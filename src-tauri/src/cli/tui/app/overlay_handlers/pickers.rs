@@ -1,5 +1,81 @@
 use super::*;
 
+fn model_fetch_model_index(
+    models_len: usize,
+    filtered_indices: Option<&[usize]>,
+    filtered_index: usize,
+) -> Option<usize> {
+    let model_index = match filtered_indices {
+        Some(indices) => indices.get(filtered_index).copied()?,
+        None => filtered_index,
+    };
+    (model_index < models_len).then_some(model_index)
+}
+
+const SESSION_PROJECT_PICKER_PAGE_STEP: usize = 8;
+const SESSION_PROJECT_FILTER_MAX_CHARS: usize = 256;
+const SESSION_PROJECT_PATH_SCROLL_STEP: usize = 8;
+
+fn project_path_scroll_right(path: &str, current: usize) -> usize {
+    if current == usize::MAX || path.is_empty() {
+        return current;
+    }
+    let mut start = current.min(path.len());
+    while start > 0 && !path.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut used = 0usize;
+    let mut next = start;
+    for (offset, ch) in path[start..].char_indices() {
+        next = start + offset + ch.len_utf8();
+        used = used.saturating_add(UnicodeWidthChar::width(ch).unwrap_or(1).max(1));
+        if used >= SESSION_PROJECT_PATH_SCROLL_STEP {
+            break;
+        }
+    }
+    if next >= path.len() {
+        usize::MAX
+    } else {
+        next
+    }
+}
+
+fn project_path_scroll_left(path: &str, current: usize) -> usize {
+    if current == 0 || path.is_empty() {
+        return 0;
+    }
+    let mut end = if current == usize::MAX {
+        path.len()
+    } else {
+        current.min(path.len())
+    };
+    while end > 0 && !path.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut used = 0usize;
+    let mut start = end;
+    for (offset, ch) in path[..end].char_indices().rev() {
+        start = offset;
+        used = used.saturating_add(UnicodeWidthChar::width(ch).unwrap_or(1).max(1));
+        if used >= SESSION_PROJECT_PATH_SCROLL_STEP {
+            break;
+        }
+    }
+    start
+}
+
+fn session_project_option_index(
+    option_count: usize,
+    filtered_indices: Option<&[usize]>,
+    selected_idx: usize,
+) -> Option<usize> {
+    let option_index = match filtered_indices {
+        Some(indices) => indices.get(selected_idx).copied()?,
+        None => selected_idx,
+    };
+    (option_index < option_count).then_some(option_index)
+}
+
 impl App {
     pub(super) fn handle_picker_overlay_key(
         &mut self,
@@ -15,7 +91,13 @@ impl App {
         if let Some(action) = self.handle_user_agent_picker_key(key) {
             return Some(action);
         }
+        if let Some(action) = self.handle_external_editor_picker_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_usage_query_template_picker_key(key) {
+            return Some(action);
+        }
+        if let Some(action) = self.handle_s3_preset_picker_key(key) {
             return Some(action);
         }
         if let Some(action) = self.handle_managed_account_picker_key(key) {
@@ -34,6 +116,9 @@ impl App {
             return Some(action);
         }
         if let Some(action) = self.handle_model_fetch_picker_key(key) {
+            return Some(action);
+        }
+        if let Some(action) = self.handle_session_project_picker_key(key) {
             return Some(action);
         }
         if let Some(action) = self.handle_openclaw_tools_profile_picker_key(key, data) {
@@ -127,7 +212,7 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                    let fields_len = provider.hermes_model_fields().len();
+                    let fields_len = provider.hermes_model_field_count();
                     if fields_len > 0 {
                         provider.hermes_models_field_idx =
                             (provider.hermes_models_field_idx + 1).min(fields_len - 1);
@@ -151,7 +236,7 @@ impl App {
                 Action::None
             }
             KeyCode::Char('f') | KeyCode::Char('F') => self.build_hermes_models_fetch_action(),
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            KeyCode::Enter => {
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
                     if provider.selected_hermes_model_field().is_some() {
                         provider.sync_hermes_model_input_from_selection();
@@ -300,10 +385,42 @@ impl App {
                 *selected = (*selected + 1).min(options.len() - 1);
                 Action::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            KeyCode::Enter => {
                 let template = options[*selected];
                 provider.set_usage_query_template(template);
                 provider.touch_usage_query();
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_s3_preset_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::S3PresetPicker { selected } = &mut self.overlay else {
+            return None;
+        };
+        let Some(FormState::S3Sync(form)) = self.form.as_mut() else {
+            self.overlay = Overlay::None;
+            return Some(Action::None);
+        };
+        *selected = (*selected).min(form::S3Preset::ALL.len().saturating_sub(1));
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(form::S3Preset::ALL.len().saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Enter => {
+                form.apply_preset(form::S3Preset::from_picker_index(*selected));
                 self.overlay = Overlay::None;
                 Action::None
             }
@@ -331,7 +448,7 @@ impl App {
                 *selected = (*selected + 1).min(max);
                 Action::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            KeyCode::Enter => {
                 let selected = *selected;
                 if selected == form::USER_AGENT_PICKER_CUSTOM_INDEX {
                     let current = self
@@ -349,7 +466,6 @@ impl App {
                         prompt: texts::tui_label_custom_user_agent().to_string(),
                         input: TextInput::new(current),
                         submit: TextSubmit::ProviderCustomUserAgent,
-                        secret: false,
                     });
                 } else if selected == form::USER_AGENT_PICKER_NO_OVERRIDE_INDEX {
                     if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
@@ -373,6 +489,53 @@ impl App {
         })
     }
 
+    fn handle_external_editor_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::ExternalEditorPicker { selected, editors } = &mut self.overlay else {
+            return None;
+        };
+        let max = editors.len();
+        *selected = (*selected).min(max);
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                *selected = selected.saturating_add(1).min(max);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let configured = crate::settings::get_preferred_editor();
+                let selected = *selected;
+                if let Some(editor) = editors.get(selected) {
+                    let command = editor.command.clone();
+                    self.overlay = Overlay::None;
+                    if configured.as_deref() == Some(command.as_str()) {
+                        Action::None
+                    } else {
+                        Action::SetPreferredEditor {
+                            command: Some(command),
+                        }
+                    }
+                } else {
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_preferred_editor_custom().to_string(),
+                        prompt: texts::tui_settings_preferred_editor_prompt().to_string(),
+                        input: TextInput::new(configured.unwrap_or_default()),
+                        submit: TextSubmit::SettingsPreferredEditor,
+                    });
+                    Action::None
+                }
+            }
+            _ => Action::None,
+        })
+    }
+
     fn handle_managed_account_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
         let Overlay::ManagedAccountPicker {
             auth_provider,
@@ -390,7 +553,7 @@ impl App {
             .managed_auth_status
             .as_ref()
             .filter(|status| status.provider == auth_provider)
-            .map(|status| status.accounts.clone())
+            .map(|status| status.accounts.as_slice())
             .unwrap_or_default();
         let row_count = if binding {
             accounts.len() + 1
@@ -529,7 +692,7 @@ impl App {
                 *selected = (*selected + 1).min(items.len() - 1);
                 Action::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            KeyCode::Enter => {
                 let provider_id = provider_id.clone();
                 let item = items[*selected];
                 let row = data
@@ -582,11 +745,16 @@ impl App {
 
     fn handle_claude_model_picker_edit_key(&mut self, key: KeyEvent) -> Action {
         let selected = match &mut self.overlay {
-            Overlay::ClaudeModelPicker { selected, editing } => {
-                *selected = (*selected).min(3);
+            Overlay::ClaudeModelPicker {
+                selected,
+                column,
+                editing,
+            } => {
+                *selected = (*selected).min(2);
                 if !*editing {
                     return Action::None;
                 }
+                *column = ClaudeModelPickerColumn::Model;
                 *selected
             }
             _ => return Action::None,
@@ -599,6 +767,9 @@ impl App {
 
         match key.code {
             KeyCode::Esc | KeyCode::Enter => {
+                if provider.normalize_claude_model_input(selected) {
+                    provider.mark_claude_model_config_touched();
+                }
                 if let Overlay::ClaudeModelPicker { editing, .. } = &mut self.overlay {
                     *editing = false;
                 }
@@ -616,13 +787,22 @@ impl App {
     }
 
     fn handle_claude_model_picker_select_key(&mut self, key: KeyEvent) -> Action {
-        let selected = match &mut self.overlay {
-            Overlay::ClaudeModelPicker { selected, editing } => {
-                *selected = (*selected).min(3);
+        let (selected, column) = match &mut self.overlay {
+            Overlay::ClaudeModelPicker {
+                selected,
+                column,
+                editing,
+            } => {
+                *selected = (*selected).min(2);
                 if *editing {
                     return Action::None;
                 }
-                selected
+                if *column == ClaudeModelPickerColumn::OneM
+                    && !ProviderAddFormState::claude_model_supports_one_m(*selected)
+                {
+                    *column = ClaudeModelPickerColumn::Model;
+                }
+                (*selected, *column)
             }
             _ => return Action::None,
         };
@@ -633,14 +813,60 @@ impl App {
                 Action::None
             }
             KeyCode::Up => {
-                *selected = selected.saturating_sub(1);
+                let next = selected.saturating_sub(1);
+                if let Overlay::ClaudeModelPicker {
+                    selected, column, ..
+                } = &mut self.overlay
+                {
+                    *selected = next;
+                    if *column == ClaudeModelPickerColumn::OneM
+                        && !ProviderAddFormState::claude_model_supports_one_m(next)
+                    {
+                        *column = ClaudeModelPickerColumn::Model;
+                    }
+                }
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(3);
+                let next = (selected + 1).min(2);
+                if let Overlay::ClaudeModelPicker {
+                    selected, column, ..
+                } = &mut self.overlay
+                {
+                    *selected = next;
+                    if *column == ClaudeModelPickerColumn::OneM
+                        && !ProviderAddFormState::claude_model_supports_one_m(next)
+                    {
+                        *column = ClaudeModelPickerColumn::Model;
+                    }
+                }
+                Action::None
+            }
+            KeyCode::Left => {
+                if let Overlay::ClaudeModelPicker { column, .. } = &mut self.overlay {
+                    *column = ClaudeModelPickerColumn::Model;
+                }
+                Action::None
+            }
+            KeyCode::Right => {
+                if ProviderAddFormState::claude_model_supports_one_m(selected) {
+                    if let Overlay::ClaudeModelPicker { column, .. } = &mut self.overlay {
+                        *column = ClaudeModelPickerColumn::OneM;
+                    }
+                }
                 Action::None
             }
             KeyCode::Enter => {
+                if column == ClaudeModelPickerColumn::Model {
+                    if let Overlay::ClaudeModelPicker { editing, .. } = &mut self.overlay {
+                        *editing = true;
+                    }
+                } else if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.toggle_claude_model_one_m(selected);
+                }
+                Action::None
+            }
+            KeyCode::Char(' ') if column == ClaudeModelPickerColumn::Model => {
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() {
                     let codex_oauth = provider.is_claude_codex_oauth_provider();
                     let codex_oauth_account_id = provider
@@ -656,20 +882,14 @@ impl App {
                         codex_oauth,
                         codex_oauth_account_id,
                         field: ProviderAddField::ClaudeModelConfig,
-                        claude_idx: Some(*selected),
+                        claude_idx: Some(selected),
                     }
                 } else {
                     Action::None
                 }
             }
-            KeyCode::Char(' ') => {
-                if let Overlay::ClaudeModelPicker { editing, .. } = &mut self.overlay {
-                    *editing = true;
-                }
-                Action::None
-            }
             KeyCode::Char('a') => {
-                let source_idx = *selected;
+                let source_idx = selected;
                 let source_empty = self
                     .form
                     .as_ref()
@@ -707,22 +927,17 @@ impl App {
             input,
             query,
             models,
+            filtered_indices,
+            filter_incomplete,
             selected_idx,
+            selection_active,
             ..
         } = &mut self.overlay
         else {
             return None;
         };
 
-        let filtered: Vec<&String> = if query.trim().is_empty() {
-            models.iter().collect()
-        } else {
-            let q = query.trim().to_lowercase();
-            models
-                .iter()
-                .filter(|model| model.to_lowercase().contains(&q))
-                .collect()
-        };
+        let filtered_len = filtered_indices.as_ref().map_or(models.len(), Vec::len);
 
         let is_claude_model = *field == ProviderAddField::ClaudeModelConfig;
         let restore_idx = claude_idx.unwrap_or(0);
@@ -732,6 +947,7 @@ impl App {
                 if is_claude_model {
                     self.overlay = Overlay::ClaudeModelPicker {
                         selected: restore_idx,
+                        column: ClaudeModelPickerColumn::Model,
                         editing: false,
                     };
                 } else {
@@ -741,38 +957,47 @@ impl App {
             }
             KeyCode::Up => {
                 *selected_idx = selected_idx.saturating_sub(1);
-                if let Some(model) = filtered.get(*selected_idx) {
-                    input.set((*model).to_string());
-                }
+                *selection_active = filtered_len > 0;
                 Action::None
             }
             KeyCode::Down => {
-                if !filtered.is_empty() {
-                    *selected_idx = (*selected_idx + 1).min(filtered.len() - 1);
-                    if let Some(model) = filtered.get(*selected_idx) {
-                        input.set((*model).to_string());
-                    }
+                if filtered_len > 0 {
+                    *selected_idx = (*selected_idx + 1).min(filtered_len - 1);
                 }
+                *selection_active = filtered_len > 0;
                 Action::None
             }
             KeyCode::Tab => {
-                if let Some(model) = filtered.get(*selected_idx) {
-                    input.set((*model).to_string());
-                    *query = input.value.clone();
-                    *selected_idx = 0;
-                }
+                *selection_active = filtered_len > 0;
                 Action::None
             }
             KeyCode::Enter => {
-                let mut selected_model = input.value.trim().to_string();
-                if selected_model.is_empty() {
-                    if let Some(first) = filtered.first() {
-                        selected_model = first.to_string();
-                    } else {
+                let input_is_blank = input.value.len() <= MODEL_FETCH_QUERY_MAX_BYTES
+                    && input.value.trim().is_empty();
+                let use_fetched_model = *selection_active || input_is_blank;
+                let selected_model = if use_fetched_model {
+                    let selected = if *selection_active { *selected_idx } else { 0 };
+                    let Some(model_index) = model_fetch_model_index(
+                        models.len(),
+                        filtered_indices.as_deref(),
+                        selected,
+                    ) else {
+                        self.close_overlay();
+                        return Some(Action::None);
+                    };
+                    std::mem::take(&mut models[model_index])
+                } else if input.value.len() <= MODEL_FETCH_QUERY_MAX_BYTES {
+                    let value = std::mem::take(&mut input.value);
+                    let selected = value.trim().to_string();
+                    if selected.is_empty() {
                         self.close_overlay();
                         return Some(Action::None);
                     }
-                }
+                    selected
+                } else {
+                    *filter_incomplete = true;
+                    return Some(Action::None);
+                };
 
                 let field = *field;
                 let claude_idx = *claude_idx;
@@ -780,6 +1005,7 @@ impl App {
                 if field == ProviderAddField::ClaudeModelConfig {
                     self.overlay = Overlay::ClaudeModelPicker {
                         selected: claude_idx.unwrap_or(0),
+                        column: ClaudeModelPickerColumn::Model,
                         editing: false,
                     };
                 } else {
@@ -789,10 +1015,7 @@ impl App {
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
                     if field == ProviderAddField::ClaudeModelConfig {
                         if let Some(idx) = claude_idx {
-                            if let Some(input_field) = provider.claude_model_input_mut(idx) {
-                                input_field.set(selected_model);
-                                provider.mark_claude_model_config_touched();
-                            }
+                            provider.set_claude_model_from_picker(idx, &selected_model);
                         }
                     } else if field == ProviderAddField::HermesModels {
                         provider.set_selected_hermes_model_id_from_picker(&selected_model);
@@ -805,11 +1028,180 @@ impl App {
                 Action::None
             }
             _ => {
-                if input.apply_key(key).is_some_and(|edit| edit.changed) {
-                    *query = input.value.clone();
-                    *selected_idx = 0;
+                if let Some(edit) = input.apply_key_with_policy(
+                    key,
+                    TextInputPolicy {
+                        max_chars: Some(MODEL_FETCH_QUERY_MAX_CHARS),
+                        sanitize: None,
+                    },
+                ) {
+                    *selection_active = false;
+                    if edit.changed {
+                        *query = input.value.clone();
+                        let filter = model_fetch_filter(models, query);
+                        *filtered_indices = filter.indices;
+                        *filter_incomplete = filter.incomplete;
+                        *selected_idx = 0;
+                    }
                 }
                 Action::None
+            }
+        })
+    }
+
+    fn handle_session_project_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::SessionProjectPicker(picker) = &mut self.overlay else {
+            return None;
+        };
+
+        let option_count = session_project_option_count(&self.sessions, picker);
+        let filtered_len = picker
+            .filtered_indices
+            .as_ref()
+            .map_or(option_count, Vec::len);
+
+        Some(match key.code {
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                picker.path_scroll = 0;
+                Action::None
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                picker.path_scroll = usize::MAX;
+                Action::None
+            }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                picker.path_scroll = session_project_option_at(
+                    &self.sessions,
+                    picker,
+                    session_project_option_index(
+                        option_count,
+                        picker.filtered_indices.as_deref(),
+                        picker.selected_idx,
+                    )
+                    .unwrap_or(0),
+                )
+                .and_then(|option| match option {
+                    SessionProjectOption::Exact { display_path, .. } => {
+                        Some(project_path_scroll_left(display_path, picker.path_scroll))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0);
+                Action::None
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                picker.path_scroll = session_project_option_at(
+                    &self.sessions,
+                    picker,
+                    session_project_option_index(
+                        option_count,
+                        picker.filtered_indices.as_deref(),
+                        picker.selected_idx,
+                    )
+                    .unwrap_or(0),
+                )
+                .and_then(|option| match option {
+                    SessionProjectOption::Exact { display_path, .. } => {
+                        Some(project_path_scroll_right(display_path, picker.path_scroll))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0);
+                Action::None
+            }
+            KeyCode::Esc => {
+                self.close_overlay();
+                Action::SessionsProjectFilterCancel
+            }
+            KeyCode::Up => {
+                picker.selected_idx = picker.selected_idx.saturating_sub(1);
+                picker.path_scroll = 0;
+                Action::None
+            }
+            KeyCode::Down => {
+                if filtered_len > 0 {
+                    picker.selected_idx =
+                        picker.selected_idx.saturating_add(1).min(filtered_len - 1);
+                }
+                picker.path_scroll = 0;
+                Action::None
+            }
+            KeyCode::PageUp => {
+                picker.selected_idx = picker
+                    .selected_idx
+                    .saturating_sub(SESSION_PROJECT_PICKER_PAGE_STEP);
+                picker.path_scroll = 0;
+                Action::None
+            }
+            KeyCode::PageDown => {
+                if filtered_len > 0 {
+                    picker.selected_idx = picker
+                        .selected_idx
+                        .saturating_add(SESSION_PROJECT_PICKER_PAGE_STEP)
+                        .min(filtered_len - 1);
+                }
+                picker.path_scroll = 0;
+                Action::None
+            }
+            KeyCode::Home => {
+                picker.selected_idx = 0;
+                picker.path_scroll = 0;
+                Action::None
+            }
+            KeyCode::End => {
+                picker.selected_idx = filtered_len.saturating_sub(1);
+                picker.path_scroll = 0;
+                Action::None
+            }
+            KeyCode::Enter => {
+                let Some(option_index) = session_project_option_index(
+                    option_count,
+                    picker.filtered_indices.as_deref(),
+                    picker.selected_idx,
+                ) else {
+                    return Some(Action::None);
+                };
+                let Some(scope) = session_project_option_at(&self.sessions, picker, option_index)
+                    .map(session_project_option_scope)
+                else {
+                    return Some(Action::None);
+                };
+                self.close_overlay();
+                Action::SessionsProjectApply { scope }
+            }
+            _ => {
+                if picker
+                    .input
+                    .apply_key_with_policy(
+                        key,
+                        TextInputPolicy {
+                            max_chars: Some(SESSION_PROJECT_FILTER_MAX_CHARS),
+                            sanitize: None,
+                        },
+                    )
+                    .is_some_and(|edit| edit.changed)
+                {
+                    let query = picker.input.value.trim().to_lowercase();
+                    picker.filter_error = None;
+                    if query.is_empty() {
+                        picker.filtered_indices = None;
+                    } else {
+                        picker.filtered_indices = Some(Vec::new());
+                    }
+                    picker.selected_idx = if query.is_empty() {
+                        session_project_active_option_index(&self.sessions, picker)
+                    } else {
+                        0
+                    };
+                    picker.path_scroll = 0;
+                    if query.is_empty() {
+                        Action::SessionsProjectFilterCancel
+                    } else {
+                        Action::SessionsProjectFilter { query }
+                    }
+                } else {
+                    Action::None
+                }
             }
         })
     }
@@ -867,6 +1259,7 @@ impl App {
             insert_at,
             selected,
             options,
+            ..
         } = &mut self.overlay
         else {
             return None;
@@ -1011,7 +1404,7 @@ impl App {
                     if !fields.is_empty() {
                         mcp.field_idx = mcp.field_idx.min(fields.len() - 1);
                     }
-                    mcp.editing = false;
+                    mcp.clear_text_edit();
                 }
                 Action::None
             }
@@ -1200,7 +1593,10 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
-        let Overlay::FailoverQueueManager { selected } = &mut self.overlay else {
+        let Overlay::FailoverQueueManager {
+            selected_provider_id,
+        } = &mut self.overlay
+        else {
             return None;
         };
 
@@ -1216,44 +1612,70 @@ impl App {
             });
         }
 
-        *selected = (*selected).min(rows.len() - 1);
-        let selected_row = rows[*selected];
+        let selected = failover_queue_selected_index(data, selected_provider_id.as_deref())
+            .unwrap_or_default();
+        let selected_row = rows[selected];
+        let selected_id = selected_row.id.clone();
+        let selected_is_queued = selected_row.provider.in_failover_queue;
+        if selected_provider_id.as_deref() != Some(selected_id.as_str()) {
+            *selected_provider_id = Some(selected_id.clone());
+        }
 
         Some(match key.code {
             KeyCode::Esc => {
                 self.overlay = Overlay::None;
                 Action::None
             }
-            KeyCode::Up => {
-                *selected = selected.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Down => {
-                *selected = (*selected + 1).min(rows.len() - 1);
-                Action::None
-            }
-            KeyCode::Char('f') => self.request_auto_failover_toggle(data),
-            KeyCode::Char(' ') | KeyCode::Enter => Action::ProviderSetFailoverQueue {
-                id: selected_row.id.clone(),
-                enabled: !selected_row.provider.in_failover_queue,
-            },
-            // Reordering deliberately avoids lowercase `d`/`u`: `d` means
-            // delete on every list screen, and lowercase j/k are already
-            // vim-normalized into selection movement.
-            KeyCode::Char('<') | KeyCode::Char('K') => {
-                if selected_row.provider.in_failover_queue {
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if selected_is_queued {
                     Action::ProviderMoveFailoverQueue {
-                        id: selected_row.id.clone(),
+                        id: selected_id,
                         direction: MoveDirection::Up,
                     }
                 } else {
                     Action::None
                 }
             }
-            KeyCode::Char('>') | KeyCode::Char('J') => {
-                if selected_row.provider.in_failover_queue {
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if selected_is_queued {
                     Action::ProviderMoveFailoverQueue {
-                        id: selected_row.id.clone(),
+                        id: selected_id,
+                        direction: MoveDirection::Down,
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Up => {
+                *selected_provider_id = Some(rows[selected.saturating_sub(1)].id.clone());
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected_provider_id = Some(rows[(selected + 1).min(rows.len() - 1)].id.clone());
+                Action::None
+            }
+            KeyCode::Char('f') => self.request_auto_failover_toggle(data),
+            KeyCode::Enter => Action::ProviderSetFailoverQueue {
+                id: selected_id,
+                enabled: !selected_is_queued,
+            },
+            // Uppercase J/K are secondary aliases documented only in help.
+            // Lowercase j/k remain normal list navigation after vim-key
+            // normalization, and d retains its usual delete meaning elsewhere.
+            KeyCode::Char('K') => {
+                if selected_is_queued {
+                    Action::ProviderMoveFailoverQueue {
+                        id: selected_id,
+                        direction: MoveDirection::Up,
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Char('J') => {
+                if selected_is_queued {
+                    Action::ProviderMoveFailoverQueue {
+                        id: selected_id,
                         direction: MoveDirection::Down,
                     }
                 } else {

@@ -110,9 +110,20 @@ fn command_requires_startup_state(command: &Option<Commands>) -> bool {
 
 fn initialize_startup_state_if_needed(command: &Option<Commands>) -> Result<(), AppError> {
     if command_requires_startup_state(command) {
-        let _state = cc_switch_lib::AppState::try_new_with_startup_recovery()?;
+        let _state = if command_uses_deferred_codex_migration(command) {
+            // Mirrors upstream's non-blocking GUI startup for the long-lived TUI.
+            cc_switch_lib::AppState::try_new_with_startup_recovery_deferred()?
+        } else {
+            // A one-shot CLI process may exit before a detached migration thread
+            // completes, so finish the same upstream migration sequence inline.
+            cc_switch_lib::AppState::try_new_with_startup_recovery()?
+        };
     }
     Ok(())
+}
+
+fn command_uses_deferred_codex_migration(command: &Option<Commands>) -> bool {
+    matches!(command, None | Some(Commands::Interactive))
 }
 
 fn database_access_required(command: &Option<Commands>) -> bool {
@@ -125,8 +136,8 @@ fn database_access_required(command: &Option<Commands>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_requires_startup_state, command_uses_own_logger, database_access_required,
-        initialize_startup_state_if_needed,
+        command_requires_startup_state, command_uses_deferred_codex_migration,
+        command_uses_own_logger, database_access_required, initialize_startup_state_if_needed,
     };
     use cc_switch_lib::cli::Cli;
     use clap::Parser;
@@ -177,6 +188,21 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "provider", "list"]);
 
         assert!(!command_uses_own_logger(&cli.command));
+    }
+
+    #[test]
+    fn only_long_lived_interactive_mode_defers_codex_migration() {
+        let default_interactive = Cli::parse_from(["cc-switch"]);
+        let explicit_interactive = Cli::parse_from(["cc-switch", "interactive"]);
+        let provider = Cli::parse_from(["cc-switch", "provider", "list"]);
+
+        assert!(command_uses_deferred_codex_migration(
+            &default_interactive.command
+        ));
+        assert!(command_uses_deferred_codex_migration(
+            &explicit_interactive.command
+        ));
+        assert!(!command_uses_deferred_codex_migration(&provider.command));
     }
 
     #[test]

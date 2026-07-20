@@ -38,17 +38,21 @@ pub(super) fn render_mcp_env_picker_overlay(
         return;
     }
 
-    let items = mcp
-        .env_rows
-        .iter()
-        .map(|row| ListItem::new(Line::raw(format!("{} = {}", row.key, row.value))));
+    let selected = selected.min(mcp.env_rows.len().saturating_sub(1));
+    let visible = visible_selection_window(mcp.env_rows.len(), selected, body.height as usize);
+    let visible_start = visible.start;
+    let items = mcp.env_rows[visible.clone()].iter().map(|row| {
+        let key = bounded_trimmed_text_for_display(&row.key);
+        let value = bounded_trimmed_text_for_display(&row.value);
+        ListItem::new(Line::raw(format!("{key} = {value}")))
+    });
 
     let list = List::new(items)
         .highlight_style(selection_style(theme))
         .highlight_symbol(highlight_symbol(theme));
 
     let mut state = ListState::default();
-    state.select(Some(selected.min(mcp.env_rows.len().saturating_sub(1))));
+    state.select(Some(selected.saturating_sub(visible_start)));
     frame.render_stateful_widget(list, body, &mut state);
 }
 
@@ -120,8 +124,7 @@ pub(super) fn render_mcp_env_entry_editor_overlay(
         let input_inner = block.inner(input_area);
         frame.render_widget(block, input_area);
 
-        let (visible, cursor_x) =
-            visible_text_window(&input.value, input.cursor, input_inner.width as usize);
+        let (visible, cursor_x) = inline_input_window(input, input_inner.width);
         frame.render_widget(
             Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
             input_inner,

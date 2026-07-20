@@ -60,6 +60,8 @@ impl App {
             toast: None,
             should_quit: false,
             pending_deep_search: None,
+            pending_project_catalog: false,
+            pending_project_filter: None,
             last_size: Size::new(0, 0),
             tick: 0,
             proxy_input_activity_samples: Vec::new(),
@@ -76,7 +78,11 @@ impl App {
             common_config_notice_confirmed: true,
             usage_query_notice_confirmed: true,
             local_env_results: Vec::new(),
-            local_env_loading: true,
+            local_env_pending: crate::services::local_env_check::LocalTool::all()
+                .iter()
+                .copied()
+                .collect(),
+            local_env_generation: 0,
             usage: UsageState::default(),
             pricing: PricingState::default(),
             sessions: SessionsState::default(),
@@ -105,6 +111,8 @@ impl App {
             openclaw_daily_memory_search_query: String::new(),
             openclaw_daily_memory_search_results: Vec::new(),
             config_webdav_idx: 0,
+            config_cloud_sync_idx: 0,
+            config_s3_idx: 0,
             webdav_quick_setup_username: None,
             language_idx: 0,
             settings_idx: 0,
@@ -122,6 +130,33 @@ impl App {
             .get(self.nav_idx)
             .copied()
             .unwrap_or(NavItem::Main)
+    }
+
+    pub(crate) fn begin_local_env_refresh(&mut self) -> u64 {
+        self.local_env_generation = self.local_env_generation.wrapping_add(1).max(1);
+        self.local_env_results.clear();
+        self.local_env_pending = crate::services::local_env_check::LocalTool::all()
+            .iter()
+            .copied()
+            .collect();
+        self.local_env_generation
+    }
+
+    pub(crate) fn fail_local_env_refresh(&mut self, generation: u64) {
+        if self.local_env_generation == generation {
+            self.local_env_pending.clear();
+        }
+    }
+
+    pub(crate) fn stop_local_env_refresh(&mut self) {
+        self.local_env_pending.clear();
+    }
+
+    pub(crate) fn is_local_env_pending(
+        &self,
+        tool: crate::services::local_env_check::LocalTool,
+    ) -> bool {
+        self.local_env_pending.contains(&tool)
     }
 
     pub(crate) fn nav_items(&self) -> &'static [NavItem] {
@@ -168,7 +203,7 @@ impl App {
                     NavItem::Config
                 }
             }
-            Route::ConfigWebDav => NavItem::Config,
+            Route::ConfigCloudSync | Route::ConfigWebDav | Route::ConfigS3 => NavItem::Config,
             Route::Skills
             | Route::SkillsDiscover
             | Route::SkillsRepos
@@ -340,7 +375,8 @@ impl App {
     }
 
     pub(crate) fn should_poll_proxy_activity(&self) -> bool {
-        matches!(self.route, Route::Main)
+        (matches!(self.route, Route::Main)
+            || matches!(self.overlay, Overlay::FailoverQueueManager { .. }))
             && self.tick.is_multiple_of(PROXY_ACTIVITY_POLL_INTERVAL_TICKS)
     }
 
@@ -514,7 +550,7 @@ impl App {
         }
 
         let help = Overlay::Help(crate::cli::tui::help::HelpState::new(
-            crate::cli::tui::help::context_help_for_app(self),
+            crate::cli::tui::help::context_help_for_app(self, data),
         ));
         if self.overlay.can_be_covered_by_help() {
             let previous = std::mem::replace(&mut self.overlay, help);
@@ -528,7 +564,10 @@ impl App {
         if self.editor.is_some() || self.filter.active || self.form_text_input_is_active() {
             return false;
         }
-        if matches!(self.overlay, Overlay::Help(_)) || self.overlay_text_input_is_active() {
+        let project_picker = matches!(self.overlay, Overlay::SessionProjectPicker(_));
+        if matches!(self.overlay, Overlay::Help(_))
+            || (self.overlay_text_input_is_active() && !project_picker)
+        {
             return false;
         }
         !self.overlay.is_active()
@@ -598,6 +637,10 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         self.clamp_selections(data);
+        self.on_key_after_clamp(key, data)
+    }
+
+    fn on_key_after_clamp(&mut self, key: KeyEvent, data: &UiData) -> Action {
         if !self.overlay.is_active() {
             self.pending_overlay = None;
         }
@@ -713,15 +756,6 @@ impl App {
                 return self.on_usage_key(key, data);
             }
             KeyCode::Char('q') | KeyCode::Esc => {
-                // If in sessions "show all providers" mode, Esc exits that mode
-                // instead of navigating back.
-                if matches!(self.route, Route::Sessions) && self.sessions.show_all_providers {
-                    self.sessions.show_all_providers = false;
-                    self.sessions.loaded_once = false;
-                    self.sessions.selected_idx = 0;
-                    self.sessions.clear_detail();
-                    return Action::None;
-                }
                 return self.on_back_key();
             }
             _ => {}
@@ -738,6 +772,50 @@ impl App {
             Focus::Nav => self.on_nav_key(key),
             Focus::Content => self.on_content_key(key, data),
         }
+    }
+
+    pub(crate) fn on_wheel(
+        &mut self,
+        direction: crate::cli::tui::input::ScrollDirection,
+        steps: u32,
+        gesture: crate::cli::tui::input::WheelGestureId,
+        data: &UiData,
+    ) -> Action {
+        if !self.overlay.is_active()
+            && self.editor.is_none()
+            && self.form.is_none()
+            && matches!(self.focus, Focus::Content)
+            && matches!(self.route, Route::Sessions)
+        {
+            return self.on_sessions_wheel(direction, steps, gesture, data);
+        }
+        if !self.overlay.is_active()
+            && self.editor.is_none()
+            && self.form.is_none()
+            && !self.filter.active
+            && matches!(self.focus, Focus::Content)
+            && matches!(self.route, Route::UsageLogs)
+        {
+            return self.on_usage_logs_wheel(direction, steps, gesture, data);
+        }
+
+        // Non-paged surfaces retain ordinary arrow semantics, but a raw burst is
+        // bounded and applied before the next draw. This prevents hundreds of
+        // queued wheel reports from each triggering a global clamp and frame.
+        let code = match direction {
+            crate::cli::tui::input::ScrollDirection::Up => KeyCode::Up,
+            crate::cli::tui::input::ScrollDirection::Down => KeyCode::Down,
+        };
+        let repeats = usize::try_from(steps).unwrap_or(usize::MAX).clamp(1, 12);
+        self.clamp_selections(data);
+        let mut action = Action::None;
+        for _ in 0..repeats {
+            let next = self.on_key_after_clamp(KeyEvent::new(code, KeyModifiers::NONE), data);
+            if !matches!(next, Action::None) {
+                action = next;
+            }
+        }
+        action
     }
 
     pub(crate) fn on_back_key(&mut self) -> Action {
@@ -759,6 +837,7 @@ impl App {
         let is_daily_memory = matches!(scope, FilterScope::Global)
             && matches!(self.route, Route::ConfigOpenClawDailyMemory);
         let mut filter_changed = false;
+        let mut cancel_session_search = false;
         let action = match key.code {
             KeyCode::Esc => {
                 filter_changed = !self.active_filter_input_mut().value.is_empty();
@@ -771,11 +850,12 @@ impl App {
                 // after Esc.
                 if matches!(self.route, Route::Sessions) && matches!(scope, FilterScope::Global) {
                     self.sessions.deep_search_query = None;
-                    self.sessions.deep_search_results.clear();
+                    self.sessions.clear_deep_search_results();
                     self.sessions.deep_search_pending = None;
                     // Drop any in-flight search too, so its result is ignored on
                     // arrival and the "searching" spinner stops immediately.
                     self.sessions.deep_search_active = None;
+                    cancel_session_search = true;
                 }
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();
@@ -794,13 +874,13 @@ impl App {
                         query: self.filter.input.value.clone(),
                     }
                 } else if matches!(self.route, Route::Sessions) {
-                    let q = self.filter.input.value.trim().to_string();
+                    let q = self.filter.input.value.trim().to_lowercase();
                     if q.is_empty() {
                         self.sessions.deep_search_query = None;
-                        self.sessions.deep_search_results.clear();
+                        self.sessions.clear_deep_search_results();
                         self.sessions.deep_search_pending = None;
                         self.sessions.deep_search_active = None;
-                        Action::None
+                        Action::SessionsDeepSearchCancel
                     } else {
                         // If deep search has already completed for this query,
                         // open the selected session's detail directly instead
@@ -845,7 +925,7 @@ impl App {
                 // In sessions page, set pending deep search only when text content changes
                 // (not on cursor movement via Left/Right keys)
                 if edit.changed && matches!(self.route, Route::Sessions) {
-                    let q = self.filter.input.value.trim().to_string();
+                    let q = self.filter.input.value.trim().to_lowercase();
                     // Only re-trigger if the query string actually changed
                     let current_query = self
                         .sessions
@@ -858,14 +938,16 @@ impl App {
                     } else if q.is_empty() {
                         self.sessions.deep_search_pending = None;
                         self.sessions.deep_search_query = None;
-                        self.sessions.deep_search_results.clear();
+                        self.sessions.clear_deep_search_results();
                         self.sessions.deep_search_active = None;
+                        cancel_session_search = true;
                     } else {
                         self.sessions.deep_search_pending = Some((q, 0));
                         // The query changed, so any in-flight search is now
                         // stale: invalidate it so its result is not accepted
                         // under the new query text.
                         self.sessions.deep_search_active = None;
+                        cancel_session_search = true;
                     }
                 }
                 if is_daily_memory && edit.changed && self.filter.input.value.is_empty() {
@@ -878,7 +960,11 @@ impl App {
             }
         };
         self.sync_after_filter_key(data, filter_changed, scope);
-        action
+        if cancel_session_search && matches!(action, Action::None) {
+            Action::SessionsDeepSearchCancel
+        } else {
+            action
+        }
     }
 
     pub(crate) fn on_nav_key(&mut self, key: KeyEvent) -> Action {
@@ -912,7 +998,7 @@ impl App {
             Route::Providers => self.on_providers_key(key, data),
             Route::Usage => self.on_usage_key(key, data),
             Route::UsageLogs => self.on_usage_logs_key(key, data),
-            Route::UsageLogDetail { request_id } => self.on_usage_log_detail_key(key, &request_id),
+            Route::UsageLogDetail { rowid } => self.on_usage_log_detail_key(key, rowid),
             Route::Pricing => self.on_pricing_key(key, data),
             Route::Sessions => self.on_sessions_key(key, data),
             Route::Mcp => self.on_mcp_key(key, data),
@@ -924,7 +1010,9 @@ impl App {
             Route::ConfigOpenClawEnv => self.on_config_openclaw_env_key(key, data),
             Route::ConfigOpenClawTools => self.on_config_openclaw_tools_key(key, data),
             Route::ConfigOpenClawAgents => self.on_config_openclaw_agents_key(key, data),
+            Route::ConfigCloudSync => self.on_config_cloud_sync_key(key),
             Route::ConfigWebDav => self.on_config_webdav_key(key, data),
+            Route::ConfigS3 => self.on_config_s3_key(key, data),
             Route::Skills => self.on_skills_installed_key(key, data),
             Route::SkillsDiscover => self.on_skills_discover_key(key),
             Route::SkillsRepos => self.on_skills_repos_key(key, data),
@@ -997,26 +1085,52 @@ impl App {
         let visible_session_rows = visible_sessions_for_state(
             &self.filter,
             &self.app_type,
-            self.sessions.show_all_providers,
+            self.sessions.provider_id.as_deref(),
+            &self.sessions.project_scope,
             &self.sessions.rows,
             self.sessions.detail_key.as_deref(),
             self.sessions.messages_loaded,
             &self.sessions.messages,
             self.sessions.deep_search_query.as_deref(),
             &self.sessions.deep_search_results,
+            self.sessions
+                .materialized_view_is_current(self.filter.query_lower().as_deref()),
+            self.sessions.rows_revision,
+            self.sessions.messages_revision,
+            self.sessions.deep_search_seq,
+            &self.sessions.visibility_cache,
         );
         let sessions_len = visible_session_rows.len();
-        if sessions_len == 0 {
-            self.sessions.selected_idx = 0;
+        self.sessions.selected_idx = if sessions_len == 0 {
+            0
         } else {
-            self.sessions.selected_idx = self.sessions.selected_idx.min(sessions_len - 1);
+            self.sessions.selected_idx.min(sessions_len - 1)
+        };
+        self.sessions
+            .pagination
+            .sync_len(self.sessions.logical_total_rows());
+        if sessions_len > 0 && !self.sessions.remote.input_is_blocked() {
+            let page_start = self
+                .sessions
+                .remote
+                .current_page()
+                .saturating_mul(crate::session_manager::paged_manifest::PAGE_SIZE);
+            let absolute = page_start.saturating_add(self.sessions.selected_idx);
+            if self.sessions.pagination.selected_index() != Some(absolute) {
+                self.sessions.pagination.select(absolute);
+            }
         }
+        let selected_session = visible_session_rows.get(self.sessions.selected_idx);
         let session_detail_missing = self.sessions.detail_key.as_deref().is_some_and(|key| {
-            !visible_session_rows
-                .iter()
-                .any(|session| session_key(session) == key)
+            selected_session.is_none_or(|session| !session_key_matches(session, key))
+                && !visible_session_rows
+                    .iter()
+                    .any(|session| session_key_matches(session, key))
         });
-        if session_detail_missing {
+        if session_detail_missing
+            && !self.sessions.remote.input_is_blocked()
+            && self.sessions.pending_manifest.is_none()
+        {
             self.sessions.clear_detail();
         }
         clamp_session_message_selection(&mut self.sessions);
@@ -1033,6 +1147,12 @@ impl App {
         } else {
             self.usage.logs_idx = self.usage.logs_idx.min(usage_logs_len - 1);
         }
+        self.usage.sync_log_pager(
+            &self.app_type,
+            self.usage.range,
+            data.usage.recent_logs_for(self.usage.range),
+            data.usage.logs_total_for(self.usage.range),
+        );
 
         let pricing_len = visible_pricing_rows(&self.filter, data).len();
         if pricing_len == 0 {
@@ -1112,5 +1232,10 @@ impl App {
         } else {
             self.model_routes_idx = self.model_routes_idx.min(routes_len - 1);
         }
+
+        self.config_cloud_sync_idx = self
+            .config_cloud_sync_idx
+            .min(CloudSyncBackend::ALL.len().saturating_sub(1));
+        self.clamp_s3_config_selection(data);
     }
 }

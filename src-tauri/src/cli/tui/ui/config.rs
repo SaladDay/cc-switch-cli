@@ -1,7 +1,101 @@
 use super::*;
 
-use crate::cli::tui::app::LocalProxySettingsItem;
+use crate::cli::tui::app::{LocalProxySettingsItem, SettingsItem};
 use unicode_width::UnicodeWidthStr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsSection {
+    General,
+    Applications,
+    Integrations,
+    System,
+}
+
+fn settings_section(item: SettingsItem) -> SettingsSection {
+    match item {
+        SettingsItem::ManagedAccounts
+        | SettingsItem::Language
+        | SettingsItem::Theme
+        | SettingsItem::Icons
+        | SettingsItem::PreferredEditor => SettingsSection::General,
+        SettingsItem::VisibleAppsMode
+        | SettingsItem::VisibleApps
+        | SettingsItem::OpenClawConfigDir => SettingsSection::Applications,
+        SettingsItem::SkipClaudeOnboarding
+        | SettingsItem::ClaudePluginIntegration
+        | SettingsItem::CodexUnifiedSessionHistory => SettingsSection::Integrations,
+        SettingsItem::Proxy | SettingsItem::ModelRoutes | SettingsItem::CheckForUpdates => {
+            SettingsSection::System
+        }
+    }
+}
+
+fn settings_table_row_index(selected_idx: usize) -> usize {
+    let selected_idx = selected_idx.min(SettingsItem::ALL.len().saturating_sub(1));
+    let mut rendered_idx = 0;
+    let mut current_section = None;
+
+    for (item_idx, item) in SettingsItem::ALL.iter().copied().enumerate() {
+        let section = settings_section(item);
+        if current_section.is_some_and(|current| current != section) {
+            rendered_idx += 1;
+        }
+        current_section = Some(section);
+        if item_idx == selected_idx {
+            return rendered_idx;
+        }
+        rendered_idx += 1;
+    }
+
+    0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigSection {
+    Inspect,
+    Transfer,
+    Integrations,
+    Reset,
+}
+
+fn config_section(item: ConfigItem) -> ConfigSection {
+    match item {
+        ConfigItem::Path | ConfigItem::ShowFull => ConfigSection::Inspect,
+        ConfigItem::Export
+        | ConfigItem::Import
+        | ConfigItem::Backup
+        | ConfigItem::Restore
+        | ConfigItem::Validate => ConfigSection::Transfer,
+        ConfigItem::CommonSnippet
+        | ConfigItem::Proxy
+        | ConfigItem::OpenClawWorkspace
+        | ConfigItem::OpenClawEnv
+        | ConfigItem::OpenClawTools
+        | ConfigItem::OpenClawAgents
+        | ConfigItem::CloudSync => ConfigSection::Integrations,
+        ConfigItem::Reset => ConfigSection::Reset,
+    }
+}
+
+fn config_table_row_index(items: &[ConfigItem], selected_idx: usize, show_dividers: bool) -> usize {
+    let selected_idx = selected_idx.min(items.len().saturating_sub(1));
+    let mut rendered_idx = 0;
+    let mut current_section = None;
+
+    for (item_idx, item) in items.iter().copied().enumerate() {
+        let section = config_section(item);
+        if show_dividers && current_section.is_some_and(|current| current != section) {
+            rendered_idx += 1;
+        }
+        current_section = Some(section);
+        if item_idx == selected_idx {
+            return rendered_idx;
+        }
+        rendered_idx += 1;
+    }
+
+    0
+}
 
 pub(super) fn config_items_filtered(app: &App) -> Vec<ConfigItem> {
     app::visible_config_items(&app.filter, &app.app_type)
@@ -53,28 +147,33 @@ pub(super) fn render_config(
     theme: &super::theme::Theme,
 ) {
     let items = config_items_filtered(app);
-    let rows = items
-        .iter()
-        .map(|item| Row::new(vec![Cell::from(config_item_label(item))]));
-
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", texts::tui_config_title()));
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-
     let mut keys = vec![("Enter", texts::tui_key_select())];
     if matches!(items.get(app.config_idx), Some(ConfigItem::CommonSnippet)) {
         keys.push(("e", texts::tui_key_edit_snippet()));
     }
-    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        texts::tui_config_title(),
+        &keys,
+        None,
+    );
+    let table_area = inset_left(body, CONTENT_INSET_LEFT);
+    let show_dividers = app.filter.query_lower().is_none();
+    let divider_style = Style::default().fg(theme.dim);
+    let divider_rule = "─".repeat(usize::from(table_area.width));
+    let mut rows = Vec::with_capacity(items.len() + 3);
+    let mut current_section = None;
+    for item in &items {
+        let section = config_section(*item);
+        if show_dividers && current_section.is_some_and(|current| current != section) {
+            rows.push(Row::new(vec![Cell::from(divider_rule.clone())]).style(divider_style));
+        }
+        current_section = Some(section);
+        rows.push(Row::new(vec![Cell::from(config_item_label(item))]));
+    }
 
     let table = Table::new(rows, [Constraint::Min(10)])
         .block(Block::default().borders(Borders::NONE))
@@ -82,46 +181,61 @@ pub(super) fn render_config(
         .highlight_symbol(highlight_symbol(theme));
 
     let mut state = TableState::default();
-    state.select(Some(app.config_idx));
-    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+    state.select(Some(config_table_row_index(
+        &items,
+        app.config_idx,
+        show_dividers,
+    )));
+    frame.render_stateful_widget(table, table_area, &mut state);
 }
 
 pub(super) fn render_config_webdav(
     frame: &mut Frame<'_>,
     app: &App,
-    _data: &UiData,
+    data: &UiData,
     area: Rect,
     theme: &super::theme::Theme,
 ) {
     let items = webdav_config_items_filtered(app);
-    let rows = items
-        .iter()
-        .map(|item| Row::new(vec![Cell::from(webdav_config_item_label(item))]));
+    let configured = data.config.webdav_sync.is_some();
+    let enabled = data
+        .config
+        .webdav_sync
+        .as_ref()
+        .is_some_and(|settings| settings.enabled);
+    let rows = items.iter().map(|item| {
+        let label = match item {
+            WebDavConfigItem::EnableDisable if enabled => texts::tui_config_item_webdav_disable(),
+            _ => webdav_config_item_label(item),
+        };
+        let style = if item.available(configured, enabled) {
+            Style::default()
+        } else {
+            Style::default().fg(theme.dim)
+        };
+        Row::new(vec![Cell::from(label)]).style(style)
+    });
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(breadcrumb_title(&[
+    let keys = vec![("Enter", texts::tui_key_select())];
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        &breadcrumb_path(&[
             texts::tui_config_title(),
+            texts::tui_config_cloud_sync_title(),
             texts::tui_config_webdav_title(),
-        ]));
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
+        ]),
+        &keys,
+        None,
+    );
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-
-    let mut keys = vec![("Enter", texts::tui_key_select())];
-    if matches!(
-        items.get(app.config_webdav_idx),
-        Some(WebDavConfigItem::Settings)
-    ) {
-        keys.push(("e", texts::tui_key_edit()));
-    }
-    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .split(body);
+    render_webdav_sync_summary(frame, data, chunks[0], theme);
 
     let table = Table::new(rows, [Constraint::Min(10)])
         .block(Block::default().borders(Borders::NONE))
@@ -131,6 +245,253 @@ pub(super) fn render_config_webdav(
     let mut state = TableState::default();
     state.select(Some(app.config_webdav_idx));
     frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+}
+
+pub(super) fn render_config_cloud_sync(
+    frame: &mut Frame<'_>,
+    app: &App,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        &breadcrumb_path(&[
+            texts::tui_config_title(),
+            texts::tui_config_cloud_sync_title(),
+        ]),
+        &[("Enter", texts::tui_key_manage())],
+        None,
+    );
+
+    let rows = CloudSyncBackend::ALL.iter().copied().map(|backend| {
+        let (status, style) = cloud_backend_status(backend, data, theme);
+        Row::new(vec![
+            Cell::from(backend.label()),
+            Cell::from(status).style(style),
+        ])
+    });
+    let table = Table::new(rows, [Constraint::Length(22), Constraint::Min(10)])
+        .header(
+            Row::new(vec![
+                Cell::from(texts::tui_cloud_sync_backend()),
+                Cell::from(texts::tui_cloud_sync_status()),
+            ])
+            .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD)),
+        )
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+    let mut state = TableState::default();
+    state.select(Some(
+        app.config_cloud_sync_idx
+            .min(CloudSyncBackend::ALL.len().saturating_sub(1)),
+    ));
+    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
+}
+
+pub(super) fn render_config_s3(
+    frame: &mut Frame<'_>,
+    app: &App,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        &breadcrumb_path(&[
+            texts::tui_config_title(),
+            texts::tui_config_cloud_sync_title(),
+            texts::tui_config_s3_title(),
+        ]),
+        &[("Enter", texts::tui_key_select())],
+        None,
+    );
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(0)])
+        .split(body);
+    render_s3_sync_summary(frame, data, chunks[0], theme);
+
+    let configured = data.config.s3_sync.is_some();
+    let enabled = data
+        .config
+        .s3_sync
+        .as_ref()
+        .is_some_and(|settings| settings.enabled);
+    let rows = S3ConfigItem::ALL.iter().copied().map(|item| {
+        let available = item.available(configured, enabled);
+        let style = if available {
+            Style::default()
+        } else {
+            Style::default().fg(theme.dim)
+        };
+        Row::new(vec![Cell::from(item.label(enabled))]).style(style)
+    });
+    let table = Table::new(rows, [Constraint::Min(10)])
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+    let mut state = TableState::default();
+    state.select(Some(
+        app.config_s3_idx
+            .min(S3ConfigItem::ALL.len().saturating_sub(1)),
+    ));
+    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+}
+
+fn cloud_backend_status(
+    backend: CloudSyncBackend,
+    data: &UiData,
+    theme: &super::theme::Theme,
+) -> (String, Style) {
+    let (configured, enabled, has_error) = match backend {
+        CloudSyncBackend::WebDav => data
+            .config
+            .webdav_sync
+            .as_ref()
+            .map_or((false, false, false), |settings| {
+                (true, settings.enabled, settings.status.last_error.is_some())
+            }),
+        CloudSyncBackend::S3Compatible => data
+            .config
+            .s3_sync
+            .as_ref()
+            .map_or((false, false, false), |settings| {
+                (true, settings.enabled, settings.status.last_error.is_some())
+            }),
+    };
+    if !configured {
+        return (
+            texts::tui_webdav_status_not_configured().to_string(),
+            Style::default().fg(theme.dim),
+        );
+    }
+    if !enabled {
+        return (
+            texts::tui_cloud_sync_disabled().to_string(),
+            Style::default().fg(theme.dim),
+        );
+    }
+    if has_error {
+        (
+            texts::tui_webdav_status_error().to_string(),
+            Style::default().fg(theme.warn),
+        )
+    } else {
+        (
+            texts::tui_cloud_sync_enabled().to_string(),
+            Style::default().fg(theme.ok),
+        )
+    }
+}
+
+fn render_webdav_sync_summary(
+    frame: &mut Frame<'_>,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let settings = data.config.webdav_sync.as_ref();
+    let state = settings.map_or_else(
+        || texts::tui_webdav_status_not_configured().to_string(),
+        |settings| {
+            if settings.enabled {
+                texts::tui_cloud_sync_enabled().to_string()
+            } else {
+                texts::tui_cloud_sync_disabled().to_string()
+            }
+        },
+    );
+    let last_sync = settings
+        .and_then(|settings| settings.status.last_sync_at)
+        .and_then(format_sync_time_local_to_minute)
+        .unwrap_or_else(|| texts::tui_webdav_status_never_synced().to_string());
+    let remote = settings.map_or_else(
+        || texts::tui_na().to_string(),
+        |settings| format!("{}/v2/db-v6/{}", settings.remote_root, settings.profile),
+    );
+    render_cloud_summary_lines(frame, area, theme, &state, &last_sync, &remote);
+}
+
+fn render_s3_sync_summary(
+    frame: &mut Frame<'_>,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let settings = data.config.s3_sync.as_ref();
+    let state = settings.map_or_else(
+        || texts::tui_webdav_status_not_configured().to_string(),
+        |settings| {
+            if settings.enabled {
+                texts::tui_cloud_sync_enabled().to_string()
+            } else {
+                texts::tui_cloud_sync_disabled().to_string()
+            }
+        },
+    );
+    let last_sync = settings
+        .and_then(|settings| settings.status.last_sync_at)
+        .and_then(format_sync_time_local_to_minute)
+        .unwrap_or_else(|| texts::tui_webdav_status_never_synced().to_string());
+    let remote = settings.map_or_else(
+        || texts::tui_na().to_string(),
+        |settings| {
+            format!(
+                "{}/{}/v2/db-v6/{}",
+                settings.bucket, settings.remote_root, settings.profile
+            )
+        },
+    );
+    render_cloud_summary_lines(frame, area, theme, &state, &last_sync, &remote);
+}
+
+fn render_cloud_summary_lines(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    state: &str,
+    last_sync: &str,
+    remote: &str,
+) {
+    let label_width = usize::from(field_label_column_width(
+        [
+            texts::tui_label_webdav_status(),
+            texts::tui_label_webdav_last_sync(),
+            texts::tui_cloud_sync_remote_path(),
+        ],
+        0,
+    ));
+    let available = area
+        .width
+        .saturating_sub(u16::try_from(label_width).unwrap_or(u16::MAX))
+        .saturating_sub(2);
+    let lines = vec![
+        kv_line(
+            theme,
+            texts::tui_label_webdav_status(),
+            label_width,
+            vec![Span::raw(state.to_string())],
+        ),
+        kv_line(
+            theme,
+            texts::tui_label_webdav_last_sync(),
+            label_width,
+            vec![Span::raw(last_sync.to_string())],
+        ),
+        kv_line(
+            theme,
+            texts::tui_cloud_sync_remote_path(),
+            label_width,
+            vec![Span::raw(truncate_to_display_width(remote, available))],
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines), inset_left(area, CONTENT_INSET_LEFT));
 }
 
 pub(super) fn render_config_openclaw_route(
@@ -187,16 +548,43 @@ fn wrapped_display_line_count(text: &str, width: u16) -> u16 {
     if width == 0 {
         return 1;
     }
+    if text.is_empty() {
+        return 1;
+    }
 
-    UnicodeWidthStr::width(text).max(1).div_ceil(width as usize) as u16
+    saturating_line_height_sum(text.lines().map(|line| {
+        let wrapped = UnicodeWidthStr::width(line)
+            .max(1)
+            .div_ceil(usize::from(width));
+        u16::try_from(wrapped).unwrap_or(u16::MAX)
+    }))
+}
+
+fn saturating_line_height_sum(heights: impl IntoIterator<Item = u16>) -> u16 {
+    heights
+        .into_iter()
+        .fold(0_u16, |total, height| total.saturating_add(height))
+}
+
+fn line_heights_fit(available_height: u16, heights: impl IntoIterator<Item = u16>) -> bool {
+    let available_height = usize::from(available_height);
+    heights
+        .into_iter()
+        .map(usize::from)
+        .try_fold(0usize, |total, height| {
+            let next = total.saturating_add(height);
+            (next <= available_height).then_some(next)
+        })
+        .is_some()
 }
 
 fn section_block_height(lines: &[String], text_width: u16) -> u16 {
-    lines
-        .iter()
-        .map(|line| wrapped_display_line_count(line, text_width))
-        .sum::<u16>()
-        .saturating_add(2)
+    saturating_line_height_sum(
+        lines
+            .iter()
+            .map(|line| wrapped_display_line_count(line, text_width)),
+    )
+    .saturating_add(2)
 }
 
 fn section_line_heights(lines: &[String], wraps: &[bool], text_width: u16) -> Vec<u16> {
@@ -225,7 +613,7 @@ fn section_line_window(
     }
 
     let inner_height = available_height.saturating_sub(2).max(1);
-    let total_height = line_heights.iter().copied().sum::<u16>();
+    let total_height = saturating_line_height_sum(line_heights.iter().copied());
     if total_height <= inner_height {
         return 0..line_heights.len();
     }
@@ -237,26 +625,26 @@ fn section_line_window(
     let mut start = selected_line;
     while start > 0 {
         let next = line_heights[start - 1];
-        if used + next > inner_height {
+        if used.saturating_add(next) > inner_height {
             break;
         }
         start -= 1;
-        used += next;
+        used = used.saturating_add(next);
     }
 
     let mut end = start;
-    let mut consumed = 0;
+    let mut consumed = 0_u16;
     while end < line_heights.len() {
         let next = line_heights[end];
-        if consumed + next > inner_height {
+        if consumed.saturating_add(next) > inner_height {
             break;
         }
-        consumed += next;
+        consumed = consumed.saturating_add(next);
         end += 1;
     }
 
     if end <= selected_line {
-        end = (selected_line + 1).min(line_heights.len());
+        end = selected_line.saturating_add(1).min(line_heights.len());
     }
 
     start..end
@@ -268,7 +656,7 @@ fn split_section_heights(
     second_full_height: u16,
     prioritize_second: bool,
 ) -> (u16, u16) {
-    if first_full_height + second_full_height <= available_height {
+    if line_heights_fit(available_height, [first_full_height, second_full_height]) {
         return (first_full_height, second_full_height);
     }
 
@@ -276,7 +664,7 @@ fn split_section_heights(
     let second_min = second_full_height.min(3);
 
     if prioritize_second {
-        if available_height < first_min + second_min {
+        if available_height < first_min.saturating_add(second_min) {
             let second_height = second_min.min(available_height);
             return (
                 available_height.saturating_sub(second_height),
@@ -288,7 +676,7 @@ fn split_section_heights(
         let first_height = first_full_height.min(available_height.saturating_sub(second_height));
         (first_height, second_height)
     } else {
-        if available_height < first_min + second_min {
+        if available_height < first_min.saturating_add(second_min) {
             let first_height = first_min.min(available_height);
             return (first_height, available_height.saturating_sub(first_height));
         }
@@ -299,11 +687,36 @@ fn split_section_heights(
     }
 }
 
+const OPENCLAW_WARNING_PREVIEW_ITEMS: usize = 32;
+
+struct OpenClawWarningPreview<'a> {
+    items: Vec<&'a crate::openclaw_config::OpenClawHealthWarning>,
+    truncated: bool,
+}
+
+impl<'a> OpenClawWarningPreview<'a> {
+    fn collect(
+        warnings: impl IntoIterator<Item = &'a crate::openclaw_config::OpenClawHealthWarning>,
+    ) -> Self {
+        let mut warnings = warnings.into_iter();
+        let items = warnings
+            .by_ref()
+            .take(OPENCLAW_WARNING_PREVIEW_ITEMS)
+            .collect::<Vec<_>>();
+        let truncated = warnings.next().is_some();
+        Self { items, truncated }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
 fn render_warning_banner(
     frame: &mut Frame<'_>,
     area: Rect,
     theme: &super::theme::Theme,
-    warnings: &[crate::openclaw_config::OpenClawHealthWarning],
+    warnings: &OpenClawWarningPreview<'_>,
 ) {
     let banner = warning_banner_lines(warnings).join("\n");
     frame.render_widget(
@@ -314,27 +727,33 @@ fn render_warning_banner(
     );
 }
 
-fn warning_banner_lines(warnings: &[crate::openclaw_config::OpenClawHealthWarning]) -> Vec<String> {
+fn warning_banner_lines(warnings: &OpenClawWarningPreview<'_>) -> Vec<String> {
     let mut lines = vec![texts::tui_openclaw_config_warning_title().to_string()];
-    lines.extend(
-        warnings
-            .iter()
-            .map(|warning| match warning.path.as_deref() {
-                Some(path) => format!("- {} ({path})", warning.message),
-                None => format!("- {}", warning.message),
-            }),
-    );
+    lines.extend(warnings.items.iter().map(|warning| {
+        let message = bounded_trimmed_text_for_display(&warning.message);
+        match warning.path.as_deref() {
+            Some(path) => {
+                let path = bounded_trimmed_text_for_display(path);
+                format!("- {message} ({path})")
+            }
+            None => format!("- {message}"),
+        }
+    }));
+    if warnings.truncated {
+        lines.push(crate::t!(
+            "… more warnings".to_string(),
+            "… 还有更多警告".to_string()
+        ));
+    }
     lines
 }
 
-fn warning_banner_height(
-    warnings: &[crate::openclaw_config::OpenClawHealthWarning],
-    text_width: u16,
-) -> u16 {
-    warning_banner_lines(warnings)
-        .iter()
-        .map(|line| wrapped_display_line_count(line, text_width))
-        .sum()
+fn warning_banner_height(warnings: &OpenClawWarningPreview<'_>, text_width: u16) -> u16 {
+    saturating_line_height_sum(
+        warning_banner_lines(warnings)
+            .iter()
+            .map(|line| wrapped_display_line_count(line, text_width)),
+    )
 }
 
 fn render_section_block(
@@ -367,21 +786,17 @@ fn render_section_block(
     );
 }
 
-fn inline_value(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
-    }
-}
-
-fn inline_env_value(key: &str, value: &Value) -> String {
-    let mut map = serde_json::Map::new();
-    map.insert(key.to_string(), value.clone());
-
-    redact_sensitive_json(&Value::Object(map))
-        .get(key)
-        .map(inline_value)
-        .unwrap_or_else(|| inline_value(value))
+fn inline_env_value(value: &Value, width: u16) -> String {
+    let plaintext = match value {
+        Value::String(text) => bounded_trimmed_text_for_display(text),
+        _ => {
+            let node_limit = usize::from(width).clamp(4, 32);
+            let preview = bounded_json_preview_with_node_limit(value, node_limit);
+            let serialized = serde_json::to_string(&preview).unwrap_or_else(|_| "null".to_string());
+            bounded_trimmed_text_for_display(&serialized)
+        }
+    };
+    truncate_to_display_width(&plaintext, width)
 }
 
 fn pad_display_width(text: &str, width: usize) -> String {
@@ -393,72 +808,19 @@ fn pad_display_width(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width - used))
 }
 
-#[allow(dead_code)]
-fn compact_two_column_lines(lines: &[String], total_width: u16) -> Option<Vec<String>> {
-    if lines.len() != 4 {
-        return None;
-    }
-
-    let gap = 4usize;
-    let total_width = total_width as usize;
-    let left_width = lines
-        .iter()
-        .step_by(2)
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
-        .max()
-        .unwrap_or(0);
-    let right_width = lines
-        .iter()
-        .skip(1)
-        .step_by(2)
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
-        .max()
-        .unwrap_or(0);
-
-    if left_width + gap + right_width > total_width {
-        return None;
-    }
-
-    Some(vec![
-        format!(
-            "{}{}",
-            pad_display_width(&lines[0], left_width + gap),
-            lines[1]
-        ),
-        format!(
-            "{}{}",
-            pad_display_width(&lines[2], left_width + gap),
-            lines[3]
-        ),
-    ])
-}
-
 struct OpenClawEnvStyledRow {
     plain_text: String,
     line: Line<'static>,
 }
 
-fn openclaw_env_protected_value_style(theme: &super::theme::Theme) -> Style {
-    if theme.no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)
-    }
-}
-
 fn openclaw_env_row(
-    theme: &super::theme::Theme,
+    _theme: &super::theme::Theme,
     label_width: usize,
     key: &str,
     value: &str,
 ) -> OpenClawEnvStyledRow {
     let padded_key = pad_display_width(key, label_width);
     let plain_text = format!("  {padded_key}  {value}");
-    let value_span = if value == redacted_secret_placeholder() {
-        Span::styled(value.to_string(), openclaw_env_protected_value_style(theme))
-    } else {
-        Span::raw(value.to_string())
-    };
 
     OpenClawEnvStyledRow {
         plain_text,
@@ -466,7 +828,7 @@ fn openclaw_env_row(
             Span::raw("  "),
             Span::raw(padded_key),
             Span::raw("  "),
-            value_span,
+            Span::raw(value.to_string()),
         ]),
     }
 }
@@ -481,10 +843,11 @@ fn openclaw_env_empty_row(theme: &super::theme::Theme) -> OpenClawEnvStyledRow {
 }
 
 fn openclaw_env_section_block_height(rows: &[OpenClawEnvStyledRow], text_width: u16) -> u16 {
-    rows.iter()
-        .map(|row| wrapped_display_line_count(&row.plain_text, text_width))
-        .sum::<u16>()
-        .saturating_add(2)
+    saturating_line_height_sum(
+        rows.iter()
+            .map(|row| wrapped_display_line_count(&row.plain_text, text_width)),
+    )
+    .saturating_add(2)
 }
 
 fn render_openclaw_env_section_block(
@@ -523,9 +886,40 @@ fn render_openclaw_env_section_block(
     }
 }
 
-fn append_json_lines(lines: &mut Vec<String>, value: &Value) {
-    let pretty = serde_json::to_string_pretty(&redact_sensitive_json(value))
-        .unwrap_or_else(|_| "{}".to_string());
+fn append_json_map_lines(
+    lines: &mut Vec<String>,
+    values: &std::collections::HashMap<String, Value>,
+) {
+    let preview = bounded_json_object_preview(
+        values.iter().map(|(key, value)| (key.as_str(), value)),
+        values.len(),
+    );
+    append_bounded_json_lines(lines, preview);
+}
+
+fn append_json_map_lines_excluding(
+    lines: &mut Vec<String>,
+    values: &std::collections::HashMap<String, Value>,
+    excluded: &[&str],
+) {
+    let total = values.len().saturating_sub(
+        excluded
+            .iter()
+            .filter(|key| values.contains_key(**key))
+            .count(),
+    );
+    let preview = bounded_json_object_preview(
+        values
+            .iter()
+            .filter(|(key, _)| !excluded.contains(&key.as_str()))
+            .map(|(key, value)| (key.as_str(), value)),
+        total,
+    );
+    append_bounded_json_lines(lines, preview);
+}
+
+fn append_bounded_json_lines(lines: &mut Vec<String>, preview: Value) {
+    let pretty = serde_json::to_string_pretty(&preview).unwrap_or_else(|_| "{}".to_string());
     lines.extend(pretty.lines().map(|line| format!("  {line}")));
 }
 
@@ -551,21 +945,21 @@ fn render_openclaw_env_route(
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
-    let config_path_display = config_path.map(|path| path.display().to_string());
-    let section_warnings = warnings
-        .unwrap_or_default()
-        .iter()
-        .filter(|warning| {
-            openclaw_warning_matches_section(warning, "env.", config_path_display.as_deref())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let config_path_match = app::bounded_openclaw_config_path(config_path);
+    let section_warnings = OpenClawWarningPreview::collect(
+        warnings
+            .unwrap_or_default()
+            .iter()
+            .take(app::OPENCLAW_WARNING_SCAN_ITEMS)
+            .filter(|warning| openclaw_warning_matches_section(warning, "env.", config_path_match)),
+    );
     let has_warnings = !section_warnings.is_empty();
     let warning_height = if has_warnings {
         warning_banner_height(
             &section_warnings,
             inner.width.saturating_sub(CONTENT_INSET_LEFT),
         )
+        .min(inner.height.saturating_sub(5))
     } else {
         0
     };
@@ -596,31 +990,65 @@ fn render_openclaw_env_route(
         render_warning_banner(frame, chunks[1], theme, &section_warnings);
     }
 
+    let body_area = inset_left(chunks[3], CONTENT_INSET_LEFT);
+    let section_text_width = body_area.width.saturating_sub(3);
+    const MAX_ENV_PREVIEW_ROWS: usize = 128;
+    let row_capacity = usize::from(chunks[3].height.saturating_sub(4)).min(MAX_ENV_PREVIEW_ROWS);
+    let total_entries = section.map_or(0, |section| section.vars.len());
+    let needs_more_row = total_entries > row_capacity;
+    let entry_capacity = if needs_more_row {
+        row_capacity.saturating_sub(1)
+    } else {
+        row_capacity
+    };
+    let max_label_width = usize::from(section_text_width.saturating_sub(4)) / 2;
     let mut env_entries = section
         .map(|section| {
             section
                 .vars
                 .iter()
-                .map(|(key, value)| (key.clone(), inline_env_value(key, value)))
+                .take(entry_capacity)
+                .map(|(key, value)| {
+                    (
+                        truncate_to_display_width(key, max_label_width as u16),
+                        value,
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     env_entries.sort_by_key(|(key, _)| key.to_ascii_lowercase());
+    let hidden_entries = total_entries.saturating_sub(env_entries.len());
     let label_width = env_entries
         .iter()
         .map(|(key, _)| UnicodeWidthStr::width(key.as_str()))
+        .chain((hidden_entries > 0).then_some(1))
         .max()
         .unwrap_or(0);
-    let env_rows = if env_entries.is_empty() {
-        vec![openclaw_env_empty_row(theme)]
-    } else {
-        env_entries
-            .into_iter()
-            .map(|(key, value)| openclaw_env_row(theme, label_width, &key, &value))
-            .collect::<Vec<_>>()
-    };
-    let body_area = inset_left(chunks[3], CONTENT_INSET_LEFT);
-    let section_text_width = body_area.width.saturating_sub(3);
+    let value_width = section_text_width
+        .saturating_sub(label_width as u16)
+        .saturating_sub(4);
+    let mut env_rows = env_entries
+        .into_iter()
+        .map(|(key, value)| {
+            let value = inline_env_value(value, value_width);
+            openclaw_env_row(theme, label_width, &key, &value)
+        })
+        .collect::<Vec<_>>();
+    if hidden_entries > 0 && row_capacity > 0 {
+        let more = crate::t!(
+            format!("{hidden_entries} more entries"),
+            format!("还有 {hidden_entries} 项")
+        );
+        env_rows.push(openclaw_env_row(
+            theme,
+            label_width,
+            "…",
+            &truncate_to_display_width(&more, value_width),
+        ));
+    } else if total_entries == 0 {
+        env_rows.push(openclaw_env_empty_row(theme));
+    }
     let body = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -649,6 +1077,103 @@ struct OpenClawToolsStyledRow {
     plain_text: String,
     line: Line<'static>,
     wrap: bool,
+}
+
+const OPENCLAW_RENDER_MAX_ROWS: usize = 128;
+
+fn bounded_logical_row_window(
+    total: usize,
+    selected: Option<usize>,
+    available_height: u16,
+) -> std::ops::Range<usize> {
+    let capacity = usize::from(available_height)
+        .clamp(1, OPENCLAW_RENDER_MAX_ROWS)
+        .min(total);
+    if capacity == 0 {
+        return 0..0;
+    }
+
+    let selected = selected.filter(|index| *index < total).unwrap_or(0);
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(capacity)
+        .min(total.saturating_sub(capacity));
+    start..start.saturating_add(capacity).min(total)
+}
+
+fn logical_section_height(row_count: usize) -> u16 {
+    u16::try_from(row_count)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+}
+
+fn bounded_passive_value(value: &str, width: u16) -> String {
+    truncate_to_display_width(&bounded_trimmed_text_for_display(value), width)
+}
+
+struct OpenClawToolsRenderView<'a> {
+    profile: Option<&'a str>,
+    allow: &'a [String],
+    deny: &'a [String],
+    extra: Option<&'a std::collections::HashMap<String, Value>>,
+    section: app::OpenClawToolsSection,
+    row: usize,
+}
+
+impl<'a> OpenClawToolsRenderView<'a> {
+    fn new(
+        form: Option<&'a app::OpenClawToolsFormState>,
+        snapshot: Option<&'a crate::openclaw_config::OpenClawToolsConfig>,
+    ) -> Self {
+        if let Some(form) = form {
+            return Self {
+                profile: form.profile.as_deref(),
+                allow: &form.allow,
+                deny: &form.deny,
+                extra: (!form.extra.is_empty()).then_some(&form.extra),
+                section: form.section,
+                row: form.row,
+            };
+        }
+
+        Self {
+            profile: snapshot.and_then(|tools| tools.profile.as_deref()),
+            allow: snapshot.map_or(&[], |tools| tools.allow.as_slice()),
+            deny: snapshot.map_or(&[], |tools| tools.deny.as_slice()),
+            extra: snapshot.and_then(|tools| (!tools.extra.is_empty()).then_some(&tools.extra)),
+            section: app::OpenClawToolsSection::Profile,
+            row: 0,
+        }
+    }
+
+    fn is_selected(&self, section: app::OpenClawToolsSection, row: usize) -> bool {
+        self.section == section && self.row == row
+    }
+
+    fn unsupported_profile(&self) -> Option<&'a str> {
+        let profile = self.profile?;
+        app::openclaw_tools_profile_picker_index(Some(profile))
+            .is_none()
+            .then_some(profile)
+    }
+
+    fn current_profile_label(&self, width: u16) -> String {
+        if let Some(index) = app::openclaw_tools_profile_picker_index(self.profile) {
+            return bounded_passive_value(app::openclaw_tools_profile_picker_label(index), width);
+        }
+
+        let suffix = format!(
+            " ({})",
+            texts::tui_openclaw_tools_unsupported_profile_label()
+        );
+        let suffix_width =
+            u16::try_from(UnicodeWidthStr::width(suffix.as_str())).unwrap_or(u16::MAX);
+        let profile = bounded_passive_value(
+            self.profile.unwrap_or_default(),
+            width.saturating_sub(suffix_width),
+        );
+        bounded_passive_value(&format!("{profile}{suffix}"), width)
+    }
 }
 
 fn openclaw_tools_selected_row_style(theme: &super::theme::Theme, selected: bool) -> Style {
@@ -685,7 +1210,7 @@ fn openclaw_tools_profile_row(
     OpenClawToolsStyledRow {
         plain_text,
         line,
-        wrap: true,
+        wrap: false,
     }
 }
 
@@ -708,9 +1233,10 @@ fn openclaw_tools_section_label_row(
 fn openclaw_tools_rule_row(
     theme: &super::theme::Theme,
     value: &str,
+    width: u16,
     selected: bool,
 ) -> OpenClawToolsStyledRow {
-    let plain_text = value.to_string();
+    let plain_text = bounded_passive_value(value, width);
     let row_style = openclaw_tools_selected_row_style(theme, selected);
 
     OpenClawToolsStyledRow {
@@ -720,7 +1246,7 @@ fn openclaw_tools_rule_row(
         } else {
             Line::from(plain_text)
         },
-        wrap: true,
+        wrap: false,
     }
 }
 
@@ -761,7 +1287,7 @@ fn openclaw_tools_add_row(
                 Span::styled(suffix.to_string(), label_style),
             ])
         },
-        wrap: true,
+        wrap: false,
     }
 }
 
@@ -778,16 +1304,14 @@ fn openclaw_tools_note_row(text: String, style: Style, wrap: bool) -> OpenClawTo
 }
 
 fn openclaw_tools_section_block_height(rows: &[OpenClawToolsStyledRow], text_width: u16) -> u16 {
-    section_line_heights(
+    saturating_line_height_sum(section_line_heights(
         &rows
             .iter()
             .map(|row| row.plain_text.clone())
             .collect::<Vec<_>>(),
         &rows.iter().map(|row| row.wrap).collect::<Vec<_>>(),
         text_width,
-    )
-    .into_iter()
-    .sum::<u16>()
+    ))
     .saturating_add(2)
 }
 
@@ -882,11 +1406,10 @@ fn render_openclaw_tools_route(
     warnings: Option<&[crate::openclaw_config::OpenClawHealthWarning]>,
 ) {
     let load_failed = app::openclaw_tools_load_failed(data);
-    let form = (!load_failed).then(|| {
-        app.openclaw_tools_form.clone().unwrap_or_else(|| {
-            app::OpenClawToolsFormState::from_snapshot(data.config.openclaw_tools.as_ref())
-        })
-    });
+    let view = OpenClawToolsRenderView::new(
+        app.openclaw_tools_form.as_ref(),
+        data.config.openclaw_tools.as_ref(),
+    );
 
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -896,26 +1419,24 @@ fn render_openclaw_tools_route(
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
-    let config_path_display = config_path.map(|path| path.display().to_string());
-    let parse_warnings = warnings
-        .unwrap_or_default()
-        .iter()
-        .filter(|warning| {
-            warning.code == "config_parse_failed"
-                && openclaw_warning_matches_section(
-                    warning,
-                    "tools.",
-                    config_path_display.as_deref(),
-                )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let config_path_match = app::bounded_openclaw_config_path(config_path);
+    let parse_warnings = OpenClawWarningPreview::collect(
+        warnings
+            .unwrap_or_default()
+            .iter()
+            .take(app::OPENCLAW_WARNING_SCAN_ITEMS)
+            .filter(|warning| {
+                warning.code == "config_parse_failed"
+                    && openclaw_warning_matches_section(warning, "tools.", config_path_match)
+            }),
+    );
     let has_parse_warning = !parse_warnings.is_empty();
     let warning_height = if has_parse_warning {
         warning_banner_height(
             &parse_warnings,
             inner.width.saturating_sub(CONTENT_INSET_LEFT),
         )
+        .min(inner.height.saturating_sub(4))
     } else {
         0
     };
@@ -975,101 +1496,55 @@ fn render_openclaw_tools_route(
         return;
     }
 
-    let Some(form) = form.as_ref() else {
-        return;
-    };
-
-    let is_selected =
-        |section: app::OpenClawToolsSection, row: usize| form.section == section && form.row == row;
-
+    let section_text_width = body_area.width.saturating_sub(3);
+    let profile_label = texts::tui_openclaw_tools_profile_label();
+    let profile_value_width = section_text_width.saturating_sub(
+        u16::try_from(UnicodeWidthStr::width(profile_label))
+            .unwrap_or(u16::MAX)
+            .saturating_add(2),
+    );
+    let profile_value = view.current_profile_label(profile_value_width);
     let mut profile_rows = vec![openclaw_tools_profile_row(
         theme,
-        texts::tui_openclaw_tools_profile_label(),
-        &form.current_profile_label(),
-        is_selected(app::OpenClawToolsSection::Profile, 0),
+        profile_label,
+        &profile_value,
+        view.is_selected(app::OpenClawToolsSection::Profile, 0),
     )];
-    if let Some(value) = form.unsupported_profile() {
+    if let Some(value) = view.unsupported_profile() {
         profile_rows.push(openclaw_tools_note_row(
             texts::tui_openclaw_tools_unsupported_profile_title().to_string(),
             Style::default().fg(theme.comment),
             true,
         ));
+        let value = bounded_passive_value(value, section_text_width);
         profile_rows.push(openclaw_tools_note_row(
-            texts::tui_openclaw_tools_unsupported_profile_description(value),
+            texts::tui_openclaw_tools_unsupported_profile_description(&value),
             Style::default().fg(theme.dim),
             true,
         ));
     }
 
-    let mut rules_rows = vec![openclaw_tools_section_label_row(
-        theme,
-        texts::tui_openclaw_tools_allow_list_label(),
-    )];
-    let mut rules_selected_line = None;
-    for (index, value) in form.allow.iter().enumerate() {
-        if is_selected(app::OpenClawToolsSection::Allow, index) {
-            rules_selected_line = Some(rules_rows.len());
-        }
-        rules_rows.push(openclaw_tools_rule_row(
-            theme,
-            value,
-            is_selected(app::OpenClawToolsSection::Allow, index),
-        ));
-    }
-    if is_selected(app::OpenClawToolsSection::Allow, form.allow.len()) {
-        rules_selected_line = Some(rules_rows.len());
-    }
-    rules_rows.push(openclaw_tools_add_row(
-        theme,
-        texts::tui_openclaw_tools_add_allow_rule(),
-        is_selected(app::OpenClawToolsSection::Allow, form.allow.len()),
-    ));
-    rules_rows.push(openclaw_tools_separator_row(theme));
-    rules_rows.push(openclaw_tools_section_label_row(
-        theme,
-        texts::tui_openclaw_tools_deny_list_label(),
-    ));
-    for (index, value) in form.deny.iter().enumerate() {
-        if is_selected(app::OpenClawToolsSection::Deny, index) {
-            rules_selected_line = Some(rules_rows.len());
-        }
-        rules_rows.push(openclaw_tools_rule_row(
-            theme,
-            value,
-            is_selected(app::OpenClawToolsSection::Deny, index),
-        ));
-    }
-    if is_selected(app::OpenClawToolsSection::Deny, form.deny.len()) {
-        rules_selected_line = Some(rules_rows.len());
-    }
-    rules_rows.push(openclaw_tools_add_row(
-        theme,
-        texts::tui_openclaw_tools_add_deny_rule(),
-        is_selected(app::OpenClawToolsSection::Deny, form.deny.len()),
-    ));
-    if !form.extra.is_empty() {
-        rules_rows.push(openclaw_tools_section_label_row(
-            theme,
-            texts::tui_openclaw_tools_extra_fields_label(),
-        ));
-        let mut extra_lines = Vec::new();
-        append_json_lines(
-            &mut extra_lines,
-            &Value::Object(
-                form.extra
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-            ),
-        );
-        rules_rows.extend(
-            extra_lines.into_iter().map(|line| {
-                openclaw_tools_note_row(line, Style::default().fg(theme.comment), true)
-            }),
-        );
+    let mut extra_lines = Vec::new();
+    if let Some(extra) = view.extra {
+        append_json_map_lines(&mut extra_lines, extra);
     }
 
-    let section_text_width = body_area.width.saturating_sub(3);
+    // The rules pane is a virtual list. Compute its logical window from list
+    // lengths first, then allocate styled rows only for terminal-visible slots.
+    let allow_len = view.allow.len();
+    let deny_start = allow_len.saturating_add(4);
+    let base_rules_len = deny_start.saturating_add(view.deny.len()).saturating_add(1);
+    let rules_total = base_rules_len.saturating_add(if view.extra.is_some() {
+        1usize.saturating_add(extra_lines.len())
+    } else {
+        0
+    });
+    let rules_selected_logical = match view.section {
+        app::OpenClawToolsSection::Profile => None,
+        app::OpenClawToolsSection::Allow => Some(1usize.saturating_add(view.row)),
+        app::OpenClawToolsSection::Deny => Some(deny_start.saturating_add(view.row)),
+    };
+
     let profile_plain_lines = profile_rows
         .iter()
         .map(|row| row.plain_text.clone())
@@ -1078,32 +1553,74 @@ fn render_openclaw_tools_route(
     let profile_line_heights =
         section_line_heights(&profile_plain_lines, &profile_wraps, section_text_width);
     let profile_height = openclaw_tools_section_block_height(&profile_rows, section_text_width);
-    let rules_plain_lines = rules_rows
-        .iter()
-        .map(|row| row.plain_text.clone())
-        .collect::<Vec<_>>();
-    let rules_wraps = rules_rows.iter().map(|row| row.wrap).collect::<Vec<_>>();
-    let rules_line_heights =
-        section_line_heights(&rules_plain_lines, &rules_wraps, section_text_width);
-    let rules_height = openclaw_tools_section_block_height(&rules_rows, section_text_width);
+    let rules_height = logical_section_height(rules_total);
     let remaining_height = body_area.height.saturating_sub(2);
     let (profile_height, rules_height) = split_section_heights(
         remaining_height,
         profile_height,
         rules_height,
         matches!(
-            form.section,
+            view.section,
             app::OpenClawToolsSection::Allow | app::OpenClawToolsSection::Deny
         ),
     );
     let profile_window = section_line_window(
         &profile_line_heights,
         profile_height,
-        is_selected(app::OpenClawToolsSection::Profile, 0).then_some(0),
+        view.is_selected(app::OpenClawToolsSection::Profile, 0)
+            .then_some(0),
     );
     let visible_profile_rows = &profile_rows[profile_window];
-    let rules_window = section_line_window(&rules_line_heights, rules_height, rules_selected_line);
-    let visible_rules_rows = &rules_rows[rules_window];
+    let rules_window = bounded_logical_row_window(
+        rules_total,
+        rules_selected_logical,
+        rules_height.saturating_sub(2),
+    );
+    let rules_selected_line = rules_selected_logical.and_then(|selected| {
+        rules_window
+            .contains(&selected)
+            .then_some(selected.saturating_sub(rules_window.start))
+    });
+    let mut rules_rows = Vec::with_capacity(rules_window.len());
+    for logical in rules_window {
+        let selected = rules_selected_line == Some(rules_rows.len());
+        let row = if logical == 0 {
+            openclaw_tools_section_label_row(theme, texts::tui_openclaw_tools_allow_list_label())
+        } else if logical <= allow_len {
+            openclaw_tools_rule_row(
+                theme,
+                &view.allow[logical - 1],
+                section_text_width,
+                selected,
+            )
+        } else if logical == allow_len.saturating_add(1) {
+            openclaw_tools_add_row(theme, texts::tui_openclaw_tools_add_allow_rule(), selected)
+        } else if logical == allow_len.saturating_add(2) {
+            openclaw_tools_separator_row(theme)
+        } else if logical == allow_len.saturating_add(3) {
+            openclaw_tools_section_label_row(theme, texts::tui_openclaw_tools_deny_list_label())
+        } else if logical < deny_start.saturating_add(view.deny.len()) {
+            openclaw_tools_rule_row(
+                theme,
+                &view.deny[logical - deny_start],
+                section_text_width,
+                selected,
+            )
+        } else if logical == deny_start.saturating_add(view.deny.len()) {
+            openclaw_tools_add_row(theme, texts::tui_openclaw_tools_add_deny_rule(), selected)
+        } else if logical == base_rules_len {
+            openclaw_tools_section_label_row(theme, texts::tui_openclaw_tools_extra_fields_label())
+        } else {
+            let extra_index = logical.saturating_sub(base_rules_len.saturating_add(1));
+            openclaw_tools_note_row(
+                extra_lines.get(extra_index).cloned().unwrap_or_default(),
+                Style::default().fg(theme.comment),
+                true,
+            )
+        };
+        rules_rows.push(row);
+    }
+    let visible_rules_rows = rules_rows.as_slice();
     let body = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1139,6 +1656,402 @@ fn render_openclaw_tools_route(
         visible_rules_rows,
         true,
     );
+}
+
+const OPENCLAW_RENDER_MODEL_PROVIDER_SLOTS: usize = 128;
+const OPENCLAW_RENDER_MODELS_PER_PROVIDER: usize = 128;
+const OPENCLAW_RENDER_MODEL_OPTIONS: usize = 512;
+const OPENCLAW_RENDER_USED_MODEL_SLOTS: usize = 512;
+const OPENCLAW_RENDER_MODEL_ID_MAX_BYTES: usize = 1_024;
+const OPENCLAW_RENDER_MODEL_VALUE_MAX_BYTES: usize = OPENCLAW_RENDER_MODEL_ID_MAX_BYTES * 2 + 1;
+const OPENCLAW_RENDER_TEXT_SCAN_CHARS: usize = 2_048;
+const OPENCLAW_AGENTS_RUNTIME_KEYS: &[&str] = &[
+    "workspace",
+    "timeout",
+    "timeoutSeconds",
+    "contextTokens",
+    "maxConcurrent",
+];
+
+fn bounded_is_blank(value: &str) -> bool {
+    for (index, ch) in value.chars().enumerate() {
+        if index >= OPENCLAW_RENDER_TEXT_SCAN_CHARS || !ch.is_whitespace() {
+            return false;
+        }
+    }
+    true
+}
+
+fn bounded_render_number(value: &str) -> bool {
+    if value.len() > OPENCLAW_RENDER_MODEL_ID_MAX_BYTES {
+        return false;
+    }
+    crate::cli::openclaw_form_normalization::parse_number(value.trim()).is_some()
+}
+
+#[derive(Clone, Copy)]
+struct OpenClawRenderModelOption<'a> {
+    provider_id: &'a str,
+    provider_name: &'a str,
+    model_id: &'a str,
+    model_name: &'a str,
+}
+
+impl OpenClawRenderModelOption<'_> {
+    fn matches(&self, value: &str) -> bool {
+        if value.len() > OPENCLAW_RENDER_MODEL_VALUE_MAX_BYTES {
+            return false;
+        }
+        value
+            .strip_prefix(self.provider_id)
+            .and_then(|rest| rest.strip_prefix('/'))
+            == Some(self.model_id)
+    }
+
+    fn display_label(&self, width: u16) -> String {
+        let component_width = width.saturating_sub(3) / 2;
+        let provider = bounded_passive_value(self.provider_name, component_width);
+        let model = bounded_passive_value(
+            self.model_name,
+            width.saturating_sub(
+                u16::try_from(UnicodeWidthStr::width(provider.as_str()))
+                    .unwrap_or(u16::MAX)
+                    .saturating_add(3),
+            ),
+        );
+        bounded_passive_value(&format!("{provider} / {model}"), width)
+    }
+}
+
+struct OpenClawRenderModelPreview<'a> {
+    options: Vec<OpenClawRenderModelOption<'a>>,
+    complete: bool,
+}
+
+impl<'a> OpenClawRenderModelPreview<'a> {
+    fn from_data(data: &'a UiData) -> Self {
+        let mut options = Vec::new();
+        let mut complete = data.providers.rows.len() <= OPENCLAW_RENDER_MODEL_PROVIDER_SLOTS;
+
+        'providers: for row in data
+            .providers
+            .rows
+            .iter()
+            .take(OPENCLAW_RENDER_MODEL_PROVIDER_SLOTS)
+        {
+            if row.id.len() > OPENCLAW_RENDER_MODEL_ID_MAX_BYTES {
+                complete = false;
+                continue;
+            }
+            let provider_name = if bounded_is_blank(&row.provider.name) {
+                row.id.as_str()
+            } else {
+                row.provider.name.as_str()
+            };
+            let Some(models) = row
+                .provider
+                .settings_config
+                .get("models")
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            complete &= models.len() <= OPENCLAW_RENDER_MODELS_PER_PROVIDER;
+
+            for model in models.iter().take(OPENCLAW_RENDER_MODELS_PER_PROVIDER) {
+                if options.len() >= OPENCLAW_RENDER_MODEL_OPTIONS {
+                    complete = false;
+                    break 'providers;
+                }
+                let Some(model_id) = model.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if model_id.len() > OPENCLAW_RENDER_MODEL_ID_MAX_BYTES {
+                    complete = false;
+                    continue;
+                }
+                if bounded_is_blank(model_id) {
+                    continue;
+                }
+                let model_name = model
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !bounded_is_blank(name))
+                    .unwrap_or(model_id);
+                options.push(OpenClawRenderModelOption {
+                    provider_id: row.id.as_str(),
+                    provider_name,
+                    model_id,
+                    model_name,
+                });
+            }
+        }
+
+        Self { options, complete }
+    }
+
+    fn find(&self, value: &str) -> Option<&OpenClawRenderModelOption<'a>> {
+        self.options.iter().find(|option| option.matches(value))
+    }
+
+    fn has_available(&self, primary: &str, fallbacks: &[String]) -> bool {
+        // A bounded preview must never falsely disable the real picker. If any
+        // source or used-value slots were omitted, keep the action enabled and
+        // let the user-triggered full picker make the authoritative decision.
+        if !self.complete || fallbacks.len() > OPENCLAW_RENDER_USED_MODEL_SLOTS {
+            return true;
+        }
+
+        self.options.iter().any(|option| {
+            !option.matches(primary) && !fallbacks.iter().any(|fallback| option.matches(fallback))
+        })
+    }
+}
+
+enum OpenClawAgentsRenderView<'a> {
+    Form(&'a app::OpenClawAgentsFormState),
+    Snapshot(Option<&'a crate::openclaw_config::OpenClawAgentsDefaults>),
+}
+
+impl<'a> OpenClawAgentsRenderView<'a> {
+    fn new(
+        form: Option<&'a app::OpenClawAgentsFormState>,
+        snapshot: Option<&'a crate::openclaw_config::OpenClawAgentsDefaults>,
+    ) -> Self {
+        form.map_or(Self::Snapshot(snapshot), Self::Form)
+    }
+
+    fn primary_model(&self) -> &'a str {
+        match self {
+            Self::Form(form) => &form.primary_model,
+            Self::Snapshot(defaults) => defaults
+                .and_then(|defaults| defaults.model.as_ref())
+                .map_or("", |model| model.primary.as_str()),
+        }
+    }
+
+    fn fallbacks(&self) -> &'a [String] {
+        match self {
+            Self::Form(form) => &form.fallbacks,
+            Self::Snapshot(defaults) => defaults
+                .and_then(|defaults| defaults.model.as_ref())
+                .map_or(&[], |model| model.fallbacks.as_slice()),
+        }
+    }
+
+    fn section(&self) -> app::OpenClawAgentsSection {
+        match self {
+            Self::Form(form) => form.section,
+            Self::Snapshot(_) => app::OpenClawAgentsSection::PrimaryModel,
+        }
+    }
+
+    fn row(&self) -> usize {
+        match self {
+            Self::Form(form) => form.row,
+            Self::Snapshot(_) => 0,
+        }
+    }
+
+    fn is_selected(&self, section: app::OpenClawAgentsSection, row: usize) -> bool {
+        self.section() == section && self.row() == row
+    }
+
+    fn model_extra(&self) -> Option<&'a std::collections::HashMap<String, Value>> {
+        match self {
+            Self::Form(form) => (!form.model_extra.is_empty()).then_some(&form.model_extra),
+            Self::Snapshot(defaults) => defaults
+                .and_then(|defaults| defaults.model.as_ref())
+                .and_then(|model| (!model.extra.is_empty()).then_some(&model.extra)),
+        }
+    }
+
+    fn has_defaults_extra(&self) -> bool {
+        match self {
+            Self::Form(form) => !form.defaults_extra.is_empty(),
+            Self::Snapshot(defaults) => defaults.is_some_and(|defaults| {
+                let excluded = OPENCLAW_AGENTS_RUNTIME_KEYS
+                    .iter()
+                    .filter(|key| defaults.extra.contains_key(**key))
+                    .count();
+                defaults.extra.len() > excluded
+            }),
+        }
+    }
+
+    fn append_defaults_extra_lines(&self, lines: &mut Vec<String>) {
+        match self {
+            Self::Form(form) => append_json_map_lines(lines, &form.defaults_extra),
+            Self::Snapshot(Some(defaults)) => append_json_map_lines_excluding(
+                lines,
+                &defaults.extra,
+                OPENCLAW_AGENTS_RUNTIME_KEYS,
+            ),
+            Self::Snapshot(None) => {}
+        }
+    }
+
+    fn has_legacy_timeout(&self) -> bool {
+        match self {
+            Self::Form(form) => form.has_legacy_timeout,
+            Self::Snapshot(defaults) => {
+                defaults.is_some_and(|defaults| defaults.extra.contains_key("timeout"))
+            }
+        }
+    }
+
+    fn has_unmigratable_legacy_timeout(&self) -> bool {
+        match self {
+            Self::Form(form) => {
+                form.has_legacy_timeout
+                    && !bounded_is_blank(&form.timeout)
+                    && !bounded_render_number(&form.timeout)
+            }
+            Self::Snapshot(defaults) => {
+                let Some(value) = defaults.and_then(|defaults| defaults.extra.get("timeout"))
+                else {
+                    return false;
+                };
+                match value {
+                    Value::String(value) => {
+                        !bounded_is_blank(value) && !bounded_render_number(value)
+                    }
+                    Value::Number(_) => false,
+                    Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => true,
+                }
+            }
+        }
+    }
+
+    fn has_preserved_non_string_runtime_values(&self) -> bool {
+        match self {
+            Self::Form(form) => [
+                (&form.timeout, form.timeout_seconds_seed.as_ref()),
+                (&form.context_tokens, form.context_tokens_seed.as_ref()),
+                (&form.max_concurrent, form.max_concurrent_seed.as_ref()),
+            ]
+            .into_iter()
+            .any(|(value, seed)| {
+                bounded_is_blank(value)
+                    && seed.is_some_and(|seed| !seed.is_number() && !seed.is_string())
+            }),
+            Self::Snapshot(defaults) => defaults.is_some_and(|defaults| {
+                ["timeoutSeconds", "contextTokens", "maxConcurrent"]
+                    .iter()
+                    .filter_map(|key| defaults.extra.get(*key))
+                    .any(|value| !value.is_number() && !value.is_string())
+            }),
+        }
+    }
+
+    fn runtime_display(&self, field: app::OpenClawAgentsRuntimeField, width: u16) -> String {
+        match self {
+            Self::Form(form) => {
+                let (value, preserved) = match field {
+                    app::OpenClawAgentsRuntimeField::Workspace => (form.workspace.as_str(), None),
+                    app::OpenClawAgentsRuntimeField::Timeout => (
+                        form.timeout.as_str(),
+                        bounded_is_blank(&form.timeout)
+                            .then_some(form.timeout_seconds_seed.as_ref())
+                            .flatten()
+                            .filter(|seed| !seed.is_number() && !seed.is_string()),
+                    ),
+                    app::OpenClawAgentsRuntimeField::ContextTokens => (
+                        form.context_tokens.as_str(),
+                        bounded_is_blank(&form.context_tokens)
+                            .then_some(form.context_tokens_seed.as_ref())
+                            .flatten()
+                            .filter(|seed| !seed.is_number() && !seed.is_string()),
+                    ),
+                    app::OpenClawAgentsRuntimeField::MaxConcurrent => (
+                        form.max_concurrent.as_str(),
+                        bounded_is_blank(&form.max_concurrent)
+                            .then_some(form.max_concurrent_seed.as_ref())
+                            .flatten()
+                            .filter(|seed| !seed.is_number() && !seed.is_string()),
+                    ),
+                };
+                bounded_openclaw_runtime_value(value, preserved, width)
+            }
+            Self::Snapshot(defaults) => {
+                let extra = defaults.map(|defaults| &defaults.extra);
+                match field {
+                    app::OpenClawAgentsRuntimeField::Workspace => bounded_openclaw_raw_value(
+                        extra.and_then(|extra| extra.get("workspace")),
+                        false,
+                        width,
+                    ),
+                    app::OpenClawAgentsRuntimeField::Timeout => {
+                        let legacy = extra.and_then(|extra| extra.get("timeout"));
+                        if legacy.is_some() {
+                            bounded_openclaw_raw_value(legacy, false, width)
+                        } else {
+                            bounded_openclaw_raw_value(
+                                extra.and_then(|extra| extra.get("timeoutSeconds")),
+                                true,
+                                width,
+                            )
+                        }
+                    }
+                    app::OpenClawAgentsRuntimeField::ContextTokens => bounded_openclaw_raw_value(
+                        extra.and_then(|extra| extra.get("contextTokens")),
+                        true,
+                        width,
+                    ),
+                    app::OpenClawAgentsRuntimeField::MaxConcurrent => bounded_openclaw_raw_value(
+                        extra.and_then(|extra| extra.get("maxConcurrent")),
+                        true,
+                        width,
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn bounded_openclaw_json_value(value: &Value, width: u16) -> String {
+    let preview = bounded_json_preview_with_node_limit(value, usize::from(width).clamp(4, 32));
+    let serialized = serde_json::to_string(&preview).unwrap_or_else(|_| "null".to_string());
+    bounded_passive_value(&serialized, width)
+}
+
+fn bounded_openclaw_preserved_value(value: &Value, width: u16) -> String {
+    let raw = match value {
+        Value::String(value) => bounded_passive_value(value, width),
+        _ => bounded_openclaw_json_value(value, width),
+    };
+    bounded_passive_value(
+        &texts::tui_openclaw_agents_preserved_non_standard_value(&raw),
+        width,
+    )
+}
+
+fn bounded_openclaw_runtime_value(value: &str, preserved: Option<&Value>, width: u16) -> String {
+    if !bounded_is_blank(value) {
+        return bounded_passive_value(value, width);
+    }
+    preserved.map_or_else(
+        || bounded_passive_value(texts::tui_openclaw_agents_not_set(), width),
+        |raw| bounded_openclaw_preserved_value(raw, width),
+    )
+}
+
+fn bounded_openclaw_raw_value(value: Option<&Value>, numeric_only: bool, width: u16) -> String {
+    let Some(value) = value else {
+        return bounded_passive_value(texts::tui_openclaw_agents_not_set(), width);
+    };
+    match value {
+        Value::String(value) => bounded_openclaw_runtime_value(value, None, width),
+        Value::Number(value) => bounded_passive_value(&value.to_string(), width),
+        Value::Bool(value) if !numeric_only => bounded_passive_value(&value.to_string(), width),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) if numeric_only => {
+            bounded_openclaw_preserved_value(value, width)
+        }
+        Value::Null | Value::Array(_) | Value::Object(_) => {
+            bounded_openclaw_json_value(value, width)
+        }
+        Value::Bool(_) => unreachable!("non-numeric booleans handled above"),
+    }
 }
 
 struct OpenClawAgentsStyledRow {
@@ -1313,16 +2226,14 @@ fn openclaw_agents_note_row(text: String, wrap: bool) -> OpenClawAgentsStyledRow
 }
 
 fn openclaw_agents_section_block_height(rows: &[OpenClawAgentsStyledRow], text_width: u16) -> u16 {
-    section_line_heights(
+    saturating_line_height_sum(section_line_heights(
         &rows
             .iter()
             .map(|row| row.plain_text.clone())
             .collect::<Vec<_>>(),
         &rows.iter().map(|row| row.wrap).collect::<Vec<_>>(),
         text_width,
-    )
-    .into_iter()
-    .sum::<u16>()
+    ))
     .saturating_add(2)
 }
 
@@ -1390,14 +2301,11 @@ fn render_openclaw_agents_route(
     warnings: Option<&[crate::openclaw_config::OpenClawHealthWarning]>,
 ) {
     let load_failed = app::openclaw_agents_load_failed(data);
-    let form = (!load_failed).then(|| {
-        app.openclaw_agents_form.clone().unwrap_or_else(|| {
-            app::OpenClawAgentsFormState::from_snapshot(
-                data.config.openclaw_agents_defaults.as_ref(),
-            )
-        })
-    });
-    let model_options = app::openclaw_agents_model_options(data);
+    let view = OpenClawAgentsRenderView::new(
+        app.openclaw_agents_form.as_ref(),
+        data.config.openclaw_agents_defaults.as_ref(),
+    );
+    let model_preview = OpenClawRenderModelPreview::from_data(data);
 
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -1407,26 +2315,28 @@ fn render_openclaw_agents_route(
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
-    let config_path_display = config_path.map(|path| path.display().to_string());
-    let parse_warnings = warnings
-        .unwrap_or_default()
-        .iter()
-        .filter(|warning| {
-            warning.code == "config_parse_failed"
-                && openclaw_warning_matches_section(
-                    warning,
-                    "agents.defaults.",
-                    config_path_display.as_deref(),
-                )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let config_path_match = app::bounded_openclaw_config_path(config_path);
+    let parse_warnings = OpenClawWarningPreview::collect(
+        warnings
+            .unwrap_or_default()
+            .iter()
+            .take(app::OPENCLAW_WARNING_SCAN_ITEMS)
+            .filter(|warning| {
+                warning.code == "config_parse_failed"
+                    && openclaw_warning_matches_section(
+                        warning,
+                        "agents.defaults.",
+                        config_path_match,
+                    )
+            }),
+    );
     let has_parse_warning = !parse_warnings.is_empty();
     let warning_height = if has_parse_warning {
         warning_banner_height(
             &parse_warnings,
             inner.width.saturating_sub(CONTENT_INSET_LEFT),
         )
+        .min(inner.height.saturating_sub(4))
     } else {
         0
     };
@@ -1492,15 +2402,6 @@ fn render_openclaw_agents_route(
         return;
     }
 
-    let Some(form) = form.as_ref() else {
-        return;
-    };
-
-    let is_selected = |section: app::OpenClawAgentsSection, row: usize| {
-        form.section == section && form.row == row
-    };
-    let available_fallback_options = form.available_fallback_options(&model_options);
-
     let field_label_width = [
         texts::tui_openclaw_agents_primary_model(),
         texts::tui_openclaw_agents_fallback_models(),
@@ -1513,89 +2414,37 @@ fn render_openclaw_agents_route(
     .map(UnicodeWidthStr::width)
     .max()
     .unwrap_or(0);
-
-    let (primary_value, primary_status) =
-        openclaw_agents_model_value_parts(&form.primary_model, &model_options);
-    let mut model_rows = vec![openclaw_agents_field_row(
-        theme,
-        field_label_width,
-        texts::tui_openclaw_agents_primary_model(),
-        &primary_value,
-        primary_status,
-        is_selected(app::OpenClawAgentsSection::PrimaryModel, 0),
-        false,
-    )];
-    let mut model_selected_line =
-        is_selected(app::OpenClawAgentsSection::PrimaryModel, 0).then_some(0);
-    for (index, value) in form.fallbacks.iter().enumerate() {
-        let (fallback_value, fallback_status) =
-            openclaw_agents_model_value_parts(value, &model_options);
-        if is_selected(app::OpenClawAgentsSection::FallbackModels, index) {
-            model_selected_line = Some(model_rows.len());
-        }
-        model_rows.push(openclaw_agents_field_row(
-            theme,
-            field_label_width,
-            texts::tui_openclaw_agents_fallback_models(),
-            &fallback_value,
-            fallback_status,
-            is_selected(app::OpenClawAgentsSection::FallbackModels, index),
-            false,
-        ));
-    }
-    if available_fallback_options.is_empty() {
-        model_rows.push(openclaw_agents_disabled_row(
-            theme,
-            field_label_width,
-            texts::tui_openclaw_agents_add_fallback_disabled(),
-        ));
-    } else {
-        if is_selected(
-            app::OpenClawAgentsSection::FallbackModels,
-            form.fallbacks.len(),
-        ) {
-            model_selected_line = Some(model_rows.len());
-        }
-        model_rows.push(openclaw_agents_action_row(
-            theme,
-            field_label_width,
-            texts::tui_openclaw_agents_add_fallback(),
-            is_selected(
-                app::OpenClawAgentsSection::FallbackModels,
-                form.fallbacks.len(),
-            ),
-        ));
-    }
-    if !form.model_extra.is_empty() {
-        model_rows.push(openclaw_agents_note_row(String::new(), false));
-        model_rows.push(openclaw_agents_note_row(
-            texts::tui_openclaw_agents_preserved_fields_label().to_string(),
-            true,
-        ));
-        let mut model_extra_lines = Vec::new();
-        append_json_lines(
-            &mut model_extra_lines,
-            &Value::Object(
-                form.model_extra
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-            ),
-        );
-        model_rows.extend(
-            model_extra_lines
-                .into_iter()
-                .map(|line| openclaw_agents_note_row(line, true)),
-        );
-    }
-
     let section_text_width = body_area.width.saturating_sub(3);
+    let field_prefix_width = u16::try_from(field_label_width)
+        .unwrap_or(u16::MAX)
+        .saturating_add(4);
+    let field_value_width = section_text_width.saturating_sub(field_prefix_width).max(1);
+
+    let mut model_extra_lines = Vec::new();
+    if let Some(model_extra) = view.model_extra() {
+        append_json_map_lines(&mut model_extra_lines, model_extra);
+    }
+    let fallbacks = view.fallbacks();
+    let model_base_len = fallbacks.len().saturating_add(2);
+    let model_total = model_base_len.saturating_add(if view.model_extra().is_some() {
+        2usize.saturating_add(model_extra_lines.len())
+    } else {
+        0
+    });
+    let model_selected_logical = match view.section() {
+        app::OpenClawAgentsSection::PrimaryModel => Some(0),
+        app::OpenClawAgentsSection::FallbackModels => Some(1usize.saturating_add(view.row())),
+        app::OpenClawAgentsSection::Runtime => None,
+    };
+    let add_fallback_disabled =
+        !model_preview.has_available(view.primary_model(), view.fallbacks());
+
     let mut runtime_rows = Vec::new();
     let mut runtime_selected_line = None;
     fn push_runtime_row(rows: &mut Vec<OpenClawAgentsStyledRow>, row: OpenClawAgentsStyledRow) {
         rows.push(row);
     }
-    if form.has_legacy_timeout {
+    if view.has_legacy_timeout() {
         push_runtime_row(
             &mut runtime_rows,
             openclaw_agents_note_row(
@@ -1608,7 +2457,7 @@ fn render_openclaw_agents_route(
             openclaw_agents_note_row(
                 format!(
                     "  {}",
-                    if form.has_unmigratable_legacy_timeout() {
+                    if view.has_unmigratable_legacy_timeout() {
                         texts::tui_openclaw_agents_legacy_timeout_invalid_description()
                     } else {
                         texts::tui_openclaw_agents_legacy_timeout_description()
@@ -1623,45 +2472,47 @@ fn render_openclaw_agents_route(
         );
     }
 
-    for (row, label, value) in [
+    for (row, field, label) in [
         (
             0,
+            app::OpenClawAgentsRuntimeField::Workspace,
             texts::tui_openclaw_agents_workspace(),
-            openclaw_agents_runtime_value(&form.workspace, None),
         ),
         (
             1,
+            app::OpenClawAgentsRuntimeField::Timeout,
             texts::tui_openclaw_agents_timeout(),
-            openclaw_agents_runtime_value(&form.timeout, form.preserved_timeout_seconds()),
         ),
         (
             2,
+            app::OpenClawAgentsRuntimeField::ContextTokens,
             texts::tui_openclaw_agents_context_tokens(),
-            openclaw_agents_runtime_value(&form.context_tokens, form.preserved_context_tokens()),
         ),
         (
             3,
+            app::OpenClawAgentsRuntimeField::MaxConcurrent,
             texts::tui_openclaw_agents_max_concurrent(),
-            openclaw_agents_runtime_value(&form.max_concurrent, form.preserved_max_concurrent()),
         ),
     ] {
-        if is_selected(app::OpenClawAgentsSection::Runtime, row) {
+        if view.is_selected(app::OpenClawAgentsSection::Runtime, row) {
             runtime_selected_line = Some(runtime_rows.len());
         }
+        let value = view.runtime_display(field, field_value_width.saturating_sub(2));
+        let value = bounded_passive_value(&format!("[{value}]"), field_value_width);
         push_runtime_row(
             &mut runtime_rows,
             openclaw_agents_field_row(
                 theme,
                 field_label_width,
                 label,
-                &format!("[{value}]"),
+                &value,
                 None,
-                is_selected(app::OpenClawAgentsSection::Runtime, row),
+                view.is_selected(app::OpenClawAgentsSection::Runtime, row),
                 false,
             ),
         );
     }
-    if form.has_preserved_non_string_runtime_values() {
+    if view.has_preserved_non_string_runtime_values() {
         push_runtime_row(
             &mut runtime_rows,
             openclaw_agents_note_row(String::new(), false),
@@ -1674,7 +2525,7 @@ fn render_openclaw_agents_route(
             ),
         );
     }
-    if !form.defaults_extra.is_empty() {
+    if view.has_defaults_extra() {
         push_runtime_row(
             &mut runtime_rows,
             openclaw_agents_note_row(String::new(), false),
@@ -1687,30 +2538,13 @@ fn render_openclaw_agents_route(
             ),
         );
         let mut defaults_extra_lines = Vec::new();
-        append_json_lines(
-            &mut defaults_extra_lines,
-            &Value::Object(
-                form.defaults_extra
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-            ),
-        );
+        view.append_defaults_extra_lines(&mut defaults_extra_lines);
         runtime_rows.extend(
             defaults_extra_lines
                 .into_iter()
                 .map(|line| openclaw_agents_note_row(line, true)),
         );
     }
-
-    let model_plain_lines = model_rows
-        .iter()
-        .map(|row| row.plain_text.clone())
-        .collect::<Vec<_>>();
-    let model_wraps = model_rows.iter().map(|row| row.wrap).collect::<Vec<_>>();
-    let model_line_heights =
-        section_line_heights(&model_plain_lines, &model_wraps, section_text_width);
-    let model_height = openclaw_agents_section_block_height(&model_rows, section_text_width);
     let runtime_plain_lines = runtime_rows
         .iter()
         .map(|row| row.plain_text.clone())
@@ -1719,15 +2553,92 @@ fn render_openclaw_agents_route(
     let runtime_line_heights =
         section_line_heights(&runtime_plain_lines, &runtime_wraps, section_text_width);
     let runtime_height = openclaw_agents_section_block_height(&runtime_rows, section_text_width);
+    let model_height = logical_section_height(model_total);
     let remaining_height = body_area.height.saturating_sub(2);
     let (model_height, runtime_height) = split_section_heights(
         remaining_height,
         model_height,
         runtime_height,
-        form.section == app::OpenClawAgentsSection::Runtime,
+        view.section() == app::OpenClawAgentsSection::Runtime,
     );
-    let model_window = section_line_window(&model_line_heights, model_height, model_selected_line);
-    let visible_model_rows = &model_rows[model_window.clone()];
+    let model_window = bounded_logical_row_window(
+        model_total,
+        model_selected_logical,
+        model_height.saturating_sub(2),
+    );
+    let model_selected_line = model_selected_logical.and_then(|selected| {
+        model_window
+            .contains(&selected)
+            .then_some(selected.saturating_sub(model_window.start))
+    });
+    let mut model_rows = Vec::with_capacity(model_window.len());
+    for logical in model_window {
+        let selected = model_selected_line == Some(model_rows.len());
+        let row = if logical == 0 {
+            let (value, status) = openclaw_agents_render_model_value(
+                view.primary_model(),
+                &model_preview,
+                field_value_width,
+            );
+            openclaw_agents_field_row(
+                theme,
+                field_label_width,
+                texts::tui_openclaw_agents_primary_model(),
+                &value,
+                status,
+                selected,
+                false,
+            )
+        } else if logical <= fallbacks.len() {
+            let (value, status) = openclaw_agents_render_model_value(
+                &fallbacks[logical - 1],
+                &model_preview,
+                field_value_width,
+            );
+            openclaw_agents_field_row(
+                theme,
+                field_label_width,
+                texts::tui_openclaw_agents_fallback_models(),
+                &value,
+                status,
+                selected,
+                false,
+            )
+        } else if logical == fallbacks.len().saturating_add(1) {
+            if add_fallback_disabled {
+                openclaw_agents_disabled_row(
+                    theme,
+                    field_label_width,
+                    texts::tui_openclaw_agents_add_fallback_disabled(),
+                )
+            } else {
+                openclaw_agents_action_row(
+                    theme,
+                    field_label_width,
+                    texts::tui_openclaw_agents_add_fallback(),
+                    selected,
+                )
+            }
+        } else if logical == model_base_len {
+            openclaw_agents_note_row(String::new(), false)
+        } else if logical == model_base_len.saturating_add(1) {
+            openclaw_agents_note_row(
+                texts::tui_openclaw_agents_preserved_fields_label().to_string(),
+                false,
+            )
+        } else {
+            let extra_index = logical.saturating_sub(model_base_len.saturating_add(2));
+            openclaw_agents_note_row(
+                model_extra_lines
+                    .get(extra_index)
+                    .cloned()
+                    .unwrap_or_default(),
+                true,
+            )
+        };
+        model_rows.push(row);
+    }
+    let visible_model_rows = model_rows.as_slice();
     let runtime_window =
         section_line_window(&runtime_line_heights, runtime_height, runtime_selected_line);
     let visible_runtime_rows = &runtime_rows[runtime_window];
@@ -1767,34 +2678,29 @@ fn render_openclaw_agents_route(
     );
 }
 
-fn openclaw_agents_model_value_parts(
+fn openclaw_agents_render_model_value(
     value: &str,
-    options: &[app::OpenClawModelOption],
+    preview: &OpenClawRenderModelPreview<'_>,
+    width: u16,
 ) -> (String, Option<&'static str>) {
-    if value.trim().is_empty() {
-        return (texts::tui_openclaw_agents_not_set().to_string(), None);
+    if bounded_is_blank(value) {
+        return (
+            bounded_passive_value(texts::tui_openclaw_agents_not_set(), width),
+            None,
+        );
     }
 
-    options
-        .iter()
-        .find(|option| option.value == value)
-        .map(|option| (option.label.clone(), None))
+    preview
+        .find(value)
+        .map(|option| (option.display_label(width), None))
         .unwrap_or_else(|| {
             (
-                value.to_string(),
-                Some(texts::tui_openclaw_agents_not_configured_suffix()),
+                bounded_passive_value(value, width),
+                preview
+                    .complete
+                    .then_some(texts::tui_openclaw_agents_not_configured_suffix()),
             )
         })
-}
-
-fn openclaw_agents_runtime_value(value: &str, preserved: Option<&Value>) -> String {
-    if value.trim().is_empty() {
-        preserved
-            .map(|raw| texts::tui_openclaw_agents_preserved_non_standard_value(&raw.to_string()))
-            .unwrap_or_else(|| texts::tui_openclaw_agents_not_set().to_string())
-    } else {
-        value.to_string()
-    }
 }
 
 fn openclaw_warning_matches_section(
@@ -1845,9 +2751,10 @@ fn openclaw_workspace_row_height(row: &OpenClawWorkspaceStyledRow, text_width: u
 }
 
 fn openclaw_workspace_summary_height(rows: &[OpenClawWorkspaceStyledRow], text_width: u16) -> u16 {
-    rows.iter()
-        .map(|row| openclaw_workspace_row_height(row, text_width))
-        .sum()
+    saturating_line_height_sum(
+        rows.iter()
+            .map(|row| openclaw_workspace_row_height(row, text_width)),
+    )
 }
 
 fn openclaw_workspace_section_block_height(
@@ -2001,7 +2908,7 @@ fn openclaw_workspace_body_heights(
         return (summary_height, 0, 0);
     }
 
-    if remaining >= files_full_height.saturating_add(daily_full_height) {
+    if line_heights_fit(remaining, [files_full_height, daily_full_height]) {
         return (summary_height, files_full_height, daily_full_height);
     }
 
@@ -2529,6 +3436,7 @@ pub(super) fn render_settings(
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
     let codex_unified_session_history = crate::settings::unify_codex_session_history();
+    let preferred_editor = crate::settings::get_preferred_editor();
 
     let rows_data = super::app::SettingsItem::ALL
         .iter()
@@ -2550,6 +3458,12 @@ pub(super) fn render_settings(
                 texts::tui_settings_icons_label().to_string(),
                 texts::tui_settings_icon_mode_name(crate::cli::tui::icons::configured_icon_mode())
                     .to_string(),
+            ),
+            super::app::SettingsItem::PreferredEditor => (
+                texts::tui_settings_preferred_editor_label().to_string(),
+                preferred_editor
+                    .clone()
+                    .unwrap_or_else(|| texts::tui_settings_preferred_editor_not_set().to_string()),
             ),
             super::app::SettingsItem::VisibleAppsMode => (
                 texts::tui_settings_visible_apps_mode_label().to_string(),
@@ -2608,7 +3522,7 @@ pub(super) fn render_settings(
                 ),
             ),
             super::app::SettingsItem::ModelRoutes => (
-                "模型路由".to_string(),
+                texts::tui_settings_model_routes_title().to_string(),
                 format!("{} 条规则", data.model_routes.rows.len()),
             ),
             super::app::SettingsItem::CheckForUpdates => (
@@ -2618,57 +3532,65 @@ pub(super) fn render_settings(
         })
         .collect::<Vec<_>>();
 
-    let label_col_width = field_label_column_width(
-        rows_data
-            .iter()
-            .map(|(label, _value)| label.as_str())
-            .chain(std::iter::once(texts::tui_settings_header_setting())),
-        0,
-    );
-
-    let header = Row::new(vec![
-        Cell::from(texts::tui_settings_header_setting()),
-        Cell::from(texts::tui_settings_header_value()),
-    ])
-    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
-
-    let rows = rows_data
-        .iter()
-        .map(|(label, value)| Row::new(vec![Cell::from(label.clone()), Cell::from(value.clone())]));
-
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", texts::menu_settings()));
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-
-    render_page_key_bar(
+    let body = render_page_frame(
         frame,
-        chunks[0],
+        area,
         theme,
+        app,
+        texts::menu_settings(),
         &[("Enter", texts::tui_key_apply())],
-        app.focus == Focus::Content,
+        None,
     );
+    let table_area = inset_left(body, CONTENT_INSET_LEFT);
+
+    let raw_label_col_width =
+        field_label_column_width(rows_data.iter().map(|(label, _value)| label.as_str()), 0);
+    let label_col_width = raw_label_col_width.min(table_area.width.saturating_sub(9));
+
+    let section_style = Style::default().fg(theme.dim);
+    let section_rule = "─".repeat(usize::from(table_area.width));
+    let mut rows = Vec::with_capacity(rows_data.len() + 3);
+    let mut current_section = None;
+    for (item, (label, value)) in SettingsItem::ALL.iter().copied().zip(&rows_data) {
+        let section = settings_section(item);
+        if current_section.is_some_and(|current| current != section) {
+            rows.push(
+                Row::new(vec![
+                    Cell::from(section_rule.clone()),
+                    Cell::from(section_rule.clone()),
+                ])
+                .style(section_style),
+            );
+        }
+        current_section = Some(section);
+
+        let value = bounded_trimmed_text_for_display(value);
+        rows.push(Row::new(vec![
+            Cell::from(truncate_to_display_width(label, label_col_width)),
+            Cell::from(truncated_value_cell(
+                &value,
+                table_area.width,
+                label_col_width,
+                theme,
+            )),
+        ]));
+    }
 
     let table = Table::new(
         rows,
-        [Constraint::Length(label_col_width), Constraint::Min(10)],
+        [
+            Constraint::Length(label_col_width.saturating_add(1)),
+            Constraint::Min(10),
+        ],
     )
-    .header(header)
+    .column_spacing(0)
     .block(Block::default().borders(Borders::NONE))
     .row_highlight_style(selection_style(theme))
     .highlight_symbol(highlight_symbol(theme));
 
     let mut state = TableState::default();
-    state.select(Some(app.settings_idx));
-    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+    state.select(Some(settings_table_row_index(app.settings_idx)));
+    frame.render_stateful_widget(table, table_area, &mut state);
 }
 
 fn managed_accounts_summary(app: &App) -> String {
@@ -2692,35 +3614,24 @@ pub(super) fn render_settings_managed_accounts(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(breadcrumb_title(&[
+    let keys = managed_account_key_items(app);
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        &breadcrumb_path(&[
             texts::menu_settings(),
             texts::tui_settings_managed_accounts_title(),
-        ]));
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
-        .split(inner);
-
-    let keys = managed_account_key_items(app);
-    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
-
-    render_summary_bar(frame, chunks[1], theme, managed_accounts_page_summary(app));
+        ]),
+        &keys,
+        Some(managed_accounts_page_summary(app)),
+    );
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(chunks[2]);
+        .split(body);
 
     render_managed_account_list(frame, app, columns[0], theme);
     render_managed_account_details(frame, app, columns[1], theme);
@@ -2878,7 +3789,9 @@ fn managed_account_list_item(
     };
     let login_style = Style::default().add_modifier(Modifier::BOLD);
     let default_label = texts::tui_managed_accounts_default();
-    let default_chip_width = UnicodeWidthStr::width(default_label) as u16 + 2;
+    let default_chip_width = u16::try_from(UnicodeWidthStr::width(default_label))
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
     let login_width = if account.is_default {
         width
             .saturating_sub(default_chip_width)

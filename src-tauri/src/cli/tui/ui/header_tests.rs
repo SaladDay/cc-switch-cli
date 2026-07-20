@@ -266,6 +266,81 @@ fn header_openclaw_truncates_long_default_model_without_fake_proxy_gap() {
 }
 
 #[test]
+fn header_openclaw_bounds_multi_megabyte_primary_model() {
+    let _ctx = TestContext::new();
+    let _lang = use_test_language(Language::English);
+    let _no_color = super::tests::EnvGuard::remove("NO_COLOR");
+
+    let app = App::new(Some(AppType::OpenClaw));
+    let mut data = super::tests::minimal_data(&app.app_type);
+    data.config.openclaw_agents_defaults = Some(OpenClawAgentsDefaults {
+        model: Some(OpenClawDefaultModel {
+            primary: format!("provider/{}", "m".repeat(3 * 1024 * 1024)),
+            fallbacks: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::new(),
+    });
+
+    let bounded_value = super::header_status_value(&app, &data, u16::MAX);
+    assert!(bounded_value.starts_with("provider/"), "{bounded_value}");
+    assert!(bounded_value.ends_with('…'), "{bounded_value}");
+    assert!(
+        UnicodeWidthStr::width(bounded_value.as_str())
+            <= usize::from(super::HEADER_STATUS_VALUE_MAX_WIDTH),
+        "header value exceeded its fixed render budget"
+    );
+
+    let header = super::tests::line_at(&super::tests::render_with_size(&app, &data, 80, 20), 1);
+
+    assert!(header.contains("Default Model: provider/"), "{header}");
+    assert!(header.contains('…'), "{header}");
+    assert_eq!(UnicodeWidthStr::width(header.as_str()), 80);
+
+    data.config
+        .openclaw_agents_defaults
+        .as_mut()
+        .and_then(|defaults| defaults.model.as_mut())
+        .expect("default model")
+        .primary = " ".repeat(3 * 1024 * 1024);
+    let bounded_whitespace = super::header_status_value(&app, &data, u16::MAX);
+    assert!(bounded_whitespace.ends_with('…'), "{bounded_whitespace:?}");
+    assert!(
+        UnicodeWidthStr::width(bounded_whitespace.as_str())
+            <= usize::from(super::HEADER_STATUS_VALUE_MAX_WIDTH),
+        "whitespace header value exceeded its fixed render budget"
+    );
+}
+
+#[test]
+fn header_bounds_multi_megabyte_current_provider_name() {
+    let _ctx = TestContext::new();
+    let _lang = use_test_language(Language::English);
+    let _no_color = super::tests::EnvGuard::remove("NO_COLOR");
+
+    let app = App::new(Some(AppType::Claude));
+    let mut data = super::tests::minimal_data(&app.app_type);
+    data.providers.current_id = "p1".to_string();
+    let current = data.providers.rows.first_mut().expect("provider row");
+    current.is_current = true;
+    current.provider.name = format!("provider-{}", "n".repeat(3 * 1024 * 1024));
+
+    let bounded_value = super::header_status_value(&app, &data, u16::MAX);
+    assert!(bounded_value.starts_with("provider-"), "{bounded_value}");
+    assert!(bounded_value.ends_with('…'), "{bounded_value}");
+    assert!(
+        UnicodeWidthStr::width(bounded_value.as_str())
+            <= usize::from(super::HEADER_STATUS_VALUE_MAX_WIDTH),
+        "provider header value exceeded its fixed render budget"
+    );
+
+    let header = super::tests::line_at(&super::tests::render_with_size(&app, &data, 120, 20), 1);
+    assert!(header.contains("Provider: provider-"), "{header}");
+    assert!(header.contains('…'), "{header}");
+}
+
+#[test]
 fn header_opencode_hides_proxy_badge_and_reports_config_membership() {
     let _ctx = TestContext::new();
     let _lang = use_test_language(Language::English);

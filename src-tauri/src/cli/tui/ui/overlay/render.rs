@@ -59,25 +59,28 @@ pub(crate) fn render_overlay(
             provider_id,
             *selected,
         ),
-        Overlay::FailoverQueueManager { selected } => {
-            super::pickers::render_failover_queue_manager_overlay(
-                frame,
-                data,
-                content_area,
-                theme,
-                *selected,
-            )
-        }
-        Overlay::ClaudeModelPicker { selected, editing } => {
-            super::pickers::render_claude_model_picker_overlay(
-                frame,
-                app,
-                content_area,
-                theme,
-                *selected,
-                *editing,
-            )
-        }
+        Overlay::FailoverQueueManager {
+            selected_provider_id,
+        } => super::pickers::render_failover_queue_manager_overlay(
+            frame,
+            data,
+            content_area,
+            theme,
+            selected_provider_id.as_deref(),
+        ),
+        Overlay::ClaudeModelPicker {
+            selected,
+            column,
+            editing,
+        } => super::pickers::render_claude_model_picker_overlay(
+            frame,
+            app,
+            content_area,
+            theme,
+            *selected,
+            *column,
+            *editing,
+        ),
         Overlay::ClaudeApiFormatPicker { selected } => {
             super::pickers::render_claude_api_format_picker_overlay(
                 frame,
@@ -94,6 +97,15 @@ pub(crate) fn render_overlay(
             theme,
             *selected,
         ),
+        Overlay::ExternalEditorPicker { selected, editors } => {
+            super::pickers::render_external_editor_picker_overlay(
+                frame,
+                content_area,
+                theme,
+                *selected,
+                editors,
+            )
+        }
         Overlay::UsageQueryTemplatePicker { selected } => {
             super::pickers::render_usage_query_template_picker_overlay(
                 frame,
@@ -103,6 +115,13 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::S3PresetPicker { selected } => super::pickers::render_s3_preset_picker_overlay(
+            frame,
+            app,
+            content_area,
+            theme,
+            *selected,
+        ),
         Overlay::ManagedAccountPicker {
             selected,
             binding,
@@ -140,9 +159,10 @@ pub(crate) fn render_overlay(
         }
         Overlay::ModelFetchPicker {
             input,
-            query,
             fetching,
             models,
+            filtered_indices,
+            filter_incomplete,
             error,
             selected_idx,
             ..
@@ -151,12 +171,22 @@ pub(crate) fn render_overlay(
             content_area,
             theme,
             input,
-            query,
             *fetching,
             models,
+            filtered_indices.as_deref(),
+            *filter_incomplete,
             error.as_deref(),
             *selected_idx,
         ),
+        Overlay::SessionProjectPicker(picker) => {
+            super::pickers::render_session_project_picker_overlay(
+                frame,
+                app,
+                content_area,
+                theme,
+                picker,
+            )
+        }
         Overlay::OpenClawToolsProfilePicker { selected } => {
             super::pickers::render_openclaw_tools_profile_picker_overlay(
                 frame,
@@ -167,13 +197,17 @@ pub(crate) fn render_overlay(
             )
         }
         Overlay::OpenClawAgentsFallbackPicker {
-            selected, options, ..
+            selected,
+            active,
+            options,
+            ..
         } => super::pickers::render_openclaw_agents_fallback_picker_overlay(
             frame,
             app,
             content_area,
             theme,
             *selected,
+            *active,
             options,
         ),
         Overlay::McpAppsPicker {

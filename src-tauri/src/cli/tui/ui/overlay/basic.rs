@@ -138,14 +138,7 @@ pub(super) fn render_text_input_overlay(
     let input_inner = input_block.inner(chunks[1]);
     frame.render_widget(input_block, chunks[1]);
 
-    let available = input_inner.width as usize;
-    let full = if input.secret {
-        "•".repeat(input.input.value.chars().count())
-    } else {
-        input.input.value.clone()
-    };
-    let cursor = input.input.cursor.min(full.chars().count());
-    let (visible, cursor_x) = visible_text_window(&full, cursor, available);
+    let (visible, cursor_x) = inline_input_window(&input.input, input_inner.width);
     frame.render_widget(
         Paragraph::new(Line::from(Span::raw(visible)))
             .wrap(Wrap { trim: false })

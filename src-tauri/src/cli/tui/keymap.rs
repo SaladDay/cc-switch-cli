@@ -51,6 +51,38 @@ pub(crate) fn key_bar_items<I: Copy>(
         .collect()
 }
 
+/// Sentinel `shown` predicate for bindings that never appear in the key bar
+/// (hidden aliases, e.g. a reverse-direction key already covered by another
+/// chip). The help-sheet generator skips these by function identity — so use
+/// this named function rather than an inline `|_, _| false` closure.
+pub(crate) fn never(_: &super::app::App, _: &super::data::UiData) -> bool {
+    false
+}
+
+/// Hide a secondary binding from the compact key bar while retaining it in
+/// the full help sheet. This differs from `never`, which hides the binding
+/// from both surfaces.
+pub(crate) fn help_only(_: &super::app::App, _: &super::data::UiData) -> bool {
+    false
+}
+
+/// (display, label) pairs for the help sheet: every binding except the
+/// `never`-shown aliases, labeled for the given app/data. Unlike
+/// `key_bar_items` this does not evaluate each binding's `shown` state, so
+/// the catalog lists a page's full key vocabulary regardless of the current
+/// selection.
+pub(crate) fn help_items<I: Copy>(
+    bindings: &[Binding<I>],
+    app: &super::app::App,
+    data: &super::data::UiData,
+) -> Vec<(&'static str, &'static str)> {
+    bindings
+        .iter()
+        .filter(|binding| !std::ptr::fn_addr_eq(binding.shown, never as PredicateFn))
+        .map(|binding| (binding.display, (binding.label)(app, data)))
+        .collect()
+}
+
 pub(crate) mod providers {
     use crossterm::event::KeyCode;
 
@@ -85,14 +117,14 @@ pub(crate) mod providers {
             keys: &[KeyCode::Enter],
             intent: Intent::Primary,
             label: primary_label,
-            shown: import_shown,
+            shown: primary_shown,
         },
         Binding {
             display: "Space",
             keys: &[KeyCode::Char(' '), KeyCode::Char('s')],
             intent: Intent::Switch,
             label: switch_label,
-            shown: any_visible,
+            shown: switch_shown,
         },
         Binding {
             display: "a",
@@ -113,7 +145,7 @@ pub(crate) mod providers {
             keys: &[KeyCode::Char('e')],
             intent: Intent::Edit,
             label: |_, _| texts::tui_key_edit(),
-            shown: selected_editable,
+            shown: super::help_only,
         },
         Binding {
             display: "d",
@@ -177,12 +209,21 @@ pub(crate) mod providers {
         selected_row(app, data).is_some()
     }
 
+    fn switch_shown(app: &App, data: &UiData) -> bool {
+        any_visible(app, data)
+            && (!supports_failover_controls(&app.app_type) || !data.proxy.auto_failover_enabled)
+    }
+
     fn selected_editable(app: &App, data: &UiData) -> bool {
         selected_row(app, data).is_some_and(|row| !data::provider_is_read_only(&app.app_type, row))
     }
 
     fn import_shown(_app: &App, data: &UiData) -> bool {
         data.providers.rows.is_empty() && !data.providers.loading
+    }
+
+    fn primary_shown(app: &App, data: &UiData) -> bool {
+        import_shown(app, data) || selected_editable(app, data)
     }
 
     fn primary_label(_app: &App, data: &UiData) -> &'static str {
@@ -313,6 +354,10 @@ pub(crate) mod mcp {
         super::key_bar_items(BINDINGS, app, data)
     }
 
+    pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::help_items(BINDINGS, app, data)
+    }
+
     fn any_visible(app: &App, data: &UiData) -> bool {
         visible_mcp(&app.filter, data)
             .get(app.mcp_idx)
@@ -382,6 +427,10 @@ pub(crate) mod prompts {
 
     pub(crate) fn key_bar_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
         super::key_bar_items(BINDINGS, app, data)
+    }
+
+    pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::help_items(BINDINGS, app, data)
     }
 
     fn any_visible(app: &App, data: &UiData) -> bool {
@@ -463,6 +512,10 @@ pub(crate) mod skills_installed {
         super::key_bar_items(BINDINGS, app, data)
     }
 
+    pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::help_items(BINDINGS, app, data)
+    }
+
     fn any_visible(app: &App, data: &UiData) -> bool {
         visible_skills_installed(&app.filter, data)
             .get(app.skills_idx)
@@ -536,7 +589,7 @@ pub(crate) mod usage {
             keys: &[KeyCode::BackTab],
             intent: Intent::PrevMetric,
             label: |_, _| crate::t!("switch metric", "切换指标"),
-            shown: |_, _| false,
+            shown: super::never,
         },
         Binding {
             display: "L",
@@ -568,11 +621,89 @@ pub(crate) mod usage {
     pub(crate) fn key_bar_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
         super::key_bar_items(BINDINGS, app, data)
     }
+
+    pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::help_items(BINDINGS, app, data)
+    }
+}
+
+pub(crate) mod sessions {
+    use crossterm::event::KeyCode;
+
+    use super::Binding;
+    use crate::cli::i18n::texts;
+    use crate::cli::tui::app::App;
+    use crate::cli::tui::data::UiData;
+
+    /// Action keys only. Pane/list navigation (arrows, h/l, PageUp/Down,
+    /// Home/End) is handled globally and in the handler's explicit arms
+    /// because it is pane-dependent and reused while the filter is active;
+    /// only these actions resolve through the table. The pane checks for
+    /// `View` stay in the handler body (the Providers pattern).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Intent {
+        View,
+        Restore,
+        Delete,
+        Refresh,
+        Project,
+    }
+
+    pub(crate) const BINDINGS: &[Binding<Intent>] = &[
+        Binding {
+            display: "Enter",
+            keys: &[KeyCode::Enter],
+            intent: Intent::View,
+            label: |_, _| texts::tui_key_view(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "R",
+            keys: &[KeyCode::Char('R')],
+            intent: Intent::Restore,
+            label: |_, _| texts::tui_key_restore(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "d",
+            keys: &[KeyCode::Char('d')],
+            intent: Intent::Delete,
+            label: |_, _| texts::tui_key_delete(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "r",
+            keys: &[KeyCode::Char('r')],
+            intent: Intent::Refresh,
+            label: |_, _| texts::tui_key_refresh(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "p",
+            keys: &[KeyCode::Char('p')],
+            intent: Intent::Project,
+            label: |_, _| texts::tui_key_sessions_project(),
+            shown: |_, _| true,
+        },
+    ];
+
+    pub(crate) fn intent_for(key: KeyCode) -> Option<Intent> {
+        super::intent_for(BINDINGS, key)
+    }
+
+    pub(crate) fn key_bar_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::key_bar_items(BINDINGS, app, data)
+    }
+
+    pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::help_items(BINDINGS, app, data)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::providers::{self, Intent};
+    use super::sessions;
     use crossterm::event::KeyCode;
 
     #[test]
@@ -634,5 +765,14 @@ mod tests {
             );
             seen.push(binding.intent);
         }
+    }
+
+    #[test]
+    fn sessions_a_is_not_a_registered_action() {
+        assert_eq!(sessions::intent_for(KeyCode::Char('a')), None);
+        assert_eq!(
+            sessions::intent_for(KeyCode::Char('p')),
+            Some(sessions::Intent::Project)
+        );
     }
 }

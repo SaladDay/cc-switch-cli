@@ -4,9 +4,7 @@ use crate::services::ProviderService;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-use super::codex_config::{
-    build_codex_provider_config_toml, clean_codex_provider_key, update_codex_config_snippet,
-};
+use super::codex_config::{build_codex_third_party_config_toml, update_codex_config_snippet};
 use super::{
     normalize_local_proxy_header_overrides, parse_codex_model_catalog_context_window,
     ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, UsageQueryTemplate,
@@ -14,6 +12,105 @@ use super::{
 };
 
 impl ProviderAddFormState {
+    pub(crate) fn existing_codex_config_text(&self) -> &str {
+        self.extra
+            .get("settingsConfig")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("config"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    }
+
+    pub(crate) fn effective_codex_config_text(&self) -> String {
+        if self.is_codex_official_provider() {
+            return self.effective_official_codex_config_text();
+        }
+
+        let fallback_model = if self.codex_model.is_blank() {
+            "gpt-5.4"
+        } else {
+            self.codex_model.value.trim()
+        };
+        let model = if self.codex_local_routing_enabled() {
+            self.codex_model_catalog
+                .iter()
+                .map(|row| row.model.trim())
+                .find(|model| !model.is_empty())
+                .unwrap_or(fallback_model)
+        } else {
+            fallback_model
+        };
+        self.effective_custom_codex_config_text(model)
+    }
+
+    fn codex_config_and_model_catalog_for_save(&self) -> (String, Vec<Value>) {
+        if self.is_codex_official_provider() {
+            return (self.effective_official_codex_config_text(), Vec::new());
+        }
+
+        let model_catalog = if self.codex_local_routing_enabled() {
+            self.normalized_codex_model_catalog_for_save()
+        } else {
+            Vec::new()
+        };
+        let model = if !model_catalog.is_empty() {
+            model_catalog[0]["model"].as_str().unwrap_or("gpt-5.4")
+        } else if self.codex_model.is_blank() {
+            "gpt-5.4"
+        } else {
+            self.codex_model.value.trim()
+        };
+        (
+            self.effective_custom_codex_config_text(model),
+            model_catalog,
+        )
+    }
+
+    fn effective_official_codex_config_text(&self) -> String {
+        let existing_config = self.existing_codex_config_text();
+        let mut config = crate::codex_config::strip_codex_provider_config_text(existing_config)
+            .map_err(|_| ())
+            .unwrap_or_else(|_| existing_config.trim().to_string());
+        if self.codex_goal_mode_touched {
+            config = crate::codex_config::set_codex_goal_mode(&config, self.codex_goal_mode);
+        }
+        config
+    }
+
+    fn effective_custom_codex_config_text(&self, model: &str) -> String {
+        let existing_config = self.existing_codex_config_text();
+        let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
+        let base_config = if existing_config.trim().is_empty() {
+            build_codex_third_party_config_toml(
+                self.name.value.trim(),
+                base_url,
+                model,
+                self.codex_wire_api,
+            )
+        } else {
+            existing_config.to_string()
+        };
+        let mut config = update_codex_config_snippet(
+            &base_config,
+            base_url,
+            model,
+            self.codex_wire_api,
+            self.codex_requires_openai_auth,
+            self.codex_env_key.value.trim(),
+        );
+        if self.codex_goal_mode_touched {
+            config = crate::codex_config::set_codex_goal_mode(&config, self.codex_goal_mode);
+        }
+        if self.codex_remote_compaction_touched {
+            config = crate::codex_config::set_codex_remote_compaction(
+                &config,
+                self.codex_remote_compaction,
+                self.name.value.trim(),
+            );
+        }
+        config
+    }
+
     pub fn to_provider_json_value(&self) -> Value {
         let mut provider_obj = match self.extra.clone() {
             Value::Object(map) => map,
@@ -74,27 +171,16 @@ impl ProviderAddFormState {
                     );
                 }
                 if self.claude_model_config_touched {
+                    let sonnet_model = self.claude_model_value_for_config(1);
+                    let opus_model = self.claude_model_value_for_config(2);
                     set_or_remove_trimmed(env_obj, "ANTHROPIC_MODEL", &self.claude_model.value);
-                    set_or_remove_trimmed(
-                        env_obj,
-                        "ANTHROPIC_REASONING_MODEL",
-                        &self.claude_reasoning_model.value,
-                    );
                     set_or_remove_trimmed(
                         env_obj,
                         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
                         &self.claude_haiku_model.value,
                     );
-                    set_or_remove_trimmed(
-                        env_obj,
-                        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                        &self.claude_sonnet_model.value,
-                    );
-                    set_or_remove_trimmed(
-                        env_obj,
-                        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-                        &self.claude_opus_model.value,
-                    );
+                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_SONNET_MODEL", &sonnet_model);
+                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_OPUS_MODEL", &opus_model);
                     env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
                 }
                 if self.claude_teammates_touched {
@@ -137,26 +223,9 @@ impl ProviderAddFormState {
                 }
             }
             AppType::Codex => {
+                let (config_toml, model_catalog) = self.codex_config_and_model_catalog_for_save();
+                settings_obj.insert("config".to_string(), Value::String(config_toml));
                 if self.is_codex_official_provider() {
-                    let existing_config = settings_obj
-                        .get("config")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    let mut cleaned_config =
-                        crate::codex_config::strip_codex_provider_config_text(existing_config)
-                            .map_err(|_| ())
-                            .unwrap_or_else(|_| existing_config.trim().to_string());
-                    // Goal mode is a top-level [features] setting, so it applies
-                    // to official providers too (remote compaction is custom-only
-                    // and its toggle is hidden here, hence not applied).
-                    if self.codex_goal_mode_touched {
-                        cleaned_config = crate::codex_config::set_codex_goal_mode(
-                            &cleaned_config,
-                            self.codex_goal_mode,
-                        );
-                    }
-                    settings_obj.insert("config".to_string(), Value::String(cleaned_config));
-
                     let auth_value = settings_obj
                         .entry("auth".to_string())
                         .or_insert_with(|| json!({}));
@@ -165,70 +234,6 @@ impl ProviderAddFormState {
                     }
                     settings_obj.remove("modelCatalog");
                 } else {
-                    let provider_key =
-                        clean_codex_provider_key(self.id.value.trim(), self.name.value.trim());
-                    let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
-                    // Model mapping (catalog) is gated by the independent
-                    // "需要本地路由映射" toggle (decoupled from the upstream
-                    // format). When on it persists for both Chat (proxy routing)
-                    // and native Responses (direct-connect catalog); its first
-                    // entry becomes the active config model.
-                    let model_catalog = if self.codex_local_routing_enabled() {
-                        self.normalized_codex_model_catalog_for_save()
-                    } else {
-                        Vec::new()
-                    };
-                    let model = if !model_catalog.is_empty() {
-                        model_catalog[0]["model"].as_str().unwrap_or("gpt-5.4")
-                    } else if self.codex_model.is_blank() {
-                        "gpt-5.4"
-                    } else {
-                        self.codex_model.value.trim()
-                    };
-
-                    let existing_config = settings_obj
-                        .get("config")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    let base_config = if existing_config.trim().is_empty() {
-                        build_codex_provider_config_toml(
-                            &provider_key,
-                            base_url,
-                            model,
-                            self.codex_wire_api,
-                        )
-                    } else {
-                        existing_config.to_string()
-                    };
-                    let mut config_toml = update_codex_config_snippet(
-                        &base_config,
-                        base_url,
-                        model,
-                        self.codex_wire_api,
-                        self.codex_requires_openai_auth,
-                        self.codex_env_key.value.trim(),
-                    );
-                    // Quick-config toggles rewrite the config TOML in place,
-                    // mirroring upstream's CodexConfigSections. Only touched
-                    // toggles change the config so existing keys are preserved.
-                    if self.codex_goal_mode_touched {
-                        config_toml = crate::codex_config::set_codex_goal_mode(
-                            &config_toml,
-                            self.codex_goal_mode,
-                        );
-                    }
-                    if self.codex_remote_compaction_touched {
-                        // Empty fallback → the helper restores `name` to the
-                        // config's own active `model_provider` id (CC-Switch's
-                        // default name), which is correct even when the imported
-                        // config's provider id differs from our cleaned key.
-                        config_toml = crate::codex_config::set_codex_remote_compaction(
-                            &config_toml,
-                            self.codex_remote_compaction,
-                            "",
-                        );
-                    }
-                    settings_obj.insert("config".to_string(), Value::String(config_toml));
                     if !model_catalog.is_empty() {
                         settings_obj.insert(
                             "modelCatalog".to_string(),

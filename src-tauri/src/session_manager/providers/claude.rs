@@ -1,5 +1,4 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -7,11 +6,15 @@ use serde_json::Value;
 use crate::config::get_claude_config_dir;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
-use crate::session_manager::{SearchSnippet, SessionMessage, SessionMeta, SessionSearchHit};
+use crate::session_manager::{
+    SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta,
+    SessionSearchHit,
+};
 
 use super::utils::{
-    build_snippet, extract_text, parse_timestamp_to_ms, path_basename, read_head_tail_lines,
-    truncate_summary, TITLE_MAX_CHARS,
+    build_snippet_cancellable, extract_text, file_modified_ms, parse_timestamp_to_ms,
+    path_basename, read_head_tail_lines_bounded, truncate_summary, visit_bounded_lines_cancellable,
+    visit_bounded_lines_cancellable_with_status, TITLE_MAX_CHARS,
 };
 
 const PROVIDER_ID: &str = "claude";
@@ -38,35 +41,122 @@ pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<S
     )
 }
 
-fn scan_targets() -> Vec<FileScanTarget> {
-    let root = get_claude_config_dir().join("projects");
-    let mut targets = Vec::new();
-    cache::collect_targets_recursive(&root, "jsonl", &mut targets);
-    targets
+pub(crate) fn scan_sessions_progressive(
+    store: Option<&ScanCacheStore>,
+    force: bool,
+    on_session: &mut dyn FnMut(&SessionMeta),
+) -> Vec<SessionMeta> {
+    let targets = scan_targets();
+    match store {
+        Some(store) => cache::scan_provider_cached_progressive(
+            store,
+            PROVIDER_ID,
+            targets,
+            force,
+            parse_session,
+            |_| true,
+            on_session,
+        ),
+        None => cache::scan_provider_uncached_progressive(targets, parse_session, on_session),
+    }
 }
 
-pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
-    let reader = BufReader::new(file);
-    let mut messages = Vec::new();
+pub(crate) fn scan_sessions_progressive_cancellable(
+    store: Option<&ScanCacheStore>,
+    force: bool,
+    on_session: &mut dyn FnMut(&SessionMeta),
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<SessionMeta>> {
+    let targets = scan_targets_cancellable(is_cancelled)?;
+    match store {
+        Some(store) => cache::scan_provider_cached_progressive_cancellable(
+            store,
+            PROVIDER_ID,
+            targets,
+            force,
+            parse_session,
+            |_| true,
+            on_session,
+            is_cancelled,
+        ),
+        None => cache::scan_provider_uncached_progressive_cancellable(
+            targets,
+            parse_session,
+            on_session,
+            is_cancelled,
+        ),
+    }
+}
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let value: Value = match serde_json::from_str(&line) {
+pub(crate) fn stream_sessions_cancellable(
+    store: Option<&ScanCacheStore>,
+    force: bool,
+    on_session: &mut dyn FnMut(SessionMeta) -> ControlFlow<()>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<cache::StreamScanStats, cache::StreamScanStop> {
+    let root = get_claude_config_dir().join("projects");
+    cache::stream_file_provider_cancellable(
+        store,
+        PROVIDER_ID,
+        force,
+        |path| {
+            if is_cancelled() {
+                return Err(cache::StreamScanStop::Cancelled);
+            }
+            let meta = parse_session_authoritative(path)?;
+            if is_cancelled() {
+                Err(cache::StreamScanStop::Cancelled)
+            } else {
+                Ok(meta)
+            }
+        },
+        |_| true,
+        cache::stat_target,
+        move |on_target, cancel| {
+            cache::visit_targets_recursive_cancellable(&root, "jsonl", on_target, cancel)
+        },
+        on_session,
+        is_cancelled,
+    )
+}
+
+fn scan_targets() -> Vec<FileScanTarget> {
+    scan_targets_cancellable(&|| false).expect("non-cancellable target scan cannot stop")
+}
+
+fn scan_targets_cancellable(
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<FileScanTarget>> {
+    let root = get_claude_config_dir().join("projects");
+    let mut targets = Vec::new();
+    if !cache::collect_targets_recursive_cancellable(&root, "jsonl", &mut targets, is_cancelled) {
+        return None;
+    }
+    Some(targets)
+}
+
+pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
+    load_messages_cancellable(path, &|| false)
+}
+
+pub(crate) fn load_messages_cancellable(
+    path: &Path,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<SessionMessageBatch, String> {
+    let mut batch = SessionMessageBatchBuilder::new();
+    let status = visit_bounded_lines_cancellable_with_status(path, is_cancelled, &mut |line| {
+        let value: Value = match serde_json::from_str(line) {
             Ok(parsed) => parsed,
-            Err(_) => continue,
+            Err(_) => return ControlFlow::Continue(()),
         };
 
         if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
-            continue;
+            return ControlFlow::Continue(());
         }
 
         let message = match value.get("message") {
             Some(message) => message,
-            None => continue,
+            None => return ControlFlow::Continue(()),
         };
 
         let mut role = message
@@ -90,42 +180,52 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 
         let content = message.get("content").map(extract_text).unwrap_or_default();
         if content.trim().is_empty() {
-            continue;
+            return ControlFlow::Continue(());
         }
 
         let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
 
-        messages.push(SessionMessage { role, content, ts });
+        batch.push(SessionMessage { role, content, ts })
+    })
+    .map_err(|error| format!("Failed to read session file: {error}"))?
+    .ok_or_else(|| "Session message preview was cancelled".to_string())?;
+    if status.oversized_record_skipped {
+        batch.mark_truncated();
     }
 
-    Ok(messages)
+    Ok(batch.finish())
 }
 
 /// Search a single Claude session file for `needle` (case-insensitive).
+#[allow(dead_code)]
 pub fn search_session(meta: &SessionMeta, needle: &str) -> Option<SessionSearchHit> {
+    search_session_cancellable(meta, needle, &|| false)
+}
+
+pub(crate) fn search_session_cancellable(
+    meta: &SessionMeta,
+    needle: &str,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<SessionSearchHit> {
+    if is_cancelled() {
+        return None;
+    }
     let source_path = meta.source_path.as_deref()?;
     let path = Path::new(source_path);
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let lower_needle = needle.to_lowercase();
     let mut snippets: Vec<SearchSnippet> = Vec::new();
     const MAX_SNIPPETS: usize = 5;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let value: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+    let visited = visit_bounded_lines_cancellable(path, is_cancelled, &mut |line| {
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => return ControlFlow::Continue(()),
         };
         if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
-            continue;
+            return ControlFlow::Continue(());
         }
         let message = match value.get("message") {
-            Some(m) => m,
-            None => continue,
+            Some(message) => message,
+            None => return ControlFlow::Continue(()),
         };
         let mut role = message
             .get("role")
@@ -144,15 +244,25 @@ pub fn search_session(meta: &SessionMeta, needle: &str) -> Option<SessionSearchH
             }
         }
         let content = message.get("content").map(extract_text).unwrap_or_default();
-        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) {
-            continue;
+        if content.trim().is_empty() {
+            return ControlFlow::Continue(());
         }
-        if let Some(snippet) = build_snippet(&content, needle) {
-            snippets.push(SearchSnippet { role, snippet });
-            if snippets.len() >= MAX_SNIPPETS {
-                break;
+        match build_snippet_cancellable(&content, needle, is_cancelled) {
+            Ok(Some(snippet)) => {
+                snippets.push(SearchSnippet { role, snippet });
+                if snippets.len() >= MAX_SNIPPETS {
+                    return ControlFlow::Break(());
+                }
             }
+            Ok(None) => {}
+            Err(_) => return ControlFlow::Break(()),
         }
+        ControlFlow::Continue(())
+    })
+    .ok()??;
+    let _ = visited;
+    if is_cancelled() {
+        return None;
     }
     if snippets.is_empty() {
         return None;
@@ -201,19 +311,32 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
 }
 
 fn parse_session(path: &Path) -> Option<SessionMeta> {
+    parse_session_authoritative(path).ok().flatten()
+}
+
+fn parse_session_authoritative(path: &Path) -> Result<Option<SessionMeta>, cache::StreamScanStop> {
     if is_agent_session(path) {
-        return None;
+        return Ok(None);
     }
 
-    let (head, tail) = read_head_tail_lines(path, 10, 30).ok()?;
+    let (head, tail) = read_head_tail_lines_bounded(path, 10, 30).map_err(|error| {
+        log::warn!(
+            "authoritative Claude metadata read failed at {}: {error}",
+            path.display()
+        );
+        cache::StreamScanStop::Incomplete
+    })?;
+    Ok(parse_session_lines(path, &head, &tail))
+}
 
+fn parse_session_lines(path: &Path, head: &[String], tail: &[String]) -> Option<SessionMeta> {
     let mut session_id: Option<String> = None;
     let mut project_dir: Option<String> = None;
     let mut created_at: Option<i64> = None;
     let mut first_user_message: Option<String> = None;
 
     // Extract metadata and first user message from head lines
-    for line in &head {
+    for line in head {
         let value: Value = match serde_json::from_str(line) {
             Ok(parsed) => parsed,
             Err(_) => continue,
@@ -315,9 +438,15 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
                 .as_deref()
                 .and_then(path_basename)
                 .map(|v| v.to_string())
+        })
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .map(|value| truncate_summary(value, TITLE_MAX_CHARS))
         });
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
+    let fallback_time = file_modified_ms(path);
 
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
@@ -325,8 +454,8 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         title,
         summary,
         project_dir,
-        created_at,
-        last_active_at,
+        created_at: created_at.or(fallback_time),
+        last_active_at: last_active_at.or(fallback_time).or(created_at),
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("claude --resume {session_id}")),
     })

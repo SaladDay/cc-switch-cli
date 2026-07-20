@@ -1,12 +1,14 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
 use axum::http::{HeaderMap, StatusCode};
+use futures::StreamExt;
 use serde_json::{json, Value};
 
 use super::{
     claude_provider, claude_request_body, closed_base_url, spawn_delayed_body_upstream,
     spawn_delayed_scripted_streaming_upstream, spawn_delayed_scripted_upstream,
-    spawn_mock_upstream, spawn_scripted_streaming_upstream, test_router, ScriptedStreamingBody,
+    spawn_failing_body_upstream, spawn_mock_upstream, spawn_scripted_streaming_upstream,
+    test_router, ScriptedStreamingBody,
 };
 use crate::{
     app_config::AppType,
@@ -94,7 +96,7 @@ async fn last_provider_429_returns_upstream_error() {
             &HeaderMap::new(),
             vec![provider_one, provider_two],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
@@ -155,7 +157,7 @@ async fn last_streaming_provider_429_returns_upstream_error() {
             &HeaderMap::new(),
             vec![provider_one, provider_two],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
@@ -213,7 +215,7 @@ async fn buffered_timeout_includes_body_read_budget_after_headers() {
 }
 
 #[tokio::test]
-async fn buffered_body_timeout_after_response_does_not_failover() {
+async fn buffered_body_timeout_after_headers_fails_over() {
     let (slow_url, slow_hits, slow_server) = spawn_delayed_body_upstream().await;
     let (fallback_url, fallback_hits, fallback_server) =
         spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
@@ -227,7 +229,7 @@ async fn buffered_body_timeout_after_response_does_not_failover() {
     db.save_provider("claude", &fallback_provider)
         .expect("save fallback provider for health tracking");
 
-    let error = forwarder
+    let result = forwarder
         .forward_buffered_response(
             &AppType::Claude,
             "/v1/messages",
@@ -235,25 +237,138 @@ async fn buffered_body_timeout_after_response_does_not_failover() {
             &HeaderMap::new(),
             vec![slow_provider, fallback_provider],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_millis(50)),
                 bypass_circuit_breaker: false,
             },
             RectifierConfig::default(),
         )
         .await
-        .expect_err("body timeout after response should stop provider failover");
+        .expect("body timeout before commit should fail over");
 
-    assert!(matches!(error, ProxyError::Timeout(message) if message.contains("request timed out")));
+    assert_eq!(result.provider.id, "p2");
+    assert_eq!(result.response.status, StatusCode::OK);
     assert_eq!(slow_hits.count.load(Ordering::SeqCst), 1);
-    assert_eq!(fallback_hits.count.load(Ordering::SeqCst), 0);
+    assert_eq!(fallback_hits.count.load(Ordering::SeqCst), 1);
 
     slow_server.abort();
     fallback_server.abort();
 }
 
 #[tokio::test]
-async fn buffered_transport_retry_shares_request_timeout_budget() {
+async fn streaming_first_chunk_timeout_after_headers_fails_over_and_replays_fallback() {
+    let (slow_url, slow_hits, slow_server) = spawn_delayed_body_upstream().await;
+    let fallback_sse =
+        "data: {\"id\":\"msg_fallback\",\"type\":\"message_start\"}\n\ndata: [DONE]\n\n";
+    let (fallback_url, fallback_hits, _bodies, fallback_server) =
+        spawn_scripted_streaming_upstream(vec![(
+            StatusCode::OK,
+            ScriptedStreamingBody::Sse(fallback_sse),
+        )])
+        .await;
+    let slow_provider = claude_provider("p1", &slow_url, None);
+    let fallback_provider = claude_provider("p2", &fallback_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("claude", &slow_provider)
+        .expect("save slow provider");
+    db.save_provider("claude", &fallback_provider)
+        .expect("save fallback provider");
+
+    let result = forwarder
+        .forward_response(
+            &AppType::Claude,
+            "/v1/messages",
+            json!({
+                "model": "claude-3-7-sonnet-20250219",
+                "stream": true,
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            &HeaderMap::new(),
+            vec![slow_provider, fallback_provider],
+            ForwardOptions {
+                max_retries: 1,
+                request_timeout: Some(Duration::from_millis(50)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("first chunk timeout should fail over");
+
+    assert_eq!(result.provider.id, "p2");
+    let StreamingResponse::Live(response) = result.response else {
+        panic!("fallback response should remain streaming");
+    };
+    let chunks = response
+        .bytes_stream()
+        .map(|chunk| chunk.expect("read replayed fallback chunk"))
+        .collect::<Vec<_>>()
+        .await;
+    let replayed = chunks.concat();
+    assert_eq!(replayed.as_slice(), fallback_sse.as_bytes());
+    assert_eq!(slow_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(fallback_hits.count.load(Ordering::SeqCst), 1);
+
+    slow_server.abort();
+    fallback_server.abort();
+}
+
+#[tokio::test]
+async fn streaming_first_chunk_error_fails_over() {
+    let (failing_url, failing_hits, failing_server) = spawn_failing_body_upstream().await;
+    let (fallback_url, fallback_hits, _bodies, fallback_server) =
+        spawn_scripted_streaming_upstream(vec![(
+            StatusCode::OK,
+            ScriptedStreamingBody::Sse(
+                "data: {\"id\":\"msg_ok\",\"type\":\"message_start\"}\n\ndata: [DONE]\n\n",
+            ),
+        )])
+        .await;
+    let failing_provider = claude_provider("p1", &failing_url, None);
+    let fallback_provider = claude_provider("p2", &fallback_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("claude", &failing_provider)
+        .expect("save failing provider");
+    db.save_provider("claude", &fallback_provider)
+        .expect("save fallback provider");
+
+    let result = forwarder
+        .forward_response(
+            &AppType::Claude,
+            "/v1/messages",
+            json!({
+                "model": "claude-3-7-sonnet-20250219",
+                "stream": true,
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            &HeaderMap::new(),
+            vec![failing_provider, fallback_provider],
+            ForwardOptions {
+                max_retries: 1,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("first chunk error should fail over");
+
+    assert_eq!(result.provider.id, "p2");
+    assert_eq!(failing_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(fallback_hits.count.load(Ordering::SeqCst), 1);
+
+    failing_server.abort();
+    fallback_server.abort();
+}
+
+#[tokio::test]
+async fn max_retries_does_not_retry_the_same_provider() {
     let (base_url, hits, _bodies, server) = spawn_delayed_scripted_upstream(vec![
         (
             Duration::from_millis(100),
@@ -289,7 +404,7 @@ async fn buffered_transport_retry_shares_request_timeout_budget() {
             RectifierConfig::default(),
         )
         .await
-        .expect_err("transport retry should share a single buffered request timeout budget");
+        .expect_err("max_retries should only permit another provider attempt");
 
     assert!(matches!(error, ProxyError::Timeout(message) if message.contains("request timed out")));
     assert_eq!(hits.count.load(Ordering::SeqCst), 1);

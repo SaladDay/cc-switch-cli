@@ -339,8 +339,6 @@ fn import_servers() -> Result<(), AppError> {
 }
 
 fn add_server(_app_type: AppType) -> Result<(), AppError> {
-    let state = get_state()?;
-
     let mut apps = McpApps::default();
     apps.set_enabled_for(&_app_type, true);
 
@@ -370,6 +368,16 @@ fn add_server(_app_type: AppType) -> Result<(), AppError> {
         return Err(AppError::InvalidInput(
             "missing required fields: id, name".to_string(),
         ));
+    }
+
+    // The external editor may stay open for a while, so load the latest state
+    // only when the user is ready to submit.
+    let state = get_state()?;
+    if McpService::get_all_servers(&state)?.contains_key(server.id.trim()) {
+        return Err(AppError::InvalidInput(format!(
+            "MCP server ID already exists: {}",
+            server.id.trim()
+        )));
     }
 
     McpService::upsert_server(&state, server)?;

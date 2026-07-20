@@ -109,6 +109,11 @@ impl ResponseHandler {
     ) -> Response {
         match response_result {
             Ok(response) => {
+                if let Some(success_sync) = success_sync.as_ref() {
+                    state
+                        .record_active_target(&success_sync.app_type, &success_sync.provider)
+                        .await;
+                }
                 track_streaming_response(state.clone(), response, status, success_sync, request_log)
             }
             Err(error) => {

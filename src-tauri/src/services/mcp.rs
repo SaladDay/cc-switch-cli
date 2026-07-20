@@ -251,12 +251,29 @@ impl McpService {
         let servers = Self::get_all_servers(state)?;
 
         for app in Self::supported_mcp_apps() {
-            for server in servers.values() {
-                if server.apps.is_enabled_for(&app) {
-                    Self::sync_server_to_app(state, server, &app)?;
-                } else {
-                    Self::remove_server_from_app(state, &server.id, &app)?;
-                }
+            Self::project_servers_to_app(state, &servers, &app)?;
+        }
+
+        Ok(())
+    }
+
+    /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做
+    /// 定向重投影，避免把无关应用的失败面牵连进目标应用的关键路径。
+    pub fn sync_enabled_for_app(state: &AppState, app: &AppType) -> Result<(), AppError> {
+        let servers = Self::get_all_servers(state)?;
+        Self::project_servers_to_app(state, &servers, app)
+    }
+
+    fn project_servers_to_app(
+        state: &AppState,
+        servers: &HashMap<String, McpServer>,
+        app: &AppType,
+    ) -> Result<(), AppError> {
+        for server in servers.values() {
+            if server.apps.is_enabled_for(app) {
+                Self::sync_server_to_app(state, server, app)?;
+            } else {
+                Self::remove_server_from_app(state, &server.id, app)?;
             }
         }
 

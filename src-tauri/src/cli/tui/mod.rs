@@ -3,6 +3,7 @@ mod data;
 mod form;
 pub(crate) mod help;
 pub(crate) mod icons;
+mod input;
 mod keymap;
 mod route;
 mod runtime_actions;
@@ -19,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
@@ -54,12 +55,70 @@ use runtime_systems::{
     start_usage_pricing_system, start_webdav_system, AppDataLoadKind, AppDataMsg, AppDataReq,
     LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq,
     SessionUsageSyncMsg, SessionUsageSyncReq, SkillsReq, StreamCheckReq, UpdateReq,
-    UsagePricingMsg, UsagePricingReq, WebDavReq,
+    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, WebDavReq,
 };
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
 pub(super) const TUI_TICK_RATE: Duration = Duration::from_millis(200);
+/// Maximum steady-state redraw rate. Input can still be reduced more often,
+/// but terminal writes are coalesced to one frame per interval.
+pub(super) const TUI_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const QUOTA_REFRESH_INTERVAL_TICKS: u64 = 5 * 60 * 1000 / 200;
+
+/// Returns how long a dirty frame must wait before it may be drawn.
+///
+/// Keeping the timing decision in durations makes the cap deterministic in
+/// tests and avoids special-casing input, worker, and tick wake-ups.
+fn frame_draw_wait(dirty: bool, elapsed_since_draw: Option<Duration>) -> Option<Duration> {
+    if !dirty {
+        return None;
+    }
+
+    Some(match elapsed_since_draw {
+        None => Duration::ZERO,
+        Some(elapsed) => TUI_FRAME_INTERVAL.saturating_sub(elapsed),
+    })
+}
+
+fn next_loop_timeout(tick_wait: Duration, frame_wait: Option<Duration>) -> Duration {
+    frame_wait.map_or(tick_wait, |wait| tick_wait.min(wait))
+}
+
+#[derive(Debug)]
+struct FrameScheduler {
+    dirty: bool,
+    last_draw: Option<Instant>,
+}
+
+impl FrameScheduler {
+    fn new() -> Self {
+        Self {
+            dirty: true,
+            last_draw: None,
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn wait(&self, now: Instant) -> Option<Duration> {
+        frame_draw_wait(
+            self.dirty,
+            self.last_draw
+                .map(|last_draw| now.saturating_duration_since(last_draw)),
+        )
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        self.wait(now) == Some(Duration::ZERO)
+    }
+
+    fn record_draw(&mut self, completed_at: Instant) {
+        self.dirty = false;
+        self.last_draw = Some(completed_at);
+    }
+}
 
 fn apply_visible_apps_startup_policy(
 ) -> Result<crate::services::visible_apps::VisibleAppsStartupOutcome, AppError> {
@@ -169,7 +228,6 @@ impl ProxyOpenFlash {
         }
     }
 
-    #[cfg(test)]
     fn active(&self) -> bool {
         self.effect.is_some()
     }
@@ -297,6 +355,15 @@ struct UiDataByAppCache {
     incomplete_by_app: HashSet<AppType>,
     usage_pricing_by_key: HashMap<UsagePricingLoadKey, data::UsagePricingData>,
     pending_usage_pricing_by_key: HashMap<UsagePricingLoadKey, PendingDataLoad>,
+    usage_pricing_phase_by_key: HashMap<UsagePricingLoadKey, UsagePricingLoadPhase>,
+    /// Usage rows are imported by a separate background connection. A dirty
+    /// key means that an aggregate which started before the latest import
+    /// progress must be followed by one fresh aggregate after it completes.
+    ///
+    /// Keeping this separate from `data_generation` is deliberate: log page
+    /// and detail requests use that generation as their snapshot token and
+    /// must remain valid while the importer is making progress.
+    usage_pricing_dirty_by_key: HashSet<UsagePricingLoadKey>,
     next_app_data_request_id: u64,
     next_usage_pricing_request_id: u64,
     data_generation: u64,
@@ -304,6 +371,25 @@ struct UiDataByAppCache {
 }
 
 type UsagePricingLoadKey = (AppType, data::UsageRangePreset);
+
+fn usage_pricing_logical_range(range: data::UsageRangePreset) -> data::UsageRangePreset {
+    match range {
+        data::UsageRangePreset::Custom(_) => range,
+        // Every fixed request computes the same Today/7d/30d snapshot and the
+        // same unbounded log head. Use one key so rapid range switching cannot
+        // enqueue three equivalent full-table scans.
+        data::UsageRangePreset::Today
+        | data::UsageRangePreset::SevenDays
+        | data::UsageRangePreset::ThirtyDays => data::UsageRangePreset::SevenDays,
+    }
+}
+
+fn usage_pricing_load_key(
+    app_type: &AppType,
+    range: data::UsageRangePreset,
+) -> UsagePricingLoadKey {
+    (app_type.clone(), usage_pricing_logical_range(range))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingAppDataLoad {
@@ -318,6 +404,25 @@ struct PendingDataLoad {
     request_id: u64,
     generation: u64,
     app_state_epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UsagePricingLoadPhase {
+    token: PendingDataLoad,
+    aggregate_finished: bool,
+    aggregate_succeeded: bool,
+    head_finished: bool,
+}
+
+impl UsagePricingLoadPhase {
+    fn new(token: PendingDataLoad) -> Self {
+        Self {
+            token,
+            aggregate_finished: false,
+            aggregate_succeeded: false,
+            head_finished: false,
+        }
+    }
 }
 
 fn usage_pricing_range_matches_active(
@@ -404,6 +509,7 @@ impl UiDataByAppCache {
         range: data::UsageRangePreset,
         usage_pricing: data::UsagePricingData,
     ) {
+        let range = usage_pricing_logical_range(range);
         if let Some(cached) = self.by_app.get_mut(app_type) {
             cached.usage.merge_range(range, usage_pricing.usage.clone());
             if let Some(pricing) = &usage_pricing.pricing {
@@ -411,7 +517,7 @@ impl UiDataByAppCache {
             }
         }
         self.usage_pricing_by_key
-            .insert((app_type.clone(), range), usage_pricing);
+            .insert(usage_pricing_load_key(app_type, range), usage_pricing);
     }
 
     fn merge_usage_pricing(
@@ -442,6 +548,8 @@ impl UiDataByAppCache {
         self.incomplete_by_app.clear();
         self.usage_pricing_by_key.clear();
         self.pending_usage_pricing_by_key.clear();
+        self.usage_pricing_phase_by_key.clear();
+        self.usage_pricing_dirty_by_key.clear();
     }
 
     fn clear_after_app_state_recreated(&mut self) {
@@ -449,16 +557,12 @@ impl UiDataByAppCache {
         self.clear();
     }
 
-    fn clear_usage_pricing_after_external_usage_sync(&mut self) {
-        self.data_generation = self.data_generation.wrapping_add(1);
-        self.app_state_epoch = self.app_state_epoch.wrapping_add(1);
-        self.pending_by_app.clear();
+    /// Invalidate completed aggregates after the external session importer
+    /// commits, without invalidating unrelated app loads or stable log-page
+    /// request tokens. Existing values remain visible in `by_app` until their
+    /// stale-while-revalidate refresh completes.
+    fn invalidate_usage_pricing_cache_after_external_usage_sync(&mut self) {
         self.usage_pricing_by_key.clear();
-        self.pending_usage_pricing_by_key.clear();
-        for cached in self.by_app.values_mut() {
-            cached.usage = data::UsageSnapshot::default();
-            cached.pricing = data::ModelPricingSnapshot::default();
-        }
     }
 
     fn remove_app_snapshot(&mut self, app_type: &AppType) {
@@ -472,6 +576,10 @@ impl UiDataByAppCache {
             .retain(|(cached_app_type, _), _| cached_app_type != app_type);
         self.pending_usage_pricing_by_key
             .retain(|(cached_app_type, _), _| cached_app_type != app_type);
+        self.usage_pricing_phase_by_key
+            .retain(|(cached_app_type, _), _| cached_app_type != app_type);
+        self.usage_pricing_dirty_by_key
+            .retain(|(cached_app_type, _)| cached_app_type != app_type);
     }
 
     fn queue_current_app_data_refresh(
@@ -675,10 +783,8 @@ impl UiDataByAppCache {
         app_type: &AppType,
         range: data::UsageRangePreset,
     ) {
-        if self
-            .pending_usage_pricing_by_key
-            .contains_key(&(app_type.clone(), range))
-        {
+        let key = usage_pricing_load_key(app_type, range);
+        if self.pending_usage_pricing_by_key.contains_key(&key) {
             return;
         }
         // A cached fixed range already covers any other fixed range, so don't
@@ -695,16 +801,62 @@ impl UiDataByAppCache {
         self.queue_usage_pricing_load(app, usage_pricing_req_tx, app_type, range);
     }
 
+    /// Record that a session-import commit happened after the currently
+    /// visible aggregate may have started. This does not cancel an in-flight
+    /// query. `flush_dirty_usage_pricing` starts one follow-up once all
+    /// aggregate requests already known to the UI have completed.
+    fn mark_usage_pricing_dirty(&mut self, app_type: &AppType, range: data::UsageRangePreset) {
+        self.usage_pricing_dirty_by_key
+            .insert(usage_pricing_load_key(app_type, range));
+    }
+
+    /// Start at most one dirty aggregate. The active range wins when both its
+    /// custom window and the fixed default cache need refreshing.
+    fn flush_dirty_usage_pricing(
+        &mut self,
+        app: &mut App,
+        usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+    ) -> bool {
+        if !self.pending_usage_pricing_by_key.is_empty() {
+            return false;
+        }
+
+        let active_key = usage_pricing_load_key(&app.app_type, app.usage.range);
+        let key = if self.usage_pricing_dirty_by_key.contains(&active_key) {
+            active_key
+        } else {
+            let Some(key) = self.usage_pricing_dirty_by_key.iter().next().cloned() else {
+                return false;
+            };
+            key
+        };
+        self.usage_pricing_dirty_by_key.remove(&key);
+        let (app_type, range) = key;
+        self.queue_usage_pricing_load(app, usage_pricing_req_tx, &app_type, range)
+    }
+
     fn queue_usage_pricing_load(
         &mut self,
         app: &mut App,
         usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
         app_type: &AppType,
         range: data::UsageRangePreset,
-    ) {
+    ) -> bool {
+        let range = usage_pricing_logical_range(range);
+        let key = usage_pricing_load_key(app_type, range);
+        if self.pending_usage_pricing_by_key.contains_key(&key) {
+            app.usage.start_loading(app_type.clone(), range);
+            return true;
+        }
+
         if matches!(range, data::UsageRangePreset::Custom(_)) {
             app.usage.clear_custom_loading_for_app(app_type);
             self.pending_usage_pricing_by_key
+                .retain(|(cached_app_type, cached_range), _| {
+                    cached_app_type != app_type
+                        || !matches!(cached_range, data::UsageRangePreset::Custom(_))
+                });
+            self.usage_pricing_phase_by_key
                 .retain(|(cached_app_type, cached_range), _| {
                     cached_app_type != app_type
                         || !matches!(cached_range, data::UsageRangePreset::Custom(_))
@@ -714,12 +866,11 @@ impl UiDataByAppCache {
                     cached_app_type != app_type
                         || !matches!(cached_range, data::UsageRangePreset::Custom(_))
                 });
-        }
-
-        let key = (app_type.clone(), range);
-        if self.pending_usage_pricing_by_key.contains_key(&key) {
-            app.usage.start_loading(app_type.clone(), range);
-            return;
+            self.usage_pricing_dirty_by_key
+                .retain(|(cached_app_type, cached_range)| {
+                    cached_app_type != app_type
+                        || !matches!(cached_range, data::UsageRangePreset::Custom(_))
+                });
         }
 
         let Some(tx) = usage_pricing_req_tx else {
@@ -730,7 +881,7 @@ impl UiDataByAppCache {
                     ToastKind::Warning,
                 );
             }
-            return;
+            return false;
         };
 
         self.next_usage_pricing_request_id = self.next_usage_pricing_request_id.wrapping_add(1);
@@ -742,6 +893,8 @@ impl UiDataByAppCache {
         };
         self.pending_usage_pricing_by_key
             .insert(key.clone(), pending);
+        self.usage_pricing_phase_by_key
+            .insert(key.clone(), UsagePricingLoadPhase::new(pending));
 
         if let Err(err) = tx.send(UsagePricingReq::Load {
             request_id,
@@ -751,12 +904,21 @@ impl UiDataByAppCache {
             range,
         }) {
             self.pending_usage_pricing_by_key.remove(&key);
+            if self
+                .usage_pricing_phase_by_key
+                .get(&key)
+                .is_some_and(|phase| phase.token == pending)
+            {
+                self.usage_pricing_phase_by_key.remove(&key);
+            }
             app.push_toast(
                 format!("Usage/pricing refresh request failed: {err}"),
                 ToastKind::Warning,
             );
+            false
         } else {
             app.usage.start_loading(app_type.clone(), range);
+            true
         }
     }
 
@@ -767,19 +929,78 @@ impl UiDataByAppCache {
         generation: u64,
         app_state_epoch: u64,
         range: data::UsageRangePreset,
+        aggregate_succeeded: bool,
     ) -> bool {
-        let key = (app_type.clone(), range);
-        if self.pending_usage_pricing_by_key.get(&key).copied()
-            != Some(PendingDataLoad {
-                request_id,
-                generation,
-                app_state_epoch,
-            })
-        {
+        let key = usage_pricing_load_key(app_type, range);
+        let completed = PendingDataLoad {
+            request_id,
+            generation,
+            app_state_epoch,
+        };
+        if self.pending_usage_pricing_by_key.get(&key).copied() != Some(completed) {
             return false;
         }
         self.pending_usage_pricing_by_key.remove(&key);
+        if let Some(phase) = self.usage_pricing_phase_by_key.get_mut(&key) {
+            if phase.token == completed {
+                phase.aggregate_finished = true;
+                phase.aggregate_succeeded = aggregate_succeeded;
+            }
+        }
         true
+    }
+
+    /// Finish the head phase and report whether its matching aggregate already
+    /// supplied an exact count. The phase token remains as the latest-token
+    /// guard after either half completes, so both delivery orders are valid.
+    fn finish_usage_log_head(
+        &mut self,
+        app_type: &AppType,
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        range: data::UsageRangePreset,
+    ) -> Option<bool> {
+        let key = usage_pricing_load_key(app_type, range);
+        let completed = PendingDataLoad {
+            request_id,
+            generation,
+            app_state_epoch,
+        };
+        let phase = self.usage_pricing_phase_by_key.get_mut(&key)?;
+        if phase.token != completed {
+            return None;
+        }
+        phase.head_finished = true;
+        Some(phase.aggregate_finished && phase.aggregate_succeeded)
+    }
+
+    fn update_usage_log_head(
+        &mut self,
+        app_type: &AppType,
+        range: data::UsageRangePreset,
+        page: data::UsageLogPage,
+        preserve_exact_total: bool,
+    ) {
+        if let Some(cached) = self.by_app.get_mut(app_type) {
+            if preserve_exact_total {
+                cached
+                    .usage
+                    .merge_log_head_preserving_exact_total(range, page.clone());
+            } else {
+                cached.usage.merge_log_head(range, page.clone());
+            }
+        }
+        let key = usage_pricing_load_key(app_type, range);
+        if let Some(cached) = self.usage_pricing_by_key.get_mut(&key) {
+            if preserve_exact_total {
+                cached
+                    .usage
+                    .merge_log_head_preserving_exact_total(range, page);
+            } else {
+                cached.usage.merge_log_head(range, page);
+            }
+        }
     }
 
     fn handle_data_reloaded(
@@ -840,8 +1061,44 @@ fn handle_usage_pricing_msg(
     data: &mut data::UiData,
     data_cache: &mut UiDataByAppCache,
     msg: UsagePricingMsg,
-) {
+) -> bool {
     match msg {
+        UsagePricingMsg::LogHeadLoaded {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+            range,
+            result,
+        } => {
+            let Some(preserve_exact_total) = data_cache.finish_usage_log_head(
+                &app_type,
+                request_id,
+                generation,
+                app_state_epoch,
+                range,
+            ) else {
+                return false;
+            };
+            let Ok(page) = result else {
+                // The full load reports the actionable error. A failed fast
+                // head must not turn a later successful aggregate into a toast.
+                return false;
+            };
+            data_cache.update_usage_log_head(&app_type, range, page.clone(), preserve_exact_total);
+            if app.app_type == app_type
+                && usage_pricing_range_matches_active(range, app.usage.range)
+            {
+                if preserve_exact_total {
+                    data.usage
+                        .merge_log_head_preserving_exact_total(range, page);
+                } else {
+                    data.usage.merge_log_head(range, page);
+                }
+                app.clamp_selections(data);
+            }
+            false
+        }
         UsagePricingMsg::Loaded {
             request_id,
             generation,
@@ -850,30 +1107,40 @@ fn handle_usage_pricing_msg(
             range,
             result,
         } => {
+            let aggregate_succeeded = result.is_ok();
             if !data_cache.finish_usage_pricing_load(
                 &app_type,
                 request_id,
                 generation,
                 app_state_epoch,
                 range,
+                aggregate_succeeded,
             ) {
-                return;
+                return false;
             }
             app.usage.finish_loading(&app_type, range);
 
-            match result {
+            match *result {
                 Ok(usage_pricing) => {
                     data_cache.update_usage_pricing(&app_type, range, usage_pricing.clone());
                     if app.app_type == app_type {
-                        data.usage.merge_range(range, usage_pricing.usage);
+                        // Aggregate/head refreshes are background updates. The
+                        // active pager owns a stable keyset snapshot, so do not
+                        // invalidate it here. A custom result for an obsolete
+                        // range is cache-only and must not replace the range the
+                        // user is currently browsing.
+                        if usage_pricing_range_matches_active(range, app.usage.range) {
+                            data.usage.merge_range(range, usage_pricing.usage);
+                            app.clamp_selections(data);
+                        }
                         if let Some(pricing) = usage_pricing.pricing {
                             data.pricing = pricing;
                         }
-                        app.clamp_selections(data);
                         data_cache.remember_current(&app.app_type, data);
                     }
                 }
-                Err(err) => {
+                Err(UsagePricingLoadError::Cancelled) => {}
+                Err(UsagePricingLoadError::Failed(err)) => {
                     if app.app_type == app_type {
                         app.push_toast(
                             format!("Usage/pricing refresh failed: {err}"),
@@ -882,6 +1149,111 @@ fn handle_usage_pricing_msg(
                     }
                 }
             }
+            true
+        }
+        UsagePricingMsg::LogPageLoaded {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+            range,
+            page,
+            direction,
+            result,
+        } => {
+            if generation != data_cache.data_generation
+                || app_state_epoch != data_cache.app_state_epoch
+            {
+                if app.app_type == app_type && app.usage.range == range {
+                    app.usage
+                        .log_pager
+                        .cancel_request(page, request_id, direction);
+                }
+                return false;
+            }
+            if app.app_type != app_type || app.usage.range != range {
+                return false;
+            }
+            let refresh_targets_current_page = app
+                .usage
+                .log_pager
+                .request_is_refresh(page, request_id, direction)
+                && app.usage.log_pager.current_page() == page;
+            match result {
+                Ok(loaded) => {
+                    let accepted = app
+                        .usage
+                        .log_pager
+                        .finish_request(page, request_id, direction, loaded);
+                    if accepted && refresh_targets_current_page {
+                        app.usage.sync_current_log_selection(
+                            data.usage.recent_logs_for(app.usage.range),
+                        );
+                    }
+                }
+                Err(UsageLogLoadError::Cancelled) => {
+                    app.usage
+                        .log_pager
+                        .cancel_request(page, request_id, direction);
+                }
+                Err(UsageLogLoadError::Failed(err)) => {
+                    let refresh_failed =
+                        app.usage
+                            .log_pager
+                            .fail_request(page, request_id, direction, err.clone())
+                            && refresh_targets_current_page;
+                    if refresh_failed {
+                        app.push_toast(
+                            format!("Usage log page refresh failed: {err}"),
+                            ToastKind::Warning,
+                        );
+                    }
+                }
+            }
+            false
+        }
+        UsagePricingMsg::LogDetailLoaded {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+            range,
+            log_rowid,
+            result,
+        } => {
+            if generation != data_cache.data_generation
+                || app_state_epoch != data_cache.app_state_epoch
+            {
+                if app.app_type == app_type && app.usage.range == range {
+                    app.usage.finish_log_detail_refresh(request_id);
+                }
+                return false;
+            }
+            if app.app_type != app_type || app.usage.range != range {
+                return false;
+            }
+            if !app.usage.finish_log_detail_refresh(request_id) {
+                return false;
+            }
+            match result {
+                Ok(Some(row)) if row.cursor_rowid == log_rowid => {
+                    app.usage.remember_log_detail(app_type, range, row);
+                }
+                Ok(Some(_)) => app.push_toast(
+                    "Usage log refresh returned a mismatched request.".to_string(),
+                    ToastKind::Warning,
+                ),
+                Ok(None) => app.push_toast(
+                    "The usage log no longer exists; keeping the previous details.".to_string(),
+                    ToastKind::Warning,
+                ),
+                Err(UsageLogLoadError::Cancelled) => {}
+                Err(UsageLogLoadError::Failed(err)) => app.push_toast(
+                    format!("Usage log refresh failed: {err}"),
+                    ToastKind::Warning,
+                ),
+            }
+            false
         }
     }
 }
@@ -889,18 +1261,21 @@ fn handle_usage_pricing_msg(
 fn queue_background_session_usage_sync(
     sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
     sync_tracker: &mut RequestTracker,
-) {
+) -> bool {
     let Some(tx) = sync_req_tx else {
-        return;
+        return false;
     };
     if sync_tracker.active.is_some() {
-        return;
+        return true;
     }
 
     let request_id = sync_tracker.start();
     if let Err(err) = tx.send(SessionUsageSyncReq::Run { request_id }) {
         sync_tracker.cancel();
         log::debug!("queue background session usage sync failed: {err}");
+        false
+    } else {
+        true
     }
 }
 
@@ -923,7 +1298,7 @@ fn maybe_queue_usage_session_sync(
         return;
     }
     *started = true;
-    queue_background_session_usage_sync(sync_req_tx, sync_tracker);
+    let _ = queue_background_session_usage_sync(sync_req_tx, sync_tracker);
 }
 
 /// Lazily load the active app's usage/pricing when a Usage or Pricing view is
@@ -953,6 +1328,204 @@ fn maybe_queue_usage_pricing_on_view(
     data_cache.ensure_usage_pricing_loaded(app, usage_pricing_req_tx, &app_type, range);
 }
 
+fn maybe_queue_usage_log_prefetch(
+    app: &mut App,
+    data: &data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+) {
+    if !matches!(app.route, route::Route::UsageLogs)
+        || !matches!(app.usage.pane, app::UsagePane::Recent)
+    {
+        return;
+    }
+
+    // A manual current-page refresh owns the single log-query worker until it
+    // completes. Speculative prefetching here would supersede that request.
+    let current_page = app.usage.log_pager.current_page();
+    if app.usage.log_page_refresh_after_aggregate_requested()
+        || app.usage.log_pager.has_refresh_pending()
+        || app.usage.log_pager.page_is_pending(current_page)
+    {
+        return;
+    }
+
+    let first_page = data.usage.recent_logs_for(app.usage.range);
+    app.usage.sync_log_pager(
+        &app.app_type,
+        app.usage.range,
+        first_page,
+        data.usage.logs_total_for(app.usage.range),
+    );
+    let Some(page) = app.usage.log_pager.preferred_prefetch_page() else {
+        return;
+    };
+    let Some(load) = app.usage.log_pager.page_request(page) else {
+        return;
+    };
+
+    data_cache.next_usage_pricing_request_id =
+        data_cache.next_usage_pricing_request_id.wrapping_add(1);
+    let request_id = data_cache.next_usage_pricing_request_id;
+    if !app
+        .usage
+        .log_pager
+        .start_load_request(page, request_id, load)
+    {
+        return;
+    }
+
+    let Some(tx) = usage_pricing_req_tx else {
+        app.usage.log_pager.fail_request(
+            page,
+            request_id,
+            load.direction,
+            "usage log worker is not running".to_string(),
+        );
+        return;
+    };
+    if let Err(err) = tx.send(UsagePricingReq::LoadLogPage {
+        request_id,
+        generation: data_cache.data_generation,
+        app_state_epoch: data_cache.app_state_epoch,
+        app_type: app.app_type.clone(),
+        range: app.usage.range,
+        page,
+        cursor: load.cursor,
+        direction: load.direction,
+        limit: data::USAGE_LOG_PAGE_SIZE,
+    }) {
+        app.usage.log_pager.fail_request(
+            page,
+            request_id,
+            load.direction,
+            format!("failed to queue usage log page: {err}"),
+        );
+    }
+}
+
+/// Refresh a visible keyset page only after all aggregate work has settled.
+/// The aggregate owns the same log-query worker for its fast head query, so
+/// waiting here prevents the two refresh halves from repeatedly cancelling one
+/// another. The old page remains visible until its exact anchored query wins.
+fn maybe_queue_usage_log_page_refresh_after_aggregate(
+    app: &mut App,
+    data_cache: &mut UiDataByAppCache,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+) {
+    if !app.usage.log_page_refresh_after_aggregate_requested() {
+        return;
+    }
+    if !matches!(app.route, route::Route::UsageLogs)
+        || !matches!(app.usage.pane, app::UsagePane::Recent)
+    {
+        app.usage.finish_log_page_refresh_after_aggregate();
+        return;
+    }
+    if !data_cache.pending_usage_pricing_by_key.is_empty()
+        || !data_cache.usage_pricing_dirty_by_key.is_empty()
+    {
+        return;
+    }
+
+    let page = app.usage.log_pager.current_page();
+    if page == 0 {
+        app.usage.finish_log_page_refresh_after_aggregate();
+        return;
+    }
+    if app.usage.log_pager.page_is_pending(page) {
+        return;
+    }
+    let Some(load) = app.usage.log_pager.current_page_refresh_request() else {
+        app.usage.finish_log_page_refresh_after_aggregate();
+        return;
+    };
+
+    data_cache.next_usage_pricing_request_id =
+        data_cache.next_usage_pricing_request_id.wrapping_add(1);
+    let request_id = data_cache.next_usage_pricing_request_id;
+    if !app
+        .usage
+        .log_pager
+        .start_load_request(page, request_id, load)
+    {
+        return;
+    }
+
+    let Some(tx) = usage_pricing_req_tx else {
+        app.usage.log_pager.fail_request(
+            page,
+            request_id,
+            load.direction,
+            "usage log worker is not running".to_string(),
+        );
+        app.push_toast(
+            "Usage log worker is not running; keeping the previous page.".to_string(),
+            ToastKind::Warning,
+        );
+        app.usage.finish_log_page_refresh_after_aggregate();
+        return;
+    };
+    if let Err(err) = tx.send(UsagePricingReq::LoadLogPage {
+        request_id,
+        generation: data_cache.data_generation,
+        app_state_epoch: data_cache.app_state_epoch,
+        app_type: app.app_type.clone(),
+        range: app.usage.range,
+        page,
+        cursor: load.cursor,
+        direction: load.direction,
+        limit: data::USAGE_LOG_PAGE_SIZE,
+    }) {
+        app.usage.log_pager.fail_request(
+            page,
+            request_id,
+            load.direction,
+            format!("failed to queue usage log page refresh: {err}"),
+        );
+        app.push_toast(
+            format!("Failed to queue usage log page refresh: {err}"),
+            ToastKind::Warning,
+        );
+    }
+    app.usage.finish_log_page_refresh_after_aggregate();
+}
+
+fn queue_usage_log_detail_refresh(
+    app: &mut App,
+    data_cache: &mut UiDataByAppCache,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+    log_rowid: i64,
+) {
+    data_cache.next_usage_pricing_request_id =
+        data_cache.next_usage_pricing_request_id.wrapping_add(1);
+    let request_id = data_cache.next_usage_pricing_request_id;
+    app.usage.start_log_detail_refresh(request_id);
+
+    let Some(tx) = usage_pricing_req_tx else {
+        app.usage.finish_log_detail_refresh(request_id);
+        app.push_toast(
+            "Usage log worker is not running; keeping the previous details.".to_string(),
+            ToastKind::Warning,
+        );
+        return;
+    };
+    if let Err(err) = tx.send(UsagePricingReq::LoadLogDetail {
+        request_id,
+        generation: data_cache.data_generation,
+        app_state_epoch: data_cache.app_state_epoch,
+        app_type: app.app_type.clone(),
+        range: app.usage.range,
+        log_rowid,
+    }) {
+        app.usage.finish_log_detail_refresh(request_id);
+        app.push_toast(
+            format!("Failed to queue usage log refresh: {err}"),
+            ToastKind::Warning,
+        );
+    }
+}
+
 fn handle_session_usage_sync_msg(
     app: &mut App,
     data: &mut data::UiData,
@@ -965,34 +1538,40 @@ fn handle_session_usage_sync_msg(
     if !sync_tracker.finish_if_active(request_id) {
         return;
     }
+    app.usage.finish_manual_session_refresh();
 
     if let Err(err) = result {
         log::debug!("background session usage sync failed: {err}");
-        return;
     }
+
+    // A best-effort import may commit records before another source reports an
+    // error. Treat every completed cycle as a Usage invalidation boundary; the
+    // follow-up query is also useful for proxy rows written during the sync.
+    data_cache.invalidate_usage_pricing_cache_after_external_usage_sync();
 
     if usage_pricing_req_tx.is_none() {
         log::debug!("background session usage sync finished; usage/pricing worker unavailable");
         return;
     }
 
-    app.usage.clear_loading();
-    data_cache.clear_usage_pricing_after_external_usage_sync();
-
+    // Completed aggregates are now stale, but their request tokens remain
+    // valid. Keep the visible snapshot in place and arrange one final query
+    // after any aggregate already in flight has completed.
     let current_app_type = app.app_type.clone();
     // Always refresh the range the user is actually viewing (Today / 30d / custom),
     // otherwise the active range would show stale numbers after the sync finishes
     // while the user is sitting on the Usage view.
     let active_range = app.usage.range;
-    data_cache.queue_usage_pricing_load(app, usage_pricing_req_tx, &current_app_type, active_range);
-    // Keep the default 7-day window warm too (used as the cached default).
-    if !matches!(active_range, data::UsageRangePreset::SevenDays) {
-        data_cache.queue_usage_pricing_load(
-            app,
-            usage_pricing_req_tx,
-            &current_app_type,
-            data::UsageRangePreset::SevenDays,
-        );
+    data_cache.mark_usage_pricing_dirty(&current_app_type, active_range);
+    let aggregate_queued = data_cache.flush_dirty_usage_pricing(app, usage_pricing_req_tx);
+    let aggregate_will_complete =
+        aggregate_queued || !data_cache.pending_usage_pricing_by_key.is_empty();
+    if matches!(app.route, route::Route::UsageLogs)
+        && matches!(app.usage.pane, app::UsagePane::Recent)
+        && app.usage.log_pager.current_page() > 0
+        && aggregate_will_complete
+    {
+        app.usage.request_log_page_refresh_after_aggregate();
     }
     data_cache.remember_current(&app.app_type, data);
 }
@@ -1039,6 +1618,7 @@ fn handle_app_data_msg(
                         data_cache.remove_usage_pricing_for_app(&app_type);
                         data_cache.mark_app_data_loaded(&app_type);
                         if app.app_type == app_type {
+                            app.usage.invalidate_log_pages();
                             *data = loaded;
                             // A full reload of the CURRENT app must not wipe the
                             // pre-seeded snapshots of the other apps (their DB rows
@@ -1069,6 +1649,7 @@ fn handle_app_data_msg(
                     data_cache.mark_app_data_loaded(&app_type);
                     if app.app_type == app_type {
                         loaded.quota = data.quota.clone();
+                        app.usage.invalidate_log_pages();
                         *data = loaded;
                         app.reset_proxy_activity(
                             data.proxy.estimated_input_tokens_total,
@@ -1138,6 +1719,7 @@ fn handle_initial_app_data_msg(
                 let mut loaded = result.map_err(AppError::Message)?;
                 data_cache.mark_app_data_loaded(&app_type);
                 loaded.quota = data.quota.clone();
+                app.usage.invalidate_log_pages();
                 *data = loaded;
                 app.overlay = startup_overlay.take().unwrap_or(Overlay::None);
                 app.reset_proxy_activity(
@@ -1189,6 +1771,11 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::LocalEnvRefresh
         | Action::SessionsRefresh
         | Action::SessionsDeepSearch { .. }
+        | Action::SessionsDeepSearchCancel
+        | Action::SessionsProjectCatalogLoad
+        | Action::SessionsProjectFilter { .. }
+        | Action::SessionsProjectFilterCancel
+        | Action::SessionsProjectApply { .. }
         | Action::SessionMessagesLoad { .. }
         | Action::SessionResume { .. }
         | Action::SessionDelete { .. }
@@ -1198,6 +1785,8 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ProviderQuotaRefresh { .. }
         | Action::ProviderModelFetch { .. }
         | Action::UsageCustomRange { .. }
+        | Action::UsageRefresh
+        | Action::UsageLogDetailRefresh { .. }
         | Action::ManagedAuthRefresh { .. }
         | Action::ManagedAuthStartLogin { .. }
         | Action::ManagedAuthSetDefault { .. }
@@ -1221,6 +1810,9 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ConfigWebDavCheckConnection
         | Action::ConfigWebDavUpload
         | Action::ConfigWebDavJianguoyunQuickSetup { .. }
+        | Action::ConfigS3CheckConnection
+        | Action::ConfigS3FetchRemoteInfo { .. }
+        | Action::ConfigS3Upload
         | Action::OpenClawWorkspaceOpenFile { .. }
         | Action::OpenClawDailyMemoryOpenFile { .. }
         | Action::OpenClawDailyMemorySearch { .. }
@@ -1229,6 +1821,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SetSkipClaudeOnboarding { .. }
         | Action::SetClaudePluginIntegration { .. }
         | Action::SetCodexUnifiedSessionHistory { .. }
+        | Action::SetPreferredEditor { .. }
         | Action::SetManagedProxyForCurrentApp { .. }
         | Action::SetLanguage(_)
         | Action::CheckUpdate
@@ -1240,7 +1833,8 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ConfigRestoreBackup { .. }
         | Action::ConfigReset
         | Action::ConfigWebDavDownload
-        | Action::ConfigWebDavMigrateV1ToV2 => CacheInvalidation::AppStateRecreated,
+        | Action::ConfigWebDavMigrateV1ToV2
+        | Action::ConfigS3Download => CacheInvalidation::AppStateRecreated,
 
         Action::ProviderSwitch { .. }
         | Action::ProviderRemoveFromConfig { .. }
@@ -1284,6 +1878,11 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::PromptDelete { .. }
         | Action::ConfigBackup { .. }
         | Action::ConfigWebDavReset
+        | Action::ConfigWebDavSave { .. }
+        | Action::ConfigWebDavSetEnabled { .. }
+        | Action::ConfigS3Save { .. }
+        | Action::ConfigS3SetEnabled { .. }
+        | Action::ConfigS3Reset
         | Action::OpenClawDailyMemoryDelete { .. }
         | Action::HermesMemorySetEnabled { .. }
         | Action::HermesOpenMemoryDirectory
@@ -1420,13 +2019,14 @@ fn apply_loaded_data_cache_invalidation(
         None
     } else if let data::UsageRangePreset::Custom(range) = app.usage.range {
         data.usage.begin_custom_range(range);
-        app.clamp_selections(data);
         Some(range)
     } else {
         None
     };
 
     if !matches!(invalidation, CacheInvalidation::None) {
+        app.usage.invalidate_log_pages();
+        app.clamp_selections(data);
         app.usage.clear_loading();
     }
 
@@ -1463,7 +2063,7 @@ fn handle_tui_action(
     skills_req_tx: Option<&mpsc::Sender<SkillsReq>>,
     proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
     proxy_loading: &mut RequestTracker,
-    local_env_req_tx: Option<&mpsc::Sender<LocalEnvReq>>,
+    local_env_req_tx: Option<&tokio::sync::mpsc::UnboundedSender<LocalEnvReq>>,
     session_req_tx: Option<&mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&mpsc::Sender<WebDavReq>>,
     webdav_loading: &mut RequestTracker,
@@ -1473,11 +2073,19 @@ fn handle_tui_action(
     managed_auth_req_tx: Option<&mpsc::Sender<ManagedAuthReq>>,
     quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+    session_usage_sync: Option<(&mpsc::Sender<SessionUsageSyncReq>, &mut RequestTracker)>,
     action: Action,
 ) -> Result<(), AppError> {
+    if app.sessions.take_message_cancel_pending() {
+        if let Some(tx) = session_req_tx {
+            let _ = tx.send(SessionReq::CancelMessages);
+        }
+    }
     let should_queue_sessions_refresh = matches!(
         &action,
-        Action::SwitchRoute(route::Route::Sessions) | Action::SetAppType(_)
+        Action::SwitchRoute(route::Route::Sessions)
+            | Action::SetAppType(_)
+            | Action::SessionsDeepSearchCancel
     );
     let result = match action {
         Action::None => Ok(()),
@@ -1486,7 +2094,30 @@ fn handle_tui_action(
             Ok(())
         }
         Action::SetAppType(next) => {
+            if let Some(tx) = session_req_tx {
+                let _ = tx.send(SessionReq::CancelSearch);
+                let _ = tx.send(SessionReq::CancelMessages);
+                let _ = tx.send(SessionReq::CancelProjectCatalog);
+                let _ = tx.send(SessionReq::CancelProjectFilter);
+            }
+            app.sessions.clear_detail();
+            let _ = app.sessions.take_message_cancel_pending();
+            app.sessions.deep_search_active = None;
+            app.sessions.deep_search_pending = None;
+            app.pending_deep_search = None;
+            app.pending_project_catalog = false;
+            app.pending_project_filter = None;
+            app.sessions.cancel_project_catalog();
+            app.sessions.cancel_project_filter();
+            app.sessions.deep_search_query = None;
+            app.sessions.clear_deep_search_results();
             data_cache.switch_to(app, data, app_data_req_tx, next)?;
+            if matches!(app.route, route::Route::Sessions) {
+                let query = app.filter.input.value.trim();
+                if !query.is_empty() {
+                    app.sessions.deep_search_pending = Some((query.to_lowercase(), 0));
+                }
+            }
             let current_app_type = app.app_type.clone();
             data_cache.queue_usage_pricing_load(
                 app,
@@ -1506,6 +2137,7 @@ fn handle_tui_action(
             Ok(())
         }
         Action::UsageCustomRange { range } => {
+            app.usage.invalidate_log_pages();
             app.usage.range = data::UsageRangePreset::Custom(range);
             data.usage.begin_custom_range(range);
             app.clamp_selections(data);
@@ -1517,6 +2149,50 @@ fn handle_tui_action(
                 data::UsageRangePreset::Custom(range),
             );
             data_cache.remember_current(&app.app_type, data);
+            Ok(())
+        }
+        Action::UsageRefresh => {
+            let current_app_type = app.app_type.clone();
+            let is_usage_route = matches!(
+                app.route,
+                route::Route::Usage | route::Route::UsageLogs | route::Route::UsageLogDetail { .. }
+            );
+            let range = if matches!(app.route, route::Route::Pricing)
+                && matches!(app.usage.range, data::UsageRangePreset::Custom(_))
+            {
+                data::UsageRangePreset::SevenDays
+            } else {
+                app.usage.range
+            };
+
+            // Match upstream's manual flow: import session logs first, then
+            // invalidate/requery Usage. Repeated `r` shares the active import;
+            // if either worker is unavailable, fall back to the async DB query.
+            let sync_queued = is_usage_route
+                && usage_pricing_req_tx.is_some()
+                && session_usage_sync
+                    .map(|(tx, tracker)| queue_background_session_usage_sync(Some(tx), tracker))
+                    .unwrap_or(false);
+            if sync_queued {
+                app.usage.start_manual_session_refresh();
+            } else {
+                data_cache.queue_usage_pricing_load(
+                    app,
+                    usage_pricing_req_tx,
+                    &current_app_type,
+                    range,
+                );
+                if matches!(app.route, route::Route::UsageLogs)
+                    && matches!(app.usage.pane, app::UsagePane::Recent)
+                    && app.usage.log_pager.current_page() > 0
+                {
+                    app.usage.request_log_page_refresh_after_aggregate();
+                }
+            }
+            Ok(())
+        }
+        Action::UsageLogDetailRefresh { rowid } => {
+            queue_usage_log_detail_refresh(app, data_cache, usage_pricing_req_tx, rowid);
             Ok(())
         }
         other => {
@@ -1571,26 +2247,50 @@ fn queue_sessions_refresh_if_needed(
     if !matches!(app.route, route::Route::Sessions) {
         return;
     }
-    // When "show all providers" is on, use "all" as the virtual provider id
-    // so the worker scans every provider and the cache is keyed separately.
-    let provider_id = if app.sessions.show_all_providers {
-        "all".to_string()
-    } else {
-        app.app_type.as_str().to_string()
-    };
-    if app.sessions.loaded_for_provider(&provider_id) || app.sessions.loading {
+    let provider_id = app.app_type.as_str().to_string();
+    let query = app.filter.query_lower().unwrap_or_default();
+    let desired = app.sessions.desired_view_spec(Some(&query));
+
+    let purge_refresh = app.sessions.purge_refresh_required();
+    // Desired views are rebuilt from the saved authoritative base before the
+    // scan-attempt guard is considered. That guard prevents failed-scan retry
+    // storms; it must not block recovery or a debounced project/query change.
+    let current_base_available = app.sessions.provider_id.as_deref() == Some(provider_id.as_str())
+        && app.sessions.base_query_source().is_some();
+    if !purge_refresh && current_base_available {
+        if desired.is_base_view() {
+            if !app.sessions.base_view_is_current() {
+                app.sessions.ensure_base_restore_staged();
+            }
+        } else if !app.sessions.materialized_view_is_current(Some(&query))
+            && !app
+                .sessions
+                .materialization_failed_for_current_base(&desired)
+            && app.sessions.deep_search_active.is_none()
+            && app.sessions.deep_search_pending.is_none()
+            && app.pending_deep_search.is_none()
+        {
+            app.pending_deep_search = Some(query);
+        }
         return;
     }
-
-    // Reuse a fresh cached scan so toggling between apps is instant; `r`
-    // (Action::SessionsRefresh) bypasses this path and always re-scans.
-    if app.sessions.restore_from_scan_cache(&provider_id) {
+    if !purge_refresh && app.sessions.loaded_for_provider(&provider_id) {
+        return;
+    }
+    if (app.sessions.provider_id.as_deref() == Some(provider_id.as_str())
+        && app.sessions.scan_active.is_some())
+        || (!purge_refresh && app.sessions.scan_attempted_for_scope(&provider_id))
+    {
         return;
     }
 
     let Some(tx) = session_req_tx else {
-        app.sessions.loading = false;
-        app.sessions.loaded_once = true;
+        let request_id = app.sessions.start_scan(provider_id);
+        if purge_refresh {
+            app.sessions.consume_purge_refresh();
+        }
+        app.sessions
+            .fail_scan(request_id, "sessions worker is not running".to_string());
         app.push_toast(
             texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
             ToastKind::Warning,
@@ -1599,17 +2299,92 @@ fn queue_sessions_refresh_if_needed(
     };
 
     let request_id = app.sessions.start_scan(provider_id.clone());
+    if purge_refresh {
+        app.sessions.consume_purge_refresh();
+    }
     if let Err(err) = tx.send(runtime_systems::SessionReq::Refresh {
         request_id,
+        scope_epoch: app.sessions.scope_epoch,
         provider_id,
         // Entering the page uses the cached snapshot + delta revalidate; only
         // manual `r` forces a full re-parse.
-        force: false,
+        force: purge_refresh,
     }) {
         app.sessions.fail_scan(request_id, err.to_string());
         app.push_toast(
             texts::tui_sessions_toast_refresh_failed(&err.to_string()),
             ToastKind::Warning,
+        );
+    }
+}
+
+fn maybe_queue_session_page_load(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<runtime_systems::SessionReq>>,
+) {
+    if !matches!(app.route, route::Route::Sessions) {
+        return;
+    }
+    let Some(page) = app.sessions.remote.pending_cross_page() else {
+        return;
+    };
+    let Some((request_id, token, reader)) = app.sessions.next_page_request(page) else {
+        return;
+    };
+    let Some(tx) = session_req_tx else {
+        app.sessions.fail_page_request(
+            request_id,
+            &token,
+            page,
+            "sessions worker is not running".to_string(),
+        );
+        return;
+    };
+    if let Err(error) = tx.send(runtime_systems::SessionReq::LoadPage {
+        request_id,
+        token: token.clone(),
+        page,
+        reader,
+    }) {
+        app.sessions
+            .fail_page_request(request_id, &token, page, error.to_string());
+    }
+}
+
+fn maybe_queue_session_manifest_reconcile(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<runtime_systems::SessionReq>>,
+) {
+    let Some((request_id, source, scope, generation, fallback_absolute, anchor, reader)) =
+        app.sessions.next_manifest_reconcile()
+    else {
+        return;
+    };
+    let scope_epoch = app.sessions.scope_epoch;
+    let Some(tx) = session_req_tx else {
+        app.sessions.fail_manifest_reconcile(
+            request_id,
+            scope_epoch,
+            &generation,
+            "sessions worker is not running".to_string(),
+        );
+        return;
+    };
+    if let Err(error) = tx.send(runtime_systems::SessionReq::LocateManifest {
+        request_id,
+        scope_epoch,
+        source,
+        scope,
+        generation: generation.clone(),
+        fallback_absolute,
+        anchor,
+        reader,
+    }) {
+        app.sessions.fail_manifest_reconcile(
+            request_id,
+            scope_epoch,
+            &generation,
+            error.to_string(),
         );
     }
 }
@@ -1633,14 +2408,15 @@ fn initialize_loaded_app(
 
 fn queue_local_env_refresh_if_available(
     app: &mut App,
-    local_env_req_tx: Option<&mpsc::Sender<LocalEnvReq>>,
+    local_env_req_tx: Option<&tokio::sync::mpsc::UnboundedSender<LocalEnvReq>>,
 ) {
     let Some(tx) = local_env_req_tx else {
+        app.stop_local_env_refresh();
         return;
     };
-    app.local_env_loading = true;
-    if let Err(err) = tx.send(LocalEnvReq::Refresh) {
-        app.local_env_loading = false;
+    let generation = app.begin_local_env_refresh();
+    if let Err(err) = tx.send(LocalEnvReq::Refresh { generation }) {
+        app.fail_local_env_refresh(generation);
         app.push_toast(
             texts::tui_toast_local_env_check_request_failed(&err.to_string()),
             ToastKind::Warning,
@@ -1673,10 +2449,19 @@ fn record_initial_loading_quit_event(quit_requested: &mut bool, event: &event::E
 }
 
 fn drain_initial_loading_queued_events() -> Result<bool, AppError> {
+    const MAX_EVENTS: usize = 256;
+    const TIME_BUDGET: Duration = Duration::from_millis(4);
+
     let mut quit_requested = false;
-    while event::poll(Duration::ZERO).map_err(|e| AppError::Message(e.to_string()))? {
+    let started = Instant::now();
+    let mut drained = 0usize;
+    while drained < MAX_EVENTS
+        && started.elapsed() < TIME_BUDGET
+        && event::poll(Duration::ZERO).map_err(|e| AppError::Message(e.to_string()))?
+    {
         let event = event::read().map_err(|e| AppError::Message(e.to_string()))?;
         record_initial_loading_quit_event(&mut quit_requested, &event);
+        drained = drained.saturating_add(1);
     }
     Ok(quit_requested)
 }
@@ -1713,9 +2498,8 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
     let tick_rate = TUI_TICK_RATE;
     let mut last_tick = Instant::now();
-    // 后台会话用量导入进行时，Usage 页数字的周期性刷新节流
-    let mut last_usage_sync_data_refresh = Instant::now();
     let mut last_frame = Instant::now();
+    let mut frame_scheduler = FrameScheduler::new();
     let mut proxy_open_flash = ProxyOpenFlash::default();
     let mut proxy_loading = RequestTracker::default();
     let mut proxy_snapshot_refresh = RequestTracker::default();
@@ -1763,7 +2547,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let local_env = match start_local_env_system() {
         Ok(system) => Some(system),
         Err(err) => {
-            app.local_env_loading = false;
+            app.stop_local_env_refresh();
             app.push_toast(
                 texts::tui_toast_local_env_check_unavailable(&err.to_string()),
                 ToastKind::Warning,
@@ -1916,6 +2700,8 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         queue_local_env_refresh_if_available(&mut app, local_env.as_ref().map(|s| &s.req_tx));
     }
 
+    let mut input_reader = input::InputReader::crossterm();
+
     loop {
         if let Some(err) = initial_data_error.take() {
             return Err(err);
@@ -1925,18 +2711,30 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if !initial_data_loading {
             app.observe_proxy_visual_state(&data);
         }
-        let frame_dt = last_frame.elapsed();
-        last_frame = Instant::now();
-        terminal.draw(|f| {
-            let area = f.area();
-            if !initial_data_loading {
-                proxy_open_flash.sync(&app, area);
+        if frame_scheduler.is_due(Instant::now()) {
+            let frame_started = Instant::now();
+            let frame_dt = frame_started.saturating_duration_since(last_frame);
+            terminal.draw(|f| {
+                let area = f.area();
+                if !initial_data_loading {
+                    proxy_open_flash.sync(&app, area);
+                }
+                ui::render(f, &app, &data);
+                if !initial_data_loading {
+                    proxy_open_flash.process(frame_dt, f.buffer_mut(), area);
+                }
+            })?;
+            let completed_at = Instant::now();
+            // Animation time follows wall-clock frame starts, while the redraw
+            // cap starts after terminal I/O completes.
+            last_frame = frame_started;
+            frame_scheduler.record_draw(completed_at);
+            // Effects advance only while drawing, so keep scheduling frames
+            // until the active effect reports completion.
+            if proxy_open_flash.active() {
+                frame_scheduler.mark_dirty();
             }
-            ui::render(f, &app, &data);
-            if !initial_data_loading {
-                proxy_open_flash.process(frame_dt, f.buffer_mut(), area);
-            }
-        })?;
+        }
 
         if initial_data_loading {
             if let Some(app_data) = app_data.as_ref() {
@@ -1950,6 +2748,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 ) {
                     Ok(true) => {
                         initial_data_loading = false;
+                        frame_scheduler.mark_dirty();
                         let current_app_type = app.app_type.clone();
                         let _ = data_cache.queue_current_app_data_refresh(
                             Some(&app_data.req_tx),
@@ -1985,7 +2784,10 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 continue;
             }
 
-            let timeout = tick_rate.saturating_sub(last_tick.elapsed());
+            let timeout = next_loop_timeout(
+                tick_rate.saturating_sub(last_tick.elapsed()),
+                frame_scheduler.wait(Instant::now()),
+            );
             if event::poll(timeout).map_err(|e| AppError::Message(e.to_string()))? {
                 let event = event::read().map_err(|e| AppError::Message(e.to_string()))?;
                 if let Some(app_data) = app_data.as_ref() {
@@ -1999,6 +2801,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                     ) {
                         Ok(true) => {
                             initial_data_loading = false;
+                            frame_scheduler.mark_dirty();
                             let current_app_type = app.app_type.clone();
                             let _ = data_cache.queue_current_app_data_refresh(
                                 Some(&app_data.req_tx),
@@ -2019,6 +2822,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         }
                     }
                 }
+                if matches!(&event, event::Event::Resize(..)) {
+                    frame_scheduler.mark_dirty();
+                }
                 record_initial_loading_quit_event(&mut initial_loading_quit_requested, &event);
                 if !should_poll_initial_loading_input(
                     initial_data_loading,
@@ -2038,28 +2844,31 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             if last_tick.elapsed() >= tick_rate {
                 app.on_tick();
                 last_tick = Instant::now();
+                frame_scheduler.mark_dirty();
             }
 
             // Fire pending deep search from debounce timer
-            if let Some(query) = app.pending_deep_search.take() {
-                // Directly send search request without full handle_tui_action
-                if let Some(sessions_sys) = sessions.as_ref() {
-                    let request_id = {
-                        app.sessions.deep_search_query = Some(query.clone());
-                        app.sessions.deep_search_results.clear();
-                        app.sessions.deep_search_seq = app.sessions.deep_search_seq.wrapping_add(1);
-                        app.sessions.deep_search_active = Some(app.sessions.deep_search_seq);
-                        app.sessions.deep_search_seq
-                    };
-                    let sessions_snapshot = app.sessions.rows.clone();
-                    let _ = sessions_sys
-                        .req_tx
-                        .send(runtime_systems::SessionReq::Search {
-                            request_id,
-                            query,
-                            sessions: sessions_snapshot,
-                        });
+            if matches!(app.route, route::Route::Sessions) {
+                if let Some(query) = app.pending_deep_search.take() {
+                    runtime_actions::queue_pending_sessions_deep_search(
+                        &mut app,
+                        sessions.as_ref().map(|system| &system.req_tx),
+                        query,
+                    );
                 }
+            }
+            if app.pending_project_catalog {
+                runtime_actions::queue_sessions_project_catalog(
+                    &mut app,
+                    sessions.as_ref().map(|system| &system.req_tx),
+                );
+            }
+            if let Some(query) = app.pending_project_filter.take() {
+                runtime_actions::queue_sessions_project_filter(
+                    &mut app,
+                    sessions.as_ref().map(|system| &system.req_tx),
+                    query,
+                );
             }
 
             if app.should_quit {
@@ -2069,33 +2878,43 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
 
         queue_sessions_refresh_if_needed(&mut app, sessions.as_ref().map(|s| &s.req_tx));
+        maybe_queue_session_page_load(&mut app, sessions.as_ref().map(|s| &s.req_tx));
+        maybe_queue_session_manifest_reconcile(&mut app, sessions.as_ref().map(|s| &s.req_tx));
 
         if let Some(speedtest) = speedtest.as_ref() {
             while let Ok(msg) = speedtest.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_speedtest_msg(&mut app, msg);
             }
         }
 
         if let Some(stream_check) = stream_check.as_ref() {
             while let Ok(msg) = stream_check.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_stream_check_msg(&mut app, msg);
             }
         }
 
         if let Some(local_env) = local_env.as_ref() {
             while let Ok(msg) = local_env.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_local_env_msg(&mut app, msg);
             }
         }
 
         if let Some(sessions) = sessions.as_ref() {
             while let Ok(msg) = sessions.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_session_msg(&mut app, msg);
+                if app.sessions.take_message_cancel_pending() {
+                    let _ = sessions.req_tx.send(SessionReq::CancelMessages);
+                }
             }
         }
 
         if let Some(proxy) = proxy_system.as_ref() {
             while let Ok(msg) = proxy.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 match handle_proxy_msg(
                     &mut app,
                     &mut data,
@@ -2123,12 +2942,14 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
         if let Some(quota) = quota.as_ref() {
             while let Ok(msg) = quota.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_quota_msg(&mut app, &mut data, msg);
             }
         }
 
         if let Some(app_data) = app_data.as_ref() {
             while let Ok(msg) = app_data.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_app_data_msg(
                     &mut app,
                     &mut data,
@@ -2143,12 +2964,21 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
         if let Some(usage_pricing) = usage_pricing.as_ref() {
             while let Ok(msg) = usage_pricing.result_rx.try_recv() {
-                handle_usage_pricing_msg(&mut app, &mut data, &mut data_cache, msg);
+                frame_scheduler.mark_dirty();
+                if handle_usage_pricing_msg(&mut app, &mut data, &mut data_cache, msg)
+                    && session_usage_sync.active.is_none()
+                {
+                    // A completed session sync can mark an in-flight aggregate
+                    // dirty. Once it finishes, launch one fresh follow-up
+                    // without disturbing log page/detail snapshot tokens.
+                    data_cache.flush_dirty_usage_pricing(&mut app, Some(&usage_pricing.req_tx));
+                }
             }
         }
 
         if let Some(session_usage) = session_usage.as_ref() {
             while let Ok(msg) = session_usage.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_session_usage_sync_msg(
                     &mut app,
                     &mut data,
@@ -2162,6 +2992,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
         if let Some(skills) = skills.as_ref() {
             while let Ok(msg) = skills.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 match handle_skills_msg(&mut app, &mut data, msg) {
                     Ok(invalidation) => {
                         if let Err(err) = apply_cache_invalidation(
@@ -2183,6 +3014,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
         if let Some(webdav) = webdav.as_ref() {
             while let Ok(msg) = webdav.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 match handle_webdav_msg(&mut app, &mut data, &mut webdav_loading, msg) {
                     Ok(invalidation) => {
                         if let Err(err) = apply_cache_invalidation(
@@ -2204,18 +3036,21 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
         if let Some(us) = update_system.as_ref() {
             while let Ok(msg) = us.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_update_msg(&mut app, &mut update_check, msg);
             }
         }
 
         if let Some(mf) = model_fetch.as_ref() {
             while let Ok(msg) = mf.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_model_fetch_msg(&mut app, msg);
             }
         }
 
         if let Some(auth) = managed_auth.as_ref() {
             while let Ok(msg) = auth.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
                 handle_managed_auth_msg(&mut app, msg);
             }
         }
@@ -2237,10 +3072,22 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             }
         }
 
-        let timeout = tick_rate.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout).map_err(|e| AppError::Message(e.to_string()))? {
-            match event::read().map_err(|e| AppError::Message(e.to_string()))? {
-                event::Event::Key(key) if key.kind == KeyEventKind::Press => {
+        let timeout = next_loop_timeout(
+            tick_rate.saturating_sub(last_tick.elapsed()),
+            frame_scheduler.wait(Instant::now()),
+        );
+        let inputs = input_reader
+            .read_batch(timeout)
+            .map_err(|e| AppError::Message(e.to_string()))?;
+        if !inputs.is_empty() {
+            // Input is reduced independently of rendering. Even a no-op wheel
+            // segment may mark the frame dirty, but the scheduler still caps
+            // terminal writes to one per frame interval.
+            frame_scheduler.mark_dirty();
+        }
+        for input in inputs {
+            match input {
+                input::UiInput::Key(key) => {
                     let key = normalize_key_event(key);
                     let before_app_type = app.app_type.clone();
                     let action = app.on_key(key, &data);
@@ -2265,6 +3112,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         managed_auth.as_ref().map(|s| &s.req_tx),
                         quota.as_ref().map(|s| &s.req_tx),
                         usage_pricing.as_ref().map(|s| &s.req_tx),
+                        session_usage
+                            .as_ref()
+                            .map(|s| (&s.req_tx, &mut session_usage_sync)),
                         action,
                     );
                     let action_succeeded = action_result.is_ok();
@@ -2285,60 +3135,61 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         action_succeeded,
                     );
                 }
-                event::Event::Mouse(mouse) => {
-                    if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = mouse.kind {
-                        let code = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                            event::KeyCode::Up
-                        } else {
-                            event::KeyCode::Down
-                        };
-                        let key = event::KeyEvent::new(code, event::KeyModifiers::NONE);
-                        let before_app_type = app.app_type.clone();
-                        let action = app.on_key(key, &data);
-                        let action_result = handle_tui_action(
-                            &mut terminal,
-                            &mut app,
-                            &mut data,
-                            &mut data_cache,
-                            app_data.as_ref().map(|s| &s.req_tx),
-                            speedtest.as_ref().map(|s| &s.req_tx),
-                            stream_check.as_ref().map(|s| &s.req_tx),
-                            skills.as_ref().map(|s| &s.req_tx),
-                            proxy_system.as_ref().map(|s| &s.req_tx),
-                            &mut proxy_loading,
-                            local_env.as_ref().map(|s| &s.req_tx),
-                            sessions.as_ref().map(|s| &s.req_tx),
-                            webdav.as_ref().map(|s| &s.req_tx),
-                            &mut webdav_loading,
-                            update_system.as_ref().map(|s| &s.req_tx),
-                            &mut update_check,
-                            model_fetch.as_ref().map(|s| &s.req_tx),
-                            managed_auth.as_ref().map(|s| &s.req_tx),
-                            quota.as_ref().map(|s| &s.req_tx),
-                            usage_pricing.as_ref().map(|s| &s.req_tx),
-                            action,
-                        );
-                        let action_succeeded = action_result.is_ok();
-                        if let Err(err) = action_result {
-                            if matches!(
-                                &err,
-                                AppError::Localized { key, .. } if *key == "tui_terminal_error"
-                            ) {
-                                return Err(err);
-                            }
-                            app.push_toast(err.to_string(), ToastKind::Error);
+                input::UiInput::Wheel {
+                    direction,
+                    steps,
+                    gesture,
+                } => {
+                    let before_app_type = app.app_type.clone();
+                    let action = app.on_wheel(direction, steps, gesture, &data);
+                    let action_result = handle_tui_action(
+                        &mut terminal,
+                        &mut app,
+                        &mut data,
+                        &mut data_cache,
+                        app_data.as_ref().map(|s| &s.req_tx),
+                        speedtest.as_ref().map(|s| &s.req_tx),
+                        stream_check.as_ref().map(|s| &s.req_tx),
+                        skills.as_ref().map(|s| &s.req_tx),
+                        proxy_system.as_ref().map(|s| &s.req_tx),
+                        &mut proxy_loading,
+                        local_env.as_ref().map(|s| &s.req_tx),
+                        sessions.as_ref().map(|s| &s.req_tx),
+                        webdav.as_ref().map(|s| &s.req_tx),
+                        &mut webdav_loading,
+                        update_system.as_ref().map(|s| &s.req_tx),
+                        &mut update_check,
+                        model_fetch.as_ref().map(|s| &s.req_tx),
+                        managed_auth.as_ref().map(|s| &s.req_tx),
+                        quota.as_ref().map(|s| &s.req_tx),
+                        usage_pricing.as_ref().map(|s| &s.req_tx),
+                        session_usage
+                            .as_ref()
+                            .map(|s| (&s.req_tx, &mut session_usage_sync)),
+                        action,
+                    );
+                    let action_succeeded = action_result.is_ok();
+                    if let Err(err) = action_result {
+                        if matches!(
+                            &err,
+                            AppError::Localized { key, .. } if *key == "tui_terminal_error"
+                        ) {
+                            return Err(err);
                         }
-                        queue_proxy_snapshot_refresh_after_app_switch(
-                            &mut proxy_snapshot_refresh,
-                            proxy_system.as_ref().map(|s| &s.req_tx),
-                            &before_app_type,
-                            &app.app_type,
-                            action_succeeded,
-                        );
+                        app.push_toast(err.to_string(), ToastKind::Error);
                     }
+                    queue_proxy_snapshot_refresh_after_app_switch(
+                        &mut proxy_snapshot_refresh,
+                        proxy_system.as_ref().map(|s| &s.req_tx),
+                        &before_app_type,
+                        &app.app_type,
+                        action_succeeded,
+                    );
                 }
-                event::Event::Resize(_, _) => {}
-                _ => {}
+                input::UiInput::Resize { .. } => {}
+            }
+            if app.should_quit {
+                break;
             }
         }
 
@@ -2357,6 +3208,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             &mut data_cache,
             usage_pricing.as_ref().map(|s| &s.req_tx),
         );
+        maybe_queue_usage_log_page_refresh_after_aggregate(
+            &mut app,
+            &mut data_cache,
+            usage_pricing.as_ref().map(|s| &s.req_tx),
+        );
+        maybe_queue_usage_log_prefetch(
+            &mut app,
+            &data,
+            &mut data_cache,
+            usage_pricing.as_ref().map(|s| &s.req_tx),
+        );
 
         if last_tick.elapsed() >= tick_rate {
             app.on_tick();
@@ -2372,52 +3234,32 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 &mut data,
                 quota.as_ref().map(|s| &s.req_tx),
             );
-            // 后台会话用量导入进行时：每 ~2.5s 重新聚合一次当前区间，让
-            // Usage 页数字随导入进度增长（P0 起最近文件最先入库，Today/7d
-            // 很快就有意义）；同步空闲时零开销。
-            if session_usage_sync.active.is_some()
-                && matches!(
-                    app.route,
-                    route::Route::Usage
-                        | route::Route::UsageLogs
-                        | route::Route::UsageLogDetail { .. }
-                )
-                && last_usage_sync_data_refresh.elapsed() >= Duration::from_millis(2500)
-            {
-                let usage_pricing_tx = usage_pricing.as_ref().map(|s| &s.req_tx);
-                if usage_pricing_tx.is_some() {
-                    data_cache.clear_usage_pricing_after_external_usage_sync();
-                    let range = app.usage.range;
-                    let app_type = app.app_type.clone();
-                    data_cache.queue_usage_pricing_load(
-                        &mut app,
-                        usage_pricing_tx,
-                        &app_type,
-                        range,
-                    );
-                }
-                last_usage_sync_data_refresh = Instant::now();
-            }
             last_tick = Instant::now();
+            frame_scheduler.mark_dirty();
         }
 
         // Fire pending deep search from debounce timer
-        if let Some(query) = app.pending_deep_search.take() {
-            if let Some(sessions_sys) = sessions.as_ref() {
-                app.sessions.deep_search_query = Some(query.clone());
-                app.sessions.deep_search_results.clear();
-                app.sessions.deep_search_seq = app.sessions.deep_search_seq.wrapping_add(1);
-                app.sessions.deep_search_active = Some(app.sessions.deep_search_seq);
-                let request_id = app.sessions.deep_search_seq;
-                let sessions_snapshot = app.sessions.rows.clone();
-                let _ = sessions_sys
-                    .req_tx
-                    .send(runtime_systems::SessionReq::Search {
-                        request_id,
-                        query,
-                        sessions: sessions_snapshot,
-                    });
+        if matches!(app.route, route::Route::Sessions) {
+            if let Some(query) = app.pending_deep_search.take() {
+                runtime_actions::queue_pending_sessions_deep_search(
+                    &mut app,
+                    sessions.as_ref().map(|system| &system.req_tx),
+                    query,
+                );
             }
+        }
+        if app.pending_project_catalog {
+            runtime_actions::queue_sessions_project_catalog(
+                &mut app,
+                sessions.as_ref().map(|system| &system.req_tx),
+            );
+        }
+        if let Some(query) = app.pending_project_filter.take() {
+            runtime_actions::queue_sessions_project_filter(
+                &mut app,
+                sessions.as_ref().map(|system| &system.req_tx),
+                query,
+            );
         }
 
         if app.should_quit {

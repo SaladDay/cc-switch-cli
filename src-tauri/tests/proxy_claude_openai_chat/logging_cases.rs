@@ -99,12 +99,13 @@ async fn proxy_claude_openai_chat_success_logs_request_with_session_id_and_usage
     assert_eq!(log_values[5], "gpt-5.2");
     assert_eq!(log_values[6], "11");
     assert_eq!(log_values[7], "7");
-    assert_eq!(log_values[10], "0.00001925");
-    assert_eq!(log_values[11], "0.000098");
-    assert_eq!(log_values[14], "0.0002345");
-    assert_eq!(log_values[18], "201");
-    assert_eq!(log_values[20], "claude-session-success");
-    assert_eq!(log_values[23], "2");
+    assert_eq!(log_values[10], "2");
+    assert_eq!(log_values[11], "0.00001925");
+    assert_eq!(log_values[12], "0.000098");
+    assert_eq!(log_values[15], "0.0002345");
+    assert_eq!(log_values[19], "201");
+    assert_eq!(log_values[21], "claude-session-success");
+    assert_eq!(log_values[24], "2");
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();
@@ -204,9 +205,10 @@ async fn proxy_claude_buffered_transform_failure_logs_error_request_with_session
     assert_eq!(log_values[3], "claude-3-7-sonnet");
     assert_eq!(log_values[4], "claude-3-7-sonnet");
     assert_eq!(log_values[5], "");
-    assert_eq!(log_values[18], "502");
-    assert_eq!(log_values[20], "claude-session-failure");
-    assert!(log_values[19].contains("parse upstream json failed"));
+    assert_eq!(log_values[10], "2");
+    assert_eq!(log_values[19], "502");
+    assert_eq!(log_values[21], "claude-session-failure");
+    assert!(log_values[20].contains("parse upstream json failed"));
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();

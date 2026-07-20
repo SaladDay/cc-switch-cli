@@ -1,7 +1,7 @@
 use super::*;
 use crate::cli::commands::provider_input::{build_provider_template_seed, ProviderAddTemplate};
 use crate::provider::Provider;
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn template_index_by_label(app_type: AppType, label: &str) -> usize {
     ProviderAddFormState::new(app_type)
@@ -771,8 +771,9 @@ fn provider_add_form_runapi_template_codex_sets_v1_base_url() {
     assert_eq!(provider["name"], "RunAPI");
     assert_eq!(provider["category"], "aggregator");
     assert_eq!(provider["icon"], "runapi");
-    assert!(cfg.contains("model_provider = \"runapi\""));
-    assert!(cfg.contains("[model_providers.runapi]"));
+    assert!(cfg.contains("model_provider = \"custom\""));
+    assert!(cfg.contains("[model_providers.custom]"));
+    assert!(cfg.contains("name = \"RunAPI\""));
     assert!(cfg.contains("base_url = \"https://runapi.co/v1\""));
     assert!(cfg.contains("model = \"gpt-5.4\""));
     assert!(cfg.contains("wire_api = \"responses\""));
@@ -1878,8 +1879,10 @@ fn provider_add_form_packycode_template_codex_sets_partner_meta_and_base_url() {
     let cfg = provider["settingsConfig"]["config"]
         .as_str()
         .expect("settingsConfig.config should be string");
-    assert!(cfg.contains("model_provider ="));
-    assert!(cfg.contains("[model_providers."));
+    assert!(cfg.contains("model_provider = \"custom\""));
+    assert!(cfg.contains("[model_providers.custom]"));
+    assert!(cfg.contains("name = \"PackyCode\""));
+    assert!(!cfg.contains("[model_providers.packycode]"));
     assert!(cfg.contains("base_url = \"https://www.packyapi.com/v1\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
@@ -2157,10 +2160,113 @@ fn provider_add_form_claude_from_provider_backfills_models_with_legacy_fallback(
 
     let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
     assert_eq!(form.claude_model.value, "model-main");
-    assert_eq!(form.claude_reasoning_model.value, "model-reasoning");
     assert_eq!(form.claude_haiku_model.value, "model-small-fast");
     assert_eq!(form.claude_sonnet_model.value, "model-sonnet-explicit");
     assert_eq!(form.claude_opus_model.value, "model-main");
+}
+
+#[test]
+fn provider_add_form_claude_one_m_marker_loads_and_saves_canonically() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4 [1m]  ",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-pro[1M]",
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_sonnet_model.value, "deepseek-v4");
+    assert_eq!(form.claude_opus_model.value, "opus-pro");
+    assert!(form.claude_model_one_m_enabled(1));
+    assert!(form.claude_model_one_m_enabled(2));
+
+    form.mark_claude_model_config_touched();
+    let saved = form.to_provider_json_value();
+    let env = saved["settingsConfig"]["env"]
+        .as_object()
+        .expect("settingsConfig.env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+            .and_then(Value::as_str),
+        Some("deepseek-v4[1M]")
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .and_then(Value::as_str),
+        Some("opus-pro[1M]")
+    );
+}
+
+#[test]
+fn provider_add_form_claude_one_m_fallback_and_untouched_storage_are_preserved() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_MODEL": "fallback-model [1m]  ",
+                "ANTHROPIC_REASONING_MODEL": "reasoning[1M]",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku[1m]",
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_sonnet_model.value, "fallback-model");
+    assert_eq!(form.claude_opus_model.value, "fallback-model");
+    assert!(form.claude_model_one_m_enabled(1));
+    assert!(form.claude_model_one_m_enabled(2));
+    assert_eq!(form.claude_haiku_model.value, "haiku[1m]");
+
+    form.name.set("Provider One Updated");
+    let untouched = form.to_provider_json_value();
+    let env = untouched["settingsConfig"]["env"]
+        .as_object()
+        .expect("settingsConfig.env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_MODEL").and_then(Value::as_str),
+        Some("fallback-model [1m]  ")
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_REASONING_MODEL").and_then(Value::as_str),
+        Some("reasoning[1M]")
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            .and_then(Value::as_str),
+        Some("haiku[1m]")
+    );
+    assert!(env.get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_none());
+    assert!(env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
+}
+
+#[test]
+fn provider_add_form_claude_one_m_toggle_and_fill_all_follow_role_semantics() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.claude_sonnet_model.set("model-sonnet");
+
+    assert!(form.toggle_claude_model_one_m(1));
+    assert_eq!(form.claude_model_value_for_config(1), "model-sonnet[1M]");
+    assert!(form.fill_claude_models_from(1));
+    assert_eq!(form.claude_haiku_model.value, "model-sonnet");
+    assert!(form.claude_model_one_m_enabled(1));
+    assert!(form.claude_model_one_m_enabled(2));
+
+    form.claude_haiku_model.set("legacy-model[1M]");
+    assert!(form.fill_claude_models_from(0));
+    assert_eq!(form.claude_sonnet_model.value, "legacy-model");
+    assert!(!form.claude_model_one_m_enabled(1));
+    assert!(!form.claude_model_one_m_enabled(2));
+
+    form.claude_opus_model.set("");
+    assert!(!form.toggle_claude_model_one_m(2));
+    assert_eq!(form.claude_model_value_for_config(2), "");
 }
 
 #[test]
@@ -2177,7 +2283,6 @@ fn provider_add_form_claude_writes_new_model_keys_and_removes_small_fast() {
         }
     });
     form.claude_model.set("model-main");
-    form.claude_reasoning_model.set("model-reasoning");
     form.claude_haiku_model.set("model-haiku");
     form.claude_sonnet_model.set("model-sonnet");
     form.claude_opus_model.set("model-opus");
@@ -2191,11 +2296,7 @@ fn provider_add_form_claude_writes_new_model_keys_and_removes_small_fast() {
         env.get("ANTHROPIC_MODEL").and_then(|value| value.as_str()),
         Some("model-main")
     );
-    assert_eq!(
-        env.get("ANTHROPIC_REASONING_MODEL")
-            .and_then(|value| value.as_str()),
-        Some("model-reasoning")
-    );
+    assert!(env.get("ANTHROPIC_REASONING_MODEL").is_none());
     assert_eq!(
         env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
             .and_then(|value| value.as_str()),
@@ -2239,7 +2340,11 @@ fn provider_add_form_claude_empty_model_fields_remove_env_keys() {
         .as_object()
         .expect("settingsConfig.env should be object");
     assert!(env.get("ANTHROPIC_MODEL").is_none());
-    assert!(env.get("ANTHROPIC_REASONING_MODEL").is_none());
+    assert_eq!(
+        env.get("ANTHROPIC_REASONING_MODEL").and_then(Value::as_str),
+        Some("old-reasoning"),
+        "legacy reasoning values remain opaque provider config"
+    );
     assert!(env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
     assert!(env.get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_none());
     assert!(env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
@@ -2312,8 +2417,10 @@ fn provider_add_form_codex_builds_full_toml_config() {
     let cfg = provider["settingsConfig"]["config"]
         .as_str()
         .expect("settingsConfig.config should be string");
-    assert!(cfg.contains("model_provider ="));
-    assert!(cfg.contains("[model_providers."));
+    assert!(cfg.contains("model_provider = \"custom\""));
+    assert!(cfg.contains("[model_providers.custom]"));
+    assert!(cfg.contains("name = \"Codex Provider\""));
+    assert!(!cfg.contains("[model_providers.c1]"));
     assert!(cfg.contains("base_url = \"https://api.openai.com/v1\""));
     assert!(cfg.contains("model = \"gpt-5.4\""));
     assert!(cfg.contains("wire_api = \"responses\""));
@@ -2331,12 +2438,12 @@ fn provider_add_form_codex_preserves_existing_config_toml_custom_keys() {
                 "OPENAI_API_KEY": "sk-test"
             },
             "config": r#"
-model_provider = "custom"
+model_provider = "vendor_alpha"
 model = "gpt-5.2-codex"
 network_access = true
 
-[model_providers.custom]
-name = "custom"
+[model_providers.vendor_alpha]
+name = "Vendor Alpha"
 base_url = "https://api.example.com/v1"
 wire_api = "responses"
 requires_openai_auth = true
@@ -2360,6 +2467,9 @@ requires_openai_auth = true
         cfg.contains("base_url = \"https://changed.example/v1\""),
         "Codex base_url form field should still update config.toml"
     );
+    assert!(cfg.contains("model_provider = \"vendor_alpha\""), "{cfg}");
+    assert!(cfg.contains("[model_providers.vendor_alpha]"), "{cfg}");
+    assert!(!cfg.contains("[model_providers.custom]"), "{cfg}");
 }
 
 #[test]
@@ -2671,6 +2781,31 @@ fn provider_add_form_codex_model_catalog_saves_normalized_models_and_syncs_prima
 }
 
 #[test]
+fn codex_config_preview_builder_matches_save_when_enabled_catalog_is_empty() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.id.set("custom");
+    form.name.set("Custom");
+    form.codex_base_url.set("https://api.example.com/v1");
+    form.codex_model.set("fallback-model");
+    form.codex_local_routing_enabled = true;
+    form.codex_model_catalog = vec![CodexModelCatalogRow {
+        model: "   ".to_string(),
+        display_name: "Ignored".to_string(),
+        context_window: "128k".to_string(),
+    }];
+
+    let preview_config = form.effective_codex_config_text();
+    let saved = form.to_provider_json_value();
+    let saved_config = saved["settingsConfig"]["config"]
+        .as_str()
+        .expect("Codex config should be serialized");
+
+    assert_eq!(preview_config, saved_config);
+    assert!(saved_config.contains("model = \"fallback-model\""));
+    assert!(saved["settingsConfig"].get("modelCatalog").is_none());
+}
+
+#[test]
 fn provider_add_form_codex_openai_official_hides_provider_specific_fields() {
     let mut form = ProviderAddFormState::new(AppType::Codex);
     let existing_ids = Vec::<String>::new();
@@ -2931,8 +3066,11 @@ fn mcp_add_form_builds_server_and_apps() {
     form.id.set("m1");
     form.name.set("Server One");
     form.command.set("npx");
-    form.args
-        .set("-y @modelcontextprotocol/server-filesystem /tmp");
+    form.set_args_values(vec![
+        "-y".to_string(),
+        "@modelcontextprotocol/server-filesystem".to_string(),
+        "/tmp".to_string(),
+    ]);
     form.apps.claude = true;
     form.apps.codex = false;
     form.apps.gemini = true;
@@ -2949,6 +3087,207 @@ fn mcp_add_form_builds_server_and_apps() {
     assert_eq!(server["apps"]["gemini"], true);
     assert_eq!(server["apps"]["opencode"], false);
     assert_eq!(server["apps"]["hermes"], true);
+}
+
+#[test]
+fn mcp_form_round_trips_quoted_whitespace_and_empty_arguments_losslessly() {
+    let expected = vec![
+        "--header".to_string(),
+        "Authorization: Bearer abc".to_string(),
+        "/path with spaces".to_string(),
+        String::new(),
+    ];
+    let server = crate::app_config::McpServer {
+        id: "lossless".to_string(),
+        name: "Lossless".to_string(),
+        server: json!({
+            "type": "stdio",
+            "command": "node",
+            "args": expected,
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+
+    let mut form = McpAddFormState::from_server(&server);
+    assert!(!form.args_text_is_materialized_for_test());
+    let serialized = form.to_mcp_server_json_value();
+
+    assert_eq!(serialized["server"]["args"], json!(expected));
+    assert!(form.begin_text_edit(McpAddField::Args));
+    assert_eq!(shlex::split(&form.args.value), Some(expected));
+    assert!(!form.has_unsaved_changes());
+}
+
+#[test]
+fn mcp_form_only_replaces_canonical_arguments_after_valid_explicit_edit() {
+    let mut form = McpAddFormState::new();
+    form.set_args_values(vec!["original".to_string()]);
+    form.rebase_initial_snapshot();
+
+    form.args
+        .set("--header 'Authorization: Bearer abc' '/path with spaces' ''");
+    assert!(form.commit_args_input());
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["args"],
+        json!([
+            "--header",
+            "Authorization: Bearer abc",
+            "/path with spaces",
+            ""
+        ])
+    );
+
+    form.args.set("'unterminated");
+    assert!(!form.commit_args_input());
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["args"][0],
+        "--header"
+    );
+    assert!(form.has_unsaved_changes());
+}
+
+#[test]
+fn mcp_form_args_budget_rejects_oversized_valid_and_malformed_input() {
+    const OVERSIZED_BYTES: usize = 2 * 1024 * 1024;
+
+    for input in [
+        "x".repeat(OVERSIZED_BYTES),
+        format!("'{}", "x".repeat(OVERSIZED_BYTES)),
+    ] {
+        let mut form = McpAddFormState::new();
+        form.set_args_values(vec!["previous".to_string()]);
+        form.args.set(input);
+
+        assert!(!form.args_input_is_valid());
+        assert!(!form.commit_args_input());
+        assert_eq!(
+            form.to_mcp_server_json_value()["server"]["args"],
+            json!(["previous"])
+        );
+    }
+}
+
+#[test]
+fn mcp_form_args_budget_rejects_more_than_256_parsed_args() {
+    let mut form = McpAddFormState::new();
+    form.set_args_values(vec!["previous".to_string()]);
+    form.args.set(
+        std::iter::repeat_n("token", 257)
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+
+    assert!(!form.args_input_is_valid());
+    assert!(!form.commit_args_input());
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["args"],
+        json!(["previous"])
+    );
+}
+
+#[test]
+fn mcp_form_args_budget_accepts_exact_byte_and_item_limits() {
+    const MAX_BYTES: usize = 64 * 1024;
+    const MAX_ITEMS: usize = 256;
+
+    let prefix = "x ".repeat(MAX_ITEMS - 1);
+    let tail_len = MAX_BYTES - prefix.len();
+    let input = format!("{prefix}{}", "y".repeat(tail_len));
+    assert_eq!(input.len(), MAX_BYTES);
+
+    let mut form = McpAddFormState::new();
+    form.args.set(input);
+
+    assert!(form.args_input_is_valid());
+    assert!(form.commit_args_input());
+    let saved = form.to_mcp_server_json_value();
+    let args = saved["server"]["args"]
+        .as_array()
+        .expect("stdio args should remain an array");
+    assert_eq!(args.len(), MAX_ITEMS);
+    assert_eq!(
+        args.last().and_then(Value::as_str).map(str::len),
+        Some(tail_len)
+    );
+}
+
+#[test]
+fn mcp_form_preserves_imported_nul_arguments_without_offering_lossy_text_editing() {
+    let mut form = McpAddFormState::new();
+    form.set_args_values(vec!["contains\0nul".to_string()]);
+
+    assert!(!form.can_edit_field(McpAddField::Args));
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["args"],
+        json!(["contains\0nul"])
+    );
+}
+
+#[test]
+fn mcp_form_keeps_large_imported_arguments_lazy_and_lossless() {
+    let expected = (0..10_000)
+        .map(|index| format!("argument-{index}"))
+        .collect::<Vec<_>>();
+    let server = crate::app_config::McpServer {
+        id: "large-argv".to_string(),
+        name: "Large argv".to_string(),
+        server: json!({
+            "type": "stdio",
+            "command": "node",
+            "args": expected,
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+
+    let shared = std::sync::Arc::new(server);
+    let form = McpAddFormState::from_shared_server(std::sync::Arc::clone(&shared));
+
+    assert!(form.shares_source_for_test(&shared));
+    assert!(!form.args_text_is_materialized_for_test());
+    assert!(!form.can_edit_field(McpAddField::Args));
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["args"],
+        json!(expected)
+    );
+    assert!(!form.has_unsaved_changes());
+}
+
+#[test]
+fn mcp_imported_argument_preview_only_inspects_the_bounded_slot_prefix() {
+    let mut args = (0..10_000).map(|index| json!(index)).collect::<Vec<_>>();
+    args.push(json!("late-string-must-not-be-scanned"));
+    let server = crate::app_config::McpServer {
+        id: "malformed-argv".to_string(),
+        name: "Malformed argv".to_string(),
+        server: json!({
+            "type": "stdio",
+            "command": "node",
+            "args": args.clone(),
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+
+    let form = McpAddFormState::from_server(&server);
+    let (preview, hidden) = form.args_preview(8);
+
+    assert!(preview.is_empty());
+    assert_eq!(hidden, 10_001);
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["args"],
+        json!(args)
+    );
 }
 
 #[test]

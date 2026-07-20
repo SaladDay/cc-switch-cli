@@ -1,5 +1,11 @@
 use super::*;
 
+/// Exact soft wrapping is useful for ordinary configuration and prompt lines,
+/// but it must not turn a pathological single physical line into an O(n)
+/// render loop. Larger lines keep their complete text and edit semantics while
+/// the TUI shows a bounded horizontal window around the cursor.
+const EDITOR_EXACT_WRAP_MAX_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorKind {
     Plain,
@@ -52,7 +58,6 @@ pub enum EditorSubmit {
     ConfigOpenClawEnv,
     ConfigOpenClawTools,
     ConfigOpenClawAgents,
-    ConfigWebDavSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +73,12 @@ pub struct EditorState {
     pub mode: EditorMode,
     pub lines: Vec<String>,
     pub scroll: usize,
+    /// Wrapped-line offset within `scroll`. A physical line can occupy many
+    /// terminal rows, so a row-only scroll position cannot keep the cursor
+    /// visible on long unbroken input.
+    pub scroll_subline: usize,
     pub cursor_row: usize,
+    /// UTF-8 byte offset within `cursor_row`.
     pub cursor_col: usize,
     pub initial_text: String,
 }
@@ -96,6 +106,7 @@ impl EditorState {
             mode: EditorMode::Edit,
             lines,
             scroll: 0,
+            scroll_subline: 0,
             cursor_row: 0,
             cursor_col: 0,
             initial_text,
@@ -119,18 +130,88 @@ impl EditorState {
 
         self.lines = lines;
         self.cursor_row = self.cursor_row.min(self.lines.len().saturating_sub(1));
-        self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+        self.cursor_col = self.clamped_cursor_byte(self.cursor_row, self.cursor_col);
         self.scroll = self.scroll.min(self.cursor_row);
+        self.scroll_subline = 0;
     }
 
-    pub(crate) fn line_len_chars(&self, row: usize) -> usize {
-        self.lines.get(row).map(|s| s.chars().count()).unwrap_or(0)
+    fn line_len_bytes(&self, row: usize) -> usize {
+        self.lines.get(row).map(String::len).unwrap_or(0)
+    }
+
+    fn clamped_cursor_byte(&self, row: usize, cursor: usize) -> usize {
+        self.lines
+            .get(row)
+            .map_or(0, |line| TextInput::clamp_byte_boundary(line, cursor))
+    }
+
+    fn cursor_byte_for_vertical_move(&self, target_row: usize) -> usize {
+        let Some(source) = self.lines.get(self.cursor_row) else {
+            return 0;
+        };
+        let Some(target) = self.lines.get(target_row) else {
+            return 0;
+        };
+        let source_cursor = TextInput::clamp_byte_boundary(source, self.cursor_col);
+
+        if !Self::uses_bounded_line_window(source) && !Self::uses_bounded_line_window(target) {
+            let char_column = source[..source_cursor].chars().count();
+            return target
+                .char_indices()
+                .nth(char_column)
+                .map(|(byte, _)| byte)
+                .unwrap_or(target.len());
+        }
+
+        // Exact character-column mapping would defeat the giant-line safety
+        // budget. A byte-clamped column is deterministic and keeps navigation
+        // bounded for those exceptional lines.
+        TextInput::clamp_byte_boundary(target, source_cursor)
+    }
+
+    fn uses_bounded_line_window(line: &str) -> bool {
+        line.len() > EDITOR_EXACT_WRAP_MAX_BYTES
+    }
+
+    fn bounded_line_window(line: &str, cursor: usize, width: u16) -> (String, u16) {
+        let width = width as usize;
+        if width == 0 {
+            return (String::new(), 0);
+        }
+
+        let cursor = TextInput::clamp_byte_boundary(line, cursor);
+        let mut start = cursor;
+        let mut before_width = 0usize;
+        for (byte, ch) in line[..cursor].char_indices().rev() {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            if before_width.saturating_add(char_width) > width.saturating_sub(1) {
+                break;
+            }
+            start = byte;
+            before_width = before_width.saturating_add(char_width);
+        }
+
+        let mut visible = String::new();
+        let mut visible_width = 0usize;
+        for ch in line[start..].chars().take(width.saturating_add(16)) {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            if visible_width.saturating_add(char_width) > width {
+                break;
+            }
+            visible.push(ch);
+            visible_width = visible_width.saturating_add(char_width);
+        }
+
+        (visible, before_width.min(width.saturating_sub(1)) as u16)
     }
 
     pub(crate) fn wrap_line_segments(line: &str, width: u16) -> Vec<String> {
         let width = width as usize;
         if width == 0 {
             return vec![String::new()];
+        }
+        if Self::uses_bounded_line_window(line) {
+            return vec![Self::bounded_line_window(line, 0, width as u16).0];
         }
 
         let mut segments = Vec::new();
@@ -155,7 +236,28 @@ impl EditorState {
     }
 
     pub(crate) fn wrapped_line_height(line: &str, width: u16) -> usize {
-        Self::wrap_line_segments(line, width).len().max(1)
+        let width = width as usize;
+        if width == 0 || line.is_empty() {
+            return 1;
+        }
+        if Self::uses_bounded_line_window(line) {
+            return 1;
+        }
+        if line.is_ascii() {
+            return line.len().div_ceil(width).max(1);
+        }
+
+        let mut height = 1usize;
+        let mut current_width = 0usize;
+        for ch in line.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            if current_width.saturating_add(ch_width) > width && current_width > 0 {
+                height = height.saturating_add(1);
+                current_width = 0;
+            }
+            current_width = current_width.saturating_add(ch_width);
+        }
+        height
     }
 
     pub(crate) fn wrapped_cursor_subline_and_x(
@@ -168,49 +270,236 @@ impl EditorState {
             return (0, 0);
         }
 
+        let cursor_col = TextInput::clamp_byte_boundary(line, cursor_col);
+        if Self::uses_bounded_line_window(line) {
+            return (
+                0,
+                Self::bounded_line_window(line, cursor_col, width as u16).1,
+            );
+        }
+
+        if line.is_ascii() {
+            let cursor_col = cursor_col.min(line.len());
+            if cursor_col == 0 {
+                return (0, 0);
+            }
+            let subline = cursor_col.saturating_sub(1) / width;
+            let current_width = ((cursor_col.saturating_sub(1) % width) + 1).min(width);
+            return (subline, current_width.min(width.saturating_sub(1)) as u16);
+        }
+
         let mut subline = 0usize;
         let mut current_width = 0usize;
-        let mut col = 0usize;
-
-        for ch in line.chars() {
-            if col >= cursor_col {
-                break;
-            }
-
+        for ch in line[..cursor_col].chars() {
             let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
             if current_width.saturating_add(ch_width) > width && current_width > 0 {
                 subline = subline.saturating_add(1);
                 current_width = 0;
             }
-
             current_width = current_width.saturating_add(ch_width);
-            col = col.saturating_add(1);
         }
 
         let x = current_width.min(width.saturating_sub(1)) as u16;
         (subline, x)
     }
 
+    #[cfg(test)]
     pub(crate) fn cursor_visual_offset_from_scroll(&self, width: u16) -> (usize, u16) {
+        self.cursor_visual_offset_from_origin(width, self.scroll, self.scroll_subline)
+    }
+
+    pub(crate) fn cursor_visual_offset_from_origin(
+        &self,
+        width: u16,
+        scroll: usize,
+        scroll_subline: usize,
+    ) -> (usize, u16) {
         if self.lines.is_empty() {
             return (0, 0);
         }
 
         let cursor_row = self.cursor_row.min(self.lines.len().saturating_sub(1));
-        let scroll = self
-            .scroll
+        let scroll = scroll
             .min(self.lines.len().saturating_sub(1))
             .min(cursor_row);
 
+        let first_line_height = Self::wrapped_line_height(&self.lines[scroll], width);
+        let scroll_subline = scroll_subline.min(first_line_height.saturating_sub(1));
+
         let mut y = 0usize;
         for row in scroll..cursor_row {
-            y = y.saturating_add(Self::wrapped_line_height(&self.lines[row], width));
+            let line_height = Self::wrapped_line_height(&self.lines[row], width);
+            y = y.saturating_add(if row == scroll {
+                line_height.saturating_sub(scroll_subline)
+            } else {
+                line_height
+            });
         }
 
-        let cursor_col = self.cursor_col.min(self.line_len_chars(cursor_row));
+        let cursor_col = self.clamped_cursor_byte(cursor_row, self.cursor_col);
         let (subline, x) =
             Self::wrapped_cursor_subline_and_x(&self.lines[cursor_row], width, cursor_col);
-        (y.saturating_add(subline), x)
+        if cursor_row == scroll {
+            (subline.saturating_sub(scroll_subline), x)
+        } else {
+            (y.saturating_add(subline), x)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn visible_wrapped_lines(&self, width: u16, height: usize) -> Vec<String> {
+        self.visible_wrapped_lines_from(width, height, self.scroll, self.scroll_subline)
+    }
+
+    pub(crate) fn visible_wrapped_lines_from(
+        &self,
+        width: u16,
+        height: usize,
+        scroll: usize,
+        scroll_subline: usize,
+    ) -> Vec<String> {
+        if self.lines.is_empty() || height == 0 {
+            return Vec::new();
+        }
+
+        let start = scroll.min(self.lines.len().saturating_sub(1));
+        let mut shown = Vec::with_capacity(height);
+        for (row, line) in self.lines.iter().enumerate().skip(start) {
+            let skip = if row == start {
+                scroll_subline.min(Self::wrapped_line_height(line, width).saturating_sub(1))
+            } else {
+                0
+            };
+            let cursor = (row == self.cursor_row).then_some(self.cursor_col);
+            Self::push_visible_line_segments(line, width, skip, height, cursor, &mut shown);
+            if shown.len() >= height {
+                return shown;
+            }
+        }
+        shown
+    }
+
+    fn push_visible_line_segments(
+        line: &str,
+        width: u16,
+        skip: usize,
+        max_lines: usize,
+        cursor: Option<usize>,
+        out: &mut Vec<String>,
+    ) {
+        if out.len() >= max_lines {
+            return;
+        }
+        let width = width as usize;
+        if width == 0 {
+            if skip == 0 {
+                out.push(String::new());
+            }
+            return;
+        }
+
+        if Self::uses_bounded_line_window(line) {
+            if skip == 0 {
+                out.push(Self::bounded_line_window(line, cursor.unwrap_or(0), width as u16).0);
+            }
+            return;
+        }
+
+        if line.is_ascii() {
+            if line.is_empty() {
+                if skip == 0 {
+                    out.push(String::new());
+                }
+                return;
+            }
+            let start = skip.saturating_mul(width).min(line.len());
+            for chunk in line.as_bytes()[start..].chunks(width) {
+                if out.len() >= max_lines {
+                    break;
+                }
+                out.push(String::from_utf8_lossy(chunk).into_owned());
+            }
+            return;
+        }
+
+        let mut segment = 0usize;
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for ch in line.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            if current_width.saturating_add(ch_width) > width && current_width > 0 {
+                if segment >= skip {
+                    out.push(std::mem::take(&mut current));
+                    if out.len() >= max_lines {
+                        return;
+                    }
+                } else {
+                    current.clear();
+                }
+                segment = segment.saturating_add(1);
+                current_width = 0;
+            }
+            if segment >= skip {
+                current.push(ch);
+            }
+            current_width = current_width.saturating_add(ch_width);
+        }
+        if segment >= skip && out.len() < max_lines {
+            out.push(current);
+        }
+    }
+
+    pub(crate) fn viewport_origin(&self, viewport: Size) -> (usize, usize) {
+        if self.lines.is_empty() {
+            return (0, 0);
+        }
+
+        let cursor_row = self.cursor_row.min(self.lines.len() - 1);
+        let cursor_col = self.clamped_cursor_byte(cursor_row, self.cursor_col);
+        let mut scroll = self.scroll.min(self.lines.len() - 1).min(cursor_row);
+        let mut scroll_subline = if scroll == self.scroll {
+            self.scroll_subline
+        } else {
+            0
+        };
+        let height = viewport.height as usize;
+        if height == 0 {
+            return (scroll, scroll_subline);
+        }
+
+        // Every physical line occupies at least one terminal row. If the
+        // stored origin is farther than one viewport behind the cursor, it
+        // cannot possibly still be visible. Jump close to the cursor before
+        // measuring wrapped heights so a stale origin (for example after a
+        // programmatic cursor move in a very large prompt) never turns a
+        // passive redraw into a scan of the complete document.
+        if cursor_row.saturating_sub(scroll) >= height {
+            scroll = cursor_row.saturating_sub(height.saturating_sub(1));
+            scroll_subline = 0;
+        }
+
+        let width = viewport.width.max(1);
+        let first_line_height = Self::wrapped_line_height(&self.lines[scroll], width);
+        scroll_subline = scroll_subline.min(first_line_height.saturating_sub(1));
+        let (cursor_subline, _) =
+            Self::wrapped_cursor_subline_and_x(&self.lines[cursor_row], width, cursor_col);
+        if cursor_row == scroll && cursor_subline < scroll_subline {
+            scroll_subline = cursor_subline;
+        }
+
+        let (mut cursor_y, _) =
+            self.cursor_visual_offset_from_origin(width, scroll, scroll_subline);
+        while cursor_y >= height && scroll < cursor_row {
+            let removed = Self::wrapped_line_height(&self.lines[scroll], width)
+                .saturating_sub(scroll_subline);
+            cursor_y = cursor_y.saturating_sub(removed);
+            scroll = scroll.saturating_add(1);
+            scroll_subline = 0;
+        }
+        if cursor_y >= height && scroll == cursor_row {
+            scroll_subline = cursor_subline.saturating_sub(height.saturating_sub(1));
+        }
+        (scroll, scroll_subline)
     }
 
     pub(crate) fn ensure_cursor_visible(&mut self, viewport: Size) {
@@ -218,38 +507,9 @@ impl EditorState {
             self.lines.push(String::new());
         }
         self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
-        self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+        self.cursor_col = self.clamped_cursor_byte(self.cursor_row, self.cursor_col);
 
-        if !self.lines.is_empty() {
-            self.scroll = self.scroll.min(self.lines.len() - 1);
-        } else {
-            self.scroll = 0;
-        }
-
-        if self.cursor_row < self.scroll {
-            self.scroll = self.cursor_row;
-        }
-
-        let height = viewport.height as usize;
-        if height == 0 {
-            return;
-        }
-
-        let width = viewport.width.max(1);
-
-        let (mut cursor_y, _) = self.cursor_visual_offset_from_scroll(width);
-        while cursor_y >= height && self.scroll < self.cursor_row {
-            let removed = Self::wrapped_line_height(&self.lines[self.scroll], width);
-            cursor_y = cursor_y.saturating_sub(removed);
-            self.scroll = self.scroll.saturating_add(1);
-        }
-    }
-
-    pub(crate) fn byte_index(line: &str, col: usize) -> usize {
-        line.char_indices()
-            .nth(col)
-            .map(|(i, _)| i)
-            .unwrap_or(line.len())
+        (self.scroll, self.scroll_subline) = self.viewport_origin(viewport);
     }
 
     fn apply_current_line_command(&mut self, command: TextEditCommand) -> bool {
@@ -259,7 +519,7 @@ impl EditorState {
         self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
 
         let mut input = TextInput {
-            value: self.lines[self.cursor_row].clone(),
+            value: std::mem::take(&mut self.lines[self.cursor_row]),
             cursor: self.cursor_col,
         };
         let changed = input.apply_command(command, TextInputPolicy::default());
@@ -295,31 +555,38 @@ impl EditorState {
         let jump_rows = viewport.height as usize;
         match key.code {
             KeyCode::Up => {
-                self.cursor_row = self.cursor_row.saturating_sub(1);
-                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                let target = self.cursor_row.saturating_sub(1);
+                self.cursor_col = self.cursor_byte_for_vertical_move(target);
+                self.cursor_row = target;
                 self.ensure_cursor_visible(viewport);
                 true
             }
             KeyCode::Down => {
+                let mut target = self.cursor_row;
                 if !self.lines.is_empty() {
-                    self.cursor_row = (self.cursor_row + 1).min(self.lines.len() - 1);
+                    target = (self.cursor_row + 1).min(self.lines.len() - 1);
                 }
-                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                self.cursor_col = self.cursor_byte_for_vertical_move(target);
+                self.cursor_row = target;
                 self.ensure_cursor_visible(viewport);
                 true
             }
             KeyCode::PageUp => {
                 self.scroll = self.scroll.saturating_sub(jump_rows);
-                self.cursor_row = self.cursor_row.saturating_sub(jump_rows);
-                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                self.scroll_subline = 0;
+                let target = self.cursor_row.saturating_sub(jump_rows);
+                self.cursor_col = self.cursor_byte_for_vertical_move(target);
+                self.cursor_row = target;
                 self.ensure_cursor_visible(viewport);
                 true
             }
             KeyCode::PageDown => {
                 if !self.lines.is_empty() {
                     self.scroll = (self.scroll + jump_rows).min(self.lines.len() - 1);
-                    self.cursor_row = (self.cursor_row + jump_rows).min(self.lines.len() - 1);
-                    self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                    self.scroll_subline = 0;
+                    let target = (self.cursor_row + jump_rows).min(self.lines.len() - 1);
+                    self.cursor_col = self.cursor_byte_for_vertical_move(target);
+                    self.cursor_row = target;
                 }
                 self.ensure_cursor_visible(viewport);
                 true
@@ -345,13 +612,14 @@ impl EditorState {
         self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
 
         if self.cursor_col > 0 {
-            self.cursor_col -= 1;
+            self.cursor_col =
+                TextInput::previous_char_boundary(&self.lines[self.cursor_row], self.cursor_col);
             return true;
         }
 
         if self.cursor_row > 0 {
             self.cursor_row -= 1;
-            self.cursor_col = self.line_len_chars(self.cursor_row);
+            self.cursor_col = self.line_len_bytes(self.cursor_row);
             return true;
         }
 
@@ -364,9 +632,10 @@ impl EditorState {
         }
         self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
 
-        let line_len = self.line_len_chars(self.cursor_row);
+        let line_len = self.line_len_bytes(self.cursor_row);
         if self.cursor_col < line_len {
-            self.cursor_col += 1;
+            self.cursor_col =
+                TextInput::next_char_boundary(&self.lines[self.cursor_row], self.cursor_col);
             return true;
         }
 
@@ -399,7 +668,7 @@ impl EditorState {
             }
 
             self.cursor_row -= 1;
-            self.cursor_col = self.line_len_chars(self.cursor_row);
+            self.cursor_col = self.line_len_bytes(self.cursor_row);
         }
 
         (self.cursor_row, self.cursor_col) != before
@@ -413,7 +682,7 @@ impl EditorState {
         let before = (self.cursor_row, self.cursor_col);
 
         loop {
-            let line_len = self.line_len_chars(self.cursor_row);
+            let line_len = self.line_len_bytes(self.cursor_row);
             if self.cursor_col < line_len {
                 let line = &self.lines[self.cursor_row];
                 self.cursor_col =
@@ -438,9 +707,9 @@ impl EditorState {
         }
         self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
         let line = &mut self.lines[self.cursor_row];
-        let idx = Self::byte_index(line, self.cursor_col);
-        line.insert(idx, c);
-        self.cursor_col += 1;
+        self.cursor_col = TextInput::clamp_byte_boundary(line, self.cursor_col);
+        line.insert(self.cursor_col, c);
+        self.cursor_col = self.cursor_col.saturating_add(c.len_utf8());
     }
 
     pub(crate) fn insert_str(&mut self, s: &str) {
@@ -455,8 +724,8 @@ impl EditorState {
         }
         self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
         let line = &mut self.lines[self.cursor_row];
-        let idx = Self::byte_index(line, self.cursor_col);
-        let rest = line.split_off(idx);
+        self.cursor_col = TextInput::clamp_byte_boundary(line, self.cursor_col);
+        let rest = line.split_off(self.cursor_col);
         let next_row = self.cursor_row + 1;
         self.lines.insert(next_row, rest);
         self.cursor_row = next_row;
@@ -471,11 +740,11 @@ impl EditorState {
 
         if self.cursor_col > 0 {
             let line = &mut self.lines[self.cursor_row];
-            let start = Self::byte_index(line, self.cursor_col.saturating_sub(1));
-            let end = Self::byte_index(line, self.cursor_col);
+            let end = TextInput::clamp_byte_boundary(line, self.cursor_col);
+            let start = TextInput::previous_char_boundary(line, end);
             if start < end && end <= line.len() {
                 line.replace_range(start..end, "");
-                self.cursor_col -= 1;
+                self.cursor_col = start;
                 return true;
             }
             return false;
@@ -488,7 +757,7 @@ impl EditorState {
         let current = self.lines.remove(self.cursor_row);
         self.cursor_row -= 1;
         let prev = &mut self.lines[self.cursor_row];
-        self.cursor_col = prev.chars().count();
+        self.cursor_col = prev.len();
         prev.push_str(&current);
         true
     }
@@ -499,11 +768,11 @@ impl EditorState {
         }
         self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
 
-        let line_len = self.line_len_chars(self.cursor_row);
+        let line_len = self.line_len_bytes(self.cursor_row);
         if self.cursor_col < line_len {
             let line = &mut self.lines[self.cursor_row];
-            let start = Self::byte_index(line, self.cursor_col);
-            let end = Self::byte_index(line, self.cursor_col + 1);
+            let start = TextInput::clamp_byte_boundary(line, self.cursor_col);
+            let end = TextInput::next_char_boundary(line, start);
             if start < end && end <= line.len() {
                 line.replace_range(start..end, "");
                 return true;

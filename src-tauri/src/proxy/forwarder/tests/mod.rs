@@ -324,6 +324,38 @@ async fn spawn_delayed_body_upstream() -> (String, UpstreamHits, JoinHandle<()>)
     (format!("http://{address}"), hits, handle)
 }
 
+async fn handle_failing_body_upstream(State(hits): State<UpstreamHits>, uri: Uri) -> Response {
+    hits.count.fetch_add(1, Ordering::SeqCst);
+    hits.paths.lock().await.push(uri.path().to_string());
+
+    let stream = futures::stream::once(async {
+        Err::<bytes::Bytes, std::io::Error>(std::io::Error::other("first chunk failed"))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(stream))
+        .expect("build failing body response")
+}
+
+async fn spawn_failing_body_upstream() -> (String, UpstreamHits, JoinHandle<()>) {
+    let hits = UpstreamHits::default();
+    let app = Router::new()
+        .route("/*path", any(handle_failing_body_upstream))
+        .with_state(hits.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind failing body listener");
+    let address = listener
+        .local_addr()
+        .expect("failing body listener address");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (format!("http://{address}"), hits, handle)
+}
+
 async fn closed_base_url() -> String {
     "http://127.0.0.1:9".to_string()
 }
@@ -338,6 +370,22 @@ fn claude_provider(id: &str, base_url: &str, api_format: Option<&str>) -> Provid
     }
 
     Provider::with_id(id.to_string(), format!("Provider {id}"), settings, None)
+}
+
+fn codex_provider(id: &str, base_url: &str, official: bool) -> Provider {
+    let mut provider = Provider::with_id(
+        id.to_string(),
+        format!("Provider {id}"),
+        json!({
+            "base_url": base_url,
+            "apiKey": format!("key-{id}"),
+        }),
+        None,
+    );
+    if official {
+        provider.category = Some("official".to_string());
+    }
+    provider
 }
 
 fn bedrock_claude_provider(id: &str, base_url: &str) -> Provider {

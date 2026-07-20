@@ -338,7 +338,22 @@ async fn streaming_success_syncs_failover_state_after_body_drains() {
     .await;
 
     let status = state.snapshot_status().await;
-    assert_eq!(status.current_provider_id, None);
+    assert_eq!(
+        status.current_provider_id.as_deref(),
+        Some("claude-failover")
+    );
+    assert_eq!(status.failover_count, 0);
+    assert_eq!(
+        db.get_current_provider("claude")
+            .expect("read current provider before drain")
+            .as_deref(),
+        Some("claude-current")
+    );
+    assert!(db
+        .get_failover_live_snapshot("claude", "claude-failover")
+        .await
+        .expect("read failover snapshot before drain")
+        .is_none());
 
     let _ = to_bytes(response.into_body(), usize::MAX)
         .await
@@ -350,6 +365,7 @@ async fn streaming_success_syncs_failover_state_after_body_drains() {
         status.current_provider_id.as_deref(),
         Some("claude-failover")
     );
+    assert_eq!(status.failover_count, 1);
     assert_eq!(
         db.get_current_provider("claude")
             .expect("read current provider")
@@ -387,5 +403,87 @@ async fn streaming_success_syncs_failover_state_after_body_drains() {
             .get("base_url")
             .and_then(serde_json::Value::as_str),
         Some("https://failover.example")
+    );
+}
+
+#[tokio::test]
+#[serial(home_settings)]
+async fn interrupted_stream_exposes_target_without_persisting_failover() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    let db = Arc::new(Database::memory().expect("memory db"));
+    let current = test_provider_with_settings(
+        "claude-current",
+        "Claude Current",
+        json!({"apiKey": "current-key", "base_url": "https://current.example"}),
+    );
+    let failover = test_provider_with_settings(
+        "claude-failover",
+        "Claude Failover",
+        json!({"apiKey": "failover-key", "base_url": "https://failover.example"}),
+    );
+
+    db.save_provider("claude", &current)
+        .expect("save current provider");
+    db.save_provider("claude", &failover)
+        .expect("save failover provider");
+    db.set_current_provider("claude", &current.id)
+        .expect("set current provider");
+    crate::settings::set_current_provider(&AppType::Claude, Some(&current.id))
+        .expect("set local current provider");
+
+    let state = test_state_with_db(db.clone());
+    state.record_request_start().await;
+    let stream = async_stream::stream! {
+        yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"partial"));
+        yield Err::<Bytes, std::io::Error>(std::io::Error::other("stream broke"));
+    };
+    let response = PreparedResponse {
+        response: Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from_stream(stream))
+            .expect("response"),
+        stream_completion: None,
+        estimated_output_tokens: 0,
+        upstream_error_summary: None,
+        body_bytes: None,
+    };
+
+    let response = ResponseHandler::finish_streaming(
+        &state,
+        Ok(response),
+        reqwest::StatusCode::OK,
+        Some(SuccessSyncInfo {
+            app_type: AppType::Claude,
+            provider: failover,
+            current_provider_id_at_start: current.id.clone(),
+            is_model_routed: false,
+            estimated_input_tokens: 0,
+        }),
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        state.snapshot_status().await.current_provider_id.as_deref(),
+        Some("claude-failover")
+    );
+
+    let _ = to_bytes(response.into_body(), usize::MAX).await;
+    settle_tasks().await;
+
+    let status = state.snapshot_status().await;
+    assert_eq!(status.failover_count, 0);
+    assert_eq!(status.success_requests, 0);
+    assert_eq!(status.failed_requests, 1);
+    assert_eq!(
+        db.get_current_provider("claude")
+            .expect("read current provider")
+            .as_deref(),
+        Some("claude-current")
+    );
+    assert_eq!(
+        crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+        Some("claude-current")
     );
 }

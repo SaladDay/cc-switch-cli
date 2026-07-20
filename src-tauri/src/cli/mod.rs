@@ -1363,6 +1363,76 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_s3_show_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "config", "s3", "show"]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
+                super::commands::config_s3::S3Command::Show,
+            ))) => {}
+            _ => panic!("expected config s3 show command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_s3_set_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "config",
+            "s3",
+            "set",
+            "--region",
+            "auto",
+            "--bucket",
+            "demo",
+            "--access-key-id",
+            "AKID",
+            "--secret-access-key",
+            "SECRET",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--enable",
+        ]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
+                super::commands::config_s3::S3Command::Set {
+                    region,
+                    bucket,
+                    access_key_id,
+                    secret_access_key,
+                    endpoint,
+                    enable,
+                    ..
+                },
+            ))) => {
+                assert_eq!(region.as_deref(), Some("auto"));
+                assert_eq!(bucket.as_deref(), Some("demo"));
+                assert_eq!(access_key_id.as_deref(), Some("AKID"));
+                assert_eq!(secret_access_key.as_deref(), Some("SECRET"));
+                assert_eq!(
+                    endpoint.as_deref(),
+                    Some("https://example.r2.cloudflarestorage.com")
+                );
+                assert!(enable);
+            }
+            _ => panic!("expected config s3 set command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_s3_check_connection_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "config", "s3", "check-connection"]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
+                super::commands::config_s3::S3Command::CheckConnection,
+            ))) => {}
+            _ => panic!("expected config s3 check-connection command"),
+        }
+    }
+
+    #[test]
     fn parses_config_openclaw_env_put_subcommand() {
         let cli = Cli::parse_from([
             "cc-switch",

@@ -15,6 +15,7 @@ mod tests;
 use self::error_summary::{summarize_upstream_body_bytes, summarize_upstream_json_value};
 use super::{
     error::ProxyError,
+    forwarder::LiveResponse,
     metrics::estimate_tokens_from_bytes,
     providers::{
         codex_chat_history::{record_responses_sse_stream, CodexChatHistoryStore},
@@ -101,7 +102,7 @@ impl StreamCompletion {
     }
 }
 
-pub fn is_sse_response(response: &reqwest::Response) -> bool {
+pub fn is_sse_response(response: &LiveResponse) -> bool {
     is_sse_headers(response.headers())
 }
 
@@ -176,7 +177,7 @@ pub(crate) fn decode_buffered_response_body(
 }
 
 pub async fn build_passthrough_response(
-    response: reqwest::Response,
+    response: LiveResponse,
     first_byte_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
 ) -> Result<PreparedResponse, ProxyError> {
@@ -227,7 +228,7 @@ pub async fn build_passthrough_response(
 }
 
 pub async fn build_json_response<F>(
-    response: reqwest::Response,
+    response: LiveResponse,
     first_byte_timeout: Option<Duration>,
     transform: F,
 ) -> Result<PreparedResponse, ProxyError>
@@ -240,7 +241,7 @@ where
 }
 
 pub async fn build_codex_chat_error_response(
-    response: reqwest::Response,
+    response: LiveResponse,
     first_byte_timeout: Option<Duration>,
     history: Arc<CodexChatHistoryStore>,
 ) -> Result<PreparedResponse, ProxyError> {
@@ -250,7 +251,7 @@ pub async fn build_codex_chat_error_response(
 }
 
 pub async fn build_codex_chat_response_with_context(
-    response: reqwest::Response,
+    response: LiveResponse,
     timeout: Option<Duration>,
     history: Arc<CodexChatHistoryStore>,
     tool_context: transform_codex_chat::CodexToolContext,
@@ -307,7 +308,7 @@ where
     reason = "stream response setup needs timeout, format, and shadow context"
 )]
 pub fn build_anthropic_stream_response(
-    response: reqwest::Response,
+    response: LiveResponse,
     first_byte_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
     api_format: &str,
@@ -357,7 +358,7 @@ pub fn build_anthropic_stream_response(
 }
 
 pub fn build_codex_chat_stream_response_with_context(
-    response: reqwest::Response,
+    response: LiveResponse,
     first_byte_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
     history: Arc<CodexChatHistoryStore>,
@@ -524,26 +525,31 @@ fn with_stream_timeouts(
 }
 
 async fn read_buffered_body(
-    response: reqwest::Response,
+    response: LiveResponse,
     timeout_duration: Option<Duration>,
 ) -> Result<Bytes, ProxyError> {
-    match timeout_duration {
-        Some(timeout) => match tokio::time::timeout(timeout, response.bytes()).await {
-            Ok(result) => result.map_err(|error| {
+    let read = async move {
+        let mut stream = response.bytes_stream();
+        let mut body = bytes::BytesMut::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
                 ProxyError::RequestFailed(format!("read response body failed: {error}"))
-            }),
-            Err(_) => Err(ProxyError::Timeout(
-                StreamTimeoutPhase::FirstByte.error_message(timeout),
-            )),
-        },
-        None => response.bytes().await.map_err(|error| {
-            ProxyError::RequestFailed(format!("read response body failed: {error}"))
-        }),
+            })?;
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body.freeze())
+    };
+
+    match timeout_duration {
+        Some(timeout) => tokio::time::timeout(timeout, read).await.map_err(|_| {
+            ProxyError::Timeout(StreamTimeoutPhase::FirstByte.error_message(timeout))
+        })?,
+        None => read.await,
     }
 }
 
 async fn read_decoded_buffered_response(
-    response: reqwest::Response,
+    response: LiveResponse,
     timeout_duration: Option<Duration>,
 ) -> Result<(reqwest::header::HeaderMap, Bytes), ProxyError> {
     let mut headers = response.headers().clone();

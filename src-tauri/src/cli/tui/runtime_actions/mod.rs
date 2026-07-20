@@ -91,6 +91,12 @@ pub(crate) fn apply_preloaded_app_switch(
     next_data: UiData,
 ) {
     app.clear_openclaw_daily_memory_search_state();
+    if app.app_type != next {
+        // A log-detail snapshot is scoped to one application. Clearing the
+        // browsing source here prevents a matching request id in another app
+        // from rendering the previous app's row.
+        app.usage.invalidate_log_pages();
+    }
     app.app_type = next;
     let original_route = app.route.clone();
     app.route = normalize_route_for_app(&app.app_type, &app.route);
@@ -130,7 +136,7 @@ pub(super) struct RuntimeActionContext<'a> {
     skills_req_tx: Option<&'a mpsc::Sender<SkillsReq>>,
     proxy_req_tx: Option<&'a mpsc::Sender<ProxyReq>>,
     proxy_loading: &'a mut RequestTracker,
-    local_env_req_tx: Option<&'a mpsc::Sender<LocalEnvReq>>,
+    local_env_req_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<LocalEnvReq>>,
     session_req_tx: Option<&'a mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&'a mpsc::Sender<WebDavReq>>,
     webdav_loading: &'a mut RequestTracker,
@@ -138,6 +144,284 @@ pub(super) struct RuntimeActionContext<'a> {
     update_check: &'a mut RequestTracker,
     model_fetch_req_tx: Option<&'a mpsc::Sender<ModelFetchReq>>,
     managed_auth_req_tx: Option<&'a mpsc::Sender<ManagedAuthReq>>,
+}
+
+/// Start one materialized Sessions search and settle it immediately if its
+/// worker channel is absent or disconnected. The request id check prevents an
+/// old send failure from clearing a newer query's spinner.
+pub(super) fn queue_sessions_deep_search(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
+    query: String,
+) {
+    let view = app.sessions.desired_view_spec(Some(&query));
+    if app.sessions.materialization_failed_for_current_base(&view) {
+        return;
+    }
+    let Some(tx) = session_req_tx else {
+        let request_id = begin_sessions_deep_search(app, &view);
+        settle_sessions_deep_search_dispatch_error(
+            app,
+            request_id,
+            &view,
+            "sessions worker is not running".to_string(),
+        );
+        return;
+    };
+    let Some((base, base_reader)) = app.sessions.base_query_source() else {
+        app.sessions.deep_search_pending = Some((query, 0));
+        return;
+    };
+    let request_id = begin_sessions_deep_search(app, &view);
+    if let Err(error) = tx.send(SessionReq::Search {
+        request_id,
+        scope_epoch: app.sessions.scope_epoch,
+        view: view.clone(),
+        base,
+        base_reader,
+        query_namespace: app.sessions.query_namespace.clone(),
+    }) {
+        settle_sessions_deep_search_dispatch_error(app, request_id, &view, error.to_string());
+    }
+}
+
+/// Dispatch a debounced request only if its query still describes the current
+/// Sessions view. This is the final identity check between UI input handling
+/// and the worker queue, so a cancelled request cannot be revived later in the
+/// same event-loop iteration.
+pub(super) fn queue_pending_sessions_deep_search(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
+    query: String,
+) {
+    let current_query = app.filter.query_lower().unwrap_or_default();
+    if query != current_query {
+        return;
+    }
+    queue_sessions_deep_search(app, session_req_tx, query);
+}
+
+fn begin_sessions_deep_search(
+    app: &mut App,
+    view: &crate::session_manager::project_scope::SessionViewSpec,
+) -> u64 {
+    app.sessions.clear_materialization_failure();
+    app.sessions.deep_search_query = (!view.query.is_empty()).then(|| view.query.clone());
+    app.sessions.clear_deep_search_results();
+    app.sessions.deep_search_pending = None;
+    app.sessions.last_error = None;
+    app.sessions.deep_search_seq = app.sessions.deep_search_seq.wrapping_add(1);
+    let request_id = app.sessions.deep_search_seq;
+    app.sessions.deep_search_active = Some(request_id);
+    request_id
+}
+
+fn settle_sessions_deep_search_dispatch_error(
+    app: &mut App,
+    request_id: u64,
+    view: &crate::session_manager::project_scope::SessionViewSpec,
+    error: String,
+) {
+    if app.sessions.deep_search_active != Some(request_id) {
+        return;
+    }
+    app.sessions.deep_search_active = None;
+    if let Some((scope_epoch, scope, generation)) =
+        app.sessions.base_manifest.as_ref().map(|base| {
+            (
+                base.scope_epoch,
+                base.scope.clone(),
+                base.generation.clone(),
+            )
+        })
+    {
+        app.sessions
+            .mark_materialization_failed(scope_epoch, &scope, &generation, view.clone());
+    }
+    app.sessions.last_error = Some(error.clone());
+    app.push_toast(
+        texts::tui_sessions_toast_worker_unavailable(&error),
+        ToastKind::Warning,
+    );
+}
+
+fn new_session_project_picker(app: &App) -> super::app::SessionProjectPickerState {
+    let mut picker = super::app::SessionProjectPickerState {
+        input: super::text_edit::TextInput::new(""),
+        selected_idx: 0,
+        path_scroll: 0,
+        filtered_indices: None,
+        pinned_scope: super::app::session_project_picker_pinned_scope(&app.sessions),
+        filter_error: None,
+    };
+    picker.selected_idx = super::app::session_project_active_option_index(&app.sessions, &picker);
+    picker
+}
+
+pub(crate) fn session_project_picker(app: &App) -> Option<&super::app::SessionProjectPickerState> {
+    match &app.overlay {
+        Overlay::SessionProjectPicker(picker) => Some(picker),
+        Overlay::Help(_) => match app.pending_overlay.as_ref() {
+            Some(Overlay::SessionProjectPicker(picker)) => Some(picker),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub(crate) fn session_project_picker_mut(
+    app: &mut App,
+) -> Option<&mut super::app::SessionProjectPickerState> {
+    match &mut app.overlay {
+        Overlay::SessionProjectPicker(picker) => Some(picker),
+        Overlay::Help(_) => match app.pending_overlay.as_mut() {
+            Some(Overlay::SessionProjectPicker(picker)) => Some(picker),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub(crate) fn sync_session_project_picker(app: &mut App) {
+    let Some(old_input) = session_project_picker(app).map(|picker| picker.input.clone()) else {
+        return;
+    };
+    let covered_by_help = matches!(app.overlay, Overlay::Help(_));
+    let mut picker = new_session_project_picker(app);
+    picker.input = old_input;
+    let query = picker.input.value.trim().to_lowercase();
+    if query.is_empty() {
+        picker.selected_idx =
+            super::app::session_project_active_option_index(&app.sessions, &picker);
+    } else {
+        picker.filtered_indices = Some(Vec::new());
+        picker.selected_idx = 0;
+        app.pending_project_filter = Some(query);
+    }
+    if covered_by_help {
+        app.pending_overlay = Some(Overlay::SessionProjectPicker(picker));
+    } else {
+        app.overlay = Overlay::SessionProjectPicker(picker);
+    }
+}
+
+pub(crate) fn queue_sessions_project_catalog(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
+) {
+    if app.sessions.project_catalog_is_current() {
+        app.pending_project_catalog = false;
+        app.sessions.project_catalog_loading = false;
+        sync_session_project_picker(app);
+        return;
+    }
+    if app.sessions.project_catalog_active.is_some() {
+        return;
+    }
+    let Some((base, base_reader)) = app.sessions.base_query_source() else {
+        if app.sessions.scan_active.is_none() {
+            if let Some(error) = app.sessions.last_error.clone() {
+                app.pending_project_catalog = false;
+                app.sessions.project_catalog_loading = false;
+                app.sessions.project_catalog_error = Some(error);
+                return;
+            }
+        }
+        app.pending_project_catalog = true;
+        app.sessions.project_catalog_loading = true;
+        return;
+    };
+    let Some(request_id) = app.sessions.start_project_catalog() else {
+        app.pending_project_catalog = true;
+        return;
+    };
+    app.pending_project_catalog = false;
+    let Some(tx) = session_req_tx else {
+        app.sessions
+            .fail_project_catalog(request_id, "sessions worker is not running".to_string());
+        return;
+    };
+    if let Err(error) = tx.send(SessionReq::ProjectCatalog {
+        request_id,
+        scope_epoch: app.sessions.scope_epoch,
+        base,
+        base_reader,
+    }) {
+        app.sessions
+            .fail_project_catalog(request_id, error.to_string());
+    }
+}
+
+pub(crate) fn cancel_sessions_project_filter(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
+) {
+    app.pending_project_filter = None;
+    app.sessions.cancel_project_filter();
+    if let Some(tx) = session_req_tx {
+        let _ = tx.send(SessionReq::CancelProjectFilter);
+    }
+}
+
+pub(crate) fn queue_sessions_project_filter(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
+    query: String,
+) {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        cancel_sessions_project_filter(app, session_req_tx);
+        return;
+    }
+    if session_project_picker(app).is_none() {
+        cancel_sessions_project_filter(app, session_req_tx);
+        return;
+    }
+    let source = session_project_picker(app).and_then(|picker| {
+        super::app::session_project_filter_source(&app.sessions, picker, &query)
+    });
+    let Some(source) = source else {
+        app.pending_project_filter = Some(query);
+        return;
+    };
+    let Some(cache) = app.sessions.project_catalog.as_ref() else {
+        app.pending_project_filter = Some(query);
+        return;
+    };
+    let scope_epoch = cache.scope_epoch;
+    let scope = cache.scope.clone();
+    let base_generation = cache.base_generation.clone();
+    let Some(request_id) = app.sessions.start_project_filter() else {
+        app.pending_project_filter = Some(query);
+        return;
+    };
+    app.pending_project_filter = None;
+    if let Some(picker) = session_project_picker_mut(app) {
+        picker.filter_error = None;
+    }
+    let Some(tx) = session_req_tx else {
+        app.sessions.fail_project_filter(request_id);
+        if let Some(picker) = session_project_picker_mut(app) {
+            picker.filter_error = Some("sessions worker is not running".to_string());
+        }
+        return;
+    };
+    if let Err(error) = tx.send(SessionReq::ProjectFilter {
+        request_id,
+        scope_epoch,
+        scope,
+        base_generation,
+        query,
+        catalog: source.catalog,
+        project_offset: source.project_offset,
+        fixed_matches: source.fixed_matches,
+        trailing_matches: source.trailing_matches,
+    }) {
+        app.sessions.fail_project_filter(request_id);
+        if let Some(picker) = session_project_picker_mut(app) {
+            picker.filter_error = Some(error.to_string());
+        }
+    }
 }
 
 #[expect(
@@ -153,7 +437,7 @@ pub(crate) fn handle_action(
     skills_req_tx: Option<&mpsc::Sender<SkillsReq>>,
     proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
     proxy_loading: &mut RequestTracker,
-    local_env_req_tx: Option<&mpsc::Sender<LocalEnvReq>>,
+    local_env_req_tx: Option<&tokio::sync::mpsc::UnboundedSender<LocalEnvReq>>,
     session_req_tx: Option<&mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&mpsc::Sender<WebDavReq>>,
     webdav_loading: &mut RequestTracker,
@@ -182,6 +466,12 @@ pub(crate) fn handle_action(
         managed_auth_req_tx,
     };
 
+    if ctx.app.sessions.take_message_cancel_pending() {
+        if let Some(tx) = ctx.session_req_tx {
+            let _ = tx.send(SessionReq::CancelMessages);
+        }
+    }
+
     match action {
         Action::None => Ok(()),
         Action::ReloadData => {
@@ -189,7 +479,15 @@ pub(crate) fn handle_action(
             ctx.app.maybe_prompt_import_candidate(ctx.data);
             Ok(())
         }
+        // The top-level TUI dispatcher owns the usage worker channel. Keeping
+        // these arms harmless also makes direct runtime-action tests exhaustive.
+        Action::UsageRefresh | Action::UsageLogDetailRefresh { .. } => Ok(()),
         Action::SetAppType(next) => {
+            ctx.app.sessions.clear_detail();
+            let _ = ctx.app.sessions.take_message_cancel_pending();
+            if let Some(tx) = ctx.session_req_tx {
+                let _ = tx.send(SessionReq::CancelMessages);
+            }
             let next_data = UiData::load(&next)?;
             apply_preloaded_app_switch(ctx.app, ctx.data, next, next_data);
             ctx.app.maybe_prompt_import_candidate(ctx.data);
@@ -197,7 +495,7 @@ pub(crate) fn handle_action(
         }
         Action::LocalEnvRefresh => {
             let Some(tx) = ctx.local_env_req_tx else {
-                ctx.app.local_env_loading = false;
+                ctx.app.stop_local_env_refresh();
                 ctx.app.push_toast(
                     texts::tui_toast_local_env_check_disabled(),
                     ToastKind::Warning,
@@ -205,9 +503,9 @@ pub(crate) fn handle_action(
                 return Ok(());
             };
 
-            ctx.app.local_env_loading = true;
-            if let Err(err) = tx.send(LocalEnvReq::Refresh) {
-                ctx.app.local_env_loading = false;
+            let generation = ctx.app.begin_local_env_refresh();
+            if let Err(err) = tx.send(LocalEnvReq::Refresh { generation }) {
+                ctx.app.fail_local_env_refresh(generation);
                 ctx.app.push_toast(
                     texts::tui_toast_local_env_check_request_failed(&err.to_string()),
                     ToastKind::Warning,
@@ -216,14 +514,6 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SessionsRefresh => {
-            let Some(tx) = ctx.session_req_tx else {
-                ctx.app.sessions.loading = false;
-                ctx.app.push_toast(
-                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
-                    ToastKind::Warning,
-                );
-                return Ok(());
-            };
             // A scan already runs on a detached worker thread (workers.rs). If we
             // start another scan here it bumps scan_active to a new id, so the
             // in-flight thread's partial/finished messages (carrying the old id)
@@ -235,17 +525,22 @@ pub(crate) fn handle_action(
             if ctx.app.sessions.scan_active.is_some() {
                 return Ok(());
             }
-            // In "show all providers" mode, refresh must rescan every provider
-            // (the virtual "all" id), otherwise `r` would only refresh the
-            // current app and the stale "all" cache would be restored afterward.
-            let provider_id = if ctx.app.sessions.show_all_providers {
-                "all".to_string()
-            } else {
-                ctx.app.app_type.as_str().to_string()
+            let provider_id = ctx.app.app_type.as_str().to_string();
+            let Some(tx) = ctx.session_req_tx else {
+                let request_id = ctx.app.sessions.start_scan(provider_id);
+                ctx.app
+                    .sessions
+                    .fail_scan(request_id, "sessions worker is not running".to_string());
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
             };
             let request_id = ctx.app.sessions.start_scan(provider_id.clone());
             if let Err(err) = tx.send(SessionReq::Refresh {
                 request_id,
+                scope_epoch: ctx.app.sessions.scope_epoch,
                 provider_id,
                 // Manual `r` reload forces a full re-parse (ignore the mtime/size
                 // snapshot); the fresh results still refresh the persistent cache.
@@ -260,22 +555,71 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SessionsDeepSearch { query } => {
-            let Some(tx) = ctx.session_req_tx else {
+            // Enter is an explicit retry boundary for a previously failed
+            // materialization of this exact query.
+            ctx.app.pending_deep_search = None;
+            ctx.app.sessions.clear_materialization_failure();
+            queue_sessions_deep_search(ctx.app, ctx.session_req_tx, query);
+            Ok(())
+        }
+        Action::SessionsDeepSearchCancel => {
+            // `sessions.deep_search_pending` may already contain the newest
+            // debounced input. Cancel only the older dispatch lane atomically.
+            ctx.app.pending_deep_search = None;
+            ctx.app.sessions.deep_search_active = None;
+            ctx.app.sessions.deep_search_query = None;
+            ctx.app.sessions.clear_deep_search_results();
+            if let Some(tx) = ctx.session_req_tx {
+                let _ = tx.send(SessionReq::CancelSearch);
+            }
+            Ok(())
+        }
+        Action::SessionsProjectCatalogLoad => {
+            ctx.app.overlay = Overlay::SessionProjectPicker(new_session_project_picker(ctx.app));
+            queue_sessions_project_catalog(ctx.app, ctx.session_req_tx);
+            Ok(())
+        }
+        Action::SessionsProjectFilter { query } => {
+            queue_sessions_project_filter(ctx.app, ctx.session_req_tx, query);
+            Ok(())
+        }
+        Action::SessionsProjectFilterCancel => {
+            cancel_sessions_project_filter(ctx.app, ctx.session_req_tx);
+            Ok(())
+        }
+        Action::SessionsProjectApply { scope } => {
+            // Enter on the already-active option is a true no-op. Cancelling
+            // first would strand an otherwise valid in-flight project/query
+            // request because the worker deliberately emits no terminal result.
+            if ctx.app.sessions.project_scope == scope {
                 return Ok(());
-            };
-            // Set the query immediately so the UI shows "searching" state
-            ctx.app.sessions.deep_search_query = Some(query.clone());
-            ctx.app.sessions.deep_search_results.clear();
-            ctx.app.sessions.deep_search_seq = ctx.app.sessions.deep_search_seq.wrapping_add(1);
-            let request_id = ctx.app.sessions.deep_search_seq;
-            ctx.app.sessions.deep_search_active = Some(request_id);
-            // Snapshot the sessions to search (respecting show_all / provider filter)
-            let sessions = ctx.app.sessions.rows.clone();
-            let _ = tx.send(SessionReq::Search {
-                request_id,
-                query,
-                sessions,
-            });
+            }
+            if let Some(tx) = ctx.session_req_tx {
+                let _ = tx.send(SessionReq::CancelSearch);
+                let _ = tx.send(SessionReq::CancelProjectCatalog);
+                let _ = tx.send(SessionReq::CancelProjectFilter);
+            }
+            ctx.app.pending_project_catalog = false;
+            ctx.app.pending_project_filter = None;
+            ctx.app.pending_deep_search = None;
+            ctx.app.sessions.cancel_project_catalog();
+            ctx.app.sessions.cancel_project_filter();
+            if !ctx.app.sessions.set_project_scope(scope) {
+                return Ok(());
+            }
+            let query = ctx.app.filter.query_lower().unwrap_or_default();
+            ctx.app.sessions.deep_search_query = (!query.is_empty()).then(|| query.clone());
+            if ctx
+                .app
+                .sessions
+                .desired_view_requires_materialization(Some(&query))
+            {
+                queue_sessions_deep_search(ctx.app, ctx.session_req_tx, query);
+            } else if !ctx.app.sessions.base_view_is_current()
+                && !ctx.app.sessions.stage_base_restore()
+            {
+                ctx.app.sessions.deep_search_pending = Some((String::new(), 0));
+            }
             Ok(())
         }
         Action::SessionResume { command, cwd } => {
@@ -371,6 +715,23 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SwitchRoute(route) => {
+            if !matches!(route, super::route::Route::Sessions) {
+                ctx.app.sessions.deep_search_active = None;
+                ctx.app.sessions.deep_search_pending = None;
+                ctx.app.pending_deep_search = None;
+                ctx.app.pending_project_catalog = false;
+                ctx.app.pending_project_filter = None;
+                ctx.app.sessions.cancel_project_catalog();
+                ctx.app.sessions.cancel_project_filter();
+                ctx.app.sessions.clear_detail();
+                let _ = ctx.app.sessions.take_message_cancel_pending();
+                if let Some(tx) = ctx.session_req_tx {
+                    let _ = tx.send(SessionReq::CancelSearch);
+                    let _ = tx.send(SessionReq::CancelMessages);
+                    let _ = tx.send(SessionReq::CancelProjectCatalog);
+                    let _ = tx.send(SessionReq::CancelProjectFilter);
+                }
+            }
             ctx.app.route = route;
             ctx.app.maybe_prompt_import_candidate(ctx.data);
             if matches!(ctx.app.route, super::route::Route::SkillsDiscover)
@@ -521,13 +882,24 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::ConfigWebDavCheckConnection => config::webdav_check_connection(&mut ctx),
+        Action::ConfigWebDavSave { settings } => config::webdav_save(&mut ctx, settings),
         Action::ConfigWebDavUpload => config::webdav_upload(&mut ctx),
         Action::ConfigWebDavDownload => config::webdav_download(&mut ctx),
         Action::ConfigWebDavMigrateV1ToV2 => config::webdav_migrate_v1_to_v2(&mut ctx),
         Action::ConfigWebDavReset => config::webdav_reset(&mut ctx),
+        Action::ConfigWebDavSetEnabled { enabled } => config::webdav_set_enabled(&mut ctx, enabled),
         Action::ConfigWebDavJianguoyunQuickSetup { username, password } => {
             config::webdav_jianguoyun_quick_setup(&mut ctx, username, password)
         }
+        Action::ConfigS3Save { settings } => config::s3_save(&mut ctx, settings),
+        Action::ConfigS3CheckConnection => config::s3_check_connection(&mut ctx),
+        Action::ConfigS3FetchRemoteInfo { intent } => {
+            config::s3_fetch_remote_info(&mut ctx, intent)
+        }
+        Action::ConfigS3Upload => config::s3_upload(&mut ctx),
+        Action::ConfigS3Download => config::s3_download(&mut ctx),
+        Action::ConfigS3SetEnabled { enabled } => config::s3_set_enabled(&mut ctx, enabled),
+        Action::ConfigS3Reset => config::s3_reset(&mut ctx),
         Action::OpenClawWorkspaceOpenFile { filename } => {
             config::open_openclaw_workspace_file(&mut ctx, filename)
         }
@@ -586,6 +958,7 @@ pub(crate) fn handle_action(
             settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
+        Action::SetPreferredEditor { command } => settings::set_preferred_editor(&mut ctx, command),
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,
@@ -731,6 +1104,133 @@ mod tests {
             None,
             action,
         )
+    }
+
+    fn app_with_base_session_manifest() -> (App, TempDir) {
+        let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
+        let store = crate::session_manager::paged_manifest::PagedManifestStore::open_at(
+            manifest_dir.path(),
+        )
+        .expect("manifest fixture store");
+        let mut builder = store
+            .begin_build("claude")
+            .expect("manifest fixture builder");
+        builder
+            .push(crate::session_manager::SessionMeta {
+                provider_id: "claude".to_string(),
+                session_id: "session".to_string(),
+                source_path: Some("/tmp/session.jsonl".to_string()),
+                ..crate::session_manager::SessionMeta::default()
+            })
+            .expect("manifest fixture row");
+        let published = builder.publish().expect("publish manifest fixture");
+        let mut app = App::new(Some(AppType::Claude));
+        let _request_id = app.sessions.start_scan("claude".to_string());
+        let scope_epoch = app.sessions.scope_epoch;
+        assert!(app.sessions.remember_base_manifest(
+            scope_epoch,
+            "claude",
+            published.generation.clone(),
+            published.total_rows,
+            published.reader.clone(),
+        ));
+        assert!(app.sessions.apply_opened_manifest(
+            scope_epoch,
+            "claude",
+            published.generation,
+            published.total_rows,
+            published.first_page.page_index,
+            published.first_page.rows,
+            published.reader,
+        ));
+        (app, manifest_dir)
+    }
+
+    #[test]
+    fn deep_search_disconnected_sender_settles_matching_request() {
+        let (mut app, _manifest_dir) = app_with_base_session_manifest();
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+
+        queue_sessions_deep_search(&mut app, Some(&tx), "needle".to_string());
+
+        assert_eq!(app.sessions.deep_search_query.as_deref(), Some("needle"));
+        assert!(app.sessions.deep_search_active.is_none());
+        let failed_view = app.sessions.desired_view_spec(Some("needle"));
+        assert!(app
+            .sessions
+            .materialization_failed_for_current_base(&failed_view));
+        let failed_request_seq = app.sessions.deep_search_seq;
+        queue_sessions_deep_search(&mut app, Some(&tx), "needle".to_string());
+        assert_eq!(app.sessions.deep_search_seq, failed_request_seq);
+        assert!(app.sessions.last_error.is_some());
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
+        ));
+    }
+
+    #[test]
+    fn deep_search_without_system_is_visible_and_settled() {
+        let mut app = App::new(Some(AppType::Claude));
+
+        queue_sessions_deep_search(&mut app, None, "needle".to_string());
+
+        assert_eq!(app.sessions.deep_search_query.as_deref(), Some("needle"));
+        assert!(app.sessions.deep_search_active.is_none());
+        assert_eq!(
+            app.sessions.last_error.as_deref(),
+            Some("sessions worker is not running")
+        );
+        assert!(app.pending_deep_search.is_none());
+    }
+
+    #[test]
+    fn stale_deep_search_send_failure_cannot_clear_newer_spinner() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.sessions.deep_search_active = Some(8);
+
+        let view = app.sessions.desired_view_spec(Some("old"));
+        settle_sessions_deep_search_dispatch_error(&mut app, 7, &view, "old failure".to_string());
+
+        assert_eq!(app.sessions.deep_search_active, Some(8));
+        assert!(app.sessions.last_error.is_none());
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn deep_search_cancel_drops_dispatch_lane_but_preserves_new_debounce() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        app.pending_deep_search = Some("old".to_string());
+        app.sessions.deep_search_pending = Some(("new".to_string(), 0));
+        app.sessions.deep_search_query = Some("old".to_string());
+        app.sessions.deep_search_active = Some(7);
+
+        run_action(&mut app, &mut data, Action::SessionsDeepSearchCancel)
+            .expect("cancel deep search");
+
+        assert!(app.pending_deep_search.is_none());
+        assert_eq!(
+            app.sessions.deep_search_pending.as_ref(),
+            Some(&("new".to_string(), 0))
+        );
+        assert!(app.sessions.deep_search_query.is_none());
+        assert!(app.sessions.deep_search_active.is_none());
+    }
+
+    #[test]
+    fn stale_debounced_query_is_rejected_before_dispatch() {
+        let (mut app, _manifest_dir) = app_with_base_session_manifest();
+        app.filter.input.set("new");
+        let (tx, rx) = mpsc::channel();
+
+        queue_pending_sessions_deep_search(&mut app, Some(&tx), "old".to_string());
+
+        assert!(rx.try_recv().is_err());
+        assert!(app.sessions.deep_search_active.is_none());
+        assert!(app.sessions.deep_search_query.is_none());
+        assert_eq!(app.sessions.deep_search_seq, 0);
     }
 
     #[test]

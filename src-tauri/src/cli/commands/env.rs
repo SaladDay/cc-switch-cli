@@ -380,7 +380,9 @@ fn tool_status_summary(status: &ToolCheckStatus) -> String {
     match status {
         ToolCheckStatus::Ok { version } => format!("ok ({version})"),
         ToolCheckStatus::NotInstalledOrNotExecutable => "not installed".to_string(),
-        ToolCheckStatus::Error { message } => format!("error ({message})"),
+        ToolCheckStatus::VersionUnavailable { reason } => {
+            format!("installed; version unavailable ({reason})")
+        }
     }
 }
 
@@ -403,6 +405,18 @@ mod tests {
         let summary = tool_status_summary(&ToolCheckStatus::NotInstalledOrNotExecutable);
 
         assert_eq!(summary, "not installed");
+    }
+
+    #[test]
+    fn tool_status_summary_keeps_unavailable_version_distinct_from_missing_tool() {
+        let summary = tool_status_summary(&ToolCheckStatus::VersionUnavailable {
+            reason: "version check timed out after 10s".to_string(),
+        });
+
+        assert_eq!(
+            summary,
+            "installed; version unavailable (version check timed out after 10s)"
+        );
     }
 
     #[test]

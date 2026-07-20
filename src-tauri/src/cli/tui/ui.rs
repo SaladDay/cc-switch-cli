@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols,
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
         Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge,
         List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
@@ -20,13 +20,13 @@ use serde_json::Value;
 use super::{
     app,
     app::{
-        App, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay, SessionsPane, ToastKind,
-        WebDavConfigItem,
+        App, CloudSyncBackend, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay,
+        S3ConfigItem, SessionsPane, ToastKind, WebDavConfigItem,
     },
     data::{McpRow, ProviderRow, UiData},
     form::{
-        CodexPreviewSection, FormFocus, FormState, GeminiAuthType, McpAddField, PromptMetaField,
-        ProviderAddField,
+        ClaudeModelPickerColumn, CodexPreviewSection, FormFocus, FormState, GeminiAuthType,
+        McpAddField, PromptMetaField, ProviderAddField,
     },
     icons,
     route::{NavItem, Route},
@@ -162,8 +162,8 @@ fn render_content(
         Route::Providers => render_providers(frame, app, data, content_area, theme),
         Route::Usage => render_usage(frame, app, data, content_area, theme),
         Route::UsageLogs => render_usage_logs(frame, app, data, content_area, theme),
-        Route::UsageLogDetail { request_id } => {
-            render_usage_log_detail(frame, app, data, content_area, theme, request_id)
+        Route::UsageLogDetail { rowid } => {
+            render_usage_log_detail(frame, app, data, content_area, theme, *rowid)
         }
         Route::Pricing => render_pricing(frame, app, data, content_area, theme),
         Route::Sessions => render_sessions(frame, app, data, content_area, theme),
@@ -185,7 +185,9 @@ fn render_content(
                 render_config(frame, app, data, content_area, theme)
             }
         }
+        Route::ConfigCloudSync => render_config_cloud_sync(frame, app, data, content_area, theme),
         Route::ConfigWebDav => render_config_webdav(frame, app, data, content_area, theme),
+        Route::ConfigS3 => render_config_s3(frame, app, data, content_area, theme),
         Route::Skills => render_skills_installed(frame, app, data, content_area, theme),
         Route::SkillsDiscover => render_skills_discover(frame, app, data, content_area, theme),
         Route::SkillsRepos => render_skills_repos(frame, app, data, content_area, theme),

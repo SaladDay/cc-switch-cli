@@ -20,7 +20,8 @@ pub(crate) use types::{
 pub(crate) use types::{
     next_model_fetch_request_id, AppDataLoadKind, AppDataMsg, AppDataReq, LocalEnvReq,
     ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq, SkillsReq,
-    StreamCheckReq, UpdateReq, UsagePricingMsg, UsagePricingReq, WebDavReq, WebDavReqKind,
+    StreamCheckReq, UpdateReq, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg,
+    UsagePricingReq, WebDavReq, WebDavReqKind,
 };
 pub(crate) use types::{SessionUsageSyncMsg, SessionUsageSyncReq};
 #[cfg(test)]

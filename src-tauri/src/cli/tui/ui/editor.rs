@@ -55,23 +55,24 @@ pub(super) fn render_editor(
     let height = field_inner.height as usize;
     let width = field_inner.width.max(1);
 
-    let mut shown = Vec::new();
-    let start = editor.scroll.min(editor.lines.len().saturating_sub(1));
-    for line in editor.lines.iter().skip(start) {
-        for segment in super::app::EditorState::wrap_line_segments(line, width) {
-            if shown.len() >= height {
-                break;
-            }
-            shown.push(Line::raw(segment));
-        }
-        if shown.len() >= height {
-            break;
-        }
-    }
+    // The input handler only has an estimated viewport. Derive a temporary
+    // origin from the actual pane without cloning the editor's text buffers.
+    let viewport = ratatui::layout::Size {
+        width: field_inner.width,
+        height: field_inner.height,
+    };
+    let (scroll, scroll_subline) = editor.viewport_origin(viewport);
+
+    let shown = editor
+        .visible_wrapped_lines_from(width, height, scroll, scroll_subline)
+        .into_iter()
+        .map(Line::raw)
+        .collect::<Vec<_>>();
 
     frame.render_widget(Paragraph::new(shown), field_inner);
 
-    let (row_in_view, col_in_view) = editor.cursor_visual_offset_from_scroll(width);
+    let (row_in_view, col_in_view) =
+        editor.cursor_visual_offset_from_origin(width, scroll, scroll_subline);
     if row_in_view < height {
         let x = field_inner.x + col_in_view.min(field_inner.width.saturating_sub(1));
         let y = field_inner.y + row_in_view as u16;

@@ -4,6 +4,7 @@ mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
 mod codex_history_migration;
+mod codex_state_db;
 pub mod commands;
 mod config;
 #[cfg(unix)]
@@ -67,16 +68,18 @@ pub use model_route::ModelRoute;
 pub use provider::{Provider, ProviderMeta, UsageScript};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
-    AuthService, ConfigService, CredentialStatus, EndpointLatency, ExtraUsage, HealthStatus,
-    ImportSkillSelection, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus,
-    McpService, PromptService, ProviderService, ProxyService, QuotaTier, SkillService,
+    reapply_current_codex_official_live, AuthService, ConfigService, CredentialStatus,
+    EndpointLatency, ExtraUsage, HealthStatus, ImportSkillSelection, ManagedAuthAccount,
+    ManagedAuthDeviceCodeResponse, ManagedAuthStatus, McpService, PromptService, ProviderService,
+    ProxyService, QuotaTier, S3RemoteInfo, S3SyncService, S3SyncSummary, SkillService,
     SpeedtestService, StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota,
     SyncDecision, WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
-    get_enable_claude_plugin_integration, get_skip_claude_onboarding, get_webdav_sync_settings,
-    set_enable_claude_plugin_integration, set_skip_claude_onboarding, set_webdav_sync_settings,
-    update_settings, update_webdav_sync_status, webdav_jianguoyun_preset, AppSettings,
+    get_enable_claude_plugin_integration, get_s3_sync_settings, get_skip_claude_onboarding,
+    get_webdav_sync_settings, set_enable_claude_plugin_integration, set_s3_sync_settings,
+    set_skip_claude_onboarding, set_webdav_sync_settings, update_s3_sync_status, update_settings,
+    update_webdav_sync_status, webdav_jianguoyun_preset, AppSettings, S3SyncSettings,
     WebDavSyncSettings, WebDavSyncStatus,
 };
 pub use store::AppState;

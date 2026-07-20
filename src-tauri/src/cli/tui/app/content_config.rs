@@ -23,7 +23,6 @@ impl App {
             prompt: texts::tui_openclaw_daily_memory_create_prompt().to_string(),
             input: TextInput::new(initial),
             submit: TextSubmit::OpenClawDailyMemoryFilename,
-            secret: false,
         });
     }
 
@@ -86,7 +85,6 @@ impl App {
                             prompt: texts::tui_config_export_prompt().to_string(),
                             input: TextInput::new(texts::tui_default_config_export_path()),
                             submit: TextSubmit::ConfigExport,
-                            secret: false,
                         });
                         Action::None
                     }
@@ -96,7 +94,6 @@ impl App {
                             prompt: texts::tui_config_import_prompt().to_string(),
                             input: TextInput::new(texts::tui_default_config_export_path()),
                             submit: TextSubmit::ConfigImport,
-                            secret: false,
                         });
                         Action::None
                     }
@@ -106,7 +103,6 @@ impl App {
                             prompt: texts::tui_config_backup_prompt().to_string(),
                             input: TextInput::new(""),
                             submit: TextSubmit::ConfigBackupName,
-                            secret: false,
                         });
                         Action::None
                     }
@@ -136,7 +132,7 @@ impl App {
                         item.detail_route()
                             .expect("OpenClaw config item should define a detail route"),
                     ),
-                    ConfigItem::WebDavSync => self.push_route_and_switch(Route::ConfigWebDav),
+                    ConfigItem::CloudSync => self.push_route_and_switch(Route::ConfigCloudSync),
                     ConfigItem::Reset => {
                         self.overlay = Overlay::Confirm(ConfirmOverlay {
                             title: texts::tui_config_reset_title().to_string(),
@@ -344,7 +340,6 @@ impl App {
             prompt: texts::tui_openclaw_tools_pattern_placeholder().to_string(),
             input: TextInput::new(initial),
             submit: TextSubmit::OpenClawToolsRule { section, row },
-            secret: false,
         });
         Action::None
     }
@@ -514,37 +509,35 @@ impl App {
             prompt: title.to_string(),
             input: TextInput::new(buffer),
             submit: TextSubmit::OpenClawAgentsRuntimeField { field },
-            secret: false,
         });
         Action::None
     }
 
     fn open_openclaw_agents_model_picker(&mut self, data: &UiData) -> Action {
         let model_options = super::openclaw_agents_model_options(data);
-        let Some((insert_at, selected, options)) = ({
+        let Some((insert_at, selected, active, options)) = ({
             let form = self.openclaw_agents_form(data);
             match form.section {
-                OpenClawAgentsSection::PrimaryModel => (!model_options.is_empty()).then(|| {
-                    (
-                        0,
-                        form.primary_model_picker_selection(&model_options),
-                        model_options.clone(),
-                    )
-                }),
+                OpenClawAgentsSection::PrimaryModel if !model_options.is_empty() => {
+                    let selected = form.primary_model_picker_selection(&model_options);
+                    let active =
+                        (selected != OPENCLAW_AGENTS_MODEL_PICKER_NONE).then_some(selected);
+                    Some((0, selected, active, model_options))
+                }
+                OpenClawAgentsSection::PrimaryModel => None,
                 OpenClawAgentsSection::FallbackModels => {
                     let row = form.row.min(form.fallbacks.len());
                     if row < form.fallbacks.len() {
                         let options = form.available_fallback_options_for_row(row, &model_options);
                         (!options.is_empty()).then(|| {
-                            (
-                                row,
-                                form.current_fallback_picker_selection(row, &options),
-                                options,
-                            )
+                            let selected = form.current_fallback_picker_selection(row, &options);
+                            let active =
+                                (selected != OPENCLAW_AGENTS_MODEL_PICKER_NONE).then_some(selected);
+                            (row, selected, active, options)
                         })
                     } else {
                         let options = form.available_fallback_options(&model_options);
-                        (!options.is_empty()).then_some((row, 0, options))
+                        (!options.is_empty()).then_some((row, 0, None, options))
                     }
                 }
                 OpenClawAgentsSection::Runtime => None,
@@ -556,6 +549,7 @@ impl App {
         self.overlay = Overlay::OpenClawAgentsFallbackPicker {
             insert_at,
             selected,
+            active,
             options,
         };
         Action::None
@@ -629,37 +623,42 @@ impl App {
 
     pub(crate) fn on_config_webdav_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let items = visible_webdav_config_items(&self.filter);
+        self.config_webdav_idx = self.config_webdav_idx.min(items.len().saturating_sub(1));
+        let configured = data.config.webdav_sync.is_some();
+        let enabled = data
+            .config
+            .webdav_sync
+            .as_ref()
+            .is_some_and(|settings| settings.enabled);
+        if items
+            .get(self.config_webdav_idx)
+            .is_some_and(|item| !item.available(configured, enabled))
+        {
+            self.config_webdav_idx = items
+                .iter()
+                .position(|item| item.available(configured, enabled))
+                .unwrap_or(0);
+        }
         match key.code {
             KeyCode::Up => {
-                self.config_webdav_idx = self.config_webdav_idx.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Down => {
-                if !items.is_empty() {
-                    self.config_webdav_idx = (self.config_webdav_idx + 1).min(items.len() - 1);
+                let mut next = self.config_webdav_idx;
+                while next > 0 {
+                    next -= 1;
+                    if items[next].available(configured, enabled) {
+                        self.config_webdav_idx = next;
+                        break;
+                    }
                 }
                 Action::None
             }
-            KeyCode::Char('e') => {
-                let Some(item) = items.get(self.config_webdav_idx) else {
-                    return Action::None;
-                };
-                if matches!(item, WebDavConfigItem::Settings) {
-                    let webdav_json = match data.config.webdav_sync.as_ref() {
-                        Some(cfg) => {
-                            serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".to_string())
-                        }
-                        None => serde_json::to_string_pretty(
-                            &crate::settings::WebDavSyncSettings::default(),
-                        )
-                        .unwrap_or_else(|_| "{}".to_string()),
-                    };
-                    self.open_editor(
-                        texts::tui_webdav_settings_editor_title(),
-                        EditorKind::Json,
-                        webdav_json,
-                        EditorSubmit::ConfigWebDavSettings,
-                    );
+            KeyCode::Down => {
+                let mut next = self.config_webdav_idx;
+                while next + 1 < items.len() {
+                    next += 1;
+                    if items[next].available(configured, enabled) {
+                        self.config_webdav_idx = next;
+                        break;
+                    }
                 }
                 Action::None
             }
@@ -667,28 +666,37 @@ impl App {
                 let Some(item) = items.get(self.config_webdav_idx) else {
                     return Action::None;
                 };
+                if !item.available(configured, enabled) {
+                    return Action::None;
+                }
                 match item {
                     WebDavConfigItem::Settings => {
-                        let webdav_json = match data.config.webdav_sync.as_ref() {
-                            Some(cfg) => serde_json::to_string_pretty(cfg)
-                                .unwrap_or_else(|_| "{}".to_string()),
-                            None => serde_json::to_string_pretty(
-                                &crate::settings::WebDavSyncSettings::default(),
-                            )
-                            .unwrap_or_else(|_| "{}".to_string()),
-                        };
-                        self.open_editor(
-                            texts::tui_webdav_settings_editor_title(),
-                            EditorKind::Json,
-                            webdav_json,
-                            EditorSubmit::ConfigWebDavSettings,
-                        );
+                        self.form = Some(FormState::WebDavSync(
+                            form::WebDavSyncFormState::from_settings(
+                                data.config.webdav_sync.as_ref(),
+                            ),
+                        ));
                         Action::None
                     }
                     WebDavConfigItem::CheckConnection => Action::ConfigWebDavCheckConnection,
                     WebDavConfigItem::Upload => Action::ConfigWebDavUpload,
                     WebDavConfigItem::Download => Action::ConfigWebDavDownload,
-                    WebDavConfigItem::Reset => Action::ConfigWebDavReset,
+                    WebDavConfigItem::EnableDisable if enabled => {
+                        Action::ConfigWebDavSetEnabled { enabled: false }
+                    }
+                    WebDavConfigItem::EnableDisable => {
+                        Action::ConfigWebDavSetEnabled { enabled: true }
+                    }
+                    WebDavConfigItem::Reset => {
+                        self.overlay = Overlay::Confirm(ConfirmOverlay {
+                            title: texts::tui_webdav_reset_title().to_string(),
+                            message: texts::tui_webdav_reset_message().to_string(),
+                            action: ConfirmAction::CloudSyncReset {
+                                backend: CloudSyncBackend::WebDav,
+                            },
+                        });
+                        Action::None
+                    }
                     WebDavConfigItem::JianguoyunQuickSetup => {
                         self.webdav_quick_setup_username = None;
                         self.overlay = Overlay::TextInput(TextInputState {
@@ -696,7 +704,130 @@ impl App {
                             prompt: texts::tui_webdav_jianguoyun_username_prompt().to_string(),
                             input: TextInput::new(""),
                             submit: TextSubmit::WebDavJianguoyunUsername,
-                            secret: false,
+                        });
+                        Action::None
+                    }
+                }
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_config_cloud_sync_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Up => {
+                self.config_cloud_sync_idx = self.config_cloud_sync_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.config_cloud_sync_idx = (self.config_cloud_sync_idx + 1)
+                    .min(CloudSyncBackend::ALL.len().saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Enter => match CloudSyncBackend::ALL.get(self.config_cloud_sync_idx) {
+                Some(CloudSyncBackend::WebDav) => self.push_route_and_switch(Route::ConfigWebDav),
+                Some(CloudSyncBackend::S3Compatible) => self.push_route_and_switch(Route::ConfigS3),
+                None => Action::None,
+            },
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn clamp_s3_config_selection(&mut self, data: &UiData) {
+        let configured = data.config.s3_sync.is_some();
+        let enabled = data
+            .config
+            .s3_sync
+            .as_ref()
+            .is_some_and(|settings| settings.enabled);
+        let len = S3ConfigItem::ALL.len();
+        self.config_s3_idx = self.config_s3_idx.min(len.saturating_sub(1));
+        if S3ConfigItem::ALL
+            .get(self.config_s3_idx)
+            .is_some_and(|item| item.available(configured, enabled))
+        {
+            return;
+        }
+        self.config_s3_idx = S3ConfigItem::ALL
+            .iter()
+            .position(|item| item.available(configured, enabled))
+            .unwrap_or(0);
+    }
+
+    fn move_s3_config_selection(&mut self, data: &UiData, down: bool) {
+        let configured = data.config.s3_sync.is_some();
+        let enabled = data
+            .config
+            .s3_sync
+            .as_ref()
+            .is_some_and(|settings| settings.enabled);
+        let mut next = self.config_s3_idx;
+        loop {
+            let candidate = if down {
+                next.saturating_add(1)
+            } else {
+                next.saturating_sub(1)
+            };
+            if candidate == next || candidate >= S3ConfigItem::ALL.len() {
+                break;
+            }
+            next = candidate;
+            if S3ConfigItem::ALL[next].available(configured, enabled) {
+                self.config_s3_idx = next;
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn on_config_s3_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        self.clamp_s3_config_selection(data);
+        match key.code {
+            KeyCode::Up => {
+                self.move_s3_config_selection(data, false);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.move_s3_config_selection(data, true);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let Some(item) = S3ConfigItem::ALL.get(self.config_s3_idx).copied() else {
+                    return Action::None;
+                };
+                let configured = data.config.s3_sync.is_some();
+                let enabled = data
+                    .config
+                    .s3_sync
+                    .as_ref()
+                    .is_some_and(|settings| settings.enabled);
+                if !item.available(configured, enabled) {
+                    return Action::None;
+                }
+                match item {
+                    S3ConfigItem::Configure => {
+                        self.form = Some(FormState::S3Sync(form::S3SyncFormState::from_settings(
+                            data.config.s3_sync.as_ref(),
+                        )));
+                        Action::None
+                    }
+                    S3ConfigItem::CheckConnection => Action::ConfigS3CheckConnection,
+                    S3ConfigItem::Upload => Action::ConfigS3FetchRemoteInfo {
+                        intent: CloudSyncTransferIntent::Upload,
+                    },
+                    S3ConfigItem::Restore => Action::ConfigS3FetchRemoteInfo {
+                        intent: CloudSyncTransferIntent::Restore,
+                    },
+                    S3ConfigItem::EnableDisable if enabled => {
+                        Action::ConfigS3SetEnabled { enabled: false }
+                    }
+                    S3ConfigItem::EnableDisable => Action::ConfigS3SetEnabled { enabled: true },
+                    S3ConfigItem::Reset => {
+                        self.overlay = Overlay::Confirm(ConfirmOverlay {
+                            title: texts::tui_s3_reset_title().to_string(),
+                            message: texts::tui_s3_reset_message().to_string(),
+                            action: ConfirmAction::CloudSyncReset {
+                                backend: CloudSyncBackend::S3Compatible,
+                            },
                         });
                         Action::None
                     }
@@ -767,6 +898,18 @@ impl App {
                     }
                     Action::None
                 }
+                Some(SettingsItem::PreferredEditor) => {
+                    let editors = crate::cli::editor::detect_external_editors();
+                    let configured = crate::settings::get_preferred_editor();
+                    let selected = configured.as_deref().map_or(0, |command| {
+                        editors
+                            .iter()
+                            .position(|editor| editor.command == command)
+                            .unwrap_or(editors.len())
+                    });
+                    self.overlay = Overlay::ExternalEditorPicker { selected, editors };
+                    Action::None
+                }
                 Some(SettingsItem::VisibleAppsMode) => {
                     let current = crate::settings::get_visible_apps_settings().mode;
                     let next = match current {
@@ -795,7 +938,6 @@ impl App {
                         prompt: texts::tui_settings_openclaw_config_dir_prompt().to_string(),
                         input: TextInput::new(buffer),
                         submit: TextSubmit::SettingsOpenClawConfigDir,
-                        secret: false,
                     });
                     Action::None
                 }
@@ -951,7 +1093,6 @@ impl App {
                         prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
                         input: TextInput::new(data.proxy.configured_listen_address.clone()),
                         submit: TextSubmit::SettingsProxyListenAddress,
-                        secret: false,
                     });
                     Action::None
                 }
@@ -968,7 +1109,6 @@ impl App {
                         prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
                         input: TextInput::new(data.proxy.configured_listen_port.to_string()),
                         submit: TextSubmit::SettingsProxyListenPort,
-                        secret: false,
                     });
                     Action::None
                 }
@@ -1024,7 +1164,6 @@ impl App {
                     prompt: texts::tui_model_route_add_pattern_prompt().to_string(),
                     input: TextInput::new(String::new()),
                     submit: TextSubmit::ModelRouteAddPattern,
-                    secret: false,
                 });
                 Action::None
             }
@@ -1035,7 +1174,6 @@ impl App {
                         prompt: texts::tui_model_route_edit_pattern_prompt().to_string(),
                         input: TextInput::new(row.pattern.clone()),
                         submit: TextSubmit::ModelRouteEditPattern { id: row.id.clone() },
-                        secret: false,
                     });
                 }
                 Action::None
@@ -1424,7 +1562,9 @@ impl App {
         self.overlay = Overlay::None;
         self.focus = Focus::Content;
         self.editor = None;
-        self.form = Some(FormState::McpAdd(McpAddFormState::from_server(&row.server)));
+        self.form = Some(FormState::McpAdd(McpAddFormState::from_shared_server(
+            std::sync::Arc::clone(&row.server),
+        )));
     }
 
     pub(crate) fn open_prompt_create_form(&mut self, data: &UiData) {

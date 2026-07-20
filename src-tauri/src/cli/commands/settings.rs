@@ -178,6 +178,7 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
             "unifyCodexMigrateExisting": settings.unify_codex_migrate_existing.unwrap_or(false),
             "hasCodexHistoryUnifyBackup": crate::codex_history_migration::has_codex_official_history_unify_backup(),
             "openclawConfigDir": settings.openclaw_config_dir,
+            "preferredEditor": settings.preferred_editor,
         });
         println!(
             "{}",
@@ -207,6 +208,10 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
             .openclaw_config_dir
             .as_deref()
             .unwrap_or("(default)")
+    );
+    println!(
+        "Preferred editor: {}",
+        settings.preferred_editor.as_deref().unwrap_or("(not set)")
     );
     Ok(())
 }

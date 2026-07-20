@@ -985,17 +985,28 @@ fn render_local_env_tool_cell(
 ) {
     use crate::services::local_env_check::ToolCheckStatus;
 
-    let status = if app.local_env_loading {
-        None
-    } else {
-        app.local_env_results
-            .iter()
-            .find(|r| r.tool == tool)
-            .map(|r| &r.status)
-    };
+    let pending = app.is_local_env_pending(tool);
+    let status = app
+        .local_env_results
+        .iter()
+        .find(|result| result.tool == tool)
+        .map(|result| &result.status);
 
-    let (icon, icon_style) = if app.local_env_loading {
-        ("…", Style::default().fg(theme.surface))
+    let (icon, icon_style) = if pending {
+        let spinner = match app.tick % 4 {
+            0 => "⠋",
+            1 => "⠙",
+            2 => "⠹",
+            _ => "⠸",
+        };
+        (
+            spinner,
+            if theme.no_color {
+                Style::default()
+            } else {
+                Style::default().fg(theme.cyan)
+            },
+        )
     } else {
         match status {
             Some(ToolCheckStatus::Ok { .. }) => (
@@ -1006,7 +1017,7 @@ fn render_local_env_tool_cell(
                     Style::default().fg(theme.ok)
                 },
             ),
-            Some(ToolCheckStatus::NotInstalledOrNotExecutable) | None => (
+            Some(ToolCheckStatus::NotInstalledOrNotExecutable) => (
                 "!",
                 if theme.no_color {
                     Style::default()
@@ -1014,14 +1025,9 @@ fn render_local_env_tool_cell(
                     Style::default().fg(theme.warn)
                 },
             ),
-            Some(ToolCheckStatus::Error { .. }) => (
-                "!",
-                if theme.no_color {
-                    Style::default()
-                } else {
-                    Style::default().fg(theme.warn)
-                },
-            ),
+            Some(ToolCheckStatus::VersionUnavailable { .. }) | None => {
+                ("•", Style::default().fg(theme.surface))
+            }
         }
     };
 
@@ -1040,16 +1046,23 @@ fn render_local_env_tool_cell(
     };
 
     let value_style = Style::default().fg(theme.cyan);
-    let (detail_text, detail_line_style) = if app.local_env_loading {
-        ("".to_string(), detail_style)
+    let (detail_text, detail_line_style) = if pending {
+        (texts::tui_local_env_checking().to_string(), detail_style)
     } else {
         match status {
             Some(ToolCheckStatus::Ok { version }) => (version.clone(), value_style),
-            Some(ToolCheckStatus::NotInstalledOrNotExecutable) | None => (
+            Some(ToolCheckStatus::NotInstalledOrNotExecutable) => (
                 texts::tui_local_env_not_installed().to_string(),
                 detail_style,
             ),
-            Some(ToolCheckStatus::Error { message }) => (message.clone(), detail_style),
+            Some(ToolCheckStatus::VersionUnavailable { .. }) => (
+                texts::tui_local_env_version_unavailable().to_string(),
+                detail_style,
+            ),
+            None => (
+                texts::tui_local_env_check_unavailable().to_string(),
+                detail_style,
+            ),
         }
     };
 

@@ -470,8 +470,11 @@ pub(super) fn model_fetch(
         query: String::new(),
         fetching: true,
         models: Vec::new(),
+        filtered_indices: None,
+        filter_incomplete: false,
         error: None,
         selected_idx: 0,
+        selection_active: false,
     };
     if matches!(field, ProviderAddField::HermesModels) {
         ctx.app.pending_overlay = Some(Overlay::HermesModelsPicker { editing: false });

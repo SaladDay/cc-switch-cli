@@ -182,6 +182,7 @@ impl Database {
             pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            input_token_semantics INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
             cache_read_cost_usd TEXT NOT NULL DEFAULT '0', cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
             total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL, first_token_ms INTEGER,
@@ -259,6 +260,7 @@ impl Database {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                input_token_semantics INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
@@ -266,6 +268,35 @@ impl Database {
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // Profiles 表（上游 Projects 功能的共享项目实体）。CLI 暂不解释 payload，
+        // 但必须原样保留该表，确保整库 WebDAV 同步与上游 schema v12+ 兼容。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                sort_order INTEGER,
+                created_at INTEGER,
+                updated_at INTEGER
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // 修复跑过上游未发布开发版的数据库：旧的全局 current marker 在 v12
+        // 定稿后改为按 scope 存储。与上游保持相同的一次性映射语义。
+        if conn
+            .execute(
+                "INSERT OR REPLACE INTO settings (key, value)
+                 SELECT 'current_profile_id_claude', value FROM settings
+                 WHERE key = 'current_profile_id'",
+                [],
+            )
+            .is_ok()
+        {
+            let _ = conn.execute("DELETE FROM settings WHERE key = 'current_profile_id'", []);
+        }
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS session_log_sync (
@@ -429,6 +460,16 @@ impl Database {
                         Self::migrate_v10_to_v11(conn)?;
                         Self::set_user_version(conn, 11)?;
                     }
+                    11 => {
+                        log::info!("迁移数据库从 v11 到 v12（添加项目 Profiles 表）");
+                        Self::migrate_v11_to_v12(conn)?;
+                        Self::set_user_version(conn, 12)?;
+                    }
+                    12 => {
+                        log::info!("迁移数据库从 v12 到 v13（记录输入 token 缓存语义）");
+                        Self::migrate_v12_to_v13(conn)?;
+                        Self::set_user_version(conn, 13)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -438,7 +479,7 @@ impl Database {
                 version = Self::get_user_version(conn)?;
             }
             Self::repair_proxy_request_logs_columns(conn)?;
-            Self::repair_usage_daily_rollups_columns(conn)?;
+            Self::repair_usage_rollup_semantics_column(conn)?;
             Self::create_request_logs_indexes_if_supported(conn)?;
             Self::normalize_auto_failover_requires_takeover(conn)?;
             Ok(())
@@ -537,17 +578,6 @@ impl Database {
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
 
-        // model_routes 统计字段（cc-switch v12 未含，留作向后兼容 + 命中追踪）
-        if Self::table_exists(conn, "model_routes")? {
-            Self::add_column_if_missing(
-                conn,
-                "model_routes",
-                "hit_count",
-                "INTEGER NOT NULL DEFAULT 0",
-            )?;
-            Self::add_column_if_missing(conn, "model_routes", "last_hit_at", "TEXT")?;
-        }
-
         // 添加代理超时配置字段
         if Self::table_exists(conn, "proxy_config")? {
             // 兼容旧版本缺失的基础字段
@@ -617,6 +647,7 @@ impl Database {
             pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            input_token_semantics INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
             cache_read_cost_usd TEXT NOT NULL DEFAULT '0', cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
             total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL, first_token_ms INTEGER,
@@ -1361,6 +1392,50 @@ impl Database {
         Ok(())
     }
 
+    /// v11 -> v12 迁移：添加上游 Projects 功能使用的 Profiles 表。
+    ///
+    /// DDL 必须与 `create_tables_on_conn` 及上游 schema v12 完全一致；
+    /// `IF NOT EXISTS` 使已接收过上游快照的数据库可以安全重放迁移。
+    fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                sort_order INTEGER,
+                created_at INTEGER,
+                updated_at INTEGER
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("v11 -> v12 创建 profiles 表失败: {e}")))?;
+        Ok(())
+    }
+
+    /// v12 -> v13 迁移：记录 `input_tokens` 是否包含缓存写入。
+    ///
+    /// 默认值 0 表示旧版/未知语义。新代理日志会显式写入 1（total）
+    /// 或 2（fresh），从而既不篡改历史数据，也能正确归一化新数据。
+    fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(
+                conn,
+                "proxy_request_logs",
+                "input_token_semantics",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        if Self::table_exists(conn, "usage_daily_rollups")? {
+            Self::add_column_if_missing(
+                conn,
+                "usage_daily_rollups",
+                "input_token_semantics",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        Ok(())
+    }
+
     fn create_model_routes_table(conn: &Connection) -> Result<(), AppError> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS model_routes (
@@ -1511,6 +1586,25 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
+            // GPT-5.6 系列（Sol / Terra / Luna，2026-06 发布）
+            // 5.6 家族起 cache write 收 1.25× 输入价（此前 GPT 模型写缓存免费，勿回填旧系列）
+            ("gpt-5.6-sol", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
+            (
+                "gpt-5.6-terra",
+                "GPT-5.6 Terra",
+                "2.50",
+                "15",
+                "0.25",
+                "3.125",
+            ),
+            ("gpt-5.6-luna", "GPT-5.6 Luna", "1", "6", "0.10", "1.25"),
+            // 裸名 gpt-5.6 是 Sol 的官方别名；effort 后缀与现有 GPT 系列保持一致。
+            ("gpt-5.6", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
+            ("gpt-5.6-low", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
+            ("gpt-5.6-medium", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
+            ("gpt-5.6-high", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
+            ("gpt-5.6-xhigh", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
+            ("gpt-5.6-minimal", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
             // GPT-5.5 系列
             ("gpt-5.5", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-low", "GPT-5.5", "5", "30", "0.50", "0"),
@@ -2087,6 +2181,44 @@ impl Database {
 
     fn repair_current_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_fixes = [
+            // 上游曾短暂以 0 写入 GPT-5.6 cache-write 价格。共享数据库可能保留该种子；
+            // 仅匹配完整旧内置值，避免覆盖用户自定义定价。
+            (
+                "gpt-5.6-sol",
+                "GPT-5.6 Sol",
+                "5",
+                "30",
+                "0.50",
+                "6.25",
+                "5",
+                "30",
+                "0.50",
+                "0",
+            ),
+            (
+                "gpt-5.6-terra",
+                "GPT-5.6 Terra",
+                "2.50",
+                "15",
+                "0.25",
+                "3.125",
+                "2.50",
+                "15",
+                "0.25",
+                "0",
+            ),
+            (
+                "gpt-5.6-luna",
+                "GPT-5.6 Luna",
+                "1",
+                "6",
+                "0.10",
+                "1.25",
+                "1",
+                "6",
+                "0.10",
+                "0",
+            ),
             (
                 "deepseek-v4-flash",
                 "DeepSeek V4 Flash",
@@ -2308,11 +2440,11 @@ impl Database {
             ("app_type", "TEXT NOT NULL DEFAULT 'claude'"),
             ("model", "TEXT NOT NULL DEFAULT ''"),
             ("request_model", "TEXT"),
-            ("pricing_model", "TEXT"),
             ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("cache_read_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("cache_creation_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("input_token_semantics", "INTEGER NOT NULL DEFAULT 0"),
             ("input_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
             ("output_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
             ("cache_read_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
@@ -2336,60 +2468,16 @@ impl Database {
         Ok(())
     }
 
-    /// 幂等修复 `usage_daily_rollups`：若缺少 v11 的 `request_model`/`pricing_model`
-    /// 列（主键仍是旧的 4 列形式），则重建为 v11 schema 并迁移历史聚合数据。
-    ///
-    /// 覆盖一条历史路径：某些 DB 的 `user_version` 已是 v11/v12，但 rollups 表却停留在
-    /// 更早的 v6 schema（建库时 `create_tables` 使用旧 DDL 后直接 set_user_version），
-    /// 导致 v10→v11 迁移循环从未运行，`run_usage_maintenance` 持续报
-    /// `no such column: request_model`。重建 SQL 与 `migrate_v10_to_v11` 保持一致。
-    fn repair_usage_daily_rollups_columns(conn: &Connection) -> Result<(), AppError> {
+    fn repair_usage_rollup_semantics_column(conn: &Connection) -> Result<(), AppError> {
         if !Self::table_exists(conn, "usage_daily_rollups")? {
             return Ok(());
         }
-
-        let has_request_model = Self::has_column(conn, "usage_daily_rollups", "request_model")?;
-        let has_pricing_model = Self::has_column(conn, "usage_daily_rollups", "pricing_model")?;
-        if has_request_model && has_pricing_model {
-            return Ok(());
-        }
-
-        log::info!(
-            "修复 usage_daily_rollups：缺少 request_model/pricing_model 列，重建为 v11 schema"
-        );
-
-        conn.execute_batch(
-            "ALTER TABLE usage_daily_rollups RENAME TO usage_daily_rollups_repair_backup;
-             CREATE TABLE usage_daily_rollups (
-                 date TEXT NOT NULL,
-                 app_type TEXT NOT NULL,
-                 provider_id TEXT NOT NULL,
-                 model TEXT NOT NULL,
-                 request_model TEXT NOT NULL DEFAULT '',
-                 pricing_model TEXT NOT NULL DEFAULT '',
-                 request_count INTEGER NOT NULL DEFAULT 0,
-                 success_count INTEGER NOT NULL DEFAULT 0,
-                 input_tokens INTEGER NOT NULL DEFAULT 0,
-                 output_tokens INTEGER NOT NULL DEFAULT 0,
-                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-                 total_cost_usd TEXT NOT NULL DEFAULT '0',
-                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
-                 PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
-             );
-             INSERT INTO usage_daily_rollups
-                 (date, app_type, provider_id, model, request_model, pricing_model,
-                  request_count, success_count, input_tokens, output_tokens,
-                  cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms)
-             SELECT date, app_type, provider_id, model, '', '',
-                  request_count, success_count, input_tokens, output_tokens,
-                  cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
-             FROM usage_daily_rollups_repair_backup;
-             DROP TABLE usage_daily_rollups_repair_backup;",
-        )
-        .map_err(|e| AppError::Database(format!("重建 usage_daily_rollups 失败: {e}")))?;
-
-        log::info!("usage_daily_rollups 重建完成，已迁移历史聚合数据");
+        Self::add_column_if_missing(
+            conn,
+            "usage_daily_rollups",
+            "input_token_semantics",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(())
     }
 

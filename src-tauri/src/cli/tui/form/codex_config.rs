@@ -75,23 +75,14 @@ pub(crate) fn update_codex_config_snippet(
     )
 }
 
-pub(crate) fn clean_codex_provider_key(provider_id: &str, provider_name: &str) -> String {
-    let raw = if provider_id.trim().is_empty() {
-        provider_name.trim()
-    } else {
-        provider_id.trim()
-    };
-    crate::codex_config::clean_codex_provider_key(raw)
-}
-
-pub(crate) fn build_codex_provider_config_toml(
-    provider_key: &str,
+pub(crate) fn build_codex_third_party_config_toml(
+    provider_name: &str,
     base_url: &str,
     model: &str,
     wire_api: CodexWireApi,
 ) -> String {
-    crate::codex_config::build_codex_provider_config_toml(
-        provider_key,
+    crate::codex_config::build_codex_third_party_config_toml(
+        provider_name,
         base_url,
         model,
         wire_api.as_str(),

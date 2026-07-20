@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     routing::post,
     Json, Router,
 };
@@ -542,7 +542,7 @@ async fn proxy_gemini_prefixed_route_passthroughs_v1beta_requests() {
 
 #[tokio::test]
 #[serial]
-async fn proxy_codex_retries_with_app_non_streaming_timeout_policy() {
+async fn proxy_codex_non_streaming_timeout_does_not_retry_the_same_provider() {
     let upstream_state = RetryUpstreamState::default();
     let upstream_router = Router::new()
         .route("/v1/responses", post(handle_retrying_codex_response))
@@ -617,21 +617,11 @@ async fn proxy_codex_retries_with_app_non_streaming_timeout_policy() {
         .await
         .expect("send codex request to proxy");
 
-    assert!(
-        response.status().is_success(),
-        "retry request should succeed"
-    );
-    let body: Value = response.json().await.expect("parse retry response");
-    assert_eq!(
-        body.pointer("/output/0/content/0/text")
-            .and_then(|v| v.as_str()),
-        Some("attempt 2"),
-        "second upstream attempt should win after the first one times out"
-    );
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(
         upstream_state.attempts.load(Ordering::SeqCst),
-        2,
-        "proxy should use the codex app policy to retry timed out requests"
+        1,
+        "a retry budget advances to another provider; it must not resend to the same provider"
     );
 
     service.stop().await.expect("stop proxy service");
@@ -899,21 +889,10 @@ async fn proxy_gemini_query_streaming_uses_stream_timeouts() {
         .await
         .expect("send gemini streaming request to proxy");
 
-    assert!(
-        response.status().is_success(),
-        "stream should be established before timeout"
-    );
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
-        Some("text/event-stream")
-    );
-    let body_result = response.text().await;
-    assert!(
-        body_result.is_err(),
-        "query-based Gemini streaming should use streaming timeouts instead of buffered non-stream handling"
+        response.status(),
+        StatusCode::GATEWAY_TIMEOUT,
+        "the first chunk must arrive before the stream is committed to the client"
     );
 
     service.stop().await.expect("stop proxy service");

@@ -18,13 +18,45 @@
 /// would happen with the opposite default.
 const CACHE_INCLUSIVE_APP_TYPES: &[&str] = &["codex", "gemini"];
 
+pub(crate) const INPUT_TOKEN_SEMANTICS_LEGACY: i64 = 0;
+pub(crate) const INPUT_TOKEN_SEMANTICS_TOTAL: i64 = 1;
+pub(crate) const INPUT_TOKEN_SEMANTICS_FRESH: i64 = 2;
+
+/// Normalize a stored input-token count to fresh (non-cached) input.
+///
+/// This is the in-memory counterpart of [`fresh_input_sql`]. Keep both paths
+/// aligned so detail rows and SQL aggregates report identical totals.
+pub(crate) fn fresh_input_tokens(
+    app_type: &str,
+    input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    input_token_semantics: i64,
+) -> u64 {
+    if input_token_semantics == INPUT_TOKEN_SEMANTICS_FRESH
+        || !CACHE_INCLUSIVE_APP_TYPES.contains(&app_type)
+    {
+        return input_tokens;
+    }
+
+    match input_token_semantics {
+        INPUT_TOKEN_SEMANTICS_TOTAL => cache_read_tokens
+            .checked_add(cache_creation_tokens)
+            .filter(|cached| input_tokens >= *cached)
+            .map_or(input_tokens, |cached| input_tokens - cached),
+        INPUT_TOKEN_SEMANTICS_LEGACY if input_tokens >= cache_read_tokens => {
+            input_tokens - cache_read_tokens
+        }
+        _ => input_tokens,
+    }
+}
+
 /// Build an SQL expression that returns the cache-normalized `input_tokens`
 /// for a single row in `proxy_request_logs` or `usage_daily_rollups`.
 ///
-/// For rows whose `app_type` is in [`CACHE_INCLUSIVE_APP_TYPES`] and
-/// `input_tokens >= cache_read_tokens`, returns
-/// `input_tokens - cache_read_tokens`. For all other rows the original
-/// `input_tokens` is returned unchanged.
+/// Legacy rows subtract cache reads only. New total-inclusive rows subtract
+/// both cache reads and writes. Rollups normalized to fresh input are returned
+/// unchanged.
 ///
 /// Pass an empty string to reference the columns directly (no alias),
 /// or a table alias such as `"l"` to emit `l.input_tokens` style references.
@@ -40,7 +72,15 @@ pub fn fresh_input_sql(alias: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "CASE WHEN {prefix}app_type IN ({app_type_list}) AND {prefix}input_tokens >= {prefix}cache_read_tokens \
+        "CASE \
+              WHEN {prefix}input_token_semantics = {INPUT_TOKEN_SEMANTICS_FRESH} THEN {prefix}input_tokens \
+              WHEN {prefix}app_type IN ({app_type_list}) \
+                   AND {prefix}input_token_semantics = {INPUT_TOKEN_SEMANTICS_TOTAL} \
+                   AND {prefix}input_tokens >= ({prefix}cache_read_tokens + {prefix}cache_creation_tokens) \
+              THEN ({prefix}input_tokens - {prefix}cache_read_tokens - {prefix}cache_creation_tokens) \
+              WHEN {prefix}app_type IN ({app_type_list}) \
+                   AND {prefix}input_token_semantics = {INPUT_TOKEN_SEMANTICS_LEGACY} \
+                   AND {prefix}input_tokens >= {prefix}cache_read_tokens \
               THEN ({prefix}input_tokens - {prefix}cache_read_tokens) \
               ELSE {prefix}input_tokens END"
     )
@@ -60,7 +100,8 @@ mod tests {
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_creation_tokens INTEGER NOT NULL DEFAULT 0
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                input_token_semantics INTEGER NOT NULL DEFAULT 0
             );",
         )
         .unwrap();
@@ -130,5 +171,48 @@ mod tests {
         let sql = format!("SELECT {expr} FROM proxy_request_logs l");
         let value: i64 = conn.query_row(&sql, [], |r| r.get(0)).unwrap();
         assert_eq!(value, 100);
+    }
+
+    #[test]
+    fn fresh_input_subtracts_cache_write_for_total_semantics() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, app_type, input_tokens, cache_read_tokens,
+                cache_creation_tokens, input_token_semantics
+             ) VALUES ('codex-total', 'codex', 1000, 300, 200, ?1)",
+            [INPUT_TOKEN_SEMANTICS_TOTAL],
+        )
+        .unwrap();
+        let expr = fresh_input_sql("l");
+        let sql = format!("SELECT {expr} FROM proxy_request_logs l");
+        let value: i64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
+        assert_eq!(value, 500);
+    }
+
+    #[test]
+    fn fresh_input_keeps_normalized_rollup_value() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, app_type, input_tokens, cache_read_tokens,
+                cache_creation_tokens, input_token_semantics
+             ) VALUES ('codex-fresh', 'codex', 500, 300, 200, ?1)",
+            [INPUT_TOKEN_SEMANTICS_FRESH],
+        )
+        .unwrap();
+        let expr = fresh_input_sql("l");
+        let sql = format!("SELECT {expr} FROM proxy_request_logs l");
+        let value: i64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
+        assert_eq!(value, 500);
+    }
+
+    #[test]
+    fn in_memory_normalization_matches_all_persisted_semantics() {
+        assert_eq!(fresh_input_tokens("codex", 100, 30, 20, 0), 70);
+        assert_eq!(fresh_input_tokens("codex", 100, 30, 20, 1), 50);
+        assert_eq!(fresh_input_tokens("codex", 50, 30, 20, 2), 50);
+        assert_eq!(fresh_input_tokens("claude", 50, 30, 20, 1), 50);
+        assert_eq!(fresh_input_tokens("codex", 10, 9, 9, 1), 10);
     }
 }

@@ -12,6 +12,59 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 use std::{collections::HashMap, ffi::OsString, path::Path};
 
+#[tokio::test]
+async fn provider_health_batch_query_returns_only_existing_records_for_requested_app() {
+    let db = Database::memory().expect("create memory database");
+    let claude = Provider::with_id(
+        "shared".to_string(),
+        "Claude Provider".to_string(),
+        json!({}),
+        None,
+    );
+    let codex = Provider::with_id(
+        "shared".to_string(),
+        "Codex Provider".to_string(),
+        json!({}),
+        None,
+    );
+    let unobserved = Provider::with_id(
+        "unobserved".to_string(),
+        "No Health Record".to_string(),
+        json!({}),
+        None,
+    );
+    db.save_provider("claude", &claude)
+        .expect("save claude provider");
+    db.save_provider("codex", &codex)
+        .expect("save codex provider");
+    db.save_provider("claude", &unobserved)
+        .expect("save provider without health record");
+
+    db.update_provider_health_with_threshold("shared", "claude", false, None, 4)
+        .await
+        .expect("record claude failure");
+    db.update_provider_health_with_threshold("shared", "codex", true, None, 4)
+        .await
+        .expect("record codex success");
+
+    let claude_health = db
+        .list_provider_health_for_app("claude")
+        .await
+        .expect("load claude health");
+    assert_eq!(claude_health.len(), 1);
+    assert_eq!(claude_health[0].provider_id, "shared");
+    assert_eq!(claude_health[0].app_type, "claude");
+    assert_eq!(claude_health[0].consecutive_failures, 1);
+
+    let codex_health = db
+        .list_provider_health_for_app("codex")
+        .await
+        .expect("load codex health");
+    assert_eq!(codex_health.len(), 1);
+    assert_eq!(codex_health[0].app_type, "codex");
+    assert_eq!(codex_health[0].consecutive_failures, 0);
+}
+
 struct ConfigDirEnvGuard {
     original: Option<OsString>,
 }
@@ -244,6 +297,44 @@ fn init_rejects_future_schema_before_creating_tables() {
     assert!(
         !Database::table_exists(&conn, "providers").expect("check providers table"),
         "future schema init should not create tables"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn init_aborts_migration_when_pre_migration_backup_fails() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+
+    let db = Database::init().expect("initialize current database");
+    Database::set_user_version(
+        &db.conn.lock().expect("lock database connection"),
+        SCHEMA_VERSION - 1,
+    )
+    .expect("downgrade schema marker");
+    drop(db);
+
+    // A regular file at the backup-directory path deterministically makes the
+    // safety backup fail before any schema migration can begin.
+    std::fs::write(temp.path().join("backups"), b"not-a-directory")
+        .expect("block backup directory creation");
+
+    let err = match Database::init() {
+        Ok(_) => panic!("migration must not proceed without its safety backup"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("Pre-migration backup failed"),
+        "unexpected error: {err}"
+    );
+
+    let conn = Connection::open(&db_path).expect("reopen database");
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read schema version"),
+        SCHEMA_VERSION - 1,
+        "failed backup must leave the schema version unchanged"
     );
 }
 
@@ -588,6 +679,44 @@ fn schema_create_tables_include_usage_daily_rollups() {
     assert_eq!(
         normalize_default(&pricing_model.default).as_deref(),
         Some("")
+    );
+
+    for table in ["proxy_request_logs", "usage_daily_rollups"] {
+        let semantics = get_column_info(&conn, table, "input_token_semantics");
+        assert_eq!(semantics.r#type, "INTEGER");
+        assert_eq!(semantics.notnull, 1);
+        assert_eq!(normalize_default(&semantics.default).as_deref(), Some("0"));
+    }
+
+    assert!(
+        Database::table_exists(&conn, "profiles").expect("check profiles table"),
+        "profiles should exist after create_tables"
+    );
+    let mut stmt = conn
+        .prepare("PRAGMA table_info('profiles')")
+        .expect("prepare profiles table info");
+    let profile_columns = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .expect("query profiles table info")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect profiles table info");
+    assert_eq!(
+        profile_columns,
+        vec![
+            ("id".to_string(), "TEXT".to_string(), 0, 1),
+            ("name".to_string(), "TEXT".to_string(), 1, 0),
+            ("payload".to_string(), "TEXT".to_string(), 1, 0),
+            ("sort_order".to_string(), "INTEGER".to_string(), 0, 0),
+            ("created_at".to_string(), "INTEGER".to_string(), 0, 0),
+            ("updated_at".to_string(), "INTEGER".to_string(), 0, 0),
+        ]
     );
 
     assert!(
@@ -1104,7 +1233,7 @@ fn schema_migration_v7_adds_session_log_tracking_and_corrects_pricing() {
 }
 
 #[test]
-fn schema_migration_v8_refreshes_model_pricing_and_reaches_v11() {
+fn schema_migration_v8_refreshes_model_pricing_and_reaches_current_schema() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(
         r#"
@@ -1362,6 +1491,239 @@ fn schema_migration_v10_to_v11_preserves_rollup_rows_with_empty_new_dimensions()
         rollup,
         ("".to_string(), "".to_string(), 2, 100, "0.42".to_string())
     );
+}
+
+#[test]
+fn schema_migration_v11_to_v13_preserves_data_and_adds_upstream_schema() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            model TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            status_code INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO proxy_request_logs (
+            request_id, provider_id, app_type, model, input_tokens,
+            output_tokens, cache_read_tokens, cache_creation_tokens,
+            latency_ms, status_code, created_at
+        ) VALUES ('legacy-log', 'p1', 'codex', 'gpt-5.5', 800, 10, 300, 200, 50, 200, 1);
+
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_model TEXT NOT NULL DEFAULT '',
+            pricing_model TEXT NOT NULL DEFAULT '',
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
+        );
+        INSERT INTO usage_daily_rollups (
+            date, app_type, provider_id, model, request_count,
+            input_tokens, cache_read_tokens, cache_creation_tokens
+        ) VALUES ('2026-07-01', 'codex', 'p1', 'gpt-5.5', 1, 500, 300, 200);
+
+        CREATE TABLE profiles (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            sort_order INTEGER,
+            created_at INTEGER,
+            updated_at INTEGER
+        );
+        INSERT INTO profiles (id, name, payload, sort_order, created_at, updated_at)
+        VALUES ('profile-1', 'Existing', '{"providers":{}}', 7, 100, 200);
+        "#,
+    )
+    .expect("seed schema v11");
+    Database::set_user_version(&conn, 11).expect("set user_version=11");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v11 to v13");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        SCHEMA_VERSION
+    );
+    for table in ["proxy_request_logs", "usage_daily_rollups"] {
+        let semantics = get_column_info(&conn, table, "input_token_semantics");
+        assert_eq!(semantics.r#type, "INTEGER");
+        assert_eq!(semantics.notnull, 1);
+        assert_eq!(normalize_default(&semantics.default).as_deref(), Some("0"));
+    }
+    let legacy_semantics: (i64, i64) = conn
+        .query_row(
+            "SELECT
+                (SELECT input_token_semantics FROM proxy_request_logs WHERE request_id = 'legacy-log'),
+                (SELECT input_token_semantics FROM usage_daily_rollups WHERE date = '2026-07-01')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read migrated legacy semantics");
+    assert_eq!(legacy_semantics, (0, 0));
+
+    let profile: (String, String, i64, i64, i64) = conn
+        .query_row(
+            "SELECT name, payload, sort_order, created_at, updated_at
+             FROM profiles WHERE id = 'profile-1'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read preserved profile");
+    assert_eq!(
+        profile,
+        (
+            "Existing".to_string(),
+            "{\"providers\":{}}".to_string(),
+            7,
+            100,
+            200,
+        )
+    );
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migration should be idempotent");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM profiles", [], |row| row
+            .get::<_, i64>(0))
+            .expect("count profiles"),
+        1
+    );
+}
+
+#[test]
+fn schema_current_v13_repairs_missing_usage_semantics_columns() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (request_id TEXT PRIMARY KEY);
+        CREATE TABLE usage_daily_rollups (date TEXT PRIMARY KEY);
+        "#,
+    )
+    .expect("seed partial v13 schema");
+    Database::set_user_version(&conn, 13).expect("set user_version=13");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("repair current schema");
+
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "input_token_semantics")
+            .expect("check log semantics")
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "input_token_semantics")
+            .expect("check rollup semantics")
+    );
+}
+
+#[test]
+fn schema_migration_v11_to_v13_rolls_back_both_steps_on_v13_failure() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            model TEXT NOT NULL
+        );
+        INSERT INTO proxy_request_logs (request_id, model) VALUES ('keep-me', 'gpt-5.5');
+        CREATE TABLE usage_daily_rollups (date TEXT PRIMARY KEY);
+        "#,
+    )
+    .expect("seed v11 tables");
+    Database::set_user_version(&conn, 11).expect("set user_version=11");
+
+    conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::AlterTable {
+            table_name: "usage_daily_rollups",
+            ..
+        } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }));
+    let error = Database::apply_schema_migrations_on_conn(&conn)
+        .expect_err("denied v13 ALTER should fail migration");
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+
+    assert!(
+        error.to_string().contains("input_token_semantics")
+            || error.to_string().contains("not authorized"),
+        "unexpected migration error: {error}"
+    );
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read rolled-back version"),
+        11
+    );
+    assert!(!Database::table_exists(&conn, "profiles").expect("check rolled-back profiles table"));
+    assert!(
+        !Database::has_column(&conn, "proxy_request_logs", "input_token_semantics")
+            .expect("check rolled-back log column")
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'keep-me'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("count preserved row"),
+        1
+    );
+}
+
+#[test]
+fn create_tables_migrates_legacy_global_profile_marker_once() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute(
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)",
+        [],
+    )
+    .expect("create settings");
+    conn.execute_batch(
+        "INSERT INTO settings (key, value) VALUES ('current_profile_id', 'legacy');
+         INSERT INTO settings (key, value) VALUES ('current_profile_id_claude', 'newer');",
+    )
+    .expect("seed profile markers");
+
+    Database::create_tables_on_conn(&conn).expect("create canonical schema");
+    Database::create_tables_on_conn(&conn).expect("repeat canonical schema");
+
+    let scoped: String = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'current_profile_id_claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read scoped marker");
+    assert_eq!(scoped, "legacy");
+    let old_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'current_profile_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count old marker");
+    assert_eq!(old_count, 0);
 }
 
 #[test]
@@ -2323,6 +2685,87 @@ fn model_pricing_delete_survives_reseed_until_user_upserts() {
         )
         .expect("count restored pricing");
     assert_eq!(count, 1, "manual upsert should clear delete marker");
+}
+
+#[test]
+fn model_pricing_seeds_gpt_5_6_family_and_aliases() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let expected = [
+        ("gpt-5.6-sol", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6-terra", "2.50", "15", "0.25", "3.125"),
+        ("gpt-5.6-luna", "1", "6", "0.10", "1.25"),
+        ("gpt-5.6", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6-high", "5", "30", "0.50", "6.25"),
+    ];
+
+    for (model_id, input, output, cache_read, cache_write) in expected {
+        let pricing: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap_or_else(|error| panic!("query {model_id} pricing: {error}"));
+        assert_eq!(
+            pricing,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_write.to_string(),
+            ),
+            "unexpected pricing for {model_id}"
+        );
+    }
+}
+
+#[test]
+fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "UPDATE model_pricing SET cache_creation_cost_per_million = '0'
+             WHERE model_id = 'gpt-5.6-sol'",
+            [],
+        )
+        .expect("restore upstream zero cache-write seed");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '9', cache_creation_cost_per_million = '0'
+             WHERE model_id = 'gpt-5.6-terra'",
+            [],
+        )
+        .expect("set custom Terra pricing");
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("ensure pricing seeded");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let sol_cache_write: String = conn
+        .query_row(
+            "SELECT cache_creation_cost_per_million FROM model_pricing
+             WHERE model_id = 'gpt-5.6-sol'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query repaired Sol pricing");
+    assert_eq!(sol_cache_write, "6.25");
+
+    let terra_custom: (String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'gpt-5.6-terra'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query custom Terra pricing");
+    assert_eq!(terra_custom, ("9".to_string(), "0".to_string()));
 }
 
 #[test]

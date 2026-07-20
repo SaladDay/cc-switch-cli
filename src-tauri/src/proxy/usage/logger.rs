@@ -4,6 +4,7 @@ use crate::{
     app_config::AppType,
     provider::Provider,
     proxy::{error::ProxyError, handler_context::HandlerContext, server::ProxyServerState},
+    services::sql_helpers::{INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL},
 };
 
 use super::{
@@ -20,6 +21,14 @@ use super::{
 pub enum UsageLogPolicy {
     Passthrough,
     Transformed,
+}
+
+fn input_token_semantics_for_app(app_type: &AppType) -> i64 {
+    if matches!(app_type.as_str(), "codex" | "gemini") {
+        INPUT_TOKEN_SEMANTICS_TOTAL
+    } else {
+        INPUT_TOKEN_SEMANTICS_FRESH
+    }
 }
 
 impl UsageLogPolicy {
@@ -200,6 +209,7 @@ async fn insert_request_log(
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
+    let input_token_semantics = input_token_semantics_for_app(&context.app_type);
 
     let conn = match state.db.conn.lock() {
         Ok(conn) => conn,
@@ -213,10 +223,11 @@ async fn insert_request_log(
         "INSERT OR REPLACE INTO proxy_request_logs (
             request_id, provider_id, app_type, model, request_model, pricing_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+            input_token_semantics,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         rusqlite::params![
             request_id,
             &context.provider.id,
@@ -228,6 +239,7 @@ async fn insert_request_log(
             usage.output_tokens,
             usage.cache_read_tokens,
             usage.cache_creation_tokens,
+            input_token_semantics,
             cost.as_ref().map(|value| format_decimal(value.input_cost)).unwrap_or_else(|| "0".to_string()),
             cost.as_ref().map(|value| format_decimal(value.output_cost)).unwrap_or_else(|| "0".to_string()),
             cost.as_ref().map(|value| format_decimal(value.cache_read_cost)).unwrap_or_else(|| "0".to_string()),
@@ -276,5 +288,26 @@ fn non_empty_model(parsed: &ParsedUsage, request_model: &str) -> String {
         request_model.to_string()
     } else {
         parsed.model.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_logs_mark_cache_inclusive_apps_as_total() {
+        assert_eq!(
+            input_token_semantics_for_app(&AppType::Codex),
+            INPUT_TOKEN_SEMANTICS_TOTAL
+        );
+        assert_eq!(
+            input_token_semantics_for_app(&AppType::Gemini),
+            INPUT_TOKEN_SEMANTICS_TOTAL
+        );
+        assert_eq!(
+            input_token_semantics_for_app(&AppType::Claude),
+            INPUT_TOKEN_SEMANTICS_FRESH
+        );
     }
 }

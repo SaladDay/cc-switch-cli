@@ -1591,12 +1591,14 @@ impl ProxyService {
         original_live: &Value,
         provider: &Provider,
     ) -> Result<Value, String> {
-        let mut provider_snapshot = self.build_live_snapshot_from_provider(app_type, provider)?;
-        Self::apply_codex_unified_session_bucket_to_backup(
-            app_type,
-            provider,
-            &mut provider_snapshot,
-        )?;
+        let provider_snapshot = self.build_live_snapshot_from_provider(app_type, provider)?;
+        if matches!(app_type, AppType::Codex) {
+            return Self::prepare_codex_backup_from_existing(
+                provider,
+                provider_snapshot,
+                Some(original_live),
+            );
+        }
         Self::merge_live_backup_snapshot(app_type, Some(original_live), None, provider_snapshot)
     }
 
@@ -1660,12 +1662,26 @@ impl ProxyService {
                 )
             })?
         {
-            return serde_json::from_str(&snapshot.config_json).map_err(|error| {
-                format!(
-                    "parse {app_key} failover live snapshot for {} failed: {error}",
-                    provider.id
-                )
-            });
+            let mut cached: Value =
+                serde_json::from_str(&snapshot.config_json).map_err(|error| {
+                    format!(
+                        "parse {app_key} failover live snapshot for {} failed: {error}",
+                        provider.id
+                    )
+                })?;
+            if matches!(app_type, AppType::Codex) {
+                let original = cached.clone();
+                Self::apply_codex_unified_session_bucket_to_backup(
+                    app_type,
+                    provider,
+                    &mut cached,
+                )?;
+                if cached != original {
+                    self.save_failover_live_snapshot(app_type, &provider.id, &cached)
+                        .await?;
+                }
+            }
+            return Ok(cached);
         }
 
         let original_live = self
@@ -2071,6 +2087,10 @@ impl ProxyService {
             == Some(PROXY_TOKEN_PLACEHOLDER)
     }
 
+    fn codex_auth_has_proxy_placeholder(auth: &Value) -> bool {
+        auth.get("OPENAI_API_KEY").and_then(Value::as_str) == Some(PROXY_TOKEN_PLACEHOLDER)
+    }
+
     fn is_gemini_live_taken_over(config: &Value) -> bool {
         config
             .get("env")
@@ -2085,20 +2105,19 @@ impl ProxyService {
         provider: &Provider,
     ) -> Result<(), String> {
         let app_type_enum = Self::takeover_app_from_str(app_type)?;
-        let mut backup_snapshot =
-            self.build_live_snapshot_from_provider(&app_type_enum, provider)?;
-        Self::apply_codex_unified_session_bucket_to_backup(
-            &app_type_enum,
-            provider,
-            &mut backup_snapshot,
-        )?;
-        let existing_backup_value = self.load_live_backup_value(&app_type_enum).await?;
-        let backup_snapshot = Self::merge_live_backup_snapshot(
-            &app_type_enum,
-            existing_backup_value.as_ref(),
-            None,
-            backup_snapshot,
-        )?;
+        let backup_snapshot = self.build_live_snapshot_from_provider(&app_type_enum, provider)?;
+        let backup_snapshot = if matches!(app_type_enum, AppType::Codex) {
+            self.prepare_codex_live_backup_replacement(provider, backup_snapshot)
+                .await?
+        } else {
+            let existing_backup_value = self.load_live_backup_value(&app_type_enum).await?;
+            Self::merge_live_backup_snapshot(
+                &app_type_enum,
+                existing_backup_value.as_ref(),
+                None,
+                backup_snapshot,
+            )?
+        };
         self.save_live_backup_snapshot(app_type, &backup_snapshot)
             .await
     }
@@ -2110,22 +2129,14 @@ impl ProxyService {
         previous_provider: Option<&Provider>,
     ) -> Result<Value, String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let mut backup_snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
-        Self::apply_codex_unified_session_bucket_to_backup(
-            &app_type,
-            provider,
-            &mut backup_snapshot,
-        )?;
+        let backup_snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
+        if matches!(app_type, AppType::Codex) {
+            return self
+                .prepare_codex_live_backup_replacement(provider, backup_snapshot)
+                .await;
+        }
         let previous_backup_snapshot = previous_provider
-            .map(|provider| {
-                let mut snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
-                Self::apply_codex_unified_session_bucket_to_backup(
-                    &app_type,
-                    provider,
-                    &mut snapshot,
-                )?;
-                Ok::<Value, String>(snapshot)
-            })
+            .map(|provider| self.build_live_snapshot_from_provider(&app_type, provider))
             .transpose()?;
         let existing_backup_value = self.load_live_backup_value(&app_type).await?;
         Self::merge_live_backup_snapshot(
@@ -2134,6 +2145,50 @@ impl ProxyService {
             previous_backup_snapshot.as_ref(),
             backup_snapshot,
         )
+    }
+
+    async fn prepare_codex_live_backup_replacement(
+        &self,
+        provider: &Provider,
+        effective_settings: Value,
+    ) -> Result<Value, String> {
+        let existing_backup_value = self
+            .load_live_backup_value(&AppType::Codex)
+            .await?
+            .or_else(|| self.read_codex_live().ok());
+        Self::prepare_codex_backup_from_existing(
+            provider,
+            effective_settings,
+            existing_backup_value.as_ref(),
+        )
+    }
+
+    fn prepare_codex_backup_from_existing(
+        provider: &Provider,
+        mut effective_settings: Value,
+        existing_backup: Option<&Value>,
+    ) -> Result<Value, String> {
+        let is_official =
+            crate::services::provider::ProviderService::codex_live_write_category(provider)
+                == Some("official");
+        if let Some(existing_value) = existing_backup {
+            Self::preserve_toml_mcp_servers_from_existing_config(
+                &mut effective_settings,
+                existing_value,
+            )?;
+            Self::preserve_codex_auth_in_backup(
+                &mut effective_settings,
+                existing_value,
+                is_official,
+            )?;
+        }
+
+        Self::apply_codex_unified_session_bucket_to_backup(
+            &AppType::Codex,
+            provider,
+            &mut effective_settings,
+        )?;
+        Ok(effective_settings)
     }
 
     async fn load_live_backup_value(&self, app_type: &AppType) -> Result<Option<Value>, String> {
@@ -2166,6 +2221,17 @@ impl ProxyService {
             return Ok(());
         }
 
+        if crate::services::provider::ProviderService::codex_live_write_category(provider)
+            == Some("official")
+        {
+            crate::codex_config::strip_codex_unified_session_bucket_from_settings(backup_snapshot)
+                .map_err(|error| {
+                    format!(
+                        "strip stale Codex unified session bucket from live backup failed: {error}"
+                    )
+                })?;
+        }
+
         crate::codex_config::apply_codex_unified_session_bucket_to_settings(
             crate::services::provider::ProviderService::codex_live_write_category(provider),
             backup_snapshot,
@@ -2173,6 +2239,103 @@ impl ProxyService {
         .map_err(|error| {
             format!("apply Codex unified session bucket to live backup failed: {error}")
         })
+    }
+
+    fn preserve_toml_mcp_servers_from_existing_config(
+        target_settings: &mut Value,
+        existing_config: &Value,
+    ) -> Result<(), String> {
+        let target_obj = target_settings
+            .as_object_mut()
+            .ok_or_else(|| "TOML 应用备份必须是 JSON 对象".to_string())?;
+
+        let target_config = target_obj
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let mut target_doc = if target_config.trim().is_empty() {
+            toml_edit::DocumentMut::new()
+        } else {
+            target_config
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| format!("解析新的 config.toml 失败: {e}"))?
+        };
+
+        let existing_config = existing_config
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if existing_config.trim().is_empty() {
+            target_obj.insert("config".to_string(), json!(target_doc.to_string()));
+            return Ok(());
+        }
+
+        let existing_doc = existing_config
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("解析现有 config.toml 备份失败: {e}"))?;
+
+        if let Some(existing_mcp_servers) = existing_doc.get("mcp_servers") {
+            match target_doc.get_mut("mcp_servers") {
+                Some(target_mcp_servers) => {
+                    if let (Some(target_table), Some(existing_table)) = (
+                        target_mcp_servers.as_table_like_mut(),
+                        existing_mcp_servers.as_table_like(),
+                    ) {
+                        for (server_id, server_item) in existing_table.iter() {
+                            if target_table.get(server_id).is_none() {
+                                target_table.insert(server_id, server_item.clone());
+                            }
+                        }
+                    } else {
+                        log::warn!(
+                            "config.toml contains a non-table mcp_servers section; skipping MCP merge"
+                        );
+                    }
+                }
+                None => {
+                    target_doc["mcp_servers"] = existing_mcp_servers.clone();
+                }
+            }
+        }
+
+        target_obj.insert("config".to_string(), json!(target_doc.to_string()));
+        Ok(())
+    }
+
+    fn preserve_codex_auth_in_backup(
+        target_settings: &mut Value,
+        existing_backup: &Value,
+        preserve_api_key: bool,
+    ) -> Result<(), String> {
+        let Some(existing_auth) = existing_backup
+            .get("auth")
+            .filter(|auth| {
+                !Self::codex_auth_has_proxy_placeholder(auth)
+                    && (crate::codex_config::codex_auth_has_oauth_login_material(auth)
+                        || (preserve_api_key
+                            && crate::codex_config::codex_auth_has_login_material(auth)))
+            })
+            .cloned()
+        else {
+            return Ok(());
+        };
+
+        let Some(target_obj) = target_settings.as_object_mut() else {
+            return Ok(());
+        };
+
+        let provider_auth = target_obj.get("auth").cloned().unwrap_or_else(|| json!({}));
+        if let Some(config_text) = target_obj.get("config").and_then(Value::as_str) {
+            let live_config = crate::codex_config::prepare_codex_provider_live_config(
+                &provider_auth,
+                config_text,
+            )
+            .map_err(|e| format!("更新 Codex 备份配置失败: {e}"))?;
+            target_obj.insert("config".to_string(), json!(live_config));
+        }
+        target_obj.insert("auth".to_string(), existing_auth);
+
+        Ok(())
     }
 
     fn merge_live_backup_snapshot(
@@ -2200,11 +2363,7 @@ impl ProxyService {
                 .map_err(|error| error.to_string()),
                 (None, _) => Ok(backup_snapshot),
             },
-            AppType::Codex => Self::merge_codex_live_backup(
-                existing_backup,
-                previous_backup_snapshot,
-                backup_snapshot,
-            ),
+            AppType::Codex => Ok(backup_snapshot),
             AppType::Gemini => {
                 let incoming_env = backup_snapshot
                     .get("env")
@@ -2235,95 +2394,6 @@ impl ProxyService {
                 }
             }
             AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(backup_snapshot),
-        }
-    }
-
-    fn merge_codex_live_backup(
-        existing_backup: Option<&Value>,
-        previous_backup_snapshot: Option<&Value>,
-        mut incoming_backup: Value,
-    ) -> Result<Value, String> {
-        let Some(existing_backup) = existing_backup else {
-            return Ok(incoming_backup);
-        };
-
-        let mut merged = existing_backup.clone();
-        let existing_auth = existing_backup
-            .get("auth")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        let base_auth = previous_backup_snapshot
-            .and_then(|base| base.get("auth"))
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        let incoming_auth = incoming_backup
-            .get("auth")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        let merged_auth = if previous_backup_snapshot.is_some() {
-            live_merge::merge_json_with_base_live(
-                &AppType::Codex,
-                "proxy live backup auth",
-                existing_auth,
-                &base_auth,
-                &incoming_auth,
-            )
-        } else {
-            live_merge::merge_json_live(
-                &AppType::Codex,
-                "proxy live backup auth",
-                existing_auth,
-                &incoming_auth,
-            )
-        }
-        .map_err(|error| error.to_string())?;
-
-        let existing_config = existing_backup
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let base_config = previous_backup_snapshot
-            .and_then(|base| base.get("config"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let incoming_config = incoming_backup
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let merged_config = if previous_backup_snapshot.is_some() {
-            live_merge::merge_toml_with_base_live(
-                &AppType::Codex,
-                "proxy live backup config",
-                existing_config,
-                base_config,
-                incoming_config,
-            )
-        } else {
-            live_merge::merge_toml_live(
-                &AppType::Codex,
-                "proxy live backup config",
-                existing_config,
-                incoming_config,
-            )
-        }
-        .map_err(|error| error.to_string())?;
-
-        if let Some(root) = merged.as_object_mut() {
-            root.insert("auth".to_string(), merged_auth);
-            root.insert("config".to_string(), json!(merged_config));
-            if let Some(incoming_root) = incoming_backup.as_object_mut() {
-                for (key, value) in incoming_root {
-                    if key != "auth" && key != "config" && !root.contains_key(key) {
-                        root.insert(key.clone(), value.clone());
-                    }
-                }
-            }
-            Ok(merged)
-        } else {
-            let mut merged_root = serde_json::Map::new();
-            merged_root.insert("auth".to_string(), merged_auth);
-            merged_root.insert("config".to_string(), json!(merged_config));
-            Ok(Value::Object(merged_root))
         }
     }
 
@@ -2742,8 +2812,17 @@ impl ProxyService {
             return Ok(());
         };
 
-        let restored: Value = serde_json::from_str(&backup.original_config)
+        let mut restored: Value = serde_json::from_str(&backup.original_config)
             .map_err(|error| format!("parse {app_key} live backup failed: {error}"))?;
+        if matches!(app_type, AppType::Codex) {
+            if let Some(provider) = self.current_provider_for_app(app_type)? {
+                Self::apply_codex_unified_session_bucket_to_backup(
+                    app_type,
+                    &provider,
+                    &mut restored,
+                )?;
+            }
+        }
         self.write_live_config_for_app(app_type, &restored)
     }
 
@@ -6705,6 +6784,241 @@ base_url = "https://new.example/v1"
         );
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn update_live_backup_from_provider_removes_unified_bucket_when_disabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let mut provider = Provider::with_id(
+            "official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "tokens": { "access_token": "official-oauth-token" }
+                },
+                "config": "model = \"gpt-5.4\"\n"
+            }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&json!({
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "tokens": { "access_token": "official-oauth-token" }
+                },
+                "config": "[mcp_servers.echo]\ncommand = \"npx\"\n"
+            }))
+            .expect("serialize seed backup"),
+        )
+        .await
+        .expect("seed live backup");
+
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = true;
+        crate::settings::update_settings(settings).expect("enable unified session history");
+        service
+            .update_live_backup_from_provider("codex", &provider)
+            .await
+            .expect("write enabled backup");
+
+        let enabled = db
+            .get_live_backup("codex")
+            .await
+            .expect("read enabled backup")
+            .expect("enabled backup");
+        let enabled: Value =
+            serde_json::from_str(&enabled.original_config).expect("parse enabled backup");
+        let enabled_config = enabled
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("enabled config");
+        assert!(enabled_config.contains("model_provider = \"custom\""));
+        assert!(enabled_config.contains("[model_providers.custom]"));
+        assert!(enabled_config.contains("[mcp_servers.echo]"));
+
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = false;
+        crate::settings::update_settings(settings).expect("disable unified session history");
+        service
+            .update_live_backup_from_provider("codex", &provider)
+            .await
+            .expect("write disabled backup");
+
+        let disabled = db
+            .get_live_backup("codex")
+            .await
+            .expect("read disabled backup")
+            .expect("disabled backup");
+        let disabled: Value =
+            serde_json::from_str(&disabled.original_config).expect("parse disabled backup");
+        let disabled_config = disabled
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("disabled config");
+        assert!(!disabled_config.contains("model_provider = \"custom\""));
+        assert!(!disabled_config.contains("[model_providers.custom]"));
+        assert!(disabled_config.contains("[mcp_servers.echo]"));
+        assert_eq!(
+            provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str),
+            Some("model = \"gpt-5.4\"\n"),
+            "the stored provider template must remain clean"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn build_failover_snapshot_removes_stale_unified_bucket_when_disabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let service = ProxyService::new(Arc::new(Database::memory().expect("init db")));
+
+        let mut provider = Provider::with_id(
+            "official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {},
+                "config": "model = \"gpt-5.4\"\n"
+            }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+
+        let stale_config = crate::codex_config::inject_codex_unified_session_bucket(
+            "[mcp_servers.echo]\ncommand = \"npx\"\n",
+        )
+        .expect("build stale unified config");
+        let original_live = json!({
+            "auth": {
+                "auth_mode": "chatgpt",
+                "tokens": { "access_token": "official-oauth-token" }
+            },
+            "config": stale_config
+        });
+
+        let snapshot = service
+            .build_failover_live_snapshot(&AppType::Codex, &original_live, &provider)
+            .expect("build failover snapshot");
+        let config = snapshot
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("snapshot config");
+        assert!(!config.contains("model_provider = \"custom\""));
+        assert!(!config.contains("[model_providers.custom]"));
+        assert!(config.contains("[mcp_servers.echo]"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cached_failover_snapshot_applies_current_unified_session_policy() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let mut provider = Provider::with_id(
+            "official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "model = \"gpt-5.4\"\n" }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        db.save_provider("codex", &provider)
+            .expect("save official provider");
+        let stale_config =
+            crate::codex_config::inject_codex_unified_session_bucket("model = \"gpt-5.4\"\n")
+                .expect("build stale unified config");
+        db.save_failover_live_snapshot(
+            "codex",
+            &provider.id,
+            &serde_json::to_string(&json!({ "auth": {}, "config": stale_config }))
+                .expect("serialize stale snapshot"),
+        )
+        .await
+        .expect("seed stale snapshot");
+
+        let normalized = service
+            .failover_live_snapshot_for_provider(&AppType::Codex, &provider)
+            .await
+            .expect("load normalized snapshot");
+        let config = normalized
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("normalized config");
+        assert!(!config.contains("model_provider = \"custom\""));
+        assert!(!config.contains("[model_providers.custom]"));
+
+        let cached = db
+            .get_failover_live_snapshot("codex", &provider.id)
+            .await
+            .expect("read normalized cache")
+            .expect("normalized cache");
+        assert!(!cached
+            .config_json
+            .contains("model_provider = \\\"custom\\\""));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn restore_codex_live_backup_applies_current_unified_session_policy() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let mut provider = Provider::with_id(
+            "official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "model = \"gpt-5.4\"\n" }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        db.save_provider("codex", &provider)
+            .expect("save official provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("set current provider");
+
+        let stale_config = crate::codex_config::inject_codex_unified_session_bucket(
+            "[mcp_servers.echo]\ncommand = \"npx\"\n",
+        )
+        .expect("build stale unified config");
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&json!({
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "tokens": { "access_token": "official-oauth-token" }
+                },
+                "config": stale_config
+            }))
+            .expect("serialize stale backup"),
+        )
+        .await
+        .expect("seed stale live backup");
+
+        service
+            .restore_live_config_for_app(&AppType::Codex)
+            .await
+            .expect("restore live backup");
+        let restored = service.read_codex_live().expect("read restored config");
+        let config = restored
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("restored config text");
+        assert!(!config.contains("model_provider = \"custom\""));
+        assert!(!config.contains("[model_providers.custom]"));
+        assert!(config.contains("[mcp_servers.echo]"));
+    }
+
     #[test]
     #[serial]
     fn codex_custom_provider_live_write_preserves_oauth_auth_json() {
@@ -7345,8 +7659,8 @@ requires_openai_auth = true
         );
         assert_eq!(
             parsed_backup.get("local_only").and_then(|v| v.as_str()),
-            Some("kept"),
-            "hot switch should preserve local-only live backup fields while refreshing provider-owned fields"
+            None,
+            "Codex restore backups should be rebuilt from the selected provider instead of retaining unrelated local-only fields"
         );
         let backup_model_providers = parsed_backup
             .get("model_providers")
@@ -7459,8 +7773,8 @@ requires_openai_auth = true
         );
         assert_eq!(
             parsed_restored.get("local_only").and_then(|v| v.as_str()),
-            Some("kept"),
-            "restore should preserve local-only live backup fields"
+            None,
+            "restore should use the provider-rebuilt Codex backup"
         );
         let restored_model_providers = parsed_restored
             .get("model_providers")

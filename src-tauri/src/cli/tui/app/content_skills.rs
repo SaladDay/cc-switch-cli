@@ -119,7 +119,6 @@ impl App {
                     },
                     input: TextInput::new(self.skills_discover_query.clone()),
                     submit: TextSubmit::SkillsDiscoverQuery,
-                    secret: false,
                 });
                 Action::None
             }
@@ -190,7 +189,6 @@ impl App {
                     prompt: texts::tui_skills_repos_add_prompt().to_string(),
                     input: TextInput::new(""),
                     submit: TextSubmit::SkillsRepoAdd,
-                    secret: false,
                 });
                 Action::None
             }

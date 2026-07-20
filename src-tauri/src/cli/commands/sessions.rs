@@ -1,6 +1,9 @@
 use chrono::{Local, TimeZone};
 use clap::Subcommand;
+use serde::ser::SerializeSeq;
 use serde::Serialize;
+use serde::Serializer as _;
+use std::io::Write;
 use std::process::Command;
 use std::str::FromStr;
 
@@ -9,8 +12,7 @@ use crate::cli::ui::{create_table, info, success, to_json, warning};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
-#[allow(unused_imports)]
-use crate::session_manager::{self, SessionMessage, SessionMeta, SessionSearchHit};
+use crate::session_manager::{self, SessionMessage, SessionMessageBatch, SessionMeta};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionsCommand {
@@ -110,8 +112,16 @@ struct SessionDetail {
     session: SessionMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     messages: Option<Vec<SessionMessage>>,
+    messages_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     messages_error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMessagesOutput<'a> {
+    messages: &'a [SessionMessage],
+    messages_truncated: bool,
 }
 
 pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppError> {
@@ -160,39 +170,84 @@ fn list_sessions(
     all: bool,
     json: bool,
 ) -> Result<(), AppError> {
-    let sessions = scan_sessions(app, provider.as_ref(), all && provider.is_none());
+    let include_all = all && provider.is_none();
+    let scope = session_scope(app, provider, include_all);
+    let reader =
+        session_manager::build_fresh_session_manifest(&scope).map_err(AppError::Message)?;
     if json {
-        println!(
-            "{}",
-            to_json(&sessions).map_err(|source| AppError::JsonSerialize { source })?
-        );
-        return Ok(());
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        return write_manifest_json(&reader, &mut output);
     }
 
-    if sessions.is_empty() {
+    if reader.total_rows() == 0 {
         println!("{}", info("No sessions found."));
         return Ok(());
     }
 
-    let mut table = create_table();
-    table.set_header(vec!["Provider", "Session", "Title", "Updated", "Workdir"]);
-    for session in &sessions {
-        table.add_row(vec![
-            session.provider_id.clone(),
-            short_session_id(&session.session_id),
-            session_title(session),
-            format_session_time(session.last_active_at.or(session.created_at)),
-            session
-                .project_dir
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("-")
-                .to_string(),
-        ]);
+    // `comfy_table` needs to retain every row whose widths it computes. Render
+    // one immutable manifest page at a time so a million-row list never turns
+    // into a million-row in-memory table. Repeating the header at page
+    // boundaries also keeps long terminal output readable.
+    for page_index in 0..reader.page_count() {
+        let page = reader.load_page(page_index).ok_or_else(|| {
+            AppError::Message(format!(
+                "Session page {page_index} became unavailable while listing."
+            ))
+        })?;
+        let mut table = create_table();
+        table.set_header(vec!["Provider", "Session", "Title", "Updated", "Workdir"]);
+        for session in &page.rows {
+            table.add_row(vec![
+                session.provider_id.clone(),
+                short_session_id(&session.session_id),
+                session_title(session),
+                format_session_time(session.last_active_at.or(session.created_at)),
+                session
+                    .project_dir
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("-")
+                    .to_string(),
+            ]);
+        }
+        println!("{table}");
     }
-
-    println!("{table}");
     Ok(())
+}
+
+fn write_manifest_json(
+    reader: &session_manager::paged_manifest::ManifestReader,
+    output: &mut dyn Write,
+) -> Result<(), AppError> {
+    // Publication validated every page before this immutable generation became
+    // current. Stream it once so first-byte latency and total I/O remain linear.
+    let mut serializer = serde_json::Serializer::pretty(&mut *output);
+    let mut sequence = serializer
+        .serialize_seq(Some(reader.total_rows()))
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    for page_index in 0..reader.page_count() {
+        let page = reader.load_page(page_index).ok_or_else(|| {
+            AppError::Message(format!(
+                "Session page {page_index} became unavailable while writing JSON."
+            ))
+        })?;
+        for session in &page.rows {
+            sequence
+                .serialize_element(session)
+                .map_err(|source| AppError::JsonSerialize { source })?;
+        }
+    }
+    sequence
+        .end()
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    drop(serializer);
+    output
+        .write_all(b"\n")
+        .map_err(|source| AppError::IoContext {
+            context: "failed to finish session JSON output".to_string(),
+            source,
+        })
 }
 
 fn show_session(
@@ -203,12 +258,16 @@ fn show_session(
     json: bool,
 ) -> Result<(), AppError> {
     let (session, _) = resolve_scanned_session(app, provider, all, selector)?;
-    let (messages, messages_error) = load_session_messages(&session);
+    let (message_batch, messages_error) = load_session_messages(&session);
 
     if json {
+        let (messages, messages_truncated) = message_batch
+            .map(|batch| (Some(batch.messages), batch.truncated))
+            .unwrap_or((None, false));
         let detail = SessionDetail {
             session,
             messages,
+            messages_truncated,
             messages_error,
         };
         println!(
@@ -220,8 +279,8 @@ fn show_session(
 
     print_session_overview(&session);
     println!();
-    match (messages, messages_error) {
-        (Some(messages), None) => print_message_table(&messages),
+    match (message_batch, messages_error) {
+        (Some(batch), None) => print_message_batch(&batch),
         (_, Some(error)) => println!("{}", warning(&error)),
         _ => println!("{}", info("Messages are not available.")),
     }
@@ -238,18 +297,22 @@ fn print_messages(
 ) -> Result<(), AppError> {
     let (session, _) = resolve_scanned_session(app, provider, all, selector)?;
     let source_path = required_source_path(&session)?;
-    let messages = session_manager::load_messages(&session.provider_id, source_path)
+    let batch = session_manager::load_messages(&session.provider_id, source_path)
         .map_err(AppError::Message)?;
 
     if json {
+        let output = SessionMessagesOutput {
+            messages: &batch.messages,
+            messages_truncated: batch.truncated,
+        };
         println!(
             "{}",
-            to_json(&messages).map_err(|source| AppError::JsonSerialize { source })?
+            to_json(&output).map_err(|source| AppError::JsonSerialize { source })?
         );
         return Ok(());
     }
 
-    print_message_table(&messages);
+    print_message_batch(&batch);
     Ok(())
 }
 
@@ -321,10 +384,10 @@ fn delete_session(
         return Err(AppError::Message("Session was not deleted.".to_string()));
     }
 
-    // 与 TUI 删除路径一致：清掉该会话的 sidecar 扫描缓存行，否则 CLI 删完再开
-    // TUI 时，stale-while-revalidate 的秒开快照会让已删会话短暂"复活"。纯缓存
-    // 操作，失败只记 debug，不影响删除结果。
-    session_manager::scan_cache_store::purge_session(
+    // 与 TUI 删除路径一致：清掉扫描 sidecar、首屏快照以及 provider/all 两份
+    // 分页 manifest，避免 CLI 删除后重开 TUI 时旧首屏短暂“复活”。这些都是
+    // schema-free 的本地缓存；失败只记 debug，不影响真实会话已经删除的结果。
+    let _ = session_manager::purge_deleted_session_from_local_caches(
         &session.provider_id,
         &session.session_id,
         &source_path,
@@ -342,67 +405,115 @@ fn delete_session(
 }
 
 fn search_sessions_cmd(query: &str, json: bool) -> Result<(), AppError> {
-    let sessions = session_manager::scan_sessions();
-    let hits = session_manager::search_sessions_in(&sessions, query);
+    let reader = session_manager::build_fresh_session_manifest("all").map_err(AppError::Message)?;
 
     if json {
-        println!(
-            "{}",
-            to_json(&hits).map_err(|source| AppError::JsonSerialize { source })?
-        );
-        return Ok(());
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        return write_manifest_search_json(&reader, query, &mut output);
     }
 
-    if hits.is_empty() {
-        println!("{}", info("No matches found."));
-        return Ok(());
-    }
-
-    let mut table = create_table();
-    table.set_header(vec!["Provider", "Session", "Title", "Snippets"]);
-    for hit in &hits {
-        let session = sessions
-            .iter()
-            .find(|s| s.source_path.as_deref() == Some(&hit.source_path))
-            .map(session_title)
-            .unwrap_or_else(|| short_session_id(&hit.session_id));
-        let snippet_preview = hit
-            .snippets
-            .iter()
-            .take(2)
-            .map(|s| truncate_chars(&s.snippet, 80))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        table.add_row(vec![
-            hit.provider_id.clone(),
-            short_session_id(&hit.session_id),
-            session,
-            snippet_preview,
-        ]);
-    }
-    println!("{table}");
-
-    // Show full snippets for each hit
-    for hit in &hits {
-        println!();
-        println!(
-            "{}",
-            info(&format!(
-                "=== {} / {} ===",
-                hit.provider_id,
-                short_session_id(&hit.session_id)
+    let mut found = false;
+    for page_index in 0..reader.page_count() {
+        let page = reader.load_page(page_index).ok_or_else(|| {
+            AppError::Message(format!(
+                "Session page {page_index} became unavailable while searching."
             ))
-        );
-        for snippet in &hit.snippets {
+        })?;
+        let hits = session_manager::search_sessions_in(&page.rows, query);
+        if hits.is_empty() {
+            continue;
+        }
+        found = true;
+
+        // Both the source page and this table are capped at 100 rows. Print
+        // each result page before searching the next one so neither the corpus
+        // nor a high-match result set accumulates in memory.
+        let mut table = create_table();
+        table.set_header(vec!["Provider", "Session", "Title", "Snippets"]);
+        for hit in &hits {
+            let session = page
+                .rows
+                .iter()
+                .find(|session| {
+                    session.provider_id == hit.provider_id
+                        && session.session_id == hit.session_id
+                        && session.source_path.as_deref() == Some(hit.source_path.as_str())
+                })
+                .map(session_title)
+                .unwrap_or_else(|| short_session_id(&hit.session_id));
+            let snippet_preview = hit
+                .snippets
+                .iter()
+                .take(2)
+                .map(|snippet| truncate_chars(&snippet.snippet, 80))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            table.add_row(vec![
+                hit.provider_id.clone(),
+                short_session_id(&hit.session_id),
+                session,
+                snippet_preview,
+            ]);
+        }
+        println!("{table}");
+
+        for hit in &hits {
+            println!();
             println!(
-                "  [{}] {}",
-                snippet.role,
-                truncate_chars(&snippet.snippet, 200)
+                "{}",
+                info(&format!(
+                    "=== {} / {} ===",
+                    hit.provider_id,
+                    short_session_id(&hit.session_id)
+                ))
             );
+            for snippet in &hit.snippets {
+                println!(
+                    "  [{}] {}",
+                    snippet.role,
+                    truncate_chars(&snippet.snippet, 200)
+                );
+            }
         }
     }
-
+    if !found {
+        println!("{}", info("No matches found."));
+    }
     Ok(())
+}
+
+fn write_manifest_search_json(
+    reader: &session_manager::paged_manifest::ManifestReader,
+    query: &str,
+    output: &mut dyn Write,
+) -> Result<(), AppError> {
+    let mut serializer = serde_json::Serializer::pretty(&mut *output);
+    let mut sequence = serializer
+        .serialize_seq(None)
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    for page_index in 0..reader.page_count() {
+        let page = reader.load_page(page_index).ok_or_else(|| {
+            AppError::Message(format!(
+                "Session page {page_index} became unavailable while searching."
+            ))
+        })?;
+        for hit in session_manager::search_sessions_in(&page.rows, query) {
+            sequence
+                .serialize_element(&hit)
+                .map_err(|source| AppError::JsonSerialize { source })?;
+        }
+    }
+    sequence
+        .end()
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    drop(serializer);
+    output
+        .write_all(b"\n")
+        .map_err(|source| AppError::IoContext {
+            context: "failed to finish session search JSON output".to_string(),
+            source,
+        })
 }
 
 fn sync_usage(
@@ -497,66 +608,144 @@ fn resolve_scanned_session(
         .as_ref()
         .and_then(|(provider, _)| app_type_from_provider_id(provider))
         .or(provider);
-    let sessions = scan_sessions(
-        app,
-        forced_provider.as_ref(),
-        all && forced_provider.is_none(),
-    );
-    let session = resolve_session(&sessions, selector)?;
-    Ok((session.clone(), selector.to_string()))
+    let include_all = all && forced_provider.is_none();
+    let scope = session_scope(app, forced_provider, include_all);
+    let reader =
+        session_manager::build_fresh_session_manifest(&scope).map_err(AppError::Message)?;
+    let session = resolve_session_manifest(&reader, selector)?;
+    Ok((session, selector.to_string()))
 }
 
-fn scan_sessions(app: Option<AppType>, provider: Option<&AppType>, all: bool) -> Vec<SessionMeta> {
+fn session_scope(app: Option<AppType>, provider: Option<AppType>, all: bool) -> String {
     if all {
-        return session_manager::scan_sessions();
+        return "all".to_string();
     }
 
-    let app_type = provider.cloned().or(app).unwrap_or(AppType::Claude);
-    session_manager::scan_sessions_for_provider(app_type.as_str())
+    provider
+        .or(app)
+        .unwrap_or(AppType::Claude)
+        .as_str()
+        .to_string()
 }
 
-fn resolve_session<'a>(
-    sessions: &'a [SessionMeta],
+#[derive(Default)]
+struct SelectorMatches {
+    count: usize,
+    first: Option<SessionMeta>,
+    choices: Vec<String>,
+}
+
+impl SelectorMatches {
+    const MAX_CHOICES: usize = 8;
+
+    fn push(&mut self, session: SessionMeta) {
+        self.count = self.count.saturating_add(1);
+        if self.first.is_none() {
+            self.first = Some(session.clone());
+        }
+        if self.choices.len() < Self::MAX_CHOICES {
+            self.choices
+                .push(format!("{}:{}", session.provider_id, session.session_id));
+        }
+    }
+}
+
+struct SessionSelectorResolver<'a> {
+    selector: &'a str,
+    exact: SelectorMatches,
+    prefixed: SelectorMatches,
+}
+
+impl<'a> SessionSelectorResolver<'a> {
+    fn new(selector: &'a str) -> Result<Self, AppError> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return Err(AppError::InvalidInput(
+                "session selector cannot be empty".to_string(),
+            ));
+        }
+        Ok(Self {
+            selector,
+            exact: SelectorMatches::default(),
+            prefixed: SelectorMatches::default(),
+        })
+    }
+
+    fn push(&mut self, session: SessionMeta) {
+        if session.session_id == self.selector {
+            self.exact.push(session);
+        } else if session.session_id.starts_with(self.selector) {
+            self.prefixed.push(session);
+        }
+    }
+
+    fn finish(self) -> Result<SessionMeta, AppError> {
+        if self.exact.count == 1 {
+            return self.exact.first.ok_or_else(|| {
+                AppError::Message("Session selector state was incomplete.".to_string())
+            });
+        }
+        if self.exact.count > 1 {
+            return Err(ambiguous_selector_error(
+                self.selector,
+                self.exact.count,
+                &self.exact.choices,
+            ));
+        }
+        if self.prefixed.count == 1 {
+            return self.prefixed.first.ok_or_else(|| {
+                AppError::Message("Session selector state was incomplete.".to_string())
+            });
+        }
+        if self.prefixed.count > 1 {
+            return Err(ambiguous_selector_error(
+                self.selector,
+                self.prefixed.count,
+                &self.prefixed.choices,
+            ));
+        }
+        Err(AppError::Message(format!(
+            "Session '{}' was not found.",
+            self.selector
+        )))
+    }
+}
+
+fn resolve_session_manifest(
+    reader: &session_manager::paged_manifest::ManifestReader,
     selector: &str,
-) -> Result<&'a SessionMeta, AppError> {
-    let selector = selector.trim();
-    if selector.is_empty() {
-        return Err(AppError::InvalidInput(
-            "session selector cannot be empty".to_string(),
-        ));
+) -> Result<SessionMeta, AppError> {
+    let mut resolver = SessionSelectorResolver::new(selector)?;
+    for page_index in 0..reader.page_count() {
+        let page = reader.load_page(page_index).ok_or_else(|| {
+            AppError::Message(format!(
+                "Session page {page_index} is unavailable while resolving '{selector}'."
+            ))
+        })?;
+        for session in page.rows {
+            resolver.push(session);
+        }
     }
-
-    let exact = sessions
-        .iter()
-        .filter(|session| session.session_id == selector)
-        .collect::<Vec<_>>();
-    match exact.len() {
-        1 => return Ok(exact[0]),
-        len if len > 1 => return Err(ambiguous_selector_error(selector, &exact)),
-        _ => {}
-    }
-
-    let prefixed = sessions
-        .iter()
-        .filter(|session| session.session_id.starts_with(selector))
-        .collect::<Vec<_>>();
-    match prefixed.len() {
-        1 => Ok(prefixed[0]),
-        0 => Err(AppError::Message(format!(
-            "Session '{selector}' was not found."
-        ))),
-        _ => Err(ambiguous_selector_error(selector, &prefixed)),
-    }
+    resolver.finish()
 }
 
-fn ambiguous_selector_error(selector: &str, matches: &[&SessionMeta]) -> AppError {
-    let choices = matches
-        .iter()
-        .take(8)
-        .map(|session| format!("{}:{}", session.provider_id, session.session_id))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let suffix = if matches.len() > 8 { ", ..." } else { "" };
+#[cfg(test)]
+fn resolve_session(sessions: &[SessionMeta], selector: &str) -> Result<SessionMeta, AppError> {
+    let mut resolver = SessionSelectorResolver::new(selector)?;
+    for session in sessions {
+        resolver.push(session.clone());
+    }
+    resolver.finish()
+}
+
+fn ambiguous_selector_error(selector: &str, count: usize, choices: &[String]) -> AppError {
+    let selector = selector.trim();
+    let choices = choices.join(", ");
+    let suffix = if count > SelectorMatches::MAX_CHOICES {
+        ", ..."
+    } else {
+        ""
+    };
     AppError::Message(format!(
         "Session selector '{selector}' is ambiguous: {choices}{suffix}"
     ))
@@ -588,7 +777,7 @@ fn app_type_from_provider_id(provider_id: &str) -> Option<AppType> {
     AppType::from_str(&normalized).ok()
 }
 
-fn load_session_messages(session: &SessionMeta) -> (Option<Vec<SessionMessage>>, Option<String>) {
+fn load_session_messages(session: &SessionMeta) -> (Option<SessionMessageBatch>, Option<String>) {
     let Some(source_path) = session
         .source_path
         .as_deref()
@@ -678,6 +867,16 @@ fn print_message_table(messages: &[SessionMessage]) {
     println!("{table}");
 }
 
+fn print_message_batch(batch: &SessionMessageBatch) {
+    print_message_table(&batch.messages);
+    if batch.truncated {
+        println!(
+            "{}",
+            warning("Showing a bounded message preview; additional content was truncated.")
+        );
+    }
+}
+
 fn session_title(session: &SessionMeta) -> String {
     session
         .title
@@ -718,13 +917,37 @@ fn format_session_time(timestamp_ms: Option<i64>) -> String {
 }
 
 fn collapse_message_preview(content: &str) -> String {
-    let single_line = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    truncate_chars(&single_line, 160)
+    const LIMIT: usize = 160;
+
+    let mut preview = String::with_capacity(LIMIT + 3);
+    let mut count = 0usize;
+    let mut pending_space = false;
+    let mut truncated = false;
+    for ch in content.chars() {
+        if ch.is_whitespace() {
+            pending_space |= !preview.is_empty();
+            continue;
+        }
+        if pending_space {
+            if count >= LIMIT {
+                truncated = true;
+                break;
+            }
+            preview.push(' ');
+            count += 1;
+            pending_space = false;
+        }
+        if count >= LIMIT {
+            truncated = true;
+            break;
+        }
+        preview.push(ch);
+        count += 1;
+    }
+    if truncated {
+        preview.push_str("...");
+    }
+    preview
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -811,6 +1034,43 @@ mod tests {
         assert!(error.to_string().contains("ambiguous"));
         assert!(error.to_string().contains("codex:abcdef"));
         assert!(error.to_string().contains("codex:abc999"));
+    }
+
+    #[test]
+    fn selector_resolution_retains_only_bounded_ambiguity_context_at_large_n() {
+        let mut resolver = SessionSelectorResolver::new("shared-").expect("resolver");
+        for index in 0..50_000 {
+            resolver.push(meta("codex", &format!("shared-{index:05}")));
+        }
+
+        assert_eq!(resolver.prefixed.count, 50_000);
+        assert_eq!(
+            resolver.prefixed.choices.len(),
+            SelectorMatches::MAX_CHOICES
+        );
+        let error = resolver.finish().expect_err("prefix must be ambiguous");
+        assert!(error.to_string().contains(", ..."));
+    }
+
+    #[test]
+    fn manifest_json_stream_is_one_valid_array_across_pages() {
+        let directory = tempfile::tempdir().expect("manifest directory");
+        let store = session_manager::paged_manifest::PagedManifestStore::open_at(directory.path())
+            .expect("manifest store");
+        let mut builder = store.begin_build("codex").expect("manifest builder");
+        for index in 0..205 {
+            let mut row = meta("codex", &format!("session-{index:03}"));
+            row.last_active_at = Some(index);
+            builder.push(row).expect("manifest row");
+        }
+        let published = builder.publish().expect("published manifest");
+        let mut output = Vec::new();
+
+        write_manifest_json(&published.reader, &mut output).expect("stream JSON");
+
+        let decoded: Vec<SessionMeta> = serde_json::from_slice(&output).expect("valid JSON array");
+        assert_eq!(decoded.len(), 205);
+        assert!(output.ends_with(b"\n"));
     }
 
     #[test]

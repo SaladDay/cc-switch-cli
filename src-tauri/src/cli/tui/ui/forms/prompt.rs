@@ -25,21 +25,51 @@ pub(crate) fn render_prompt_meta_form(
         .split(inner);
 
     let fields = prompt.fields();
-    let selected = fields
-        .get(prompt.field_idx.min(fields.len().saturating_sub(1)))
-        .copied();
+    let selected_idx = prompt
+        .text_edit_target()
+        .and_then(|field| fields.iter().position(|candidate| *candidate == field))
+        .unwrap_or(prompt.field_idx.min(fields.len().saturating_sub(1)));
+    let selected = fields.get(selected_idx).copied();
     render_key_bar(
         frame,
         chunks[0],
         theme,
-        &prompt_meta_form_key_items(prompt.editing, prompt.focus, selected),
+        &prompt_meta_form_key_items(prompt.text_edit.is_some(), prompt.focus, selected),
     );
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(36), Constraint::Min(30)])
-        .split(chunks[1]);
+    let split = chunks[1].width >= super::form::PROMPT_FORM_SPLIT_MIN_BODY_WIDTH;
+    let panes = split.then(|| {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(chunks[1])
+    });
+    if split || matches!(prompt.focus, FormFocus::Fields) {
+        let fields_area = if split {
+            panes.as_ref().expect("split panes")[0]
+        } else {
+            chunks[1]
+        };
+        render_prompt_inline_fields(frame, prompt, &fields, selected_idx, fields_area, theme);
+    }
+    if split || matches!(prompt.focus, FormFocus::Content) {
+        let content_area = if split {
+            panes.as_ref().expect("split panes")[1]
+        } else {
+            chunks[1]
+        };
+        render_prompt_content_editor(frame, prompt, content_area, theme);
+    }
+}
 
+fn render_prompt_inline_fields(
+    frame: &mut Frame<'_>,
+    prompt: &super::form::PromptMetaFormState,
+    fields: &[PromptMetaField],
+    selected_idx: usize,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
     let fields_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -48,26 +78,28 @@ pub(crate) fn render_prompt_meta_form(
             theme,
         ))
         .title(format!(" {} ", texts::tui_form_fields_title()));
-    frame.render_widget(fields_block.clone(), body[0]);
-    let fields_inner = fields_block.inner(body[0]);
-
-    let fields_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(fields_inner);
+    frame.render_widget(fields_block.clone(), area);
+    let table_area = fields_block.inner(area);
 
     let rows_data = fields
         .iter()
         .map(|field| prompt_meta_field_label_and_value(prompt, *field))
         .collect::<Vec<_>>();
 
-    let label_col_width = field_label_column_width(
+    let raw_label_width = field_label_column_width(
         rows_data
             .iter()
             .map(|(label, _value)| label.as_str())
             .chain(std::iter::once(texts::tui_header_field())),
         1,
     );
+    let label_col_width = raw_label_width.min(
+        table_area
+            .width
+            .saturating_sub(FORM_VALUE_MIN_WIDTH)
+            .saturating_sub(1),
+    );
+    let value_width = form_value_width(table_area.width, label_col_width, theme);
 
     let header = Row::new(vec![
         Cell::from(cell_pad(texts::tui_header_field())),
@@ -75,17 +107,34 @@ pub(crate) fn render_prompt_meta_form(
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
-    let rows = rows_data.iter().map(|(label, value)| {
-        Row::new(vec![
-            Cell::from(cell_pad(label)),
-            Cell::from(truncated_value_cell(
-                value,
-                fields_inner.width,
-                label_col_width,
-                theme,
-            )),
-        ])
-    });
+    let mut cursor_x = None;
+    let mut row_heights = Vec::with_capacity(fields.len());
+    let rows = fields
+        .iter()
+        .zip(rows_data.iter())
+        .enumerate()
+        .map(|(idx, (field, (label, value)))| {
+            let editing = matches!(prompt.focus, FormFocus::Fields)
+                && prompt.text_edit_target() == Some(*field);
+            let display = if editing {
+                let (visible, x) = inline_input_window(prompt.input(*field), value_width);
+                if idx == selected_idx {
+                    cursor_x = Some(x);
+                }
+                visible
+            } else {
+                truncated_value_cell(value, table_area.width, label_col_width, theme)
+            };
+            let error = prompt.field_error(*field);
+            let height = inline_row_height(error, value_width);
+            row_heights.push(height);
+            Row::new(vec![
+                Cell::from(cell_pad(label)),
+                inline_field_cell(display, error, value_width, theme),
+            ])
+            .height(height)
+        })
+        .collect::<Vec<_>>();
 
     let table = Table::new(
         rows,
@@ -98,39 +147,21 @@ pub(crate) fn render_prompt_meta_form(
 
     let mut state = TableState::default();
     if !fields.is_empty() {
-        state.select(Some(prompt.field_idx.min(fields.len() - 1)));
+        state.select(Some(selected_idx.min(fields.len() - 1)));
     }
-    frame.render_stateful_widget(table, fields_chunks[0], &mut state);
-
-    let editor_active = matches!(prompt.focus, FormFocus::Fields) && prompt.editing;
-    let editor_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(focus_block_style(editor_active, theme))
-        .title(if editor_active {
-            texts::tui_form_editing_title()
-        } else {
-            texts::tui_form_input_title()
-        });
-    frame.render_widget(editor_block.clone(), fields_chunks[1]);
-    let editor_inner = editor_block.inner(fields_chunks[1]);
-
-    if let Some(field) = selected {
-        let input = prompt.input(field);
-        let (visible, cursor_x) =
-            visible_text_window(&input.value, input.cursor, editor_inner.width as usize);
-        frame.render_widget(
-            Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
-            editor_inner,
+    frame.render_stateful_widget(table, table_area, &mut state);
+    if let Some(cursor_x) = cursor_x {
+        set_inline_table_cursor(
+            frame,
+            table_area,
+            label_col_width,
+            selected_idx,
+            state.offset(),
+            &row_heights,
+            cursor_x,
+            theme,
         );
-        if editor_active {
-            let x = editor_inner.x + cursor_x.min(editor_inner.width.saturating_sub(1));
-            let y = editor_inner.y;
-            frame.set_cursor_position((x, y));
-        }
     }
-
-    render_prompt_content_editor(frame, prompt, body[1], theme);
 }
 
 fn render_prompt_content_editor(
@@ -151,27 +182,28 @@ fn render_prompt_content_editor(
     let height = content_inner.height as usize;
     let width = content_inner.width.max(1);
 
-    let mut shown = Vec::new();
-    let start = prompt
+    // Use the rendered pane dimensions as the final authority without cloning
+    // the prompt text buffers on every TUI tick.
+    let viewport = ratatui::layout::Size {
+        width: content_inner.width,
+        height: content_inner.height,
+    };
+    let (scroll, scroll_subline) = prompt.content.viewport_origin(viewport);
+
+    let shown = prompt
         .content
-        .scroll
-        .min(prompt.content.lines.len().saturating_sub(1));
-    for line in prompt.content.lines.iter().skip(start) {
-        for segment in super::app::EditorState::wrap_line_segments(line, width) {
-            if shown.len() >= height {
-                break;
-            }
-            shown.push(Line::raw(segment));
-        }
-        if shown.len() >= height {
-            break;
-        }
-    }
+        .visible_wrapped_lines_from(width, height, scroll, scroll_subline)
+        .into_iter()
+        .map(Line::raw)
+        .collect::<Vec<_>>();
 
     frame.render_widget(Paragraph::new(shown), content_inner);
 
     if active {
-        let (row_in_view, col_in_view) = prompt.content.cursor_visual_offset_from_scroll(width);
+        let (row_in_view, col_in_view) =
+            prompt
+                .content
+                .cursor_visual_offset_from_origin(width, scroll, scroll_subline);
         if row_in_view < height {
             let x = content_inner.x + col_in_view.min(content_inner.width.saturating_sub(1));
             let y = content_inner.y + row_in_view as u16;
@@ -189,7 +221,7 @@ fn prompt_meta_field_label_and_value(
         PromptMetaField::Name => texts::header_name().to_string(),
         PromptMetaField::Description => texts::header_description().to_string(),
     };
-    let value = prompt.input(field).value.trim().to_string();
+    let value = bounded_trimmed_text_for_display(&prompt.input(field).value);
     (
         label,
         if value.is_empty() {
@@ -219,13 +251,9 @@ fn prompt_meta_form_key_items(
         }
         FormFocus::Fields if editing => {
             keys.extend([
-                ("Tab", texts::tui_key_focus()),
+                ("Enter", texts::tui_key_apply()),
                 ("Ctrl+S", texts::tui_key_save()),
-                ("Esc", texts::tui_key_close()),
-            ]);
-            keys.extend([
-                ("←→", texts::tui_key_move()),
-                ("Enter", texts::tui_key_exit_edit()),
+                ("Esc", texts::tui_key_cancel()),
             ]);
         }
         _ => {

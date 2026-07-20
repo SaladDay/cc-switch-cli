@@ -48,11 +48,17 @@ impl ProviderService {
         let mut raw_settings = serde_json::Map::new();
         raw_settings.insert("auth".to_string(), auth);
         raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
+        let mut settings_to_store = Value::Object(raw_settings);
+        if Self::codex_live_write_category(&provider) == Some("official") {
+            crate::codex_config::strip_codex_unified_session_bucket_from_settings(
+                &mut settings_to_store,
+            )?;
+        }
 
         let settings_to_store = Self::normalize_settings_config_for_storage(
             &AppType::Codex,
             &provider,
-            Value::Object(raw_settings),
+            settings_to_store,
             common_snippet.as_deref(),
         )?;
 
@@ -86,11 +92,24 @@ impl ProviderService {
         root.remove("model_provider");
         // Legacy/alt formats might use a top-level base_url.
         root.remove("base_url");
+        root.remove("wire_api");
         // Profiles can carry provider-specific model_provider overrides. Keep
         // unrelated profile settings in the common config snippet.
         root.remove("profile");
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
+        root.remove("mcp_servers");
+        if let Some(mcp_tbl) = root
+            .get_mut("mcp")
+            .and_then(|item| item.as_table_like_mut())
+        {
+            mcp_tbl.remove("servers");
+            if mcp_tbl.is_empty() {
+                root.remove("mcp");
+            }
+        }
+        root.remove("experimental_bearer_token");
+        root.remove("model_catalog_json");
 
         if let Some(profiles) = root
             .get_mut("profiles")
@@ -418,7 +437,14 @@ impl ProviderService {
                 raw_settings.insert("auth".to_string(), auth);
             }
             raw_settings.insert("config".to_string(), Value::String(text));
-            snapshot_provider.settings_config = Value::Object(raw_settings);
+            let mut settings_for_storage = Value::Object(raw_settings);
+            crate::codex_config::strip_codex_mcp_servers_from_settings(&mut settings_for_storage)?;
+            if is_official {
+                crate::codex_config::strip_codex_unified_session_bucket_from_settings(
+                    &mut settings_for_storage,
+                )?;
+            }
+            snapshot_provider.settings_config = settings_for_storage;
             snapshot_provider = Self::migrate_provider_snapshot_for_storage(
                 &AppType::Codex,
                 &snapshot_provider,
@@ -510,9 +536,24 @@ impl ProviderService {
                 profile,
             )?;
         let is_official = Self::codex_live_write_category(provider) == Some("official");
-        // Mirror upstream write_codex_live_for_provider: official providers own
-        // auth.json; third-party providers write auth.json unless
-        // preserve_codex_official_auth_on_switch is set (then auth.json is
+        let clean_config_text = if is_official {
+            crate::codex_config::strip_codex_unified_session_bucket(&prepared_config.config_text)?
+        } else {
+            prepared_config.config_text.clone()
+        };
+        // Align with write_codex_live_for_provider (and upstream farion1231/cc-switch):
+        // when unified Codex session history is enabled, rewrite official live
+        // config through the shared `custom` model_provider bucket so third-party
+        // sessions remain resumeable. Provider DB templates stay clean (stripped
+        // on backfill); only ~/.codex/config.toml is injected.
+        let live_config_text = if is_official && crate::settings::unify_codex_session_history() {
+            crate::codex_config::inject_codex_unified_session_bucket(&clean_config_text)?
+        } else {
+            clean_config_text
+        };
+
+        // Official providers own auth.json; third-party providers write auth.json
+        // unless preserve_codex_official_auth_on_switch is set (then auth.json is
         // preserved and the API key rides in config.toml's bearer token).
         let should_write_auth = is_official
             || (!force_sync && !crate::settings::preserve_codex_official_auth_on_switch());
@@ -537,12 +578,9 @@ impl ProviderService {
         // When auth.json is preserved (third-party + preserve flag) the API key
         // is injected into config.toml as an experimental_bearer_token instead.
         let config_text = if should_write_auth {
-            prepared_config.config_text.clone()
+            live_config_text
         } else {
-            crate::codex_config::prepare_codex_provider_live_config(
-                &write_auth,
-                &prepared_config.config_text,
-            )?
+            crate::codex_config::prepare_codex_provider_live_config(&write_auth, &live_config_text)?
         };
 
         // auth.json follows Preserve/Write/Delete (no merge): a switch always

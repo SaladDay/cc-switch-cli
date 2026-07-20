@@ -109,6 +109,147 @@ fn insert_codex_managed_mcp(config: &mut MultiAppConfig) {
 }
 
 #[test]
+fn reapply_codex_official_live_resyncs_mcp_servers() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
+    });
+    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        let mut official = Provider::with_id(
+            "official-provider".to_string(),
+            "Official".to_string(),
+            json!({
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": null,
+                    "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
+                },
+                "config": ""
+            }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("official-provider".to_string(), official);
+    }
+    insert_codex_managed_mcp(&mut initial_config);
+
+    let state = state_from_config(initial_config);
+    ProviderService::switch(&state, AppType::Codex, "official-provider")
+        .expect("switch to official provider");
+    let live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+        .expect("read config.toml after switch");
+    assert!(
+        live.contains("mcp_servers.echo-server"),
+        "switch should sync enabled MCP servers into live"
+    );
+
+    let reapplied =
+        cc_switch_lib::reapply_current_codex_official_live(&state).expect("reapply official live");
+    assert!(
+        reapplied,
+        "current provider is official, reapply should run"
+    );
+
+    let live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+        .expect("read config.toml after reapply");
+    assert!(
+        live.contains("mcp_servers.echo-server"),
+        "reapply must re-project enabled MCP servers after the full live rewrite, got: {live}"
+    );
+}
+
+#[test]
+fn codex_unified_session_bucket_stays_live_only_across_provider_switches() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
+    });
+    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
+
+    let mut settings = AppSettings::load();
+    settings.unify_codex_session_history = true;
+    update_settings(settings).expect("enable unified Codex session history");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        let mut official = Provider::with_id(
+            "official-provider".to_string(),
+            "Official".to_string(),
+            json!({
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "tokens": { "access_token": "official-oauth-token" }
+                },
+                "config": "model_reasoning_effort = \"medium\"\n"
+            }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("official-provider".to_string(), official);
+        manager.providers.insert(
+            "custom-provider".to_string(),
+            codex_provider(
+                "custom-provider",
+                "Custom",
+                "sk-custom",
+                "custom",
+                "https://custom.example/v1",
+            ),
+        );
+    }
+    insert_codex_managed_mcp(&mut initial_config);
+
+    let state = state_from_config(initial_config);
+    ProviderService::switch(&state, AppType::Codex, "official-provider")
+        .expect("switch to official provider");
+
+    let live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+        .expect("read official live config");
+    assert!(live.contains("model_provider = \"custom\""));
+    assert!(live.contains("[model_providers.custom]"));
+    assert!(live.contains("[mcp_servers.echo-server]"));
+
+    ProviderService::switch(&state, AppType::Codex, "custom-provider")
+        .expect("switch away from official provider");
+
+    let providers = ProviderService::list(&state, AppType::Codex).expect("list providers");
+    let stored_official = providers
+        .get("official-provider")
+        .expect("stored official provider");
+    let stored_config = stored_official
+        .settings_config
+        .get("config")
+        .and_then(serde_json::Value::as_str)
+        .expect("stored official config");
+    assert!(!stored_config.contains("model_provider = \"custom\""));
+    assert!(!stored_config.contains("[model_providers.custom]"));
+    assert!(!stored_config.contains("mcp_servers"));
+}
+
+#[test]
 fn provider_service_switch_codex_updates_live_and_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();

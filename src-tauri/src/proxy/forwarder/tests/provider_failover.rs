@@ -1,20 +1,20 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
 use axum::http::{HeaderMap, StatusCode};
+use futures::StreamExt;
 use serde_json::{json, Value};
 
 use super::{
-    claude_provider, claude_request_body, spawn_delayed_scripted_streaming_upstream,
-    spawn_mock_upstream, spawn_scripted_streaming_upstream, spawn_scripted_upstream, test_router,
-    ScriptedStreamingBody,
+    claude_provider, claude_request_body, codex_provider,
+    spawn_delayed_scripted_streaming_upstream, spawn_mock_upstream,
+    spawn_scripted_streaming_upstream, spawn_scripted_upstream, test_router, ScriptedStreamingBody,
 };
 use crate::{
     app_config::AppType,
     provider::{LocalProxyRequestOverrides, ProviderMeta},
     proxy::{
         error::ProxyError,
-        forwarder::{ForwardOptions, RequestForwarder, StreamingResponse},
-        response::is_sse_response,
+        forwarder::{ForwardOptions, RequestForwarder},
         types::RectifierConfig,
     },
 };
@@ -222,7 +222,7 @@ async fn claude_buffered_failover_uses_second_provider_and_per_provider_endpoint
             &HeaderMap::new(),
             vec![provider_one, provider_two.clone()],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
@@ -245,6 +245,166 @@ async fn claude_buffered_failover_uses_second_provider_and_per_provider_endpoint
 
     primary_server.abort();
     secondary_server.abort();
+}
+
+#[tokio::test]
+async fn max_retries_zero_attempts_only_the_first_available_provider() {
+    let (primary_url, primary_hits, primary_server) = spawn_mock_upstream(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": {"message": "primary down"}}),
+    )
+    .await;
+    let (secondary_url, secondary_hits, secondary_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
+    let primary = claude_provider("p1", &primary_url, None);
+    let secondary = claude_provider("p2", &secondary_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("claude", &primary)
+        .expect("save primary provider");
+    db.save_provider("claude", &secondary)
+        .expect("save secondary provider");
+
+    let error = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            vec![primary, secondary],
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect_err("zero retries should not attempt the fallback provider");
+
+    assert!(matches!(
+        error,
+        ProxyError::UpstreamError { status: 500, .. }
+    ));
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 0);
+
+    primary_server.abort();
+    secondary_server.abort();
+}
+
+#[tokio::test]
+async fn max_retries_caps_attempts_before_the_remaining_queue() {
+    let (first_url, first_hits, first_server) = spawn_mock_upstream(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": {"message": "first down"}}),
+    )
+    .await;
+    let (second_url, second_hits, second_server) = spawn_mock_upstream(
+        StatusCode::BAD_GATEWAY,
+        json!({"error": {"message": "second down"}}),
+    )
+    .await;
+    let (third_url, third_hits, third_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
+    let first = claude_provider("p1", &first_url, None);
+    let second = claude_provider("p2", &second_url, None);
+    let third = claude_provider("p3", &third_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    for provider in [&first, &second, &third] {
+        db.save_provider("claude", provider).expect("save provider");
+    }
+
+    let error = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            vec![first, second, third],
+            ForwardOptions {
+                max_retries: 1,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect_err("one retry should cap the request at two providers");
+
+    assert!(matches!(
+        error,
+        ProxyError::UpstreamError { status: 502, .. }
+    ));
+    assert_eq!(first_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(third_hits.count.load(Ordering::SeqCst), 0);
+
+    first_server.abort();
+    second_server.abort();
+    third_server.abort();
+}
+
+#[tokio::test]
+async fn open_breaker_candidates_do_not_consume_the_attempt_limit() {
+    let (open_url, open_hits, open_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"unexpected": true})).await;
+    let (healthy_url, healthy_hits, healthy_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
+    let open_provider = claude_provider("open", &open_url, None);
+    let healthy_provider = claude_provider("healthy", &healthy_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router.clone()).expect("create forwarder");
+
+    db.save_provider("claude", &open_provider)
+        .expect("save open provider");
+    db.save_provider("claude", &healthy_provider)
+        .expect("save healthy provider");
+    let mut config = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("load proxy config");
+    config.circuit_timeout_seconds = 3600;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("update circuit timeout");
+    router
+        .record_result(
+            &open_provider.id,
+            "claude",
+            false,
+            false,
+            Some("open breaker".to_string()),
+        )
+        .await
+        .expect("open first provider breaker");
+
+    let result = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            vec![open_provider, healthy_provider],
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("skipped open breaker should not consume the only attempt");
+
+    assert_eq!(result.provider.id, "healthy");
+    assert_eq!(open_hits.count.load(Ordering::SeqCst), 0);
+    assert_eq!(healthy_hits.count.load(Ordering::SeqCst), 1);
+
+    open_server.abort();
+    healthy_server.abort();
 }
 
 #[tokio::test]
@@ -295,7 +455,7 @@ async fn buffered_failover_applies_each_providers_own_request_overrides() {
             &HeaderMap::new(),
             vec![primary_provider, secondary_provider],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
@@ -453,7 +613,7 @@ async fn failover_enabled_multiple_queued_providers_transfer_by_queue_priority()
             &HeaderMap::new(),
             selected,
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
@@ -518,7 +678,7 @@ async fn failover_enabled_all_queued_providers_unavailable_fails_after_attemptin
             &HeaderMap::new(),
             selected,
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
@@ -538,7 +698,7 @@ async fn failover_enabled_all_queued_providers_unavailable_fails_after_attemptin
     secondary_server.abort();
 }
 #[tokio::test]
-async fn plain_buffered_400_fails_over_to_next_provider() {
+async fn plain_buffered_400_stops_without_polluting_provider_health() {
     let (primary_url, primary_hits, primary_server) = spawn_mock_upstream(
         StatusCode::BAD_REQUEST,
         json!({"error": {"message": "bad request"}}),
@@ -567,7 +727,7 @@ async fn plain_buffered_400_fails_over_to_next_provider() {
         .await
         .expect("open breaker");
 
-    let result = forwarder
+    let error = forwarder
         .forward_buffered_response(
             &AppType::Claude,
             "/v1/messages",
@@ -575,23 +735,275 @@ async fn plain_buffered_400_fails_over_to_next_provider() {
             &HeaderMap::new(),
             vec![provider_one, provider_two],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
             RectifierConfig::default(),
         )
         .await
-        .expect("plain 400 should fail over to the next provider");
+        .expect_err("plain 400 is a non-retryable client error");
 
-    assert_eq!(result.provider.id, "p2");
-    assert_eq!(result.response.status, StatusCode::OK);
+    assert!(matches!(
+        error,
+        ProxyError::UpstreamError { status: 400, .. }
+    ));
     assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
-    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 0);
 
     let permit = router.allow_provider_request("p1", "claude").await;
     assert!(permit.allowed);
     assert!(permit.used_half_open_permit);
+
+    primary_server.abort();
+    secondary_server.abort();
+}
+
+#[tokio::test]
+async fn nonretryable_http_status_family_stops_and_keeps_health_neutral() {
+    let statuses = [400, 405, 406, 413, 414, 415, 422, 501];
+    let primary_responses = statuses
+        .iter()
+        .map(|status| {
+            (
+                StatusCode::from_u16(*status).expect("valid status"),
+                json!({"error": {"message": format!("client error {status}")}}),
+            )
+        })
+        .collect();
+    let (primary_url, primary_hits, _bodies, primary_server) =
+        spawn_scripted_upstream(primary_responses).await;
+    let (secondary_url, secondary_hits, secondary_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
+    let primary = claude_provider("p1", &primary_url, None);
+    let secondary = claude_provider("p2", &secondary_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("claude", &primary)
+        .expect("save primary provider");
+    db.save_provider("claude", &secondary)
+        .expect("save secondary provider");
+
+    for status in statuses {
+        let error = forwarder
+            .forward_buffered_response(
+                &AppType::Claude,
+                "/v1/messages",
+                claude_request_body(),
+                &HeaderMap::new(),
+                vec![primary.clone(), secondary.clone()],
+                ForwardOptions {
+                    max_retries: 1,
+                    request_timeout: Some(Duration::from_secs(2)),
+                    bypass_circuit_breaker: false,
+                },
+                RectifierConfig::default(),
+            )
+            .await
+            .expect_err("client status should not fail over");
+        assert!(matches!(
+            error,
+            ProxyError::UpstreamError {
+                status: actual,
+                ..
+            } if actual == status
+        ));
+    }
+
+    let health = db
+        .get_provider_health(&primary.id, "claude")
+        .await
+        .expect("load primary health");
+    assert_eq!(health.consecutive_failures, 0);
+    assert!(health.last_failure_at.is_none());
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), statuses.len());
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 0);
+
+    primary_server.abort();
+    secondary_server.abort();
+}
+
+#[tokio::test]
+async fn official_codex_401_and_403_do_not_fail_over_or_pollute_health() {
+    let (official_url, official_hits, _bodies, official_server) = spawn_scripted_upstream(vec![
+        (
+            StatusCode::UNAUTHORIZED,
+            json!({"error": {"message": "login expired"}}),
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            json!({"error": {"message": "account forbidden"}}),
+        ),
+    ])
+    .await;
+    let (fallback_url, fallback_hits, fallback_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"status": "completed"})).await;
+    let official = codex_provider("official", &official_url, true);
+    let fallback = codex_provider("fallback", &fallback_url, false);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("codex", &official)
+        .expect("save official Codex provider");
+    db.save_provider("codex", &fallback)
+        .expect("save fallback Codex provider");
+
+    for expected_status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+        let result = forwarder
+            .forward_buffered_response(
+                &AppType::Codex,
+                "/responses",
+                json!({"model": "gpt-5.4", "input": "hello"}),
+                &HeaderMap::new(),
+                vec![official.clone(), fallback.clone()],
+                ForwardOptions {
+                    max_retries: 1,
+                    request_timeout: Some(Duration::from_secs(2)),
+                    bypass_circuit_breaker: false,
+                },
+                RectifierConfig::default(),
+            )
+            .await
+            .expect("official Codex auth error should be returned without failover");
+        assert_eq!(result.provider.id, official.id);
+        assert_eq!(result.response.status, expected_status);
+    }
+
+    let health = db
+        .get_provider_health(&official.id, "codex")
+        .await
+        .expect("load official provider health");
+    assert_eq!(health.consecutive_failures, 0);
+    assert!(health.last_failure_at.is_none());
+    assert_eq!(official_hits.count.load(Ordering::SeqCst), 2);
+    assert_eq!(fallback_hits.count.load(Ordering::SeqCst), 0);
+
+    official_server.abort();
+    fallback_server.abort();
+}
+
+#[tokio::test]
+async fn responses_json_2xx_failure_fails_over_before_provider_commit() {
+    let (primary_url, primary_hits, primary_server) = spawn_mock_upstream(
+        StatusCode::OK,
+        json!({
+            "id": "resp_failed",
+            "status": "failed",
+            "error": {"type": "server_error", "message": "primary failed"}
+        }),
+    )
+    .await;
+    let (secondary_url, secondary_hits, secondary_server) = spawn_mock_upstream(
+        StatusCode::OK,
+        json!({"id": "resp_ok", "status": "completed", "output": []}),
+    )
+    .await;
+    let primary = claude_provider("p1", &primary_url, Some("openai_responses"));
+    let secondary = claude_provider("p2", &secondary_url, Some("openai_responses"));
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("claude", &primary)
+        .expect("save primary provider");
+    db.save_provider("claude", &secondary)
+        .expect("save secondary provider");
+
+    let result = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            vec![primary, secondary],
+            ForwardOptions {
+                max_retries: 1,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("2xx semantic failure should fail over");
+
+    assert_eq!(result.provider.id, "p2");
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 1);
+
+    primary_server.abort();
+    secondary_server.abort();
+}
+
+#[tokio::test]
+async fn responses_sse_failure_before_output_fails_over_and_replays_fallback() {
+    let primary_sse = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+        "event: response.failed\n",
+        "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"message\":\"boom\"}}}\n\n"
+    );
+    let fallback_sse = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+    );
+    let (primary_url, primary_hits, _primary_bodies, primary_server) =
+        spawn_scripted_streaming_upstream(vec![(
+            StatusCode::OK,
+            ScriptedStreamingBody::Sse(primary_sse),
+        )])
+        .await;
+    let (secondary_url, secondary_hits, _secondary_bodies, secondary_server) =
+        spawn_scripted_streaming_upstream(vec![(
+            StatusCode::OK,
+            ScriptedStreamingBody::Sse(fallback_sse),
+        )])
+        .await;
+    let primary = claude_provider("p1", &primary_url, Some("openai_responses"));
+    let secondary = claude_provider("p2", &secondary_url, Some("openai_responses"));
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("claude", &primary)
+        .expect("save primary provider");
+    db.save_provider("claude", &secondary)
+        .expect("save secondary provider");
+
+    let result = forwarder
+        .forward_response(
+            &AppType::Claude,
+            "/v1/messages",
+            json!({
+                "model": "claude-3-7-sonnet-20250219",
+                "stream": true,
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            &HeaderMap::new(),
+            vec![primary, secondary],
+            ForwardOptions {
+                max_retries: 1,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("pre-output response.failed should fail over");
+
+    assert_eq!(result.provider.id, "p2");
+    let super::super::StreamingResponse::Live(response) = result.response else {
+        panic!("fallback Responses body should remain streaming");
+    };
+    let chunks = response
+        .bytes_stream()
+        .map(|chunk| chunk.expect("read replayed Responses chunk"))
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(chunks.concat().as_slice(), fallback_sse.as_bytes());
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 1);
 
     primary_server.abort();
     secondary_server.abort();
@@ -652,7 +1064,7 @@ async fn claude_buffered_rectifier_owned_400_stops_before_next_provider() {
             &HeaderMap::new(),
             vec![provider_one, provider_two],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
@@ -686,7 +1098,7 @@ async fn claude_buffered_rectifier_owned_400_stops_before_next_provider() {
 }
 
 #[tokio::test]
-async fn plain_streaming_422_json_error_fails_over_to_next_provider() {
+async fn plain_streaming_422_stops_before_next_provider() {
     let (primary_url, primary_hits, primary_bodies, primary_server) =
         spawn_scripted_streaming_upstream(vec![(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -721,7 +1133,7 @@ async fn plain_streaming_422_json_error_fails_over_to_next_provider() {
         }]
     });
 
-    let result = forwarder
+    let error = forwarder
         .forward_response(
             &AppType::Claude,
             "/v1/messages",
@@ -729,25 +1141,23 @@ async fn plain_streaming_422_json_error_fails_over_to_next_provider() {
             &HeaderMap::new(),
             vec![provider_one, provider_two],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },
             RectifierConfig::default(),
         )
         .await
-        .expect("plain streaming 422 should fail over to next provider");
+        .expect_err("plain streaming 422 is a non-retryable client error");
 
-    assert_eq!(result.provider.id, "p2");
-    assert_eq!(result.response.status(), StatusCode::OK);
     assert!(matches!(
-        &result.response,
-        StreamingResponse::Live(response) if is_sse_response(response)
+        error,
+        ProxyError::UpstreamError { status: 422, .. }
     ));
     assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
-    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 0);
     assert_eq!(primary_bodies.lock().await.len(), 1);
-    assert_eq!(secondary_bodies.lock().await.len(), 1);
+    assert_eq!(secondary_bodies.lock().await.len(), 0);
 
     primary_server.abort();
     secondary_server.abort();
@@ -1207,7 +1617,7 @@ async fn claude_streaming_rectifier_owned_400_stops_before_next_provider() {
             &HeaderMap::new(),
             vec![provider_one, provider_two],
             ForwardOptions {
-                max_retries: 0,
+                max_retries: 1,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
             },

@@ -154,7 +154,7 @@ fn pricing_summary_line(app: &App, data: &UiData) -> String {
     }
 
     if i18n::is_chinese() {
-        let mut summary = format!(
+        let summary = format!(
             "{} 个目录模型 · 30天使用 {} 个 · 30天未匹配 {} 个模型 · {} tokens · {} total",
             data.pricing.total_models(),
             data.pricing.recently_used_models(),
@@ -162,15 +162,24 @@ fn pricing_summary_line(app: &App, data: &UiData) -> String {
             format_token_compact(data.pricing.recent_total_tokens()),
             format_money(data.pricing.recent_total_cost_usd())
         );
-        if data.pricing.recent_unmatched_total_cost_usd > 0.0 {
-            summary.push_str(&format!(
-                " · 未匹配 {}",
+        let summary = if data.pricing.recent_unmatched_total_cost_usd > 0.0 {
+            format!(
+                "{summary} · 未匹配 {}",
                 format_money(data.pricing.recent_unmatched_total_cost_usd)
-            ));
+            )
+        } else {
+            summary
+        };
+        if app
+            .usage
+            .is_loading_for(&app.app_type, UsageRangePreset::SevenDays)
+        {
+            format!("{}{}", pricing_refresh_prefix(app, "正在刷新"), summary)
+        } else {
+            summary
         }
-        summary
     } else {
-        let mut summary = format!(
+        let summary = format!(
             "{} catalog models · {} used 30d · {} unmatched models 30d · {} tokens · {} total",
             data.pricing.total_models(),
             data.pricing.recently_used_models(),
@@ -178,14 +187,33 @@ fn pricing_summary_line(app: &App, data: &UiData) -> String {
             format_token_compact(data.pricing.recent_total_tokens()),
             format_money(data.pricing.recent_total_cost_usd())
         );
-        if data.pricing.recent_unmatched_total_cost_usd > 0.0 {
-            summary.push_str(&format!(
-                " · {} unmatched",
+        let summary = if data.pricing.recent_unmatched_total_cost_usd > 0.0 {
+            format!(
+                "{summary} · {} unmatched",
                 format_money(data.pricing.recent_unmatched_total_cost_usd)
-            ));
+            )
+        } else {
+            summary
+        };
+        if app
+            .usage
+            .is_loading_for(&app.app_type, UsageRangePreset::SevenDays)
+        {
+            format!("{}{}", pricing_refresh_prefix(app, "Refreshing"), summary)
+        } else {
+            summary
         }
-        summary
     }
+}
+
+fn pricing_refresh_prefix(app: &App, label: &str) -> String {
+    let spinner = match app.tick % 4 {
+        0 => "⠋",
+        1 => "⠙",
+        2 => "⠹",
+        _ => "⠸",
+    };
+    format!("{spinner} {label} · ")
 }
 
 fn current_pricing_is_loading(app: &App, data: &UiData) -> bool {

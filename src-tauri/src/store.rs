@@ -96,8 +96,7 @@ impl AppState {
         Self::from_parts(db, config)
     }
 
-    /// 创建新的应用状态，并在真实进程启动路径上执行一次启动恢复。
-    pub fn try_new_with_startup_recovery() -> Result<Self, AppError> {
+    fn try_new_with_startup_recovery_without_codex_migration() -> Result<Self, AppError> {
         let state = Self::try_new()?;
 
         state.import_live_provider_configs_on_startup()?;
@@ -108,6 +107,7 @@ impl AppState {
             .proxy_service
             .should_skip_startup_recovery_for_active_managed_session_blocking()
             .map_err(AppError::Message)?;
+        let mut live_config_is_safe_to_repair = false;
         if !owned_managed_session_active {
             let proxy_running = state
                 .proxy_service
@@ -118,71 +118,100 @@ impl AppState {
                     .proxy_service
                     .recover_takeovers_on_startup_blocking()
                     .map_err(AppError::Config)?;
+                live_config_is_safe_to_repair = true;
             }
         }
 
         state.import_live_current_provider_configs_on_startup()?;
+        if live_config_is_safe_to_repair {
+            match state.repair_disabled_codex_unified_session_live() {
+                Ok(true) => log::info!(
+                    "✓ Removed a stale unified-session route from the active Codex config"
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("✗ Failed to repair the active Codex unified-session route: {error}")
+                }
+            }
+        }
+
+        Ok(state)
+    }
+
+    /// Repair the exact live-only route injected by older CLI builds after the
+    /// unified-history setting has been disabled. This deliberately leaves the
+    /// provider database snapshot untouched and never rewrites a proxy takeover.
+    fn repair_disabled_codex_unified_session_live(&self) -> Result<bool, AppError> {
+        use crate::app_config::AppType;
+        use crate::services::provider::ProviderService;
+
+        if crate::settings::unify_codex_session_history() {
+            return Ok(false);
+        }
+
+        let current_id = ProviderService::current(self, AppType::Codex)?;
+        if current_id.is_empty() {
+            return Ok(false);
+        }
+        let Some(provider) = self
+            .db
+            .get_provider_by_id(&current_id, AppType::Codex.as_str())?
+        else {
+            return Ok(false);
+        };
+        if provider.category.as_deref() != Some("official") {
+            return Ok(false);
+        }
+
+        let has_live_backup =
+            futures::executor::block_on(self.db.get_live_backup(AppType::Codex.as_str()))?
+                .is_some();
+        if has_live_backup
+            || self
+                .proxy_service
+                .detect_takeover_in_live_config_for_app(&AppType::Codex)
+        {
+            return Ok(false);
+        }
+
+        let path = crate::codex_config::get_codex_config_path();
+        let config_text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(AppError::io(&path, error)),
+        };
+        let stripped = crate::codex_config::strip_codex_unified_session_bucket(&config_text)?;
+        if stripped == config_text {
+            return Ok(false);
+        }
+
+        crate::config::write_text_file(&path, &stripped)?;
+        Ok(true)
+    }
+
+    /// 创建新的应用状态，并像上游一样在后台执行 Codex 历史迁移。
+    pub fn try_new_with_startup_recovery_deferred() -> Result<Self, AppError> {
+        let state = Self::try_new_with_startup_recovery_without_codex_migration()?;
+        let db = Arc::clone(&state.db);
+        if let Err(error) = std::thread::Builder::new()
+            .name("cc-switch-codex-bucket-migration".to_string())
+            .spawn(move || run_codex_provider_bucket_migrations(&db))
+        {
+            log::warn!("✗ Failed to start Codex provider bucket migration: {error}");
+        }
+        Ok(state)
+    }
+
+    /// 创建新的应用状态，并同步完成启动迁移，供短生命周期 CLI 与测试使用。
+    pub fn try_new_with_startup_recovery() -> Result<Self, AppError> {
+        let state = Self::try_new_with_startup_recovery_without_codex_migration()?;
         state.migrate_codex_provider_buckets_on_startup();
 
         Ok(state)
     }
 
     fn migrate_codex_provider_buckets_on_startup(&self) {
-        match crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
-            &self.db,
-        ) {
-            Ok(outcome) => {
-                if let Some(reason) = outcome.skipped_reason {
-                    log::debug!("○ Codex history provider bucket migration skipped: {reason}");
-                } else {
-                    log::info!(
-                        "✓ Codex history provider bucket migration completed: sources={}, jsonl_files={}, state_rows={}",
-                        outcome.source_provider_ids.len(),
-                        outcome.migrated_jsonl_files,
-                        outcome.migrated_state_rows
-                    );
-                }
-            }
-            Err(error) => {
-                log::warn!("✗ Codex history provider bucket migration failed: {error}");
-            }
-        }
-
-        match crate::codex_history_migration::maybe_migrate_codex_provider_template_bucket(&self.db)
-        {
-            Ok(outcome) => {
-                if let Some(reason) = outcome.skipped_reason {
-                    log::debug!("○ Codex provider template bucket migration skipped: {reason}");
-                } else if !outcome.migrated_provider_ids.is_empty() {
-                    log::info!(
-                        "✓ Codex provider template bucket migration completed: providers={}",
-                        outcome.migrated_provider_ids.len()
-                    );
-                }
-            }
-            Err(error) => {
-                log::warn!("✗ Codex provider template bucket migration failed: {error}");
-            }
-        }
-
-        match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket(
-        ) {
-            Ok(outcome) => {
-                if let Some(reason) = outcome.skipped_reason {
-                    log::debug!("○ Codex official history unify migration skipped: {reason}");
-                } else {
-                    log::info!(
-                        "✓ Codex official history unify migration completed: jsonl_files={}, state_rows={}",
-                        outcome.migrated_jsonl_files,
-                        outcome.migrated_state_rows
-                    );
-                }
-            }
-            Err(error) => {
-                log::warn!("✗ Codex official history unify migration failed: {error}");
-            }
-        }
-
+        run_codex_provider_bucket_migrations(&self.db);
         if let Err(error) = self.refresh_config_from_db() {
             log::warn!("✗ Failed to refresh config after Codex provider bucket migration: {error}");
         }
@@ -400,6 +429,74 @@ impl AppState {
             proxy_service,
         })
     }
+}
+
+fn run_codex_provider_bucket_migrations(db: &Database) {
+    let _ = run_required_codex_provider_bucket_migrations(db);
+
+    match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
+        Ok(outcome) => {
+            if let Some(reason) = outcome.skipped_reason {
+                log::debug!("○ Codex official history unify migration skipped: {reason}");
+            } else {
+                log::info!(
+                    "✓ Codex official history unify migration completed: jsonl_files={}, state_rows={}",
+                    outcome.migrated_jsonl_files,
+                    outcome.migrated_state_rows
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!("✗ Codex official history unify migration failed: {error}");
+        }
+    }
+}
+
+fn run_required_codex_provider_bucket_migrations(db: &Database) -> Result<(), AppError> {
+    match crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
+        db,
+    ) {
+        Ok(outcome) => {
+            if let Some(reason) = outcome.skipped_reason {
+                log::debug!("○ Codex history provider bucket migration skipped: {reason}");
+            } else {
+                log::info!(
+                    "✓ Codex history provider bucket migration completed: sources={}, jsonl_files={}, state_rows={}",
+                    outcome.source_provider_ids.len(),
+                    outcome.migrated_jsonl_files,
+                    outcome.migrated_state_rows
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!("✗ Codex history provider bucket migration failed: {error}");
+            // Dynamic ids can only be derived from the old templates. Keep
+            // those templates intact so a failed history pass remains retryable.
+            log::debug!(
+                "○ Codex provider template bucket migration deferred until history succeeds"
+            );
+            return Err(error);
+        }
+    }
+
+    match crate::codex_history_migration::maybe_migrate_codex_provider_template_bucket(db) {
+        Ok(outcome) => {
+            if let Some(reason) = outcome.skipped_reason {
+                log::debug!("○ Codex provider template bucket migration skipped: {reason}");
+            } else if !outcome.migrated_provider_ids.is_empty() {
+                log::info!(
+                    "✓ Codex provider template bucket migration completed: providers={}",
+                    outcome.migrated_provider_ids.len()
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!("✗ Codex provider template bucket migration failed: {error}");
+            return Err(error);
+        }
+    }
+
+    Ok(())
 }
 
 fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppError> {
@@ -640,6 +737,7 @@ fn migrate_legacy_codex_configs(db: &Database, config: &mut MultiAppConfig) {
 #[cfg(test)]
 mod tests {
     use super::AppState;
+    use crate::provider::Provider;
     use crate::test_support::TestEnvGuard;
     use serde_json::json;
     use serial_test::serial;
@@ -773,8 +871,80 @@ wire_api = "responses"
 
     #[test]
     #[serial(home_settings)]
+    fn startup_repairs_stale_unified_route_for_current_official_codex_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        {
+            let state = AppState::try_new_with_startup_recovery().expect("seed startup state");
+            let mut third_party = Provider::with_id(
+                "third-party".to_string(),
+                "Third Party".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "third-party-key" },
+                    "config": "model_provider = \"third-party\"\n"
+                }),
+                None,
+            );
+            third_party.category = Some("custom".to_string());
+            state
+                .db
+                .save_provider("codex", &third_party)
+                .expect("seed a non-official provider");
+            state
+                .db
+                .set_current_provider("codex", "codex-official")
+                .expect("select official provider");
+            crate::settings::set_current_provider(
+                &crate::app_config::AppType::Codex,
+                Some("codex-official"),
+            )
+            .expect("persist official selection");
+        }
+
+        let original = "model = \"gpt-5.4\"\n\n[tui]\ntheme = \"dark\"\n\n[mcp_servers.echo]\ncommand = \"npx\"\n";
+        let stale = crate::codex_config::inject_codex_unified_session_bucket(original)
+            .expect("build stale v5.9.1 live config");
+        write_text(crate::codex_config::get_codex_config_path(), &stale);
+
+        let state = AppState::try_new_with_startup_recovery().expect("restart after upgrade");
+        let repaired = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read repaired live config");
+
+        assert!(!repaired.contains("model_provider = \"custom\""));
+        assert!(!repaired.contains("[model_providers.custom]"));
+        assert!(repaired.contains("[tui]"));
+        assert!(repaired.contains("[mcp_servers.echo]"));
+        assert_eq!(
+            crate::services::ProviderService::current(&state, crate::app_config::AppType::Codex,)
+                .expect("read current provider"),
+            "codex-official"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn startup_migrates_imported_codex_live_provider_after_import() {
         let temp_home = TempDir::new().expect("create temp home");
+        write_json(
+            temp_home.path().join(".cc-switch/settings.json"),
+            json!({
+                "localMigrations": {
+                    "codexThirdPartyHistoryProviderBucketV1": {
+                        "completedAt": "2026-07-15T00:00:00Z",
+                        "targetProviderId": "custom",
+                        "sourceProviderIds": ["rightcode"],
+                        "migratedJsonlFiles": 0,
+                        "migratedStateRows": 0,
+                        "scannedHistoryFiles": true
+                    },
+                    "codexProviderTemplateV1": {
+                        "completedAt": "2026-07-15T00:00:00Z",
+                        "migratedProviderIds": ["rightcode"]
+                    }
+                }
+            }),
+        );
         let _env = TestEnvGuard::isolated(temp_home.path());
 
         write_json(
@@ -820,7 +990,7 @@ requires_openai_auth = true
 
         let migration = crate::settings::get_settings()
             .local_migrations
-            .and_then(|migrations| migrations.codex_third_party_history_provider_bucket_v1)
+            .and_then(|migrations| migrations.codex_third_party_history_provider_bucket_v2)
             .expect("history migration should be marked after imported provider is visible");
         assert_eq!(migration.target_provider_id, "custom");
         assert!(
@@ -830,6 +1000,17 @@ requires_openai_auth = true
                 .any(|provider_id| provider_id == "rightcode"),
             "startup migration should collect source ids from the imported live provider"
         );
+        assert!(crate::settings::get_settings()
+            .local_migrations
+            .and_then(|migrations| migrations.codex_provider_template_v2)
+            .is_some());
+        let migrations = crate::settings::get_settings()
+            .local_migrations
+            .expect("migration markers");
+        assert!(migrations
+            .codex_third_party_history_provider_bucket_v1
+            .is_some());
+        assert!(migrations.codex_provider_template_v1.is_some());
     }
 
     #[test]

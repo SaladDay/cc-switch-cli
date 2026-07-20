@@ -1,27 +1,60 @@
-use crate::cli::tui::data;
-
 use super::*;
 
-fn openclaw_header_default_model_value(data: &UiData) -> String {
+pub(super) const HEADER_STATUS_VALUE_MAX_WIDTH: u16 = 512;
+const HEADER_BLANK_CHECK_MAX_BYTES: usize = 4 * 1024;
+const HEADER_BLANK_CHECK_MAX_CHARS: usize = 2 * 1024;
+
+fn bounded_header_value_is_blank(value: &str) -> bool {
+    for (count, (byte, ch)) in value.char_indices().enumerate() {
+        if count >= HEADER_BLANK_CHECK_MAX_CHARS || byte >= HEADER_BLANK_CHECK_MAX_BYTES {
+            // A value larger than the header's inspection budget is kept as a
+            // non-empty, truncated value. Determining that it is entirely
+            // whitespace must never require a full per-frame scan.
+            return false;
+        }
+        if !ch.is_whitespace() {
+            return false;
+        }
+    }
+    true
+}
+
+fn openclaw_header_default_model_value(data: &UiData) -> &str {
     if app::openclaw_agents_has_blocking_warning(data) {
-        return texts::tui_header_config_error().to_string();
+        return texts::tui_header_config_error();
     }
 
-    data.config
+    let primary = data
+        .config
         .openclaw_agents_defaults
         .as_ref()
         .and_then(|defaults| defaults.model.as_ref())
-        .and_then(|model| {
-            if model.primary.trim().is_empty() {
-                None
-            } else {
-                Some(model.primary.clone())
-            }
-        })
-        .unwrap_or_else(|| texts::none().to_string())
+        .map(|model| model.primary.as_str());
+    match primary {
+        Some(value) if !bounded_header_value_is_blank(value) => value,
+        _ => texts::none(),
+    }
+}
+
+fn header_provider_display_name<'a>(app_type: &AppType, row: &'a ProviderRow) -> &'a str {
+    if !bounded_header_value_is_blank(&row.provider.name) {
+        return &row.provider.name;
+    }
+
+    if matches!(app_type, AppType::OpenClaw) {
+        &row.id
+    } else {
+        &row.provider.name
+    }
 }
 
 fn opencode_configured_provider_count(data: &UiData) -> usize {
+    // Provider rows are intentionally treated as a low-cardinality,
+    // user-managed configuration collection. Reading the snapshot directly
+    // keeps this badge consistent with the list; a second cached summary would
+    // add invalidation paths for little practical gain. High-cardinality data
+    // such as sessions, usage logs, rules, and model catalogs is virtualized at
+    // its own boundary instead.
     data.providers
         .rows
         .iter()
@@ -37,7 +70,7 @@ fn header_status_label(app_type: &AppType) -> &'static str {
     }
 }
 
-fn header_status_value(app: &App, data: &UiData) -> String {
+pub(super) fn header_status_value(app: &App, data: &UiData, available_width: u16) -> String {
     if matches!(app.app_type, AppType::OpenCode) {
         return texts::tui_provider_config_count(
             opencode_configured_provider_count(data),
@@ -46,15 +79,20 @@ fn header_status_value(app: &App, data: &UiData) -> String {
     }
 
     if matches!(app.app_type, AppType::OpenClaw) {
-        return openclaw_header_default_model_value(data);
+        return truncate_to_display_width(
+            openclaw_header_default_model_value(data),
+            available_width.min(HEADER_STATUS_VALUE_MAX_WIDTH),
+        );
     }
 
-    data.providers
-        .rows
-        .iter()
-        .find(|row| row.is_current)
-        .map(|row| data::provider_display_name(&app.app_type, row))
-        .unwrap_or_else(|| texts::none().to_string())
+    let provider_name = match data.providers.rows.iter().find(|row| row.is_current) {
+        Some(row) => header_provider_display_name(&app.app_type, row),
+        None => texts::none(),
+    };
+    truncate_to_display_width(
+        provider_name,
+        available_width.min(HEADER_STATUS_VALUE_MAX_WIDTH),
+    )
 }
 
 fn fit_header_status_badge(
@@ -140,12 +178,12 @@ pub(super) fn render_header(
             (format!("  {text}  "), style)
         });
 
+    let available_after_title = area.width.saturating_sub(title_width);
     let status_text_full = format!(
         "{}: {}",
         header_status_label(&app.app_type),
-        header_status_value(app, data)
+        header_status_value(app, data, available_after_title)
     );
-    let available_after_title = area.width.saturating_sub(title_width);
     let proxy_badge_width = proxy_badge
         .as_ref()
         .map(|(text, _)| UnicodeWidthStr::width(text.as_str()) as u16);

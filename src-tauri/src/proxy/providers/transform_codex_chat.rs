@@ -40,6 +40,8 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 const TOOL_SEARCH_PROXY_NAME: &str = "tool_search";
 const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
+const CUSTOM_TOOL_INPUT_DESCRIPTION: &str = "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
+const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodexToolKind {
@@ -132,10 +134,7 @@ impl CodexToolContext {
         let Some(name) = responses_tool_name(tool) else {
             return;
         };
-        let description = tool
-            .get("description")
-            .cloned()
-            .unwrap_or_else(|| json!("Custom Codex tool."));
+        let description = json!(responses_custom_tool_description(tool));
         let chat_tool = json!({
             "type": "function",
             "function": {
@@ -146,7 +145,7 @@ impl CodexToolContext {
                     "properties": {
                         CUSTOM_TOOL_INPUT_FIELD: {
                             "type": "string",
-                            "description": "Input to pass to the custom Codex tool."
+                            "description": CUSTOM_TOOL_INPUT_DESCRIPTION
                         }
                     },
                     "required": [CUSTOM_TOOL_INPUT_FIELD]
@@ -1015,6 +1014,20 @@ fn responses_tool_name(tool: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn responses_custom_tool_description(tool: &Value) -> String {
+    let mut description = String::new();
+    description.push_str(CUSTOM_TOOL_PRESERVED_METADATA_HEADING);
+    description.push_str("\n```json\n");
+    description.push_str(&serialize_tool_definition_for_description(tool));
+    description.push_str("\n```");
+    description
+}
+
+fn serialize_tool_definition_for_description(tool: &Value) -> String {
+    // Keep the embedded definition compact and stable across map storage order.
+    canonical_json_string(tool)
+}
+
 fn responses_function_tool_to_chat_tool(tool: &Value, chat_name: &str) -> Option<Value> {
     if tool.get("type").and_then(|v| v.as_str()) != Some("function") {
         return None;
@@ -1360,6 +1373,12 @@ fn chat_tool_calls_to_response_output_items(
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
         for (index, tool_call) in tool_calls.iter().enumerate() {
+            let function = tool_call.get("function").unwrap_or(&Value::Null);
+            let name = function.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                log::warn!("[Codex] Skipping tool call with missing name");
+                continue;
+            }
             output.push(chat_tool_call_to_response_item(
                 tool_call,
                 index,
@@ -1368,11 +1387,11 @@ fn chat_tool_calls_to_response_output_items(
             ));
         }
     } else if let Some(function_call) = message.get("function_call") {
-        output.push(chat_legacy_function_call_to_response_item(
-            function_call,
-            reasoning,
-            tool_context,
-        ));
+        if let Some(item) =
+            chat_legacy_function_call_to_response_item(function_call, reasoning, tool_context)
+        {
+            output.push(item);
+        }
     }
 
     output
@@ -1410,7 +1429,7 @@ fn chat_legacy_function_call_to_response_item(
     function_call: &Value,
     reasoning: Option<&str>,
     tool_context: &CodexToolContext,
-) -> Value {
+) -> Option<Value> {
     let call_id = function_call
         .get("id")
         .and_then(|v| v.as_str())
@@ -1420,10 +1439,16 @@ fn chat_legacy_function_call_to_response_item(
         .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    if name.is_empty() {
+        log::warn!("[Codex] Skipping legacy function_call with missing name");
+        return None;
+    }
+
     let arguments = canonicalize_tool_arguments(function_call.get("arguments"));
 
     let item_id = response_tool_call_item_id_from_chat_name(call_id, name, tool_context);
-    response_tool_call_item_from_chat_name(
+    Some(response_tool_call_item_from_chat_name(
         &item_id,
         "completed",
         call_id,
@@ -1431,7 +1456,7 @@ fn chat_legacy_function_call_to_response_item(
         &arguments,
         reasoning,
         tool_context,
-    )
+    ))
 }
 
 pub(crate) fn response_tool_call_item_id_from_chat_name(
@@ -1570,12 +1595,26 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         "total_tokens": total_tokens
     });
 
-    if let Some(cached) = usage
+    let cached = usage
         .pointer("/prompt_tokens_details/cached_tokens")
         .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
         .and_then(|v| v.as_u64())
-    {
-        result["input_tokens_details"] = json!({ "cached_tokens": cached });
+        .unwrap_or(0);
+    let cache_write = usage
+        .pointer("/prompt_tokens_details/cache_write_tokens")
+        .or_else(|| usage.pointer("/input_tokens_details/cache_write_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(0);
+    if cached > 0 || cache_write > 0 {
+        result["input_tokens_details"] = json!({
+            "cached_tokens": cached,
+            "cache_write_tokens": cache_write
+        });
     }
 
     if let Some(details) = usage.get("completion_tokens_details") {
@@ -1585,8 +1624,8 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     if let Some(cache_read) = usage.get("cache_read_input_tokens") {
         result["cache_read_input_tokens"] = cache_read.clone();
     }
-    if let Some(cache_creation) = usage.get("cache_creation_input_tokens") {
-        result["cache_creation_input_tokens"] = cache_creation.clone();
+    if cache_write > 0 {
+        result["cache_creation_input_tokens"] = json!(cache_write);
     }
 
     result
@@ -1883,6 +1922,34 @@ mod tests {
             result["messages"][0]["tool_calls"][0]["function"]["arguments"],
             r#"{"input":"*** Begin Patch\n*** End Patch"}"#
         );
+    }
+
+    #[test]
+    fn responses_request_to_chat_preserves_custom_tool_metadata_in_description() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: begin_patch hunk+ end_patch"
+                }
+            }]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let description = result["tools"][0]["function"]["description"]
+            .as_str()
+            .unwrap();
+
+        assert!(description.starts_with("Original tool definition:"));
+        assert!(!description.contains("Original Codex tool definition"));
+        assert!(description.contains("\"type\":\"custom\""));
+        assert!(description.contains("\"format\":"));
+        assert!(description.contains("\"syntax\":\"lark\""));
     }
 
     #[test]
@@ -2523,7 +2590,10 @@ mod tests {
                 "prompt_tokens": 10,
                 "completion_tokens": 5,
                 "total_tokens": 15,
-                "prompt_tokens_details": {"cached_tokens": 3}
+                "prompt_tokens_details": {
+                    "cached_tokens": 3,
+                    "cache_write_tokens": 2
+                }
             }
         });
 
@@ -2547,6 +2617,100 @@ mod tests {
         assert_eq!(result["usage"]["input_tokens"], 10);
         assert_eq!(result["usage"]["output_tokens"], 5);
         assert_eq!(result["usage"]["input_tokens_details"]["cached_tokens"], 3);
+        assert_eq!(
+            result["usage"]["input_tokens_details"]["cache_write_tokens"],
+            2
+        );
+    }
+
+    #[test]
+    fn chat_response_skips_tool_calls_with_missing_names() {
+        let input = json!({
+            "id": "chatcmpl_missing_names",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_missing",
+                            "type": "function",
+                            "function": {"arguments": "{}"}
+                        },
+                        {
+                            "id": "call_empty",
+                            "type": "function",
+                            "function": {"name": "", "arguments": "{}"}
+                        },
+                        {
+                            "id": "call_valid",
+                            "type": "function",
+                            "function": {"name": "exec_command", "arguments": "{\"cmd\":\"date\"}"}
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let result = chat_completion_to_response(input).unwrap();
+
+        assert_eq!(result["output"].as_array().unwrap().len(), 1);
+        assert_eq!(result["output"][0]["type"], "function_call");
+        assert_eq!(result["output"][0]["name"], "exec_command");
+        assert_eq!(result["output"][0]["call_id"], "call_valid");
+    }
+
+    #[test]
+    fn chat_response_skips_legacy_function_call_with_missing_name() {
+        for function_call in [
+            json!({"arguments": "{}"}),
+            json!({
+                "name": "",
+                "arguments": "{}"
+            }),
+        ] {
+            let input = json!({
+                "id": "chatcmpl_legacy_missing_name",
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "function_call": function_call
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            });
+
+            let result = chat_completion_to_response(input).unwrap();
+            assert_eq!(result["output"], json!([]));
+        }
+    }
+
+    #[test]
+    fn chat_response_keeps_valid_legacy_function_call() {
+        let input = json!({
+            "id": "chatcmpl_legacy_valid",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "function_call": {
+                        "id": "call_legacy",
+                        "name": "exec_command",
+                        "arguments": "{\"cmd\":\"date\"}"
+                    }
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let result = chat_completion_to_response(input).unwrap();
+
+        assert_eq!(result["output"][0]["type"], "function_call");
+        assert_eq!(result["output"][0]["name"], "exec_command");
+        assert_eq!(result["output"][0]["call_id"], "call_legacy");
+        assert_eq!(result["output"][0]["arguments"], r#"{"cmd":"date"}"#);
     }
 
     #[test]

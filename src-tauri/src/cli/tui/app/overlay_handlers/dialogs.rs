@@ -124,24 +124,34 @@ impl App {
                         }
                     }
                     ConfirmAction::WebDavMigrateV1ToV2 => Action::ConfigWebDavMigrateV1ToV2,
+                    ConfirmAction::CloudSyncTransfer { backend, intent } => {
+                        match (backend, intent) {
+                            (CloudSyncBackend::WebDav, CloudSyncTransferIntent::Upload) => {
+                                Action::ConfigWebDavUpload
+                            }
+                            (CloudSyncBackend::WebDav, CloudSyncTransferIntent::Restore) => {
+                                Action::ConfigWebDavDownload
+                            }
+                            (CloudSyncBackend::S3Compatible, CloudSyncTransferIntent::Upload) => {
+                                Action::ConfigS3Upload
+                            }
+                            (CloudSyncBackend::S3Compatible, CloudSyncTransferIntent::Restore) => {
+                                Action::ConfigS3Download
+                            }
+                        }
+                    }
+                    ConfirmAction::CloudSyncReset { backend } => match backend {
+                        CloudSyncBackend::WebDav => Action::ConfigWebDavReset,
+                        CloudSyncBackend::S3Compatible => Action::ConfigS3Reset,
+                    },
                     ConfirmAction::ClaudeModelFillAll { source_idx } => {
                         let source_idx = *source_idx;
                         if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                            let value = provider
-                                .claude_model_input(source_idx)
-                                .map(|input| input.value.clone())
-                                .unwrap_or_default();
-                            for idx in 0..4 {
-                                if idx != source_idx {
-                                    if let Some(input) = provider.claude_model_input_mut(idx) {
-                                        input.set(value.clone());
-                                    }
-                                }
-                            }
-                            provider.mark_claude_model_config_touched();
+                            provider.fill_claude_models_from(source_idx);
                         }
                         self.overlay = Overlay::ClaudeModelPicker {
                             selected: source_idx,
+                            column: ClaudeModelPickerColumn::Model,
                             editing: false,
                         };
                         return Some(Action::None);
@@ -157,6 +167,7 @@ impl App {
                 if let ConfirmAction::ClaudeModelFillAll { source_idx } = confirm.action {
                     self.overlay = Overlay::ClaudeModelPicker {
                         selected: source_idx,
+                        column: ClaudeModelPickerColumn::Model,
                         editing: false,
                     };
                     return Some(Action::None);
@@ -210,6 +221,7 @@ impl App {
                     ConfirmAction::ClaudeModelFillAll { source_idx } => {
                         self.overlay = Overlay::ClaudeModelPicker {
                             selected: source_idx,
+                            column: ClaudeModelPickerColumn::Model,
                             editing: false,
                         };
                         Action::None
@@ -304,6 +316,27 @@ impl App {
                 };
                 Action::SetOpenClawConfigDir { path }
             }
+            TextSubmit::SettingsPreferredEditor => {
+                let trimmed = raw.trim().to_string();
+                let command = if trimmed.is_empty() {
+                    None
+                } else {
+                    if let Err(err) =
+                        crate::cli::editor::validate_preferred_editor_command(&trimmed)
+                    {
+                        self.overlay = Overlay::TextInput(TextInputState {
+                            title: texts::tui_settings_preferred_editor_label().to_string(),
+                            prompt: texts::tui_settings_preferred_editor_prompt().to_string(),
+                            input: TextInput::new(trimmed),
+                            submit: TextSubmit::SettingsPreferredEditor,
+                        });
+                        self.push_toast(err.to_string(), ToastKind::Error);
+                        return Action::None;
+                    }
+                    Some(trimmed)
+                };
+                Action::SetPreferredEditor { command }
+            }
             TextSubmit::SkillsInstallSpec => {
                 if raw.is_empty() {
                     self.push_toast(texts::tui_toast_skill_spec_empty(), ToastKind::Warning);
@@ -363,7 +396,6 @@ impl App {
                         },
                         input: TextInput::new(raw),
                         submit: TextSubmit::UsageCustomRange,
-                        secret: false,
                     });
                     Action::None
                 }
@@ -390,7 +422,6 @@ impl App {
                         prompt: texts::tui_model_route_add_pattern_prompt().to_string(),
                         input: TextInput::new(raw),
                         submit: TextSubmit::ModelRouteAddPattern,
-                        secret: false,
                     });
                     return Action::None;
                 }
@@ -429,7 +460,6 @@ impl App {
                         prompt: texts::tui_model_route_edit_pattern_prompt().to_string(),
                         input: TextInput::new(raw),
                         submit: TextSubmit::ModelRouteEditPattern { id },
-                        secret: false,
                     });
                     return Action::None;
                 }
@@ -494,7 +524,6 @@ impl App {
                 prompt: codex_model_catalog_field_prompt(field).to_string(),
                 input: TextInput::new(trimmed),
                 submit: TextSubmit::CodexModelCatalogField { row, field },
-                secret: false,
             });
             return Action::None;
         }
@@ -546,7 +575,6 @@ impl App {
                 prompt: texts::tui_webdav_jianguoyun_username_prompt().to_string(),
                 input: TextInput::new(""),
                 submit: TextSubmit::WebDavJianguoyunUsername,
-                secret: false,
             });
             return Action::None;
         }
@@ -557,7 +585,6 @@ impl App {
             prompt: texts::tui_webdav_jianguoyun_app_password_prompt().to_string(),
             input: TextInput::new(""),
             submit: TextSubmit::WebDavJianguoyunPassword,
-            secret: true,
         });
         Action::None
     }
@@ -570,7 +597,6 @@ impl App {
                 prompt: texts::tui_webdav_jianguoyun_app_password_prompt().to_string(),
                 input: TextInput::new(""),
                 submit: TextSubmit::WebDavJianguoyunPassword,
-                secret: true,
             });
             return Action::None;
         }
@@ -611,7 +637,6 @@ impl App {
                 prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
                 input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenAddress,
-                secret: false,
             });
             return Action::None;
         }
@@ -639,7 +664,6 @@ impl App {
                 prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
                 input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenPort,
-                secret: false,
             });
             return Action::None;
         };
@@ -654,7 +678,6 @@ impl App {
                 prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
                 input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenPort,
-                secret: false,
             });
             return Action::None;
         }

@@ -5,7 +5,9 @@
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::ModelPricing;
-use crate::services::sql_helpers::fresh_input_sql;
+use crate::services::sql_helpers::{
+    fresh_input_sql, INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL,
+};
 use chrono::{Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -135,6 +137,9 @@ pub struct RequestLogDetail {
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_creation_tokens: u32,
+    /// Internal storage semantics; omitted from serialized CLI/TUI payloads.
+    #[serde(skip)]
+    pub input_token_semantics: i64,
     pub input_cost_usd: String,
     pub output_cost_usd: String,
     pub cache_read_cost_usd: String,
@@ -151,15 +156,15 @@ pub struct RequestLogDetail {
     pub data_source: Option<String>,
 }
 
-/// 把 24 列的查询结果映射为 `RequestLogDetail`。
+/// 把 25 列的查询结果映射为 `RequestLogDetail`。
 ///
-/// 调用方的 SELECT **必须**按以下顺序返回 24 列：
+/// 调用方的 SELECT **必须**按以下顺序返回 25 列：
 /// `request_id, provider_id, provider_name, app_type, model, request_model,
 ///  cost_multiplier, input_tokens, output_tokens, cache_read_tokens,
 ///  cache_creation_tokens, input_cost_usd, output_cost_usd, cache_read_cost_usd,
 ///  cache_creation_cost_usd, total_cost_usd, is_streaming, latency_ms,
 ///  first_token_ms, duration_ms, status_code, error_message, created_at,
-///  data_source`
+///  data_source, input_token_semantics`
 ///
 /// 不需要 provider_name 时（如 backfill）SELECT `NULL AS provider_name` 占位即可。
 fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestLogDetail> {
@@ -190,6 +195,7 @@ fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
         error_message: row.get(21)?,
         created_at: row.get(22)?,
         data_source: row.get(23)?,
+        input_token_semantics: row.get::<_, i64>(24)?,
     })
 }
 
@@ -1284,7 +1290,8 @@ impl Database {
                     l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
                     l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd, l.cache_creation_cost_usd, l.total_cost_usd,
                     l.is_streaming, l.latency_ms, l.first_token_ms, l.duration_ms,
-                    l.status_code, l.error_message, l.created_at, l.data_source
+                    l.status_code, l.error_message, l.created_at, l.data_source,
+                    l.input_token_semantics
              FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              {where_clause}
@@ -1327,7 +1334,8 @@ impl Database {
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                     input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
                     is_streaming, latency_ms, first_token_ms, duration_ms,
-                    status_code, error_message, created_at, l.data_source
+                    status_code, error_message, created_at, l.data_source,
+                    l.input_token_semantics
              FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              WHERE l.request_id = ?"
@@ -1483,7 +1491,7 @@ impl Database {
                         input_cost_usd, output_cost_usd, cache_read_cost_usd,
                         cache_creation_cost_usd, total_cost_usd, is_streaming, latency_ms,
                         first_token_ms, duration_ms, status_code, error_message, created_at,
-                        data_source
+                        data_source, input_token_semantics
              FROM proxy_request_logs
              WHERE CAST(total_cost_usd AS REAL) <= 0
                AND (input_tokens > 0 OR output_tokens > 0
@@ -1565,15 +1573,21 @@ impl Database {
         let million = rust_decimal::Decimal::from(1_000_000u64);
 
         // 与 CostCalculator::calculate_for_app 保持一致的计算逻辑：
-        // 1. Codex/Gemini 的 input_tokens 包含 cache_read_tokens，需要扣除后按输入价计费
+        // 1. 旧 Codex/Gemini 行只包含 cache read；新 total 行还包含 cache write
         // 2. Claude/Anthropic 的 input_tokens 已经是 fresh input，不能再次扣减
         // 3. 各项成本是基础成本（不含倍率），倍率只作用于最终总价
-        let input_includes_cache_read = matches!(log.app_type.as_str(), "codex" | "gemini");
-        let billable_input_tokens = if input_includes_cache_read {
-            (log.input_tokens as u64).saturating_sub(log.cache_read_tokens as u64)
-        } else {
-            log.input_tokens as u64
-        };
+        let cache_inclusive_app = matches!(log.app_type.as_str(), "codex" | "gemini");
+        let billable_input_tokens =
+            if !cache_inclusive_app || log.input_token_semantics == INPUT_TOKEN_SEMANTICS_FRESH {
+                log.input_tokens as u64
+            } else if log.input_token_semantics == INPUT_TOKEN_SEMANTICS_TOTAL {
+                (log.input_tokens as u64)
+                    .saturating_sub(log.cache_read_tokens as u64)
+                    .saturating_sub(log.cache_creation_tokens as u64)
+            } else {
+                // v12 and earlier: input included cache reads but excluded cache writes.
+                (log.input_tokens as u64).saturating_sub(log.cache_read_tokens as u64)
+            };
         let input_cost =
             rust_decimal::Decimal::from(billable_input_tokens) * pricing.input / million;
         let output_cost =
@@ -2161,6 +2175,116 @@ mod tests {
         assert_eq!(input_cost, "5.000000");
         assert_eq!(output_cost, "30.000000");
         assert_eq!(total_cost, "35.000000");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_backfill_missing_usage_costs_uses_gpt_5_6_sol_pricing() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "codex-gpt-5-6-sol-zero-cost",
+                "codex",
+                "_codex_session",
+                "gpt-5.6-sol",
+                "codex_session",
+                1000,
+                1_000_000,
+                1_000_000,
+                0,
+                0,
+                200,
+                "0",
+            )?;
+        }
+
+        assert_eq!(db.backfill_missing_usage_costs()?, 1);
+
+        let conn = lock_conn!(db.conn);
+        let (input_cost, output_cost, total_cost): (String, String, String) = conn.query_row(
+            "SELECT input_cost_usd, output_cost_usd, total_cost_usd
+             FROM proxy_request_logs WHERE request_id = 'codex-gpt-5-6-sol-zero-cost'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(input_cost, "5.000000");
+        assert_eq!(output_cost, "30.000000");
+        assert_eq!(total_cost, "35.000000");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_backfill_distinguishes_legacy_and_total_cache_semantics() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            // v12 row: input = fresh + read; cache creation was separate.
+            insert_usage_log(
+                &conn,
+                "legacy-cache-semantics",
+                "codex",
+                "p1",
+                "gpt-5.5",
+                "proxy",
+                1000,
+                800_000,
+                0,
+                600_000,
+                200_000,
+                200,
+                "0",
+            )?;
+            // v13 row: input = fresh + read + creation.
+            insert_usage_log(
+                &conn,
+                "total-cache-semantics",
+                "codex",
+                "p1",
+                "gpt-5.5",
+                "proxy",
+                1001,
+                1_000_000,
+                0,
+                600_000,
+                200_000,
+                200,
+                "0",
+            )?;
+            conn.execute(
+                "UPDATE proxy_request_logs
+                 SET input_token_semantics = ?1
+                 WHERE request_id = 'total-cache-semantics'",
+                [INPUT_TOKEN_SEMANTICS_TOTAL],
+            )?;
+        }
+
+        assert_eq!(db.backfill_missing_usage_costs()?, 2);
+
+        let conn = lock_conn!(db.conn);
+        let mut stmt = conn.prepare(
+            "SELECT request_id, input_cost_usd
+             FROM proxy_request_logs
+             WHERE request_id IN ('legacy-cache-semantics', 'total-cache-semantics')
+             ORDER BY request_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            rows,
+            vec![
+                ("legacy-cache-semantics".to_string(), "1.000000".to_string()),
+                ("total-cache-semantics".to_string(), "1.000000".to_string()),
+            ]
+        );
 
         Ok(())
     }

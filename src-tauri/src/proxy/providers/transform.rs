@@ -474,6 +474,12 @@ fn openai_usage_to_anthropic(body: &Value) -> Value {
     let cache_creation = usage
         .get("cache_creation_input_tokens")
         .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cache_write_tokens")
+                .or_else(|| usage.pointer("/input_tokens_details/cache_write_tokens"))
+                .and_then(|v| v.as_u64())
+        })
         .unwrap_or(0);
     let input_tokens = usage
         .get("prompt_tokens")
@@ -1152,7 +1158,10 @@ mod tests {
             "usage": {
                 "prompt_tokens": 13312,
                 "completion_tokens": 79,
-                "prompt_tokens_details": {"cached_tokens": 100}
+                "prompt_tokens_details": {
+                    "cached_tokens": 100,
+                    "cache_write_tokens": 200
+                }
             }
         });
 
@@ -1164,10 +1173,11 @@ mod tests {
         assert_eq!(result["model"], "z-ai/glm-5.2");
         assert_eq!(result["stop_reason"], "end_turn");
         assert_eq!(result["content"], json!([]));
-        // input_tokens is fresh input: prompt_tokens(13312) - cache_read(100) = 13212.
-        assert_eq!(result["usage"]["input_tokens"], 13212);
+        // Fresh input = prompt_tokens - cache read - cache write.
+        assert_eq!(result["usage"]["input_tokens"], 13012);
         assert_eq!(result["usage"]["output_tokens"], 79);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 100);
+        assert_eq!(result["usage"]["cache_creation_input_tokens"], 200);
     }
 
     #[test]

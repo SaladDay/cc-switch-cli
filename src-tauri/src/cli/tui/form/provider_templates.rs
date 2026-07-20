@@ -482,6 +482,9 @@ impl ProviderAddFormState {
         let total_templates = builtin_defs.len() + sponsor_presets.len() + after_sponsor_defs.len();
         let idx = idx.min(total_templates.saturating_sub(1));
         self.template_idx = idx;
+        self.field_errors.clear();
+        self.usage_query_field_errors.clear();
+        self.clear_text_edit();
         self.id_is_manual = false;
         self.reset_local_proxy_settings_state();
 
@@ -528,10 +531,11 @@ impl ProviderAddFormState {
                     self.claude_base_url = defaults.claude_base_url;
                     self.claude_api_format = defaults.claude_api_format;
                     self.claude_model = defaults.claude_model;
-                    self.claude_reasoning_model = defaults.claude_reasoning_model;
                     self.claude_haiku_model = defaults.claude_haiku_model;
                     self.claude_sonnet_model = defaults.claude_sonnet_model;
                     self.claude_opus_model = defaults.claude_opus_model;
+                    self.claude_sonnet_one_m = defaults.claude_sonnet_one_m;
+                    self.claude_opus_one_m = defaults.claude_opus_one_m;
                     self.claude_hide_attribution = defaults.claude_hide_attribution;
                     self.claude_teammates = defaults.claude_teammates;
                     self.claude_tool_search = defaults.claude_tool_search;
@@ -591,10 +595,11 @@ impl ProviderAddFormState {
                     self.claude_base_url.set("");
                     self.claude_api_format = ClaudeApiFormat::Anthropic;
                     self.claude_model.set("");
-                    self.claude_reasoning_model.set("");
                     self.claude_haiku_model.set("");
                     self.claude_sonnet_model.set("");
                     self.claude_opus_model.set("");
+                    self.claude_sonnet_one_m = false;
+                    self.claude_opus_one_m = false;
                     self.claude_model_config_touched = false;
                     self.codex_oauth_account_id = None;
                     self.codex_fast_mode = false;
@@ -625,10 +630,11 @@ impl ProviderAddFormState {
                         .set("https://chatgpt.com/backend-api/codex");
                     self.claude_api_format = ClaudeApiFormat::OpenAiResponses;
                     self.claude_model.set("gpt-5.4");
-                    self.claude_reasoning_model.set("gpt-5.4");
                     self.claude_haiku_model.set("gpt-5.4-mini");
                     self.claude_sonnet_model.set("gpt-5.4");
                     self.claude_opus_model.set("gpt-5.4");
+                    self.claude_sonnet_one_m = false;
+                    self.claude_opus_one_m = false;
                     self.claude_model_config_touched = true;
                     self.codex_oauth_account_id = None;
                     self.codex_fast_mode = false;

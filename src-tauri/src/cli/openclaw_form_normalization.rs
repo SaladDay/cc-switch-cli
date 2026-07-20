@@ -242,18 +242,6 @@ pub(crate) fn should_preserve_non_string_numeric_seed(seed: Option<&Value>) -> b
     matches!(seed, Some(value) if !value.is_number() && !value.is_string())
 }
 
-pub(crate) fn preserved_non_string_runtime_seed<'a>(
-    value: &str,
-    seed: Option<&'a Value>,
-) -> Option<&'a Value> {
-    value
-        .trim()
-        .is_empty()
-        .then_some(seed)
-        .flatten()
-        .filter(|seed| should_preserve_non_string_numeric_seed(Some(seed)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

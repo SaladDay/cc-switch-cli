@@ -12,7 +12,6 @@ use crate::openclaw_config::{
 };
 use crate::provider::Provider;
 use crate::services::{McpService, PromptService, ProviderService};
-use crate::settings::{set_webdav_sync_settings, WebDavSyncSettings};
 
 use super::super::app::{CommonSnippetViewSource, EditorSubmit, ToastKind};
 use super::super::data::{load_state, UiData};
@@ -283,7 +282,6 @@ pub(super) fn submit(
         EditorSubmit::ConfigOpenClawEnv => submit_openclaw_env(ctx, content),
         EditorSubmit::ConfigOpenClawTools => submit_openclaw_tools(ctx, content),
         EditorSubmit::ConfigOpenClawAgents => submit_openclaw_agents(ctx, content),
-        EditorSubmit::ConfigWebDavSettings => submit_webdav_settings(ctx, content),
     }
 }
 
@@ -662,6 +660,14 @@ fn submit_provider_form_apply_usage_script_code(
 ) -> Result<(), AppError> {
     if let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_mut() {
         form.usage_query_code = content;
+        if let Some(message) = form.usage_query_script_validation_error() {
+            form.set_usage_query_field_error(
+                crate::cli::tui::form::UsageQueryField::Script,
+                message,
+            );
+        } else {
+            form.clear_usage_query_field_error(crate::cli::tui::form::UsageQueryField::Script);
+        }
         form.touch_usage_query();
     }
     ctx.app.editor = None;
@@ -1011,6 +1017,14 @@ fn submit_mcp_add(ctx: &mut RuntimeActionContext<'_>, content: String) -> Result
     }
 
     let state = load_state()?;
+    if McpService::get_all_servers(&state)?
+        .keys()
+        .any(|id| id == server.id.trim())
+    {
+        ctx.app
+            .push_toast(texts::tui_toast_mcp_id_exists(), ToastKind::Warning);
+        return Ok(());
+    }
     if let Err(err) = McpService::upsert_server(&state, server) {
         ctx.app.push_toast(err.to_string(), ToastKind::Error);
         return Ok(());
@@ -1115,33 +1129,6 @@ fn submit_config_common_snippet(
     if matches!(source, CommonSnippetViewSource::Global) {
         ctx.app.overlay = crate::cli::tui::app::Overlay::None;
     }
-    Ok(())
-}
-
-fn submit_webdav_settings(
-    ctx: &mut RuntimeActionContext<'_>,
-    content: String,
-) -> Result<(), AppError> {
-    let edited = content.trim();
-    if edited.is_empty() {
-        set_webdav_sync_settings(None)?;
-        ctx.app.editor = None;
-        ctx.app.push_toast(
-            texts::tui_toast_webdav_settings_cleared(),
-            ToastKind::Success,
-        );
-        *ctx.data = UiData::load(&ctx.app.app_type)?;
-        return Ok(());
-    }
-
-    let cfg: WebDavSyncSettings = serde_json::from_str(edited)
-        .map_err(|e| AppError::Message(texts::tui_toast_invalid_json(&e.to_string())))?;
-    set_webdav_sync_settings(Some(cfg))?;
-
-    ctx.app.editor = None;
-    ctx.app
-        .push_toast(texts::tui_toast_webdav_settings_saved(), ToastKind::Success);
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
 }
 
@@ -1329,6 +1316,38 @@ mod tests {
                 ("x-custom-trace".to_string(), "trace-1".to_string()),
             ])
         );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn applying_invalid_usage_script_keeps_an_inline_validation_error() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+        form.usage_query_enabled = true;
+        form.usage_query_template = crate::cli::tui::form::UsageQueryTemplate::General;
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+        fixture.app.open_editor(
+            "Usage query script",
+            crate::cli::tui::app::EditorKind::Plain,
+            "",
+            EditorSubmit::ProviderFormApplyUsageScriptCode,
+        );
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ProviderFormApplyUsageScriptCode,
+            "const result = response;".to_string(),
+        )
+        .expect("script should apply to the draft");
+
+        assert!(ctx.app.editor.is_none());
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert!(form
+            .usage_query_field_error(crate::cli::tui::form::UsageQueryField::Script)
+            .is_some_and(|message| message.contains("return")));
     }
 
     #[test]

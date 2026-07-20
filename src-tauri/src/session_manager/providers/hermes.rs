@@ -1,18 +1,26 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+#[cfg(test)]
+use std::fs::File;
+
+use rusqlite::{types::ValueRef, Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::hermes_config::get_hermes_dir;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
-use crate::session_manager::{SearchSnippet, SessionMessage, SessionMeta, SessionSearchHit};
+use crate::session_manager::{
+    SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta,
+    SessionSearchHit, SESSION_MESSAGE_PREVIEW_MAX_MESSAGES,
+    SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES,
+};
 
 use super::utils::{
-    build_snippet, extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary,
-    TITLE_MAX_CHARS,
+    build_snippet_cancellable, extract_text, file_modified_ms, parse_timestamp_to_ms,
+    read_head_tail_lines_bounded, truncate_summary, visit_bounded_lines_cancellable,
+    visit_bounded_lines_cancellable_with_status, with_sqlite_cancellation, MAX_METADATA_FILE_BYTES,
+    MAX_METADATA_LINE_BYTES, TITLE_MAX_CHARS,
 };
 
 const PROVIDER_ID: &str = "hermes";
@@ -46,6 +54,422 @@ pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<S
     merge_sqlite_jsonl(scan_sessions_sqlite(), jsonl_sessions)
 }
 
+pub(crate) fn scan_sessions_progressive(
+    store: Option<&ScanCacheStore>,
+    force: bool,
+    on_session: &mut dyn FnMut(&SessionMeta),
+) -> Vec<SessionMeta> {
+    let targets = scan_targets();
+    let jsonl_sessions = match store {
+        Some(store) => cache::scan_provider_cached_progressive(
+            store,
+            PROVIDER_ID,
+            targets,
+            force,
+            parse_jsonl_session,
+            |_| true,
+            &mut *on_session,
+        ),
+        None => cache::scan_provider_uncached_progressive(
+            targets,
+            parse_jsonl_session,
+            &mut *on_session,
+        ),
+    };
+
+    let sqlite_sessions = scan_sessions_sqlite();
+    for session in &sqlite_sessions {
+        on_session(session);
+    }
+    merge_sqlite_jsonl(sqlite_sessions, jsonl_sessions)
+}
+
+pub(crate) fn scan_sessions_progressive_cancellable(
+    store: Option<&ScanCacheStore>,
+    force: bool,
+    on_session: &mut dyn FnMut(&SessionMeta),
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<SessionMeta>> {
+    let targets = scan_targets_cancellable(is_cancelled)?;
+    let jsonl_sessions = match store {
+        Some(store) => cache::scan_provider_cached_progressive_cancellable(
+            store,
+            PROVIDER_ID,
+            targets,
+            force,
+            parse_jsonl_session,
+            |_| true,
+            &mut *on_session,
+            is_cancelled,
+        )?,
+        None => cache::scan_provider_uncached_progressive_cancellable(
+            targets,
+            parse_jsonl_session,
+            &mut *on_session,
+            is_cancelled,
+        )?,
+    };
+    let sqlite_sessions = scan_sessions_sqlite_cancellable(is_cancelled)?;
+    for session in &sqlite_sessions {
+        if is_cancelled() {
+            return None;
+        }
+        on_session(session);
+    }
+    if is_cancelled() {
+        None
+    } else {
+        merge_sqlite_jsonl_cancellable(sqlite_sessions, jsonl_sessions, is_cancelled)
+    }
+}
+
+pub(crate) fn stream_sessions_cancellable(
+    store: Option<&ScanCacheStore>,
+    force: bool,
+    on_session: &mut dyn FnMut(SessionMeta) -> ControlFlow<()>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<cache::StreamScanStats, cache::StreamScanStop> {
+    let db = open_stream_database()?;
+    let plan = db.as_ref().map(HermesStreamPlan::discover).transpose()?;
+    let mut stats = cache::StreamScanStats::default();
+    if let (Some(conn), Some(plan)) = (db.as_ref(), plan.as_ref()) {
+        stream_sqlite_sessions(conn, plan, on_session, is_cancelled, &mut stats)?;
+    }
+
+    let sessions_dir = get_hermes_sessions_dir();
+    let mut duplicates = 0usize;
+    let duplicate_lookup_failed = std::cell::Cell::new(false);
+    let db_source = format!("sqlite:{}", get_hermes_db_path().display());
+    let mut json_sink = |meta: SessionMeta| {
+        let duplicate = match (db.as_ref(), plan.as_ref()) {
+            (Some(conn), Some(plan)) => {
+                match plan.decodable_recent_contains(conn, &meta.session_id, &db_source) {
+                    Ok(duplicate) => duplicate,
+                    Err(()) => {
+                        duplicate_lookup_failed.set(true);
+                        return ControlFlow::Break(());
+                    }
+                }
+            }
+            _ => false,
+        };
+        if duplicate {
+            duplicates = duplicates.saturating_add(1);
+            return ControlFlow::Continue(());
+        }
+        on_session(meta)
+    };
+    let file_result = cache::stream_file_provider_cancellable(
+        store,
+        PROVIDER_ID,
+        force,
+        |path| {
+            if is_cancelled() {
+                return Err(cache::StreamScanStop::Cancelled);
+            }
+            let meta = parse_jsonl_session_authoritative(path)?;
+            if is_cancelled() {
+                Err(cache::StreamScanStop::Cancelled)
+            } else {
+                Ok(meta)
+            }
+        },
+        |_| true,
+        cache::stat_target,
+        move |on_target, cancel| {
+            if cancel() {
+                return Err(cache::StreamScanStop::Cancelled);
+            }
+            let entries = match std::fs::read_dir(&sessions_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => {
+                    log::warn!(
+                        "authoritative Hermes session walk failed at {}: {error}",
+                        sessions_dir.display()
+                    );
+                    return Err(cache::StreamScanStop::Incomplete);
+                }
+            };
+            for entry in entries {
+                if cancel() {
+                    return Err(cache::StreamScanStop::Cancelled);
+                }
+                let entry = entry.map_err(|error| {
+                    log::warn!(
+                        "authoritative Hermes directory entry failed at {}: {error}",
+                        sessions_dir.display()
+                    );
+                    cache::StreamScanStop::Incomplete
+                })?;
+                let path = entry.path();
+                if !matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("jsonl" | "json")
+                ) {
+                    continue;
+                }
+                let kind = entry.file_type().map_err(|error| {
+                    log::warn!(
+                        "authoritative Hermes session type failed at {}: {error}",
+                        path.display()
+                    );
+                    cache::StreamScanStop::Incomplete
+                })?;
+                let regular = kind.is_file()
+                    || (kind.is_symlink()
+                        && std::fs::metadata(&path)
+                            .map(|metadata| metadata.is_file())
+                            .map_err(|error| {
+                                log::warn!(
+                                    "authoritative Hermes symlink stat failed at {}: {error}",
+                                    path.display()
+                                );
+                                cache::StreamScanStop::Incomplete
+                            })?);
+                if !regular {
+                    continue;
+                }
+                let target = cache::stat_target_strict(&path)
+                    .map_err(|error| {
+                        log::warn!(
+                            "authoritative Hermes session stat failed at {}: {error}",
+                            path.display()
+                        );
+                        cache::StreamScanStop::Incomplete
+                    })?
+                    .ok_or(cache::StreamScanStop::Incomplete)?;
+                on_target(target)?;
+            }
+            Ok(())
+        },
+        &mut json_sink,
+        is_cancelled,
+    );
+    drop(json_sink);
+    if duplicate_lookup_failed.get() {
+        return Err(cache::StreamScanStop::Incomplete);
+    }
+    let mut file_stats = file_result?;
+    file_stats.emitted = file_stats.emitted.saturating_sub(duplicates);
+    stats.merge(file_stats);
+    Ok(stats)
+}
+
+fn open_stream_database() -> Result<Option<Connection>, cache::StreamScanStop> {
+    let path = get_hermes_db_path();
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err(cache::StreamScanStop::Incomplete),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            log::warn!(
+                "authoritative Hermes database stat failed at {}: {error}",
+                path.display()
+            );
+            return Err(cache::StreamScanStop::Incomplete);
+        }
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| {
+        log::warn!(
+            "authoritative Hermes database open failed at {}: {error}",
+            path.display()
+        );
+        cache::StreamScanStop::Incomplete
+    })?;
+    let exists = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| {
+            log::warn!("authoritative Hermes schema inspection failed: {error}");
+            cache::StreamScanStop::Incomplete
+        })?;
+    if exists {
+        Ok(Some(conn))
+    } else {
+        Ok(None)
+    }
+}
+
+#[derive(Debug)]
+struct HermesStreamPlan {
+    select_list: String,
+}
+
+impl HermesStreamPlan {
+    fn discover(conn: &Connection) -> Result<Self, cache::StreamScanStop> {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(sessions)")
+            .map_err(|error| {
+                log::warn!("authoritative Hermes column inspection prepare failed: {error}");
+                cache::StreamScanStop::Incomplete
+            })?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| {
+                log::warn!("authoritative Hermes column inspection failed: {error}");
+                cache::StreamScanStop::Incomplete
+            })?;
+        let mut columns = std::collections::HashSet::new();
+        for row in rows {
+            columns.insert(row.map_err(|error| {
+                log::warn!("authoritative Hermes column decode failed: {error}");
+                cache::StreamScanStop::Incomplete
+            })?);
+        }
+        if !columns.contains("id") {
+            return Err(cache::StreamScanStop::Incomplete);
+        }
+        let bounded_optional = |names: &[&'static str]| {
+            names
+                .iter()
+                .copied()
+                .find(|name| columns.contains(*name))
+                .map_or_else(
+                    || "NULL".to_string(),
+                    |name| {
+                        format!(
+                        "CASE WHEN length(CAST(\"{name}\" AS BLOB)) <= {MAX_METADATA_LINE_BYTES} \
+                         THEN \"{name}\" ELSE NULL END"
+                    )
+                    },
+                )
+        };
+        Ok(Self {
+            // Only metadata fields are selected. In particular, a flexible
+            // upstream sessions table may contain transcript/blob columns that
+            // must never enter the list scanner's memory. Text is bounded in
+            // SQL before rusqlite materializes it in a Rust String.
+            select_list: format!(
+                "CASE WHEN length(CAST(\"id\" AS BLOB)) <= {MAX_METADATA_LINE_BYTES} \
+                     THEN CAST(\"id\" AS TEXT) ELSE printf('oversized-rowid-%lld', rowid) END, \
+                 {}, {}, {}, {}",
+                bounded_optional(&["title"]),
+                bounded_optional(&["cwd", "directory"]),
+                bounded_optional(&["started_at", "created_at"]),
+                bounded_optional(&["ended_at", "updated_at"]),
+            ),
+        })
+    }
+
+    fn decode_row(
+        &self,
+        row: &rusqlite::Row<'_>,
+        db_source: &str,
+    ) -> rusqlite::Result<SessionMeta> {
+        let session_id: String = row.get(0)?;
+        let title = row.get::<_, Option<String>>(1)?.and_then(|value| {
+            (!value.is_empty()).then(|| truncate_summary(&value, TITLE_MAX_CHARS))
+        });
+        let cwd = row
+            .get::<_, Option<String>>(2)?
+            .filter(|value| !value.is_empty());
+        let started_at = sqlite_value_to_json(row.get_ref(3)?).and_then(|value| {
+            (!value.is_null())
+                .then(|| parse_timestamp_to_ms(&value))
+                .flatten()
+        });
+        let ended_at = sqlite_value_to_json(row.get_ref(4)?).and_then(|value| {
+            (!value.is_null())
+                .then(|| parse_timestamp_to_ms(&value))
+                .flatten()
+        });
+        Ok(SessionMeta {
+            provider_id: PROVIDER_ID.to_string(),
+            session_id: session_id.clone(),
+            title,
+            summary: None,
+            project_dir: cwd,
+            created_at: started_at,
+            last_active_at: ended_at.or(started_at),
+            source_path: Some(format!("{db_source}#{session_id}")),
+            resume_command: None,
+        })
+    }
+
+    fn decodable_recent_contains(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        db_source: &str,
+    ) -> Result<bool, ()> {
+        let sql = format!(
+            "SELECT {} FROM sessions
+             WHERE id = ?1
+               AND rowid IN (SELECT rowid FROM sessions ORDER BY rowid DESC LIMIT 500)
+             LIMIT 1",
+            self.select_list
+        );
+        conn.query_row(&sql, [session_id], |row| self.decode_row(row, db_source))
+            .optional()
+            .map(|meta| meta.is_some())
+            .map_err(|error| {
+                log::warn!(
+                    "authoritative Hermes duplicate decode failed for {session_id}: {error}"
+                );
+            })
+    }
+}
+
+fn sqlite_value_to_json(value: ValueRef<'_>) -> Option<Value> {
+    match value {
+        ValueRef::Null => Some(Value::Null),
+        ValueRef::Integer(value) => Some(Value::Number(value.into())),
+        ValueRef::Real(value) => serde_json::Number::from_f64(value).map(Value::Number),
+        ValueRef::Text(value) => Some(Value::String(String::from_utf8_lossy(value).into_owned())),
+        ValueRef::Blob(_) => None,
+    }
+}
+
+fn stream_sqlite_sessions(
+    conn: &Connection,
+    plan: &HermesStreamPlan,
+    on_session: &mut dyn FnMut(SessionMeta) -> ControlFlow<()>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    stats: &mut cache::StreamScanStats,
+) -> Result<(), cache::StreamScanStop> {
+    if is_cancelled() {
+        return Err(cache::StreamScanStop::Cancelled);
+    }
+    let sql = format!(
+        "SELECT {} FROM sessions ORDER BY rowid DESC LIMIT 500",
+        plan.select_list
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| {
+        log::warn!("authoritative Hermes session query prepare failed: {error}");
+        cache::StreamScanStop::Incomplete
+    })?;
+    let source = format!("sqlite:{}", get_hermes_db_path().display());
+    let rows = stmt
+        .query_map([], |row| plan.decode_row(row, &source))
+        .map_err(|error| {
+            log::warn!("authoritative Hermes session query failed: {error}");
+            cache::StreamScanStop::Incomplete
+        })?;
+    for row in rows {
+        if is_cancelled() {
+            return Err(cache::StreamScanStop::Cancelled);
+        }
+        let meta = row.map_err(|error| {
+            log::warn!("authoritative Hermes session row decode failed: {error}");
+            cache::StreamScanStop::Incomplete
+        })?;
+        stats.discovered = stats.discovered.saturating_add(1);
+        if on_session(meta).is_break() {
+            return Err(cache::StreamScanStop::SinkStopped);
+        }
+        stats.emitted = stats.emitted.saturating_add(1);
+    }
+    Ok(())
+}
+
 /// Merge SQLite and JSONL sessions, keeping the SQLite row when the same
 /// `session_id` exists in both.
 fn merge_sqlite_jsonl(
@@ -73,16 +497,61 @@ fn merge_sqlite_jsonl(
     merged
 }
 
+fn merge_sqlite_jsonl_cancellable(
+    sqlite_sessions: Vec<SessionMeta>,
+    jsonl_sessions: Vec<SessionMeta>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<SessionMeta>> {
+    if is_cancelled() {
+        return None;
+    }
+    if sqlite_sessions.is_empty() {
+        return Some(jsonl_sessions);
+    }
+    if jsonl_sessions.is_empty() {
+        return Some(sqlite_sessions);
+    }
+    let mut sqlite_ids = std::collections::HashSet::with_capacity(sqlite_sessions.len());
+    for session in &sqlite_sessions {
+        if is_cancelled() {
+            return None;
+        }
+        sqlite_ids.insert(session.session_id.clone());
+    }
+    let mut merged = sqlite_sessions;
+    for session in jsonl_sessions {
+        if is_cancelled() {
+            return None;
+        }
+        if !sqlite_ids.contains(&session.session_id) {
+            merged.push(session);
+        }
+    }
+    Some(merged)
+}
+
 /// Collect the flat `sessions/` directory (both `.jsonl` and `.json`), statting
 /// each file once. Matches `scan_sessions_jsonl`'s non-recursive traversal.
 fn scan_targets() -> Vec<FileScanTarget> {
+    scan_targets_cancellable(&|| false).expect("non-cancellable target scan cannot stop")
+}
+
+fn scan_targets_cancellable(
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<FileScanTarget>> {
     let sessions_dir = get_hermes_sessions_dir();
     let mut targets = Vec::new();
+    if is_cancelled() {
+        return None;
+    }
     let entries = match std::fs::read_dir(&sessions_dir) {
         Ok(entries) => entries,
-        Err(_) => return targets,
+        Err(_) => return Some(targets),
     };
     for entry in entries.flatten() {
+        if is_cancelled() {
+            return None;
+        }
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str());
         if ext != Some("jsonl") && ext != Some("json") {
@@ -92,148 +561,66 @@ fn scan_targets() -> Vec<FileScanTarget> {
             targets.push(target);
         }
     }
-    targets
+    Some(targets)
 }
 
 // ── SQLite scanning ─────────────────────────────────────────────────
 
 fn scan_sessions_sqlite() -> Vec<SessionMeta> {
-    let db_path = get_hermes_db_path();
-    if !db_path.exists() {
-        return Vec::new();
+    scan_sessions_sqlite_cancellable(&|| false)
+        .expect("non-cancellable SQLite session scan cannot stop")
+}
+
+fn scan_sessions_sqlite_cancellable(
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<SessionMeta>> {
+    if is_cancelled() {
+        return None;
     }
-
-    let conn = match Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+    let conn = match open_stream_database() {
+        Ok(Some(conn)) => conn,
+        Ok(None) => return Some(Vec::new()),
+        Err(cache::StreamScanStop::Cancelled) => return None,
+        Err(_) => return Some(Vec::new()),
     };
-
-    // Check if sessions table exists
-    let has_sessions: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='sessions'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if !has_sessions {
-        return Vec::new();
-    }
-
-    // Query sessions — use flexible column access via pragma
-    let columns = get_table_columns(&conn, "sessions");
-
-    let query = "SELECT * FROM sessions ORDER BY rowid DESC LIMIT 500";
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    let plan = match HermesStreamPlan::discover(&conn) {
+        Ok(plan) => plan,
+        Err(_) => return Some(Vec::new()),
     };
-
     let mut sessions = Vec::new();
-    let rows = match stmt.query_map([], |row| Ok(row_to_json(row, &columns))) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-
-    let db_source = format!("sqlite:{}", db_path.display());
-
-    for row_result in rows.flatten() {
-        if let Some(meta) = sqlite_row_to_session_meta(&row_result, &db_source) {
+    let mut stats = cache::StreamScanStats::default();
+    let result = stream_sqlite_sessions(
+        &conn,
+        &plan,
+        &mut |meta| {
             sessions.push(meta);
-        }
+            ControlFlow::Continue(())
+        },
+        is_cancelled,
+        &mut stats,
+    );
+    match result {
+        Ok(()) => Some(sessions),
+        Err(cache::StreamScanStop::Cancelled) => None,
+        Err(_) => Some(Vec::new()),
     }
-
-    sessions
-}
-
-fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMeta> {
-    let obj = row.as_object()?;
-
-    let session_id = obj.get("id").and_then(Value::as_str)?.to_string();
-
-    let title = obj
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(|s| truncate_summary(s, TITLE_MAX_CHARS).to_string());
-
-    let cwd = obj
-        .get("cwd")
-        .or_else(|| obj.get("directory"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-
-    let started_at = obj
-        .get("started_at")
-        .or_else(|| obj.get("created_at"))
-        .and_then(parse_timestamp_to_ms);
-
-    let ended_at = obj
-        .get("ended_at")
-        .or_else(|| obj.get("updated_at"))
-        .and_then(parse_timestamp_to_ms);
-
-    let source_path = format!("{}#{}", db_source, session_id);
-
-    Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
-        session_id,
-        title,
-        summary: None,
-        project_dir: cwd,
-        created_at: started_at,
-        last_active_at: ended_at.or(started_at),
-        source_path: Some(source_path),
-        resume_command: None,
-    })
-}
-
-/// Get column names for a table.
-fn get_table_columns(conn: &Connection, table: &str) -> Vec<String> {
-    let query = format!("PRAGMA table_info({table})");
-    let mut stmt = match conn.prepare(&query) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let rows = match stmt.query_map([], |row| {
-        let name: String = row.get(1)?;
-        Ok(name)
-    }) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    rows.flatten().collect()
-}
-
-/// Convert a SQLite row to a JSON Value using known column names.
-fn row_to_json(row: &rusqlite::Row, columns: &[String]) -> Value {
-    let mut map = serde_json::Map::new();
-    for (i, col) in columns.iter().enumerate() {
-        // Try string first, then integer, then float, then null
-        if let Ok(val) = row.get::<_, String>(i) {
-            map.insert(col.clone(), Value::String(val));
-        } else if let Ok(val) = row.get::<_, i64>(i) {
-            map.insert(col.clone(), Value::Number(val.into()));
-        } else if let Ok(val) = row.get::<_, f64>(i) {
-            if let Some(n) = serde_json::Number::from_f64(val) {
-                map.insert(col.clone(), Value::Number(n));
-            }
-        } else {
-            map.insert(col.clone(), Value::Null);
-        }
-    }
-    Value::Object(map)
 }
 
 /// Load messages from the Hermes SQLite database.
-pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String> {
+pub fn load_messages_sqlite(source: &str) -> Result<SessionMessageBatch, String> {
+    load_messages_sqlite_cancellable(source, &|| false)
+}
+
+pub(crate) fn load_messages_sqlite_cancellable(
+    source: &str,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<SessionMessageBatch, String> {
     let (db_path, session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+
+    if is_cancelled() {
+        return Err("Session message preview was cancelled".to_string());
+    }
 
     let conn = Connection::open_with_flags(
         &db_path,
@@ -241,38 +628,92 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
     )
     .map_err(|e| format!("Failed to open Hermes database: {e}"))?;
 
-    // Try querying with common column names
-    let query =
-        "SELECT role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC";
+    with_sqlite_cancellation(&conn, is_cancelled, || {
+        load_messages_sqlite_from_connection(&conn, &session_id, is_cancelled)
+    })
+}
+
+fn load_messages_sqlite_from_connection(
+    conn: &Connection,
+    session_id: &str,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<SessionMessageBatch, String> {
+    // Read one lookahead row from the newest end. The fixed SQL substrings
+    // bound rusqlite allocations; Rust restores chronological display order.
+    let query = format!(
+        "SELECT
+            substr(CAST(role AS TEXT), 1, 256),
+            length(CAST(role AS BLOB)),
+            substr(CAST(content AS TEXT), 1, {SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES}),
+            length(CAST(content AS BLOB)),
+            created_at
+         FROM messages
+         WHERE session_id = ?1
+         ORDER BY created_at DESC
+         LIMIT {}",
+        SESSION_MESSAGE_PREVIEW_MAX_MESSAGES + 1
+    );
 
     let mut stmt = conn
-        .prepare(query)
+        .prepare(&query)
         .map_err(|e| format!("Failed to prepare messages query: {e}"))?;
 
     let rows = stmt
-        .query_map([session_id.as_str()], |row| {
-            let role: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            let ts: Option<i64> = row.get(2).ok();
-            Ok((role, content, ts))
+        .query_map([session_id], |row| {
+            let role: Option<String> = row.get(0)?;
+            let role_bytes: Option<i64> = row.get(1)?;
+            let content: Option<String> = row.get(2)?;
+            let content_bytes: Option<i64> = row.get(3)?;
+            let ts: Option<i64> = row.get(4).ok();
+            Ok((role, role_bytes, content, content_bytes, ts))
         })
         .map_err(|e| format!("Failed to query messages: {e}"))?;
 
-    let mut messages = Vec::new();
-    for row in rows.flatten() {
-        let (role, content, ts) = row;
+    let mut newest = Vec::with_capacity(SESSION_MESSAGE_PREVIEW_MAX_MESSAGES + 1);
+    let mut truncated = false;
+    for row in rows {
+        if is_cancelled() {
+            return Err("Session message preview was cancelled".to_string());
+        }
+        let (role, role_bytes, content, content_bytes, ts) =
+            row.map_err(|error| format!("Failed to decode message row: {error}"))?;
+        let (Some(role), Some(content)) = (role, content) else {
+            truncated = true;
+            continue;
+        };
         if content.trim().is_empty() {
             continue;
         }
+        truncated |= role_bytes.is_some_and(|bytes| bytes > 256)
+            || content_bytes
+                .is_some_and(|bytes| bytes > SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES as i64);
         let ts_ms = ts.and_then(|v| parse_timestamp_to_ms(&Value::Number(v.into())));
-        messages.push(SessionMessage {
+        newest.push(SessionMessage {
             role,
             content,
             ts: ts_ms,
         });
     }
 
-    Ok(messages)
+    if newest.len() > SESSION_MESSAGE_PREVIEW_MAX_MESSAGES {
+        newest.truncate(SESSION_MESSAGE_PREVIEW_MAX_MESSAGES);
+        truncated = true;
+    }
+    let mut batch = SessionMessageBatchBuilder::new();
+    if truncated {
+        batch.mark_truncated();
+    }
+    for message in newest {
+        if is_cancelled() {
+            return Err("Session message preview was cancelled".to_string());
+        }
+        if batch.push(message).is_break() {
+            break;
+        }
+    }
+    let mut batch = batch.finish();
+    batch.messages.reverse();
+    Ok(batch)
 }
 
 /// Delete a session from the Hermes SQLite database.
@@ -354,9 +795,24 @@ fn scan_sessions_jsonl() -> Vec<SessionMeta> {
 }
 
 fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
-    // Read head (metadata + first user message) and tail (last timestamp)
-    let (head, tail) = read_head_tail_lines(path, 30, 10).ok()?;
+    parse_jsonl_session_authoritative(path).ok().flatten()
+}
 
+fn parse_jsonl_session_authoritative(
+    path: &Path,
+) -> Result<Option<SessionMeta>, cache::StreamScanStop> {
+    // Read head (metadata + first user message) and tail (last timestamp)
+    let (head, tail) = read_head_tail_lines_bounded(path, 30, 10).map_err(|error| {
+        log::warn!(
+            "authoritative Hermes metadata read failed at {}: {error}",
+            path.display()
+        );
+        cache::StreamScanStop::Incomplete
+    })?;
+    Ok(parse_jsonl_session_lines(path, &head, &tail))
+}
+
+fn parse_jsonl_session_lines(path: &Path, head: &[String], tail: &[String]) -> Option<SessionMeta> {
     let mut first_user_msg: Option<String> = None;
     let mut first_ts: Option<i64> = None;
     let mut last_ts: Option<i64> = None;
@@ -365,7 +821,7 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
     let mut cwd: Option<String> = None;
 
     // Process head lines for metadata and first user message
-    for line in &head {
+    for line in head {
         if line.trim().is_empty() {
             continue;
         }
@@ -460,37 +916,42 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
     });
 
     let source_path = path.to_string_lossy().to_string();
+    let fallback_time = file_modified_ms(path);
+    let fallback_title = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| truncate_summary(value, TITLE_MAX_CHARS));
 
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id,
-        title: title.or_else(|| first_user_msg.clone()),
+        title: title.or_else(|| first_user_msg.clone()).or(fallback_title),
         summary: first_user_msg,
         project_dir: cwd,
-        created_at: first_ts,
-        last_active_at: last_ts.or(first_ts),
+        created_at: first_ts.or(fallback_time),
+        last_active_at: last_ts.or(first_ts).or(fallback_time),
         source_path: Some(source_path),
         resume_command: None,
     })
 }
 
 /// Load messages from a Hermes JSONL transcript file.
-pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
-    let reader = BufReader::new(file);
-    let mut messages = Vec::new();
+pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
+    load_messages_cancellable(path, &|| false)
+}
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+pub(crate) fn load_messages_cancellable(
+    path: &Path,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<SessionMessageBatch, String> {
+    let mut batch = SessionMessageBatchBuilder::new();
+    let status = visit_bounded_lines_cancellable_with_status(path, is_cancelled, &mut |line| {
         if line.trim().is_empty() {
-            continue;
+            return ControlFlow::Continue(());
         }
-        let value: Value = match serde_json::from_str(&line) {
+        let value: Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => return ControlFlow::Continue(()),
         };
 
         // Support both flat messages and nested {type:"message", message:{...}} format
@@ -498,7 +959,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
             if value.get("type").and_then(Value::as_str) == Some("message") {
                 let msg = match value.get("message") {
                     Some(m) => m,
-                    None => continue,
+                    None => return ControlFlow::Continue(()),
                 };
                 (
                     msg.get("role"),
@@ -515,62 +976,86 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 
         let role = match role_val.and_then(Value::as_str) {
             Some(r) => r.to_string(),
-            None => continue,
+            None => return ControlFlow::Continue(()),
         };
 
         let content = content_val.map(extract_text).unwrap_or_default();
         if content.trim().is_empty() {
-            continue;
+            return ControlFlow::Continue(());
         }
 
         let ts = ts_val.and_then(parse_timestamp_to_ms);
-        messages.push(SessionMessage { role, content, ts });
+        batch.push(SessionMessage { role, content, ts })
+    })
+    .map_err(|error| format!("Failed to read session file: {error}"))?
+    .ok_or_else(|| "Session message preview was cancelled".to_string())?;
+    if status.oversized_record_skipped {
+        batch.mark_truncated();
     }
 
-    Ok(messages)
+    Ok(batch.finish())
 }
 
 /// Search Hermes sessions (JSONL or SQLite) for `needle` (case-insensitive).
+#[allow(dead_code)]
 pub fn search_sessions(metas: &[&SessionMeta], needle: &str) -> Vec<SessionSearchHit> {
-    metas
-        .iter()
-        .filter_map(|m| {
-            let source = m.source_path.as_deref()?;
-            if source.starts_with("sqlite:") {
-                search_session_sqlite(m, needle)
-            } else {
-                search_session_jsonl(m, needle)
-            }
-        })
-        .collect()
+    search_sessions_cancellable(metas, needle, &|| false).unwrap_or_default()
 }
 
-fn search_session_jsonl(meta: &SessionMeta, needle: &str) -> Option<SessionSearchHit> {
+pub(crate) fn search_sessions_cancellable(
+    metas: &[&SessionMeta],
+    needle: &str,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<SessionSearchHit>> {
+    let mut hits = Vec::new();
+    for meta in metas {
+        if is_cancelled() {
+            return None;
+        }
+        let Some(source) = meta.source_path.as_deref() else {
+            continue;
+        };
+        let hit = if source.starts_with("sqlite:") {
+            search_session_sqlite(meta, needle, is_cancelled)
+        } else {
+            search_session_jsonl(meta, needle, is_cancelled)
+        };
+        if is_cancelled() {
+            return None;
+        }
+        if let Some(hit) = hit {
+            hits.push(hit);
+        }
+    }
+    Some(hits)
+}
+
+fn search_session_jsonl(
+    meta: &SessionMeta,
+    needle: &str,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<SessionSearchHit> {
+    if is_cancelled() {
+        return None;
+    }
     let source_path = meta.source_path.as_deref()?;
     let path = Path::new(source_path);
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let lower_needle = needle.to_lowercase();
     let mut snippets: Vec<SearchSnippet> = Vec::new();
     const MAX_SNIPPETS: usize = 5;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+    visit_bounded_lines_cancellable(path, is_cancelled, &mut |line| {
         if line.trim().is_empty() {
-            continue;
+            return ControlFlow::Continue(());
         }
-        let value: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => return ControlFlow::Continue(()),
         };
         let (role_val, content_val) =
             if value.get("type").and_then(Value::as_str) == Some("message") {
                 let msg = match value.get("message") {
                     Some(m) => m,
-                    None => continue,
+                    None => return ControlFlow::Continue(()),
                 };
                 (msg.get("role"), msg.get("content"))
             } else {
@@ -578,19 +1063,25 @@ fn search_session_jsonl(meta: &SessionMeta, needle: &str) -> Option<SessionSearc
             };
         let role = match role_val.and_then(Value::as_str) {
             Some(r) => r.to_string(),
-            None => continue,
+            None => return ControlFlow::Continue(()),
         };
         let content = content_val.map(extract_text).unwrap_or_default();
-        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) {
-            continue;
+        if content.trim().is_empty() {
+            return ControlFlow::Continue(());
         }
-        if let Some(snippet) = build_snippet(&content, needle) {
-            snippets.push(SearchSnippet { role, snippet });
-            if snippets.len() >= MAX_SNIPPETS {
-                break;
+        match build_snippet_cancellable(&content, needle, is_cancelled) {
+            Ok(Some(snippet)) => {
+                snippets.push(SearchSnippet { role, snippet });
+                if snippets.len() >= MAX_SNIPPETS {
+                    return ControlFlow::Break(());
+                }
             }
+            Ok(None) => {}
+            Err(_) => return ControlFlow::Break(()),
         }
-    }
+        ControlFlow::Continue(())
+    })
+    .ok()??;
     if snippets.is_empty() {
         return None;
     }
@@ -602,7 +1093,14 @@ fn search_session_jsonl(meta: &SessionMeta, needle: &str) -> Option<SessionSearc
     })
 }
 
-fn search_session_sqlite(meta: &SessionMeta, needle: &str) -> Option<SessionSearchHit> {
+fn search_session_sqlite(
+    meta: &SessionMeta,
+    needle: &str,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<SessionSearchHit> {
+    if is_cancelled() {
+        return None;
+    }
     let source_path = meta.source_path.as_deref()?;
     let (db_path, session_id) = parse_sqlite_source(source_path)?;
     let conn = Connection::open_with_flags(
@@ -610,34 +1108,49 @@ fn search_session_sqlite(meta: &SessionMeta, needle: &str) -> Option<SessionSear
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()?;
-    // Fetch all messages for the session without a LIKE prefilter, because
-    // SQLite's LIKE is case-insensitive only for ASCII and would miss Unicode
-    // matches (e.g. "Éclair" vs "éclair"). The Rust to_lowercase().contains()
-    // check below handles full Unicode case-insensitive matching.
-    let mut stmt = conn
-        .prepare("SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY created_at ASC")
-        .ok()?;
-    let rows = stmt
-        .query_map(rusqlite::params![session_id.as_str()], |row| {
-            let role: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            Ok((role, content))
-        })
-        .ok()?;
-    let lower_needle = needle.to_lowercase();
-    let mut snippets: Vec<SearchSnippet> = Vec::new();
-    const MAX_SNIPPETS: usize = 5;
-    for row in rows.flatten() {
-        let (role, content) = row;
-        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) {
-            continue;
-        }
-        if let Some(snippet) = build_snippet(&content, needle) {
-            snippets.push(SearchSnippet { role, snippet });
-            if snippets.len() >= MAX_SNIPPETS {
-                break;
+    let snippets = with_sqlite_cancellation(&conn, is_cancelled, || {
+        // Fetch all messages for the session without a LIKE prefilter, because
+        // SQLite's LIKE is case-insensitive only for ASCII and would miss Unicode
+        // matches (e.g. "Éclair" vs "éclair"). The cancellable linear matcher
+        // below handles Unicode lowercase matching without a second lowercase copy.
+        let mut stmt = conn
+            .prepare(
+                "SELECT role, content FROM messages
+                 WHERE session_id = ?1 AND length(CAST(content AS BLOB)) <= ?2
+                 ORDER BY created_at ASC",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![session_id.as_str(), MAX_METADATA_FILE_BYTES as i64],
+                |row| {
+                    let role: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    Ok((role, content))
+                },
+            )
+            .ok()?;
+        let mut snippets: Vec<SearchSnippet> = Vec::new();
+        const MAX_SNIPPETS: usize = 5;
+        for row in rows.flatten() {
+            if is_cancelled() {
+                return None;
+            }
+            let (role, content) = row;
+            if content.trim().is_empty() {
+                continue;
+            }
+            if let Some(snippet) = build_snippet_cancellable(&content, needle, is_cancelled).ok()? {
+                snippets.push(SearchSnippet { role, snippet });
+                if snippets.len() >= MAX_SNIPPETS {
+                    break;
+                }
             }
         }
+        Some(snippets)
+    })?;
+    if is_cancelled() {
+        return None;
     }
     if snippets.is_empty() {
         return None;
@@ -680,6 +1193,66 @@ mod tests {
         assert!(parse_sqlite_source("not-sqlite").is_none());
         assert!(parse_sqlite_source("sqlite:").is_none());
         assert!(parse_sqlite_source("sqlite:/path#").is_none());
+    }
+
+    #[test]
+    fn sqlite_stream_plan_bounds_metadata_and_omits_transcript_columns() {
+        let conn = Connection::open_in_memory().expect("database");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT NOT NULL,
+                title TEXT,
+                cwd TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                transcript BLOB
+             );",
+        )
+        .expect("schema");
+        conn.execute(
+            "INSERT INTO sessions
+             (id, title, cwd, started_at, ended_at, transcript)
+             VALUES (?1, ?2, ?3, ?4, ?5, zeroblob(16777216))",
+            rusqlite::params![
+                "session-1",
+                "x".repeat(MAX_METADATA_LINE_BYTES + 1),
+                "/tmp/project",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:01:00Z"
+            ],
+        )
+        .expect("insert");
+
+        let plan = HermesStreamPlan::discover(&conn).expect("plan");
+        assert!(!plan.select_list.contains("transcript"));
+        let mut rows = Vec::new();
+        let mut stats = cache::StreamScanStats::default();
+        stream_sqlite_sessions(
+            &conn,
+            &plan,
+            &mut |meta| {
+                rows.push(meta);
+                ControlFlow::Continue(())
+            },
+            &|| false,
+            &mut stats,
+        )
+        .expect("stream");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, "session-1");
+        assert!(rows[0].title.is_none(), "oversized title must not decode");
+        assert_eq!(rows[0].project_dir.as_deref(), Some("/tmp/project"));
+    }
+
+    #[test]
+    fn sqlite_stream_plan_rejects_schema_without_session_id() {
+        let conn = Connection::open_in_memory().expect("database");
+        conn.execute_batch("CREATE TABLE sessions (title TEXT);")
+            .expect("schema");
+        assert!(matches!(
+            HermesStreamPlan::discover(&conn),
+            Err(cache::StreamScanStop::Incomplete)
+        ));
     }
 
     #[test]

@@ -15,6 +15,15 @@ pub enum Action {
     SessionsDeepSearch {
         query: String,
     },
+    SessionsDeepSearchCancel,
+    SessionsProjectCatalogLoad,
+    SessionsProjectFilter {
+        query: String,
+    },
+    SessionsProjectFilterCancel,
+    SessionsProjectApply {
+        scope: crate::session_manager::project_scope::SessionProjectScope,
+    },
     SessionMessagesLoad {
         key: String,
         provider_id: String,
@@ -138,6 +147,10 @@ pub enum Action {
     UsageCustomRange {
         range: data::UsageCustomRange,
     },
+    UsageRefresh,
+    UsageLogDetailRefresh {
+        rowid: i64,
+    },
     PricingDelete {
         model_id: String,
     },
@@ -217,14 +230,33 @@ pub enum Action {
     ConfirmCommonConfigNotice,
     ConfirmUsageQueryNotice,
     ConfigWebDavCheckConnection,
+    ConfigWebDavSave {
+        settings: crate::settings::WebDavSyncSettings,
+    },
     ConfigWebDavUpload,
     ConfigWebDavDownload,
     ConfigWebDavMigrateV1ToV2,
     ConfigWebDavReset,
+    ConfigWebDavSetEnabled {
+        enabled: bool,
+    },
     ConfigWebDavJianguoyunQuickSetup {
         username: String,
         password: String,
     },
+    ConfigS3Save {
+        settings: crate::settings::S3SyncSettings,
+    },
+    ConfigS3CheckConnection,
+    ConfigS3FetchRemoteInfo {
+        intent: CloudSyncTransferIntent,
+    },
+    ConfigS3Upload,
+    ConfigS3Download,
+    ConfigS3SetEnabled {
+        enabled: bool,
+    },
+    ConfigS3Reset,
     OpenClawWorkspaceOpenFile {
         filename: String,
     },
@@ -292,6 +324,9 @@ pub enum Action {
     SetOpenClawConfigDir {
         path: Option<String>,
     },
+    SetPreferredEditor {
+        command: Option<String>,
+    },
     SetManagedProxyForCurrentApp {
         app_type: AppType,
         enabled: bool,
@@ -333,7 +368,7 @@ pub enum ConfigItem {
     OpenClawEnv,
     OpenClawTools,
     OpenClawAgents,
-    WebDavSync,
+    CloudSync,
     Reset,
 }
 
@@ -381,7 +416,7 @@ impl ConfigItem {
         ConfigItem::OpenClawEnv,
         ConfigItem::OpenClawTools,
         ConfigItem::OpenClawAgents,
-        ConfigItem::WebDavSync,
+        ConfigItem::CloudSync,
         ConfigItem::Reset,
     ];
 
@@ -418,7 +453,7 @@ impl ConfigItem {
                 texts::tui_openclaw_config_agents_title(),
                 Route::ConfigOpenClawAgents,
             ),
-            ConfigItem::WebDavSync => config_item_metadata(texts::tui_config_item_webdav_sync()),
+            ConfigItem::CloudSync => config_item_metadata(texts::tui_config_item_cloud_sync()),
             ConfigItem::Reset => config_item_metadata(texts::tui_config_item_reset()),
         }
     }
@@ -463,6 +498,7 @@ pub enum SettingsItem {
     Language,
     Theme,
     Icons,
+    PreferredEditor,
     VisibleAppsMode,
     VisibleApps,
     OpenClawConfigDir,
@@ -476,11 +512,12 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 13] = [
+    pub const ALL: [SettingsItem; 14] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::Theme,
         SettingsItem::Icons,
+        SettingsItem::PreferredEditor,
         SettingsItem::VisibleAppsMode,
         SettingsItem::VisibleApps,
         SettingsItem::OpenClawConfigDir,
@@ -522,16 +559,82 @@ pub enum WebDavConfigItem {
     CheckConnection,
     Upload,
     Download,
+    EnableDisable,
     Reset,
     JianguoyunQuickSetup,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudSyncBackend {
+    WebDav,
+    S3Compatible,
+}
+
+impl CloudSyncBackend {
+    pub const ALL: [Self; 2] = [Self::WebDav, Self::S3Compatible];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::WebDav => "WebDAV",
+            Self::S3Compatible => "S3 Compatible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudSyncTransferIntent {
+    Upload,
+    Restore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S3ConfigItem {
+    Configure,
+    CheckConnection,
+    Upload,
+    Restore,
+    EnableDisable,
+    Reset,
+}
+
+impl S3ConfigItem {
+    pub const ALL: [Self; 6] = [
+        Self::Configure,
+        Self::CheckConnection,
+        Self::Upload,
+        Self::Restore,
+        Self::EnableDisable,
+        Self::Reset,
+    ];
+
+    pub(crate) fn label(self, enabled: bool) -> &'static str {
+        match self {
+            Self::Configure => texts::tui_config_item_s3_configure(),
+            Self::CheckConnection => texts::tui_config_item_s3_check_connection(),
+            Self::Upload => texts::tui_config_item_s3_upload(),
+            Self::Restore => texts::tui_config_item_s3_restore(),
+            Self::EnableDisable if enabled => texts::tui_config_item_s3_disable(),
+            Self::EnableDisable => texts::tui_config_item_s3_enable(),
+            Self::Reset => texts::tui_config_item_s3_reset(),
+        }
+    }
+
+    pub(crate) fn available(self, configured: bool, enabled: bool) -> bool {
+        match self {
+            Self::Configure => true,
+            Self::CheckConnection | Self::EnableDisable | Self::Reset => configured,
+            Self::Upload | Self::Restore => configured && enabled,
+        }
+    }
+}
+
 impl WebDavConfigItem {
-    pub const ALL: [WebDavConfigItem; 6] = [
+    pub const ALL: [WebDavConfigItem; 7] = [
         WebDavConfigItem::Settings,
         WebDavConfigItem::CheckConnection,
         WebDavConfigItem::Upload,
         WebDavConfigItem::Download,
+        WebDavConfigItem::EnableDisable,
         WebDavConfigItem::Reset,
         WebDavConfigItem::JianguoyunQuickSetup,
     ];
@@ -542,10 +645,19 @@ impl WebDavConfigItem {
             WebDavConfigItem::CheckConnection => texts::tui_config_item_webdav_check_connection(),
             WebDavConfigItem::Upload => texts::tui_config_item_webdav_upload(),
             WebDavConfigItem::Download => texts::tui_config_item_webdav_download(),
+            WebDavConfigItem::EnableDisable => texts::tui_config_item_webdav_enable(),
             WebDavConfigItem::Reset => texts::tui_config_item_webdav_reset(),
             WebDavConfigItem::JianguoyunQuickSetup => {
                 texts::tui_config_item_webdav_jianguoyun_quick_setup()
             }
+        }
+    }
+
+    pub(crate) fn available(&self, configured: bool, enabled: bool) -> bool {
+        match self {
+            Self::Settings | Self::JianguoyunQuickSetup => true,
+            Self::CheckConnection | Self::EnableDisable | Self::Reset => configured,
+            Self::Upload | Self::Download => configured && enabled,
         }
     }
 }
@@ -576,6 +688,10 @@ pub struct App {
     pub should_quit: bool,
     /// When set, the main loop should fire a SessionsDeepSearch action.
     pub pending_deep_search: Option<String>,
+    /// A project picker opened before the current base manifest was ready.
+    pub pending_project_catalog: bool,
+    /// Latest picker query waiting for a current project catalog/worker lane.
+    pub pending_project_filter: Option<String>,
     pub last_size: Size,
     pub tick: u64,
     pub proxy_input_activity_samples: Vec<u64>,
@@ -594,7 +710,8 @@ pub struct App {
     pub usage_query_notice_confirmed: bool,
 
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
-    pub local_env_loading: bool,
+    pub local_env_pending: HashSet<crate::services::local_env_check::LocalTool>,
+    pub local_env_generation: u64,
 
     pub usage: UsageState,
     pub pricing: PricingState,
@@ -626,6 +743,8 @@ pub struct App {
     pub openclaw_daily_memory_search_results:
         Vec<crate::commands::workspace::DailyMemorySearchResult>,
     pub config_webdav_idx: usize,
+    pub config_cloud_sync_idx: usize,
+    pub config_s3_idx: usize,
     pub webdav_quick_setup_username: Option<String>,
     #[allow(dead_code)]
     pub language_idx: usize,

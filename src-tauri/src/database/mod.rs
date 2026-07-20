@@ -32,6 +32,7 @@ mod schema;
 mod tests;
 
 // DAO 类型导出供外部使用
+pub(crate) use backup::run_sqlite_backup_to_completion;
 pub(crate) use dao::model_pricing::ModelPricingUpdate;
 pub(crate) use dao::providers_seed::is_official_seed_id;
 pub use dao::FailoverQueueItem;
@@ -63,7 +64,7 @@ static DATABASE_PERMISSION_CHECK: Once = Once::new();
 /// 注意：本库 schema 与上游项目同步（WebDAV 亦会整库同步），本仓库不得自行
 /// 加表/加列或提升版本号；本地新增的持久化需求一律放独立 sidecar 存储
 /// （如 session_manager::scan_cache_store）。
-pub(crate) const SCHEMA_VERSION: i32 = 11;
+pub(crate) const SCHEMA_VERSION: i32 = 13;
 
 fn database_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -545,9 +546,11 @@ impl Database {
                 log::info!(
                     "Creating pre-migration database backup (v{version} -> v{SCHEMA_VERSION})"
                 );
-                if let Err(err) = db.backup_database_file() {
-                    log::warn!("Pre-migration backup failed, continuing migration: {err}");
-                }
+                db.backup_database_file().map_err(|err| {
+                    AppError::Database(format!(
+                        "Pre-migration backup failed; database migration was not started: {err}"
+                    ))
+                })?;
             }
         }
 

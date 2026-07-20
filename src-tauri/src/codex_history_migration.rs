@@ -6,10 +6,13 @@
 use crate::codex_config::{
     get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
 };
+use crate::codex_state_db::codex_state_db_paths;
+#[cfg(test)]
+use crate::codex_state_db::CODEX_STATE_DB_FILENAME;
 use crate::config::{
     atomic_write, copy_file, create_managed_config_parent_dirs, get_app_config_dir,
 };
-use crate::database::{is_official_seed_id, Database};
+use crate::database::{is_official_seed_id, run_sqlite_backup_to_completion, Database};
 use crate::error::AppError;
 use crate::settings::{
     CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
@@ -26,11 +29,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use toml_edit::DocumentMut;
 
-const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
+const MIGRATION_NAME: &str = "codex-history-provider-migration-v2";
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
 /// 还原操作自身的备份目录（与迁移备份分开，保持迁移账本目录纯净）。
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
-const CODEX_STATE_DB_FILENAME: &str = "state_5.sqlite";
 /// SQLite 变量上限保守值，IN 列表按此分块。
 const STATE_DB_ID_CHUNK: usize = 500;
 
@@ -69,6 +71,7 @@ const CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS: &[&str] = &[
     "dmxapi",
     "doubaoseed",
     "eflowcode",
+    "etok",
     "kimi",
     "lemondata",
     "longcat",
@@ -613,6 +616,7 @@ fn migrate_codex_provider_templates_to_custom(
     backup_root: &Path,
 ) -> Result<CodexProviderTemplateBucketMigrationOutcome, AppError> {
     let providers = db.get_all_providers("codex")?;
+    let common_config_snippet = db.get_config_snippet("codex")?;
     let mut migrated_provider_ids = Vec::new();
 
     for (_, provider) in providers {
@@ -631,10 +635,21 @@ fn migrate_codex_provider_templates_to_custom(
             continue;
         };
 
-        let Some(migrated_config_text) = migrate_provider_config_template_to_custom(config_text)?
+        let source_provider_ids =
+            provider_migration_source_ids(&provider, config_text, common_config_snippet.as_deref());
+        if source_provider_ids.is_empty() {
+            continue;
+        }
+
+        let Some(mut migrated_config_text) =
+            migrate_provider_config_template_to_custom(config_text, &source_provider_ids)?
         else {
             continue;
         };
+        if legacy_cli_deeplink_model_provider_id(&provider, config_text).is_some() {
+            migrated_config_text =
+                add_missing_custom_provider_name(&migrated_config_text, provider.name.as_str())?;
+        }
 
         let mut settings = provider.settings_config.clone();
         let Some(obj) = settings.as_object_mut() else {
@@ -658,6 +673,7 @@ fn migrate_codex_provider_templates_to_custom(
 
 fn collect_source_model_provider_ids(db: &Database) -> Result<BTreeSet<String>, AppError> {
     let providers = db.get_all_providers("codex")?;
+    let common_config_snippet = db.get_config_snippet("codex")?;
     let mut ids = BTreeSet::new();
 
     for provider in providers.values() {
@@ -670,25 +686,75 @@ fn collect_source_model_provider_ids(db: &Database) -> Result<BTreeSet<String>, 
 
         insert_known_cc_switch_legacy_source_id(&mut ids, &provider.id);
 
-        let Some(config_text) = provider
+        let Some(raw_config_text) = provider
             .settings_config
             .get("config")
             .and_then(|value| value.as_str())
         else {
             continue;
         };
-
-        for provider_id in trusted_legacy_codex_model_provider_ids_from_config(config_text) {
-            insert_known_cc_switch_legacy_source_id(&mut ids, &provider_id);
-        }
+        ids.extend(provider_migration_source_ids(
+            provider,
+            raw_config_text,
+            common_config_snippet.as_deref(),
+        ));
         if let Some(provider_id) =
-            legacy_codex_model_provider_id_from_normalized_config(config_text)
+            legacy_codex_model_provider_id_from_normalized_config(raw_config_text)
         {
             insert_known_cc_switch_legacy_source_id(&mut ids, &provider_id);
         }
     }
 
     Ok(ids)
+}
+
+/// Upstream trusts its fixed preset ids. Older cc-switch-cli builds additionally
+/// generated a provider id from the local provider key, so that one exact
+/// generated shape is included as the only CLI-specific migration source.
+fn provider_migration_source_ids(
+    provider: &crate::provider::Provider,
+    raw_config_text: &str,
+    common_config_snippet: Option<&str>,
+) -> BTreeSet<String> {
+    let effective_config_text =
+        crate::services::provider::ProviderService::build_effective_live_snapshot(
+            &crate::app_config::AppType::Codex,
+            provider,
+            common_config_snippet,
+            true,
+        )
+        .ok()
+        .and_then(|effective| {
+            effective
+                .get("config")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| raw_config_text.to_string());
+
+    let mut ids = trusted_legacy_codex_model_provider_ids_from_config(raw_config_text);
+    ids.extend(trusted_legacy_codex_model_provider_ids_from_config(
+        &effective_config_text,
+    ));
+    for config_text in [raw_config_text, effective_config_text.as_str()] {
+        if let Some(provider_id) =
+            cli_generated_quick_config_model_provider_id(provider, config_text)
+        {
+            ids.insert(provider_id);
+        }
+        if let Some(provider_id) = legacy_full_deeplink_model_provider_id(provider, config_text) {
+            ids.insert(provider_id);
+        }
+    }
+    if let Some(provider_id) = legacy_cli_deeplink_model_provider_id(provider, raw_config_text) {
+        ids.insert(provider_id);
+    }
+    if let Some(provider_id) =
+        legacy_flat_deeplink_conversion_model_provider_id(provider, raw_config_text)
+    {
+        ids.insert(provider_id);
+    }
+    ids
 }
 
 fn insert_known_cc_switch_legacy_source_id(ids: &mut BTreeSet<String>, provider_id: &str) {
@@ -802,8 +868,345 @@ fn config_defines_model_provider(doc: &DocumentMut, provider_id: &str) -> bool {
         .is_some()
 }
 
+/// Detect the dynamic provider ids emitted by older cc-switch-cli generators.
+///
+/// Upstream only needs its fixed preset ids. Older CLI builds also derived this
+/// id from the local provider key, so accept that one generated shape here.
+fn cli_generated_quick_config_model_provider_id(
+    provider: &crate::provider::Provider,
+    config_text: &str,
+) -> Option<String> {
+    let doc = config_text.parse::<DocumentMut>().ok()?;
+    let active_provider_id = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)?;
+    let stored_provider_id = provider.id.trim();
+    if stored_provider_id.is_empty() || stored_provider_id == "default" {
+        return None;
+    }
+    let expected_provider_id = crate::codex_config::clean_codex_provider_key(stored_provider_id);
+    if active_provider_id != expected_provider_id {
+        return None;
+    }
+    if expected_provider_id == CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        || !crate::codex_config::is_custom_codex_model_provider_id(&expected_provider_id)
+    {
+        return None;
+    }
+
+    let provider_table = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get(&expected_provider_id))
+        .and_then(|item| item.as_table())?;
+    let table_name = provider_table
+        .get("name")
+        .and_then(|item| item.as_str())
+        .map(str::trim)?;
+    if table_name != expected_provider_id && table_name != "OpenAI" {
+        return None;
+    }
+
+    let has_generated_shape = doc
+        .get("model")
+        .and_then(|item| item.as_str())
+        .is_some_and(|model| !model.trim().is_empty())
+        && doc
+            .get("model_reasoning_effort")
+            .and_then(|item| item.as_str())
+            == Some("high")
+        && doc
+            .get("disable_response_storage")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+        && provider_table
+            .get("base_url")
+            .and_then(|item| item.as_str())
+            .is_some_and(|base_url| !base_url.trim().is_empty())
+        && provider_table
+            .get("wire_api")
+            .and_then(|item| item.as_str())
+            .is_some_and(|wire_api| matches!(wire_api, "responses" | "chat"))
+        && provider_table
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            .is_some();
+
+    has_generated_shape.then_some(expected_provider_id)
+}
+
+/// Detect Codex configs emitted by cc-switch-cli's historical deep-link path.
+///
+/// That implementation used `<sanitized-name>-<timestamp_ms>` as the database
+/// id, but a name-derived Codex routing id. The timestamp relation and exact
+/// provider-table shape keep this narrower than accepting arbitrary
+/// user-authored provider ids. The current display name is deliberately not
+/// part of the proof because provider editing can change it without changing
+/// the stored id or config.
+fn legacy_cli_deeplink_model_provider_id(
+    provider: &crate::provider::Provider,
+    config_text: &str,
+) -> Option<String> {
+    let id_name_prefix = legacy_cli_deeplink_id_prefix(provider)?;
+    let doc = config_text.parse::<DocumentMut>().ok()?;
+    let active_provider_id = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)?;
+    if active_provider_id == CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        || !crate::codex_config::is_custom_codex_model_provider_id(active_provider_id)
+    {
+        return None;
+    }
+    let active_name_fingerprint = active_provider_id
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric())
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let id_name_fingerprint = id_name_prefix
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric())
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if active_name_fingerprint.is_empty() || active_name_fingerprint != id_name_fingerprint {
+        return None;
+    }
+
+    if doc
+        .get("model")
+        .and_then(|item| item.as_str())
+        .is_none_or(|model| model.trim().is_empty())
+        || doc.get("model_reasoning_effort").is_some()
+        || doc.get("disable_response_storage").is_some()
+    {
+        return None;
+    }
+
+    let provider_table = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get(active_provider_id))
+        .and_then(|item| item.as_table())?;
+    let has_legacy_deeplink_shape = provider_table.get("name").is_none()
+        && provider_table
+            .get("base_url")
+            .and_then(|item| item.as_str())
+            .is_some_and(|base_url| !base_url.trim().is_empty())
+        && provider_table
+            .get("wire_api")
+            .and_then(|item| item.as_str())
+            == Some("responses")
+        && provider_table
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(false)
+        && provider_table.get("env_key").and_then(|item| item.as_str()) == Some("OPENAI_API_KEY")
+        && provider
+            .settings_config
+            .get("auth")
+            .and_then(Value::as_object)
+            .is_some_and(|auth| auth.contains_key("OPENAI_API_KEY"));
+
+    has_legacy_deeplink_shape.then(|| active_provider_id.to_string())
+}
+
+/// Detect the first full Codex config emitted by cc-switch-cli's deep-link
+/// importer. It used the same timestamped database id as the later importer,
+/// but retained the earlier generated provider-table defaults.
+fn legacy_full_deeplink_model_provider_id(
+    provider: &crate::provider::Provider,
+    config_text: &str,
+) -> Option<String> {
+    let id_name_prefix = legacy_cli_deeplink_id_prefix(provider)?;
+    let doc = config_text.parse::<DocumentMut>().ok()?;
+    let active_provider_id = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)?;
+    if active_provider_id == CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        || !crate::codex_config::is_custom_codex_model_provider_id(active_provider_id)
+    {
+        return None;
+    }
+    let active_name_fingerprint = active_provider_id
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric())
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let id_name_fingerprint = id_name_prefix
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric())
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if active_name_fingerprint.is_empty() || active_name_fingerprint != id_name_fingerprint {
+        return None;
+    }
+
+    if doc
+        .get("model")
+        .and_then(|item| item.as_str())
+        .is_none_or(|model| model.trim().is_empty())
+        || doc
+            .get("model_reasoning_effort")
+            .and_then(|item| item.as_str())
+            != Some("high")
+        || doc
+            .get("disable_response_storage")
+            .and_then(|item| item.as_bool())
+            != Some(true)
+    {
+        return None;
+    }
+
+    let provider_table = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get(active_provider_id))
+        .and_then(|item| item.as_table())?;
+    let has_legacy_deeplink_shape = provider_table
+        .get("name")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        == Some(active_provider_id)
+        && provider_table
+            .get("base_url")
+            .and_then(|item| item.as_str())
+            .is_some_and(|base_url| !base_url.trim().is_empty())
+        && provider_table
+            .get("wire_api")
+            .and_then(|item| item.as_str())
+            == Some("responses")
+        && provider_table
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+        && provider_table.get("env_key").is_none()
+        && provider
+            .settings_config
+            .get("auth")
+            .and_then(Value::as_object)
+            .is_some_and(|auth| auth.contains_key("OPENAI_API_KEY"));
+
+    has_legacy_deeplink_shape.then(|| active_provider_id.to_string())
+}
+
+/// Detect the older deep-link cohort that first stored a flat config and was
+/// later rewritten by the v4.7.4 startup migration. That converter derived the
+/// routing id from the immutable timestamped database id.
+fn legacy_flat_deeplink_conversion_model_provider_id(
+    provider: &crate::provider::Provider,
+    config_text: &str,
+) -> Option<String> {
+    legacy_cli_deeplink_id_prefix(provider)?;
+    let expected_provider_id = crate::codex_config::clean_codex_provider_key(&provider.id);
+    if expected_provider_id == CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        || !crate::codex_config::is_custom_codex_model_provider_id(&expected_provider_id)
+    {
+        return None;
+    }
+
+    let doc = config_text.parse::<DocumentMut>().ok()?;
+    if doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        != Some(expected_provider_id.as_str())
+        || doc
+            .get("model")
+            .and_then(|item| item.as_str())
+            .is_none_or(|model| model.trim().is_empty())
+        || doc.get("model_reasoning_effort").is_some()
+        || doc.get("disable_response_storage").is_some()
+    {
+        return None;
+    }
+
+    let provider_table = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get(&expected_provider_id))
+        .and_then(|item| item.as_table())?;
+    let has_legacy_conversion_shape = provider_table
+        .get("name")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        == Some(expected_provider_id.as_str())
+        && provider_table
+            .get("base_url")
+            .and_then(|item| item.as_str())
+            .is_some_and(|base_url| !base_url.trim().is_empty())
+        && provider_table
+            .get("wire_api")
+            .and_then(|item| item.as_str())
+            == Some("responses")
+        && provider_table
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+        && provider_table.get("env_key").is_none()
+        && provider
+            .settings_config
+            .get("auth")
+            .and_then(Value::as_object)
+            .is_some_and(|auth| auth.contains_key("OPENAI_API_KEY"));
+
+    has_legacy_conversion_shape.then_some(expected_provider_id)
+}
+
+fn legacy_cli_deeplink_id_prefix(provider: &crate::provider::Provider) -> Option<&str> {
+    let (name_prefix, timestamp_text) = provider.id.rsplit_once('-')?;
+    if name_prefix.is_empty()
+        || timestamp_text.len() != 13
+        || !timestamp_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let timestamp = timestamp_text.parse::<i64>().ok()?;
+    // Released deep-link imports stored created_at as NULL. Newer records may
+    // carry it, in which case it remains an additional timestamp cross-check.
+    if provider
+        .created_at
+        .is_some_and(|created_at| timestamp.abs_diff(created_at) > 60_000)
+    {
+        return None;
+    }
+    Some(name_prefix)
+}
+
+fn add_missing_custom_provider_name(
+    config_text: &str,
+    provider_name: &str,
+) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let Some(custom_table) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+        .and_then(|table| table.get_mut(CC_SWITCH_CODEX_MODEL_PROVIDER_ID))
+        .and_then(|item| item.as_table_mut())
+    else {
+        return Ok(config_text.to_string());
+    };
+    if custom_table
+        .get("name")
+        .and_then(|item| item.as_str())
+        .is_none_or(|name| name.trim().is_empty())
+    {
+        let display_name = if provider_name.trim().is_empty() {
+            CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        } else {
+            provider_name.trim()
+        };
+        custom_table["name"] = toml_edit::value(display_name);
+    }
+    Ok(doc.to_string())
+}
+
 fn migrate_provider_config_template_to_custom(
     config_text: &str,
+    source_provider_ids: &BTreeSet<String>,
 ) -> Result<Option<String>, AppError> {
     if config_text.trim().is_empty() {
         return Ok(None);
@@ -813,7 +1216,6 @@ fn migrate_provider_config_template_to_custom(
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
-    let source_provider_ids = trusted_legacy_codex_model_provider_ids_from_doc(&doc);
     if source_provider_ids.is_empty() {
         return Ok(None);
     }
@@ -1068,58 +1470,6 @@ fn migrate_codex_state_dbs(
     Ok(migrated)
 }
 
-fn codex_state_db_paths(codex_dir: &Path, config_text: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    push_unique_path(&mut paths, codex_dir.join(CODEX_STATE_DB_FILENAME));
-    if let Some(sqlite_home) = sqlite_home_from_codex_config(config_text) {
-        push_unique_path(&mut paths, sqlite_home.join(CODEX_STATE_DB_FILENAME));
-    } else if let Some(sqlite_home) = sqlite_home_from_env() {
-        push_unique_path(&mut paths, sqlite_home.join(CODEX_STATE_DB_FILENAME));
-    }
-    paths
-}
-
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.contains(&path) {
-        paths.push(path);
-    }
-}
-
-fn sqlite_home_from_codex_config(config_text: &str) -> Option<PathBuf> {
-    let doc = config_text.parse::<DocumentMut>().ok()?;
-    let raw = doc.get("sqlite_home")?.as_str()?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    Some(resolve_user_path(raw))
-}
-
-fn sqlite_home_from_env() -> Option<PathBuf> {
-    let raw = std::env::var("CODEX_SQLITE_HOME").ok()?;
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    Some(resolve_user_path(raw))
-}
-
-fn resolve_user_path(raw: &str) -> PathBuf {
-    if raw == "~" {
-        return crate::config::home_dir().unwrap_or_else(|| PathBuf::from(raw));
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = crate::config::home_dir() {
-            return home.join(rest);
-        }
-    }
-    if let Some(rest) = raw.strip_prefix("~\\") {
-        if let Some(home) = crate::config::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(raw)
-}
-
 fn migrate_codex_state_db_provider_bucket(
     db_path: &Path,
     codex_dir: &Path,
@@ -1200,53 +1550,99 @@ fn backup_codex_state_db(
         .join("state")
         .join(relative_backup_path(db_path, codex_dir));
     create_managed_config_parent_dirs(&backup_path)?;
+    // Reserve the destination ourselves on every platform. This guarantees that
+    // SQLite never opens an existing backup and that failure cleanup only removes
+    // a file created by this invocation.
+    create_codex_state_backup_file(&backup_path)?;
+
+    let mut backup_conn = match open_codex_state_backup_connection(&backup_path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            remove_codex_state_backup_artifacts(&backup_path);
+            return Err(err);
+        }
+    };
+    let backup_result = match Backup::new(source_conn, &mut backup_conn) {
+        Ok(backup) => run_sqlite_backup_to_completion(&backup),
+        Err(err) => Err(AppError::Database(format!(
+            "初始化 Codex state DB 备份失败: {err}"
+        ))),
+    };
+    drop(backup_conn);
+
+    if let Err(err) = backup_result {
+        remove_codex_state_backup_artifacts(&backup_path);
+        return Err(AppError::Database(format!(
+            "写入 Codex state DB 备份失败: {err}"
+        )));
+    }
+    Ok(())
+}
+
+fn create_codex_state_backup_file(backup_path: &Path) -> Result<(), AppError> {
+    match fs::symlink_metadata(backup_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(AppError::InvalidInput(format!(
+                "Codex state DB 备份文件不能是符号链接: {}",
+                backup_path.display()
+            )));
+        }
+        Ok(meta) if meta.is_file() => {
+            return Err(AppError::InvalidInput(format!(
+                "Codex state DB 备份文件已存在: {}",
+                backup_path.display()
+            )));
+        }
+        Ok(_) => {
+            return Err(AppError::InvalidInput(format!(
+                "Codex state DB 备份路径不是普通文件: {}",
+                backup_path.display()
+            )));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(AppError::io(backup_path, err)),
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        match std::fs::symlink_metadata(&backup_path) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(AppError::InvalidInput(format!(
-                    "Codex state DB 备份文件不能是符号链接: {}",
-                    backup_path.display()
-                )));
-            }
-            Ok(meta) if meta.is_file() => {
-                return Err(AppError::InvalidInput(format!(
-                    "Codex state DB 备份文件已存在: {}",
-                    backup_path.display()
-                )));
-            }
-            Ok(_) => {
-                return Err(AppError::InvalidInput(format!(
-                    "Codex state DB 备份路径不是普通文件: {}",
-                    backup_path.display()
-                )));
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&backup_path)
-                    .map_err(|e| AppError::io(&backup_path, e))?;
-            }
-            Err(err) => return Err(AppError::io(&backup_path, err)),
-        }
+        options.mode(0o600);
     }
 
-    let mut backup_conn = open_codex_state_backup_connection(&backup_path)?;
-    let backup = Backup::new(source_conn, &mut backup_conn)
-        .map_err(|e| AppError::Database(format!("初始化 Codex state DB 备份失败: {e}")))?;
-    backup
-        .run_to_completion(5, Duration::from_millis(25), None)
-        .map_err(|e| AppError::Database(format!("写入 Codex state DB 备份失败: {e}")))?;
-    Ok(())
+    match options.open(backup_path) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(AppError::InvalidInput(
+            format!("Codex state DB 备份文件已存在: {}", backup_path.display()),
+        )),
+        Err(err) => Err(AppError::io(backup_path, err)),
+    }
+}
+
+fn remove_codex_state_backup_artifacts(backup_path: &Path) {
+    let mut artifacts = vec![backup_path.to_path_buf()];
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut artifact = backup_path.as_os_str().to_os_string();
+        artifact.push(suffix);
+        artifacts.push(PathBuf::from(artifact));
+    }
+
+    for artifact in artifacts {
+        match fs::remove_file(&artifact) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => log::warn!(
+                "Failed to remove incomplete Codex state backup {}: {err}",
+                artifact.display()
+            ),
+        }
+    }
 }
 
 fn open_codex_state_backup_connection(backup_path: &Path) -> Result<Connection, AppError> {
     let open_path = canonicalize_existing_parent(backup_path)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-        | OpenFlags::SQLITE_OPEN_CREATE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
 
@@ -1994,6 +2390,98 @@ base_url = "https://proxy.example/v1"
         }
     }
 
+    #[test]
+    fn codex_state_db_backup_does_not_throttle_completed_pages() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL
+            );
+            CREATE TABLE backup_padding (payload BLOB NOT NULL);
+            INSERT INTO threads (id, model_provider) VALUES ('a', 'rightcode');
+            INSERT INTO backup_padding (payload) VALUES (zeroblob(8388608));",
+        )
+        .expect("seed large state db");
+
+        let backup_root = dir.path().join("backup");
+        let started = std::time::Instant::now();
+        backup_codex_state_db(&db_path, &codex_dir, &backup_root, &conn)
+            .expect("back up large Codex state db");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "an 8 MiB backup must not sleep after every five pages: {elapsed:?}"
+        );
+        let backup_path = backup_root.join("state").join(CODEX_STATE_DB_FILENAME);
+        let backup_conn = Connection::open(&backup_path).expect("open backup db");
+        let integrity: String = backup_conn
+            .query_row("PRAGMA integrity_check;", [], |row| row.get(0))
+            .expect("check backup integrity");
+        assert_eq!(integrity, "ok");
+        let bytes: i64 = backup_conn
+            .query_row("SELECT length(payload) FROM backup_padding", [], |row| {
+                row.get(0)
+            })
+            .expect("read backed up payload");
+        assert_eq!(bytes, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn codex_state_db_backup_cleans_files_after_a_real_busy_timeout() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE threads (
+                 id TEXT PRIMARY KEY,
+                 model_provider TEXT NOT NULL
+             );
+             INSERT INTO threads (id, model_provider) VALUES ('a', 'rightcode');",
+        )
+        .expect("seed state db");
+        conn.busy_timeout(Duration::from_millis(50))
+            .expect("set source busy timeout");
+
+        let locker = Connection::open(&db_path).expect("open lock connection");
+        locker
+            .execute_batch("BEGIN EXCLUSIVE;")
+            .expect("lock source db");
+
+        let backup_root = dir.path().join("backup");
+        let started = std::time::Instant::now();
+        let error = backup_codex_state_db(&db_path, &codex_dir, &backup_root, &conn)
+            .expect_err("locked source backup should fail");
+        let elapsed = started.elapsed();
+        locker
+            .execute_batch("ROLLBACK;")
+            .expect("release source db");
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the backup layer must not multiply the 50ms connection timeout: {elapsed:?}"
+        );
+        assert!(error.to_string().contains("busy_timeout"));
+
+        let backup_path = backup_root.join("state").join(CODEX_STATE_DB_FILENAME);
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let mut artifact = backup_path.as_os_str().to_os_string();
+            artifact.push(suffix);
+            assert!(
+                !PathBuf::from(artifact).exists(),
+                "failed Codex backup must not leave {suffix} artifact"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn codex_migration_backups_reject_parent_dir_config_path_before_creating_dirs() {
@@ -2083,9 +2571,9 @@ base_url = "https://proxy.example/v1"
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn codex_state_db_backup_rejects_existing_backup_path() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().expect("tempdir");
@@ -2108,6 +2596,7 @@ base_url = "https://proxy.example/v1"
         fs::create_dir_all(backup_path.parent().expect("backup parent"))
             .expect("create backup parent");
         fs::write(&backup_path, b"existing").expect("write existing backup");
+        #[cfg(unix)]
         fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o644))
             .expect("set existing backup permissions");
 
@@ -2123,15 +2612,18 @@ base_url = "https://proxy.example/v1"
             b"existing",
             "state db backup must not overwrite an existing backup file"
         );
-        let mode = fs::metadata(&backup_path)
-            .expect("metadata existing backup")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o644,
-            "rejected existing backup path should be left untouched"
-        );
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&backup_path)
+                .expect("metadata existing backup")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o644,
+                "rejected existing backup path should be left untouched"
+            );
+        }
     }
 
     #[test]
@@ -2163,6 +2655,588 @@ base_url = "https://proxy.example/v1"
         assert!(ids.contains("aihubmix"));
         assert!(!ids.contains("openai"));
         assert!(!ids.contains("codex-official"));
+    }
+
+    #[test]
+    fn migrates_cli_generated_dynamic_provider_bucket_end_to_end() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let backup_root = dir.path().join("backup");
+        let session_dir = codex_dir.join("sessions/2026/07/16");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let db = Database::memory().expect("memory db");
+        let mut generated = Provider::with_id(
+            "my-relay".to_string(),
+            "My Relay".to_string(),
+            serde_json::json!({
+                "auth": {},
+                "config": r#"model_provider = "my_relay"
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+disable_response_storage = true
+profile = "work"
+
+[model_providers.my_relay]
+name = "my_relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[profiles.work]
+model_provider = "my_relay"
+model = "gpt-5.4"
+"#
+            }),
+            None,
+        );
+        generated.category = Some("custom".to_string());
+        generated.created_at = Some(1);
+        db.save_provider("codex", &generated)
+            .expect("save generated provider");
+
+        let deeplink = Provider::with_id(
+            "deeplink-1784160000001".to_string(),
+            "Renamed Deep Link".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-deeplink" },
+                "config": r#"model_provider = "deep_link"
+model = "gpt-5.4"
+
+[model_providers.deep_link]
+base_url = "https://deeplink.example/v1"
+wire_api = "responses"
+requires_openai_auth = false
+env_key = "OPENAI_API_KEY"
+"#
+            }),
+            None,
+        );
+        db.save_provider("codex", &deeplink)
+            .expect("save legacy deeplink provider");
+
+        let full_deeplink = Provider::with_id(
+            "full-link-1784160000051".to_string(),
+            "Renamed Full Deep Link".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-full" },
+                "config": r#"model_provider = "full_link"
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.full_link]
+name = "full_link"
+base_url = "https://full.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        db.save_provider("codex", &full_deeplink)
+            .expect("save full legacy deeplink provider");
+
+        let converted_flat_deeplink = Provider::with_id(
+            "legacyflat-1784160000101".to_string(),
+            "Renamed Legacy Flat".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-flat" },
+                "config": r#"model_provider = "legacyflat_1784160000101"
+model = "gpt-5.4"
+
+[model_providers.legacyflat_1784160000101]
+name = "legacyflat_1784160000101"
+base_url = "https://flat.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        db.save_provider("codex", &converted_flat_deeplink)
+            .expect("save converted flat deeplink provider");
+
+        let mut manual = Provider::with_id(
+            "manual-relay".to_string(),
+            "Manual Relay".to_string(),
+            serde_json::json!({
+                "auth": {},
+                "config": r#"model_provider = "manual_relay"
+model = "gpt-5.4"
+
+[model_providers.manual_relay]
+name = "manual_relay"
+base_url = "https://manual.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        manual.category = Some("custom".to_string());
+        manual.created_at = Some(1);
+        db.save_provider("codex", &manual)
+            .expect("save manual provider");
+
+        let source_provider_ids = collect_source_model_provider_ids(&db).expect("collect ids");
+        assert_eq!(
+            source_provider_ids,
+            source_ids(&[
+                "deep_link",
+                "full_link",
+                "legacyflat_1784160000101",
+                "my_relay",
+            ])
+        );
+
+        let session_path = session_dir.join("dynamic-provider.jsonl");
+        fs::write(
+            &session_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"generated\",\"model_provider\":\"my_relay\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"deeplink\",\"model_provider\":\"deep_link\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"full\",\"model_provider\":\"full_link\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"flat\",\"model_provider\":\"legacyflat_1784160000101\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"manual\",\"model_provider\":\"manual_relay\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"official\",\"model_provider\":\"openai\"}}\n",
+            ),
+        )
+        .expect("write session file");
+
+        let state_db = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&state_db).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT NOT NULL);\
+             INSERT INTO threads VALUES ('generated', 'my_relay');\
+             INSERT INTO threads VALUES ('deeplink', 'deep_link');\
+             INSERT INTO threads VALUES ('full', 'full_link');\
+             INSERT INTO threads VALUES ('flat', 'legacyflat_1784160000101');\
+             INSERT INTO threads VALUES ('manual', 'manual_relay');\
+             INSERT INTO threads VALUES ('official', 'openai');",
+        )
+        .expect("seed state db");
+        drop(conn);
+
+        assert_eq!(
+            migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)
+                .expect("migrate session files"),
+            1
+        );
+        assert_eq!(
+            migrate_codex_state_db_provider_bucket(
+                &state_db,
+                &codex_dir,
+                &source_provider_ids,
+                &backup_root,
+            )
+            .expect("migrate state db"),
+            4
+        );
+        let mut template_outcome = migrate_codex_provider_templates_to_custom(&db, &backup_root)
+            .expect("migrate provider templates");
+        template_outcome.migrated_provider_ids.sort();
+        assert_eq!(
+            template_outcome.migrated_provider_ids,
+            vec![
+                "deeplink-1784160000001".to_string(),
+                "full-link-1784160000051".to_string(),
+                "legacyflat-1784160000101".to_string(),
+                "my-relay".to_string()
+            ]
+        );
+
+        let session_text = fs::read_to_string(&session_path).expect("read migrated session");
+        assert!(session_text.contains("\"id\":\"generated\",\"model_provider\":\"custom\""));
+        assert!(session_text.contains("\"id\":\"deeplink\",\"model_provider\":\"custom\""));
+        assert!(session_text.contains("\"id\":\"full\",\"model_provider\":\"custom\""));
+        assert!(session_text.contains("\"id\":\"flat\",\"model_provider\":\"custom\""));
+        assert!(session_text.contains("\"id\":\"manual\",\"model_provider\":\"manual_relay\""));
+        assert!(session_text.contains("\"id\":\"official\",\"model_provider\":\"openai\""));
+
+        let conn = Connection::open(&state_db).expect("reopen state db");
+        for (id, expected_provider) in [
+            ("generated", "custom"),
+            ("deeplink", "custom"),
+            ("full", "custom"),
+            ("flat", "custom"),
+            ("manual", "manual_relay"),
+            ("official", "openai"),
+        ] {
+            let provider: String = conn
+                .query_row(
+                    "SELECT model_provider FROM threads WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .expect("read thread provider");
+            assert_eq!(provider, expected_provider);
+        }
+        drop(conn);
+
+        let migrated = db
+            .get_provider_by_id("my-relay", "codex")
+            .expect("get generated provider")
+            .expect("generated provider exists");
+        let migrated_config = migrated
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("generated config");
+        let migrated_doc: toml::Value =
+            toml::from_str(migrated_config).expect("parse generated config");
+        assert_eq!(
+            migrated_doc
+                .get("model_provider")
+                .and_then(toml::Value::as_str),
+            Some("custom")
+        );
+
+        let migrated_deeplink = db
+            .get_provider_by_id("deeplink-1784160000001", "codex")
+            .expect("get deeplink provider")
+            .expect("deeplink provider exists");
+        let migrated_deeplink_doc: toml::Value = toml::from_str(
+            migrated_deeplink
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .expect("deeplink config"),
+        )
+        .expect("parse migrated deeplink config");
+        assert_eq!(
+            migrated_deeplink_doc
+                .get("model_provider")
+                .and_then(toml::Value::as_str),
+            Some("custom")
+        );
+        assert_eq!(
+            migrated_deeplink_doc
+                .get("model_providers")
+                .and_then(|providers| providers.get("custom"))
+                .and_then(|provider| provider.get("name"))
+                .and_then(toml::Value::as_str),
+            Some("Renamed Deep Link")
+        );
+
+        let migrated_full = db
+            .get_provider_by_id("full-link-1784160000051", "codex")
+            .expect("get full deeplink provider")
+            .expect("full deeplink provider exists");
+        let migrated_full_doc: toml::Value = toml::from_str(
+            migrated_full
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .expect("full deeplink config"),
+        )
+        .expect("parse migrated full deeplink config");
+        assert_eq!(
+            migrated_full_doc
+                .get("model_provider")
+                .and_then(toml::Value::as_str),
+            Some("custom")
+        );
+        assert_eq!(
+            migrated_full_doc
+                .get("model_providers")
+                .and_then(|providers| providers.get("custom"))
+                .and_then(|provider| provider.get("name"))
+                .and_then(toml::Value::as_str),
+            Some("full_link")
+        );
+
+        let migrated_flat = db
+            .get_provider_by_id("legacyflat-1784160000101", "codex")
+            .expect("get converted flat provider")
+            .expect("converted flat provider exists");
+        let migrated_flat_doc: toml::Value = toml::from_str(
+            migrated_flat
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .expect("converted flat config"),
+        )
+        .expect("parse migrated converted flat config");
+        assert_eq!(
+            migrated_flat_doc
+                .get("model_provider")
+                .and_then(toml::Value::as_str),
+            Some("custom")
+        );
+        assert_eq!(
+            migrated_flat_doc
+                .get("model_providers")
+                .and_then(|providers| providers.get("custom"))
+                .and_then(|provider| provider.get("name"))
+                .and_then(toml::Value::as_str),
+            Some("legacyflat_1784160000101")
+        );
+        assert!(migrated_doc
+            .get("model_providers")
+            .and_then(|providers| providers.get("my_relay"))
+            .is_none());
+        assert_eq!(
+            migrated_doc
+                .get("profiles")
+                .and_then(|profiles| profiles.get("work"))
+                .and_then(|profile| profile.get("model_provider"))
+                .and_then(toml::Value::as_str),
+            Some("custom")
+        );
+
+        let manual = db
+            .get_provider_by_id("manual-relay", "codex")
+            .expect("get manual provider")
+            .expect("manual provider exists");
+        assert!(manual
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .is_some_and(|config| config.contains("model_provider = \"manual_relay\"")));
+
+        assert!(backup_root.join("providers").is_dir());
+        assert!(backup_root
+            .join("jsonl/sessions/2026/07/16/dynamic-provider.jsonl")
+            .is_file());
+        assert!(backup_root
+            .join("state")
+            .join(CODEX_STATE_DB_FILENAME)
+            .is_file());
+
+        assert_eq!(
+            migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)
+                .expect("repeat session migration"),
+            0
+        );
+        assert_eq!(
+            migrate_codex_state_db_provider_bucket(
+                &state_db,
+                &codex_dir,
+                &source_provider_ids,
+                &backup_root,
+            )
+            .expect("repeat state migration"),
+            0
+        );
+        assert!(
+            migrate_codex_provider_templates_to_custom(&db, &backup_root)
+                .expect("repeat template migration")
+                .migrated_provider_ids
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn imported_default_provider_does_not_guess_dynamic_bucket_from_config() {
+        let config = r#"model_provider = "imported_relay"
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.imported_relay]
+name = "imported_relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let provider = Provider::with_id(
+            "default".to_string(),
+            "Imported Configuration".to_string(),
+            serde_json::json!({ "auth": {}, "config": config }),
+            None,
+        );
+        assert_eq!(
+            cli_generated_quick_config_model_provider_id(&provider, config),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_deeplink_detector_requires_timestamped_id_name_fingerprint() {
+        let config = r#"model_provider = "deep_link"
+model = "gpt-5.4"
+
+[model_providers.deep_link]
+base_url = "https://deeplink.example/v1"
+wire_api = "responses"
+requires_openai_auth = false
+env_key = "OPENAI_API_KEY"
+"#;
+        let mut provider = Provider::with_id(
+            "unrelated-1784160000001".to_string(),
+            "Renamed Deep Link".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-deeplink" },
+                "config": config
+            }),
+            None,
+        );
+        provider.created_at = Some(1_784_160_000_000);
+
+        assert_eq!(
+            legacy_cli_deeplink_model_provider_id(&provider, config),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_deeplink_detector_rejects_conflicting_created_at() {
+        let config = r#"model_provider = "deep_link"
+model = "gpt-5.4"
+
+[model_providers.deep_link]
+base_url = "https://deeplink.example/v1"
+wire_api = "responses"
+requires_openai_auth = false
+env_key = "OPENAI_API_KEY"
+"#;
+        let mut provider = Provider::with_id(
+            "deeplink-1784160000001".to_string(),
+            "Deep Link".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-deeplink" },
+                "config": config
+            }),
+            None,
+        );
+        provider.created_at = Some(1_700_000_000_000);
+
+        assert_eq!(
+            legacy_cli_deeplink_model_provider_id(&provider, config),
+            None
+        );
+    }
+
+    #[test]
+    fn dynamic_detector_uses_effective_common_config_without_copying_it_to_storage() {
+        let db = Database::memory().expect("memory db");
+        db.set_config_snippet(
+            "codex",
+            Some(
+                "model_reasoning_effort = \"high\"\ndisable_response_storage = true\n".to_string(),
+            ),
+        )
+        .expect("save common config");
+        let mut provider = Provider::with_id(
+            "common-relay".to_string(),
+            "Common Relay".to_string(),
+            serde_json::json!({
+                "auth": {},
+                "config": r#"model_provider = "common_relay"
+model = "gpt-5.4"
+
+[model_providers.common_relay]
+name = "common_relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        provider
+            .meta
+            .get_or_insert_with(crate::provider::ProviderMeta::default)
+            .apply_common_config = Some(true);
+        db.save_provider("codex", &provider).expect("save provider");
+
+        let source_ids = collect_source_model_provider_ids(&db).expect("collect ids");
+        assert!(source_ids.contains("common_relay"));
+        let backup_dir = tempdir().expect("backup dir");
+        let outcome = migrate_codex_provider_templates_to_custom(&db, backup_dir.path())
+            .expect("migrate templates");
+        assert_eq!(outcome.migrated_provider_ids, vec!["common-relay"]);
+
+        let saved = db
+            .get_provider_by_id("common-relay", "codex")
+            .expect("get provider")
+            .expect("provider exists");
+        let config = saved
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("stored config");
+        assert!(config.contains("model_provider = \"custom\""));
+        assert!(!config.contains("model_reasoning_effort"));
+        assert!(!config.contains("disable_response_storage"));
+    }
+
+    #[test]
+    fn full_deeplink_detector_uses_effective_common_config_after_storage_normalization() {
+        let db = Database::memory().expect("memory db");
+        db.set_config_snippet(
+            "codex",
+            Some(
+                "model_reasoning_effort = \"high\"\ndisable_response_storage = true\n".to_string(),
+            ),
+        )
+        .expect("save common config");
+        let mut provider = Provider::with_id(
+            "full-link-1784160000051".to_string(),
+            "Renamed Full Deep Link".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-full" },
+                "config": r#"model_provider = "full_link"
+model = "gpt-5.4"
+
+[model_providers.full_link]
+name = "full_link"
+base_url = "https://full.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        provider
+            .meta
+            .get_or_insert_with(crate::provider::ProviderMeta::default)
+            .apply_common_config = Some(true);
+        db.save_provider("codex", &provider).expect("save provider");
+
+        let source_ids = collect_source_model_provider_ids(&db).expect("collect ids");
+        assert!(source_ids.contains("full_link"));
+    }
+
+    #[test]
+    fn quick_detector_uses_raw_config_when_common_config_overrides_generated_defaults() {
+        let db = Database::memory().expect("memory db");
+        db.set_config_snippet(
+            "codex",
+            Some(
+                "model_reasoning_effort = \"medium\"\ndisable_response_storage = false\n"
+                    .to_string(),
+            ),
+        )
+        .expect("save common config");
+        let mut provider = Provider::with_id(
+            "common-relay".to_string(),
+            "Common Relay".to_string(),
+            serde_json::json!({
+                "auth": {},
+                "config": r#"model_provider = "common_relay"
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.common_relay]
+name = "common_relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        provider
+            .meta
+            .get_or_insert_with(crate::provider::ProviderMeta::default)
+            .apply_common_config = Some(true);
+        db.save_provider("codex", &provider).expect("save provider");
+
+        let source_ids = collect_source_model_provider_ids(&db).expect("collect ids");
+        assert!(source_ids.contains("common_relay"));
     }
 
     #[test]
@@ -2252,6 +3326,11 @@ model_provider = "my-private-relay"
         let ids = collect_source_model_provider_ids(&db).expect("collect ids");
         assert!(ids.contains("aihubmix"));
         assert!(!ids.contains("generated-uuid"));
+    }
+
+    #[test]
+    fn recognizes_upstream_etok_legacy_provider_id() {
+        assert!(is_known_cc_switch_legacy_codex_model_provider_id("etok"));
     }
 
     #[test]

@@ -78,6 +78,8 @@ struct Usage {
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: u32,
+    #[serde(default)]
+    cache_write_tokens: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -187,7 +189,7 @@ pub fn create_anthropic_sse_stream(
                                     // build_stream_usage_json; output_tokens stays 0 at start.
                                     let cached = extract_cache_read_tokens(usage).unwrap_or(0);
                                     let cache_creation =
-                                        usage.cache_creation_input_tokens.unwrap_or(0);
+                                        extract_cache_write_tokens(usage).unwrap_or(0);
                                     start_usage["input_tokens"] = json!(usage
                                         .prompt_tokens
                                         .saturating_sub(cached)
@@ -228,52 +230,58 @@ pub fn create_anthropic_sse_stream(
                                 has_sent_message_start = true;
                             }
 
+                            // 处理 reasoning（thinking）
                             if let Some(reasoning) = &choice.delta.reasoning {
-                                if current_non_tool_block_type != Some("thinking") {
-                                    if let Some(index) = current_non_tool_block_index.take() {
+                                // 跳过空字符串 reasoning_content：部分 Provider（如 ModelScope
+                                // DeepSeek-V4-Pro）在正文阶段每个 chunk 仍带 "reasoning_content": ""
+                                // 空字符串，若不判空会反复触发 thinking/text block 切换，导致逐字换行。
+                                if !reasoning.is_empty() {
+                                    if current_non_tool_block_type != Some("thinking") {
+                                        if let Some(index) = current_non_tool_block_index.take() {
+                                            let event = json!({
+                                                "type": "content_block_stop",
+                                                "index": index
+                                            });
+                                            let sse_data = format!(
+                                                "event: content_block_stop\ndata: {}\n\n",
+                                                serde_json::to_string(&event).unwrap_or_default()
+                                            );
+                                            yield Ok(Bytes::from(sse_data));
+                                        }
+                                        let index = next_content_index;
+                                        next_content_index += 1;
                                         let event = json!({
-                                            "type": "content_block_stop",
-                                            "index": index
+                                            "type": "content_block_start",
+                                            "index": index,
+                                            "content_block": {
+                                                "type": "thinking",
+                                                "thinking": ""
+                                            }
                                         });
                                         let sse_data = format!(
-                                            "event: content_block_stop\ndata: {}\n\n",
+                                            "event: content_block_start\ndata: {}\n\n",
+                                            serde_json::to_string(&event).unwrap_or_default()
+                                        );
+                                        yield Ok(Bytes::from(sse_data));
+                                        current_non_tool_block_type = Some("thinking");
+                                        current_non_tool_block_index = Some(index);
+                                    }
+
+                                    if let Some(index) = current_non_tool_block_index {
+                                        let event = json!({
+                                            "type": "content_block_delta",
+                                            "index": index,
+                                            "delta": {
+                                                "type": "thinking_delta",
+                                                "thinking": reasoning
+                                            }
+                                        });
+                                        let sse_data = format!(
+                                            "event: content_block_delta\ndata: {}\n\n",
                                             serde_json::to_string(&event).unwrap_or_default()
                                         );
                                         yield Ok(Bytes::from(sse_data));
                                     }
-                                    let index = next_content_index;
-                                    next_content_index += 1;
-                                    let event = json!({
-                                        "type": "content_block_start",
-                                        "index": index,
-                                        "content_block": {
-                                            "type": "thinking",
-                                            "thinking": ""
-                                        }
-                                    });
-                                    let sse_data = format!(
-                                        "event: content_block_start\ndata: {}\n\n",
-                                        serde_json::to_string(&event).unwrap_or_default()
-                                    );
-                                    yield Ok(Bytes::from(sse_data));
-                                    current_non_tool_block_type = Some("thinking");
-                                    current_non_tool_block_index = Some(index);
-                                }
-
-                                if let Some(index) = current_non_tool_block_index {
-                                    let event = json!({
-                                        "type": "content_block_delta",
-                                        "index": index,
-                                        "delta": {
-                                            "type": "thinking_delta",
-                                            "thinking": reasoning
-                                        }
-                                    });
-                                    let sse_data = format!(
-                                        "event: content_block_delta\ndata: {}\n\n",
-                                        serde_json::to_string(&event).unwrap_or_default()
-                                    );
-                                    yield Ok(Bytes::from(sse_data));
                                 }
                             }
 
@@ -706,7 +714,7 @@ pub fn create_anthropic_sse_stream(
 /// are mutually exclusive: input + cache_read + cache_creation == prompt_tokens.
 fn build_stream_usage_json(usage: &Usage) -> serde_json::Value {
     let cached = extract_cache_read_tokens(usage).unwrap_or(0);
-    let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+    let cache_creation = extract_cache_write_tokens(usage).unwrap_or(0);
     let input_tokens = usage
         .prompt_tokens
         .saturating_sub(cached)
@@ -766,6 +774,18 @@ fn extract_cache_read_tokens(usage: &Usage) -> Option<u32> {
         .prompt_tokens_details
         .as_ref()
         .map(|details| details.cached_tokens)
+}
+
+fn extract_cache_write_tokens(usage: &Usage) -> Option<u32> {
+    if let Some(value) = usage.cache_creation_input_tokens {
+        return Some(value);
+    }
+
+    usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(|details| details.cache_write_tokens)
+        .filter(|value| *value > 0)
 }
 
 #[cfg(test)]
@@ -934,7 +954,7 @@ mod tests {
     #[tokio::test]
     async fn streaming_message_usage_includes_cache_token_fields() {
         let input = concat!(
-            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":5},\"cache_creation_input_tokens\":2}}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":5,\"cache_write_tokens\":2}}}\n\n",
             "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":7,\"cache_read_input_tokens\":6,\"cache_creation_input_tokens\":3}}\n\n",
             "data: [DONE]\n\n"
         );
@@ -1118,6 +1138,59 @@ mod tests {
 
         assert_eq!(thinking_delta["delta"]["type"], "thinking_delta");
         assert_eq!(thinking_delta["delta"]["thinking"], "think");
+    }
+
+    /// 回归测试：DeepSeek-V4-Pro（ModelScope）等 Provider 在正文阶段每个 chunk 仍带
+    /// `"reasoning_content": ""`（空字符串，非 null）。修复前 reasoning 分支不判空，会在每个
+    /// 正文 token 上反复 stop text block / start thinking block / stop / start text block，
+    /// 导致 Claude Code/Desktop 逐字换行。修复后空字符串 reasoning_content 应被跳过。
+    #[tokio::test]
+    async fn test_empty_reasoning_content_does_not_cause_per_token_block_switching() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"deepseek-ai/DeepSeek-V4-Pro\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"嗯\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"deepseek-ai/DeepSeek-V4-Pro\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning_content\":\"，用户只发了你好\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"deepseek-ai/DeepSeek-V4-Pro\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好！\",\"reasoning_content\":\"\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"deepseek-ai/DeepSeek-V4-Pro\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"很高兴见到你\",\"reasoning_content\":\"\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"deepseek-ai/DeepSeek-V4-Pro\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，有什么可以帮你的吗？\",\"reasoning_content\":\"\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"deepseek-ai/DeepSeek-V4-Pro\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning_content\":\"\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":10,\"total_tokens\":15}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        let text_block_starts = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "content_block_start" && event["content_block"]["type"] == "text"
+            })
+            .count();
+        assert_eq!(
+            text_block_starts, 1,
+            "正文阶段应只启动一个 text block，实际 {text_block_starts} 个 —— 空 reasoning_content 仍在触发逐字 block 切换"
+        );
+
+        let thinking_block_starts = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "content_block_start"
+                    && event["content_block"]["type"] == "thinking"
+            })
+            .count();
+        assert_eq!(
+            thinking_block_starts, 1,
+            "思考阶段应只启动一个 thinking block，实际 {thinking_block_starts} 个"
+        );
+
+        let merged = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta"
+            })
+            .filter_map(|event| event["delta"]["text"].as_str())
+            .collect::<String>();
+        assert!(
+            merged.contains("你好！很高兴见到你，有什么可以帮你的吗？"),
+            "正文应完整拼接，实际得到: {merged}"
+        );
     }
 
     #[tokio::test]

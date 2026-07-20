@@ -46,6 +46,42 @@ approval_policy = "never"
 }
 
 #[test]
+fn extract_codex_common_config_strips_provider_fields_and_injected_artifacts() {
+    let extracted = ProviderService::extract_codex_common_config_from_config_toml(
+        r#"model_provider = "azure"
+model = "gpt-4"
+wire_api = "chat"
+disable_response_storage = true
+experimental_bearer_token = "sk-live-secret"
+model_catalog_json = "cc-switch-model-catalog.json"
+
+[model_providers.azure]
+name = "Azure OpenAI"
+base_url = "https://example.openai.azure.com"
+wire_api = "responses"
+
+[mcp_servers.my_server]
+base_url = "http://localhost:8080"
+
+[mcp.servers.legacy_server]
+command = "legacy-cmd"
+"#,
+    )
+    .expect("extract common config");
+
+    assert!(!extracted.contains("model_provider"));
+    assert!(!extracted.contains("model = \"gpt-4\""));
+    assert!(!extracted.contains("base_url"));
+    assert!(!extracted.contains("wire_api"));
+    assert!(!extracted.contains("mcp_servers"));
+    assert!(!extracted.contains("[mcp"));
+    assert!(!extracted.contains("experimental_bearer_token"));
+    assert!(!extracted.contains("sk-live-secret"));
+    assert!(!extracted.contains("model_catalog_json"));
+    assert!(extracted.contains("disable_response_storage = true"));
+}
+
+#[test]
 fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -382,6 +418,39 @@ fn validate_provider_settings_allows_blank_config_for_official_codex() {
 
     ProviderService::validate_provider_settings(&AppType::Codex, &provider)
         .expect("official Codex provider should not require a base_url");
+}
+
+#[test]
+#[serial]
+fn official_codex_live_write_strips_stale_unified_bucket_when_disabled() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create Codex config dir");
+
+    let stale_config = crate::codex_config::inject_codex_unified_session_bucket(
+        "model_reasoning_effort = \"medium\"\n",
+    )
+    .expect("build stale unified config");
+    let mut provider = Provider::with_id(
+        "official".to_string(),
+        "OpenAI Official".to_string(),
+        json!({
+            "auth": {},
+            "config": stale_config
+        }),
+        None,
+    );
+    provider.category = Some("official".to_string());
+
+    ProviderService::write_codex_live_force(&provider, None, false)
+        .expect("write official live config");
+
+    let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+        .expect("read live config");
+    assert!(!live.contains("model_provider = \"custom\""));
+    assert!(!live.contains("[model_providers.custom]"));
+    assert!(live.contains("model_reasoning_effort = \"medium\""));
 }
 
 #[test]
@@ -2963,6 +3032,243 @@ fn provider_update_overwrites_claude_live_for_current_provider() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn provider_update_keeps_running_claude_takeover_and_refreshes_restore_backup() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let original = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-old",
+                "ANTHROPIC_BASE_URL": "https://claude.old",
+                "ANTHROPIC_MODEL": "model-old"
+            },
+            "permissions": { "allow": ["Bash"] }
+        }),
+        None,
+    );
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), original.clone());
+    }
+
+    write_json_file(&get_claude_settings_path(), &original.settings_config)
+        .expect("seed live settings");
+
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set db current provider");
+    state
+        .db
+        .set_app_proxy_preferred_port(AppType::Claude.as_str(), 0)
+        .expect("use an ephemeral proxy port");
+    state
+        .proxy_service
+        .set_takeover_for_app(AppType::Claude.as_str(), true)
+        .await
+        .expect("enable Claude takeover");
+
+    let updated = Provider::with_id(
+        "p1".to_string(),
+        "First Updated".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-new",
+                "ANTHROPIC_BASE_URL": "https://claude.new",
+                "ANTHROPIC_MODEL": "model-new",
+                "ANTHROPIC_REASONING_MODEL": "legacy-reasoning"
+            },
+            "permissions": { "allow": ["Read"] }
+        }),
+        None,
+    );
+
+    ProviderService::update(&state, AppType::Claude, updated)
+        .expect("update current provider during takeover");
+
+    let backup = state
+        .db
+        .get_live_backup(AppType::Claude.as_str())
+        .await
+        .expect("read Claude live backup")
+        .expect("Claude live backup should exist");
+    let backup_value: Value =
+        serde_json::from_str(&backup.original_config).expect("parse Claude live backup");
+    assert_eq!(
+        backup_value
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token-new")
+    );
+    assert_eq!(
+        backup_value
+            .pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.new")
+    );
+    assert_eq!(
+        backup_value
+            .pointer("/permissions/allow/0")
+            .and_then(Value::as_str),
+        Some("Read")
+    );
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read taken-over live");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("PROXY_MANAGED"),
+        "live credentials must remain proxy-managed"
+    );
+    assert!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str)
+            .is_some_and(|url| url.starts_with("http://127.0.0.1:")),
+        "live base URL must remain on the local proxy"
+    );
+    assert!(live.pointer("/env/ANTHROPIC_MODEL").is_none());
+    assert!(live.pointer("/env/ANTHROPIC_REASONING_MODEL").is_none());
+    assert_eq!(
+        live.pointer("/permissions/allow/0").and_then(Value::as_str),
+        Some("Read"),
+        "non-routing provider settings should refresh while takeover stays active"
+    );
+
+    state
+        .proxy_service
+        .set_takeover_for_app(AppType::Claude.as_str(), false)
+        .await
+        .expect("disable Claude takeover");
+    let restored: Value =
+        read_json_file(&get_claude_settings_path()).expect("read restored Claude settings");
+    assert_eq!(
+        restored
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token-new")
+    );
+    assert_eq!(
+        restored
+            .pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.new")
+    );
+    assert_eq!(
+        restored
+            .pointer("/permissions/allow/0")
+            .and_then(Value::as_str),
+        Some("Read")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn provider_update_uses_live_marker_as_takeover_ownership_when_proxy_is_stopped() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let original = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-old",
+                "ANTHROPIC_BASE_URL": "https://claude.old"
+            }
+        }),
+        None,
+    );
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), original);
+    }
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set db current provider");
+
+    let takeover_live = json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED",
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721"
+        },
+        "permissions": { "allow": ["Bash"] }
+    });
+    write_json_file(&get_claude_settings_path(), &takeover_live)
+        .expect("seed takeover-owned live settings");
+    assert!(!state.proxy_service.is_running().await);
+    assert!(state
+        .db
+        .get_live_backup(AppType::Claude.as_str())
+        .await
+        .expect("read initial backup")
+        .is_none());
+
+    let updated = Provider::with_id(
+        "p1".to_string(),
+        "First Updated".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-new",
+                "ANTHROPIC_BASE_URL": "https://claude.new"
+            },
+            "permissions": { "allow": ["Read"] }
+        }),
+        None,
+    );
+    ProviderService::update(&state, AppType::Claude, updated)
+        .expect("update takeover-owned provider while proxy is stopped");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read unchanged live");
+    assert_eq!(
+        live, takeover_live,
+        "a stopped proxy must not trigger a normal live write over takeover placeholders"
+    );
+    let backup = state
+        .db
+        .get_live_backup(AppType::Claude.as_str())
+        .await
+        .expect("read refreshed backup")
+        .expect("refreshed backup should exist");
+    let backup_value: Value =
+        serde_json::from_str(&backup.original_config).expect("parse refreshed backup");
+    assert_eq!(
+        backup_value
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token-new")
+    );
+    assert_eq!(
+        backup_value
+            .pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.new")
+    );
+}
+
 #[test]
 #[serial]
 fn provider_update_treats_settings_effective_current_as_current_for_live_write() {
@@ -4168,7 +4474,7 @@ fn provider_add_tolerates_invalid_codex_common_snippet_during_storage_normalizat
 
 #[test]
 #[serial]
-fn codex_switch_extracts_common_snippet_preserving_mcp_servers() {
+fn codex_switch_excludes_mcp_servers_from_common_snippet_and_provider_snapshot() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
 
@@ -4234,12 +4540,8 @@ base_url = "http://localhost:8080"
         "should keep top-level common config"
     );
     assert!(
-        extracted.contains("[mcp_servers.my_server]"),
-        "should keep mcp_servers table"
-    );
-    assert!(
-        extracted.contains("base_url = \"http://localhost:8080\""),
-        "should keep mcp_servers.* base_url"
+        !extracted.contains("mcp_servers"),
+        "MCP is projected from its database SSOT and must not enter common config"
     );
     assert!(
         !extracted
@@ -4256,6 +4558,20 @@ base_url = "http://localhost:8080"
     assert!(
         !extracted.contains("[model_providers"),
         "should remove entire model_providers table"
+    );
+
+    let previous_provider = cfg
+        .get_manager(&AppType::Codex)
+        .and_then(|manager| manager.providers.get("p1"))
+        .expect("previous provider snapshot");
+    let previous_config = previous_provider
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .expect("previous provider config");
+    assert!(
+        !previous_config.contains("mcp_servers"),
+        "live-only MCP projection must not be persisted into a provider snapshot"
     );
 }
 

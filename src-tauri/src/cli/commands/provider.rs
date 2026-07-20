@@ -1081,6 +1081,7 @@ fn build_add_settings_config(
     args: &AddProviderArgs,
     raw_config: Option<&serde_json::Value>,
     current: Option<&serde_json::Value>,
+    provider_name: &str,
     prompt_result: &mut Option<SettingsConfigPromptResult>,
 ) -> Result<serde_json::Value, AppError> {
     // Raw config wins for every app type.
@@ -1135,7 +1136,7 @@ fn build_add_settings_config(
                 &api_key,
                 &base_url,
                 model.trim(),
-                "custom",
+                provider_name,
             ))
         }
         AppType::Gemini => match non_empty(args.api_key.clone()) {
@@ -1281,6 +1282,7 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
             &args,
             raw_config.as_ref(),
             None,
+            &name,
             &mut settings_prompt_result,
         )?;
         Provider {
@@ -1319,6 +1321,7 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
                 &args,
                 raw_config.as_ref(),
                 Some(&current),
+                &name,
                 &mut settings_prompt_result,
             )?;
         } else if has_field_input {
@@ -1421,6 +1424,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
             Some(&original.settings_config),
             original.meta.as_ref(),
             matches!(app_type, AppType::Codex) && original.is_codex_official(),
+            &name,
         )?)
     } else {
         None
@@ -1600,6 +1604,7 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
             Some(&draft.settings_config),
             draft.meta.as_ref(),
             matches!(app_type, AppType::Codex) && source.is_codex_official(),
+            &name,
         )?)
     } else {
         None

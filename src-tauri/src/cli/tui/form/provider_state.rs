@@ -4,6 +4,10 @@ use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig, Provider};
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 
+use super::super::text_edit::{
+    passive_text_contains, passive_trimmed_eq_ignore_ascii_case, PASSIVE_TEXT_SCAN_MAX_BYTES,
+};
+
 use super::provider_json::{
     merge_json_values, should_hide_provider_field, strip_common_config_from_settings,
 };
@@ -11,9 +15,9 @@ use super::provider_state_loading::populate_form_from_provider;
 use super::{
     ClaudeApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
     CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType, HermesModelField,
-    LocalProxySettingsField, ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput,
-    UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
-    OPENCLAW_DEFAULT_API_PROTOCOL,
+    InlineFieldError, LocalProxySettingsField, ProviderAddField, ProviderAddFormState,
+    ProviderFormPage, ProviderTextField, TextEditSession, TextInput, UsageQueryField,
+    UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
 fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
@@ -30,6 +34,28 @@ fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
         }
         counter += 1;
     }
+}
+
+fn split_claude_one_m_marker(value: &str) -> (String, bool) {
+    const MARKER: &str = "[1M]";
+
+    let trimmed_end = value.trim_end();
+    let marker_start = trimmed_end.len().saturating_sub(MARKER.len());
+    let has_marker = trimmed_end
+        .get(marker_start..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(MARKER));
+    if !has_marker {
+        return (value.to_string(), false);
+    }
+
+    (
+        trimmed_end
+            .get(..marker_start)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string(),
+        true,
+    )
 }
 
 impl ProviderAddFormState {
@@ -120,10 +146,11 @@ impl ProviderAddFormState {
             page: ProviderFormPage::Main,
             template_idx: 0,
             field_idx: 0,
-            editing: false,
+            text_edit: None,
+            field_errors: Vec::new(),
             usage_query_touched: false,
             usage_query_field_idx: 0,
-            usage_query_editing: false,
+            usage_query_field_errors: Vec::new(),
             codex_local_routing_field_idx: 0,
             local_proxy_settings_field_idx: 0,
             codex_model_catalog_idx: 0,
@@ -150,10 +177,11 @@ impl ProviderAddFormState {
                 ClaudeApiFormat::Anthropic
             },
             claude_model: TextInput::new(""),
-            claude_reasoning_model: TextInput::new(""),
             claude_haiku_model: TextInput::new(""),
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
+            claude_sonnet_one_m: false,
+            claude_opus_one_m: false,
             claude_hide_attribution: false,
             claude_hide_attribution_touched: false,
             claude_teammates: false,
@@ -525,6 +553,29 @@ impl ProviderAddFormState {
             .collect()
     }
 
+    pub fn usage_query_script_validation_error(&self) -> Option<&'static str> {
+        if !self.usage_query_enabled
+            || matches!(
+                self.usage_query_template,
+                UsageQueryTemplate::GitHubCopilot
+                    | UsageQueryTemplate::TokenPlan
+                    | UsageQueryTemplate::Balance
+            )
+        {
+            return None;
+        }
+
+        let code = self.usage_query_code.trim();
+        if code.is_empty() {
+            return Some(texts::tui_usage_query_script_empty());
+        }
+        if !code.contains("return") {
+            return Some(texts::tui_usage_query_must_have_return());
+        }
+
+        None
+    }
+
     pub fn input(&self, field: ProviderAddField) -> Option<&TextInput> {
         match field {
             ProviderAddField::Id => Some(&self.id),
@@ -673,6 +724,176 @@ impl ProviderAddFormState {
         }
     }
 
+    pub fn text_edit_target(&self) -> Option<ProviderTextField> {
+        self.text_edit.as_ref().map(TextEditSession::target)
+    }
+
+    pub fn is_editing_main_field(&self, field: ProviderAddField) -> bool {
+        self.text_edit_target() == Some(ProviderTextField::Main(field))
+    }
+
+    pub fn is_editing_usage_query_field(&self, field: UsageQueryField) -> bool {
+        self.text_edit_target() == Some(ProviderTextField::UsageQuery(field))
+    }
+
+    pub fn is_editing_main_text(&self) -> bool {
+        matches!(self.text_edit_target(), Some(ProviderTextField::Main(_)))
+    }
+
+    pub fn is_editing_usage_query_text(&self) -> bool {
+        matches!(
+            self.text_edit_target(),
+            Some(ProviderTextField::UsageQuery(_))
+        )
+    }
+
+    pub fn can_edit_main_field(&self, field: ProviderAddField) -> bool {
+        self.input(field).is_some() && (field != ProviderAddField::Id || self.is_id_editable())
+    }
+
+    pub fn can_edit_usage_query_field(&self, field: UsageQueryField) -> bool {
+        field != UsageQueryField::CodingPlanProvider && self.usage_query_input(field).is_some()
+    }
+
+    pub fn begin_main_text_edit(&mut self, field: ProviderAddField) -> bool {
+        if !self.can_edit_main_field(field) {
+            return false;
+        }
+        let Some(original) = self.input(field).cloned() else {
+            return false;
+        };
+        let original_error = self.main_field_error(field).map(str::to_string);
+        self.clear_main_field_error(field);
+        self.text_edit = Some(TextEditSession::new(
+            ProviderTextField::Main(field),
+            original,
+            original_error,
+        ));
+        self.sync_main_field_index(field);
+        true
+    }
+
+    pub fn begin_usage_query_text_edit(&mut self, field: UsageQueryField) -> bool {
+        if !self.can_edit_usage_query_field(field) {
+            return false;
+        }
+        let Some(original) = self.usage_query_input(field).cloned() else {
+            return false;
+        };
+        let original_error = self.usage_query_field_error(field).map(str::to_string);
+        self.clear_usage_query_field_error(field);
+        self.text_edit = Some(TextEditSession::new(
+            ProviderTextField::UsageQuery(field),
+            original,
+            original_error,
+        ));
+        self.sync_usage_query_field_index(field);
+        true
+    }
+
+    pub fn take_text_edit(&mut self) -> Option<TextEditSession<ProviderTextField>> {
+        self.text_edit.take()
+    }
+
+    pub fn cancel_text_edit(&mut self) -> Option<ProviderTextField> {
+        let (target, original, original_error) = self.text_edit.take()?.into_parts();
+        match target {
+            ProviderTextField::Main(field) => {
+                if let Some(input) = self.input_mut(field) {
+                    *input = original;
+                }
+                self.sync_main_field_index(field);
+                if let Some(message) = original_error {
+                    self.set_main_field_error(field, message);
+                } else {
+                    self.clear_main_field_error(field);
+                }
+            }
+            ProviderTextField::UsageQuery(field) => {
+                if let Some(input) = self.usage_query_input_mut(field) {
+                    *input = original;
+                }
+                self.sync_usage_query_field_index(field);
+                if let Some(message) = original_error {
+                    self.set_usage_query_field_error(field, message);
+                } else {
+                    self.clear_usage_query_field_error(field);
+                }
+            }
+        }
+        Some(target)
+    }
+
+    pub fn clear_text_edit(&mut self) {
+        self.text_edit = None;
+    }
+
+    pub fn sync_main_field_index(&mut self, field: ProviderAddField) {
+        if let Some(index) = self
+            .fields()
+            .iter()
+            .position(|candidate| *candidate == field)
+        {
+            self.field_idx = index;
+        } else {
+            self.field_idx = self.field_idx.min(self.fields().len().saturating_sub(1));
+        }
+    }
+
+    pub fn sync_usage_query_field_index(&mut self, field: UsageQueryField) {
+        let fields = self.usage_query_table_fields();
+        if let Some(index) = fields.iter().position(|candidate| *candidate == field) {
+            self.usage_query_field_idx = index;
+        } else {
+            self.usage_query_field_idx = self
+                .usage_query_field_idx
+                .min(fields.len().saturating_sub(1));
+        }
+    }
+
+    pub fn main_field_error(&self, field: ProviderAddField) -> Option<&str> {
+        self.field_errors
+            .iter()
+            .find(|error| error.field == field)
+            .map(|error| error.message.as_str())
+    }
+
+    pub fn set_main_field_error(&mut self, field: ProviderAddField, message: impl Into<String>) {
+        self.clear_main_field_error(field);
+        self.field_errors.push(InlineFieldError {
+            field,
+            message: message.into(),
+        });
+    }
+
+    pub fn clear_main_field_error(&mut self, field: ProviderAddField) {
+        self.field_errors.retain(|error| error.field != field);
+    }
+
+    pub fn usage_query_field_error(&self, field: UsageQueryField) -> Option<&str> {
+        self.usage_query_field_errors
+            .iter()
+            .find(|error| error.field == field)
+            .map(|error| error.message.as_str())
+    }
+
+    pub fn set_usage_query_field_error(
+        &mut self,
+        field: UsageQueryField,
+        message: impl Into<String>,
+    ) {
+        self.clear_usage_query_field_error(field);
+        self.usage_query_field_errors.push(InlineFieldError {
+            field,
+            message: message.into(),
+        });
+    }
+
+    pub fn clear_usage_query_field_error(&mut self, field: UsageQueryField) {
+        self.usage_query_field_errors
+            .retain(|error| error.field != field);
+    }
+
     /// The four Claude quick toggles, in upstream order. They live on the
     /// "快捷配置菜单" sub-page rather than the main field list.
     pub fn claude_quick_config_fields(&self) -> Vec<ProviderAddField> {
@@ -712,7 +933,7 @@ impl ProviderAddFormState {
         }
         self.page = ProviderFormPage::ClaudeQuickConfig;
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
         let len = self.claude_quick_config_fields().len();
         self.claude_quick_config_idx = self.claude_quick_config_idx.min(len.saturating_sub(1));
     }
@@ -720,7 +941,7 @@ impl ProviderAddFormState {
     pub fn close_claude_quick_config_page(&mut self) {
         self.page = ProviderFormPage::Main;
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
     }
 
     pub fn toggle_codex_goal_mode(&mut self) {
@@ -772,7 +993,7 @@ impl ProviderAddFormState {
         }
         self.page = ProviderFormPage::CodexQuickConfig;
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
         let len = self.codex_quick_config_fields().len();
         self.codex_quick_config_idx = self.codex_quick_config_idx.min(len.saturating_sub(1));
     }
@@ -780,7 +1001,7 @@ impl ProviderAddFormState {
     pub fn close_codex_quick_config_page(&mut self) {
         self.page = ProviderFormPage::Main;
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
     }
 
     pub fn supports_local_proxy_settings(&self) -> bool {
@@ -812,7 +1033,7 @@ impl ProviderAddFormState {
         }
         self.page = ProviderFormPage::LocalProxySettings;
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
         self.local_proxy_settings_field_idx = self
             .local_proxy_settings_field_idx
             .min(self.local_proxy_settings_fields().len().saturating_sub(1));
@@ -821,7 +1042,7 @@ impl ProviderAddFormState {
     pub fn close_local_proxy_settings_page(&mut self) {
         self.page = ProviderFormPage::Main;
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
     }
 
     pub fn local_proxy_body_field_count(&self) -> usize {
@@ -833,7 +1054,7 @@ impl ProviderAddFormState {
 
     pub fn local_proxy_settings_summary(&self) -> String {
         texts::tui_local_proxy_settings_summary(
-            !self.custom_user_agent.is_blank(),
+            !self.custom_user_agent.is_blank_for_passive_display(),
             self.local_proxy_header_overrides.len(),
             self.local_proxy_body_field_count(),
         )
@@ -848,6 +1069,9 @@ impl ProviderAddFormState {
     }
 
     pub fn custom_user_agent_is_valid(&self) -> bool {
+        if self.custom_user_agent.value.len() > PASSIVE_TEXT_SCAN_MAX_BYTES {
+            return false;
+        }
         super::provider_request_overrides::is_valid_custom_user_agent(&self.custom_user_agent.value)
     }
 
@@ -880,8 +1104,7 @@ impl ProviderAddFormState {
         self.refresh_default_usage_query_template();
         self.page = ProviderFormPage::UsageQuery;
         self.focus = FormFocus::Fields;
-        self.editing = false;
-        self.usage_query_editing = false;
+        self.clear_text_edit();
         let len = self.usage_query_table_fields().len();
         self.usage_query_field_idx = self.usage_query_field_idx.min(len.saturating_sub(1));
     }
@@ -892,8 +1115,7 @@ impl ProviderAddFormState {
         }
         self.page = ProviderFormPage::CodexLocalRouting;
         self.focus = FormFocus::Fields;
-        self.editing = false;
-        self.usage_query_editing = false;
+        self.clear_text_edit();
         let len = self.codex_local_routing_fields().len();
         self.codex_local_routing_field_idx = self
             .codex_local_routing_field_idx
@@ -903,15 +1125,14 @@ impl ProviderAddFormState {
     pub fn close_codex_local_routing_page(&mut self) {
         self.page = ProviderFormPage::Main;
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
     }
 
     pub fn open_codex_model_catalog_page(&mut self) {
         // Model mapping is available for both Chat and native Responses formats.
         self.page = ProviderFormPage::CodexModelCatalog;
         self.focus = FormFocus::Fields;
-        self.editing = false;
-        self.usage_query_editing = false;
+        self.clear_text_edit();
         self.codex_model_catalog_idx = self
             .codex_model_catalog_idx
             .min(self.codex_model_catalog.len().saturating_sub(1));
@@ -920,7 +1141,7 @@ impl ProviderAddFormState {
     pub fn close_codex_model_catalog_page(&mut self) {
         self.page = ProviderFormPage::CodexLocalRouting;
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
         self.codex_model_catalog_idx = self
             .codex_model_catalog_idx
             .min(self.codex_model_catalog.len().saturating_sub(1));
@@ -1146,7 +1367,7 @@ impl ProviderAddFormState {
     pub fn close_usage_query_page(&mut self) {
         self.page = ProviderFormPage::Main;
         self.focus = FormFocus::Fields;
-        self.usage_query_editing = false;
+        self.clear_text_edit();
     }
 
     pub fn open_hermes_models_picker(&mut self) {
@@ -1154,9 +1375,9 @@ impl ProviderAddFormState {
             return;
         }
         self.focus = FormFocus::Fields;
-        self.editing = false;
+        self.clear_text_edit();
         self.hermes_models_editing = false;
-        let len = self.hermes_model_fields().len();
+        let len = self.hermes_model_field_count();
         self.hermes_models_field_idx = self.hermes_models_field_idx.min(len.saturating_sub(1));
         self.sync_hermes_model_input_from_selection();
     }
@@ -1166,24 +1387,24 @@ impl ProviderAddFormState {
         self.hermes_model_input.set("");
     }
 
-    pub fn hermes_model_fields(&self) -> Vec<HermesModelField> {
-        let mut fields = Vec::with_capacity(self.hermes_models.len().saturating_mul(3));
-        for index in 0..self.hermes_models.len() {
-            fields.push(HermesModelField::Id(index));
-            fields.push(HermesModelField::Name(index));
-            fields.push(HermesModelField::ContextLength(index));
+    pub fn hermes_model_field_count(&self) -> usize {
+        self.hermes_models.len().saturating_mul(3)
+    }
+
+    fn hermes_model_field_at_index(index: usize) -> HermesModelField {
+        let model = index / 3;
+        match index % 3 {
+            0 => HermesModelField::Id(model),
+            1 => HermesModelField::Name(model),
+            _ => HermesModelField::ContextLength(model),
         }
-        fields
     }
 
     pub fn selected_hermes_model_field(&self) -> Option<HermesModelField> {
-        let fields = self.hermes_model_fields();
-        fields
-            .get(
-                self.hermes_models_field_idx
-                    .min(fields.len().saturating_sub(1)),
-            )
-            .copied()
+        let count = self.hermes_model_field_count();
+        (count > 0)
+            .then(|| self.hermes_models_field_idx.min(count - 1))
+            .map(Self::hermes_model_field_at_index)
     }
 
     pub fn add_empty_hermes_model(&mut self) {
@@ -1191,11 +1412,7 @@ impl ProviderAddFormState {
             return;
         }
         self.hermes_models.push(json!({ "id": "", "name": "" }));
-        self.hermes_models_field_idx = self
-            .hermes_model_fields()
-            .iter()
-            .position(|field| matches!(field, HermesModelField::Id(index) if *index == self.hermes_models.len().saturating_sub(1)))
-            .unwrap_or(self.hermes_models_field_idx);
+        self.hermes_models_field_idx = self.hermes_models.len().saturating_sub(1).saturating_mul(3);
         self.sync_hermes_model_input_from_selection();
     }
 
@@ -1204,7 +1421,7 @@ impl ProviderAddFormState {
             return;
         }
         self.hermes_models.remove(index);
-        let fields_len = self.hermes_model_fields().len();
+        let fields_len = self.hermes_model_field_count();
         self.hermes_models_field_idx = self
             .hermes_models_field_idx
             .min(fields_len.saturating_sub(1));
@@ -1309,11 +1526,7 @@ impl ProviderAddFormState {
         };
 
         self.set_hermes_model_field_text(HermesModelField::Id(target_index), model_id);
-        self.hermes_models_field_idx = self
-            .hermes_model_fields()
-            .iter()
-            .position(|field| *field == HermesModelField::Id(target_index))
-            .unwrap_or(self.hermes_models_field_idx);
+        self.hermes_models_field_idx = target_index.saturating_mul(3);
         self.sync_hermes_model_input_from_selection();
         true
     }
@@ -1358,6 +1571,7 @@ impl ProviderAddFormState {
     }
 
     pub fn set_usage_query_template(&mut self, template: UsageQueryTemplate) {
+        self.clear_usage_query_field_error(UsageQueryField::Script);
         self.usage_query_template = template;
         match template {
             UsageQueryTemplate::Custom => {
@@ -1547,37 +1761,170 @@ impl ProviderAddFormState {
         None
     }
 
-    // The model-mapping sub-page exposes only the four role models; the main
+    // The model-mapping sub-page exposes only the three role models; the main
     // model (ANTHROPIC_MODEL) is edited via the top-level ClaudeFallbackModel row.
     pub fn claude_model_input(&self, index: usize) -> Option<&TextInput> {
         match index {
-            0 => Some(&self.claude_reasoning_model),
-            1 => Some(&self.claude_haiku_model),
-            2 => Some(&self.claude_sonnet_model),
-            3 => Some(&self.claude_opus_model),
+            0 => Some(&self.claude_haiku_model),
+            1 => Some(&self.claude_sonnet_model),
+            2 => Some(&self.claude_opus_model),
             _ => None,
         }
     }
 
     pub fn claude_model_input_mut(&mut self, index: usize) -> Option<&mut TextInput> {
         match index {
-            0 => Some(&mut self.claude_reasoning_model),
-            1 => Some(&mut self.claude_haiku_model),
-            2 => Some(&mut self.claude_sonnet_model),
-            3 => Some(&mut self.claude_opus_model),
+            0 => Some(&mut self.claude_haiku_model),
+            1 => Some(&mut self.claude_sonnet_model),
+            2 => Some(&mut self.claude_opus_model),
             _ => None,
         }
     }
 
+    pub fn claude_model_supports_one_m(index: usize) -> bool {
+        matches!(index, 1 | 2)
+    }
+
+    pub fn claude_model_one_m_enabled(&self, index: usize) -> bool {
+        match index {
+            1 => self.claude_sonnet_one_m,
+            2 => self.claude_opus_one_m,
+            _ => false,
+        }
+    }
+
+    fn set_claude_model_one_m_enabled(&mut self, index: usize, enabled: bool) {
+        match index {
+            1 => self.claude_sonnet_one_m = enabled,
+            2 => self.claude_opus_one_m = enabled,
+            _ => {}
+        }
+    }
+
+    pub fn set_claude_model_from_config(&mut self, index: usize, value: &str) {
+        if !Self::claude_model_supports_one_m(index) {
+            if let Some(input) = self.claude_model_input_mut(index) {
+                input.set(value);
+            }
+            return;
+        }
+
+        let (model, one_m) = split_claude_one_m_marker(value);
+        if let Some(input) = self.claude_model_input_mut(index) {
+            input.set(model);
+        }
+        self.set_claude_model_one_m_enabled(index, one_m);
+    }
+
+    pub fn set_claude_model_from_picker(&mut self, index: usize, value: &str) {
+        let preserve_one_m = self.claude_model_one_m_enabled(index);
+        let (model, explicit_one_m) = split_claude_one_m_marker(value);
+        if let Some(input) = self.claude_model_input_mut(index) {
+            input.set(if Self::claude_model_supports_one_m(index) {
+                model
+            } else {
+                value.trim().to_string()
+            });
+        }
+        if Self::claude_model_supports_one_m(index) {
+            self.set_claude_model_one_m_enabled(index, explicit_one_m || preserve_one_m);
+        }
+        self.mark_claude_model_config_touched();
+    }
+
+    pub fn normalize_claude_model_input(&mut self, index: usize) -> bool {
+        if !Self::claude_model_supports_one_m(index) {
+            return false;
+        }
+
+        let Some(raw) = self
+            .claude_model_input(index)
+            .map(|input| input.value.clone())
+        else {
+            return false;
+        };
+        let (model, explicit_one_m) = split_claude_one_m_marker(&raw);
+        let enabled = if model.trim().is_empty() {
+            false
+        } else {
+            explicit_one_m || self.claude_model_one_m_enabled(index)
+        };
+        let changed = model != raw || enabled != self.claude_model_one_m_enabled(index);
+        if changed {
+            if let Some(input) = self.claude_model_input_mut(index) {
+                input.set(model);
+            }
+            self.set_claude_model_one_m_enabled(index, enabled);
+        }
+        changed
+    }
+
+    pub fn toggle_claude_model_one_m(&mut self, index: usize) -> bool {
+        if !Self::claude_model_supports_one_m(index) {
+            return false;
+        }
+
+        let currently_enabled = self.claude_model_one_m_enabled(index);
+        let model_is_blank = self
+            .claude_model_input(index)
+            .is_none_or(|input| input.value.trim().is_empty());
+        if model_is_blank && !currently_enabled {
+            return false;
+        }
+
+        let enabled = !currently_enabled;
+        self.set_claude_model_one_m_enabled(index, enabled);
+        self.mark_claude_model_config_touched();
+        true
+    }
+
+    pub fn claude_model_value_for_config(&self, index: usize) -> String {
+        let Some(input) = self.claude_model_input(index) else {
+            return String::new();
+        };
+        let model = input.value.trim();
+        if model.is_empty() {
+            return String::new();
+        }
+        if Self::claude_model_supports_one_m(index) && self.claude_model_one_m_enabled(index) {
+            format!("{model}[1M]")
+        } else {
+            model.to_string()
+        }
+    }
+
+    pub fn fill_claude_models_from(&mut self, source_index: usize) -> bool {
+        let Some(source) = self.claude_model_input(source_index) else {
+            return false;
+        };
+        if source.value.trim().is_empty() {
+            return false;
+        }
+
+        let (model, _) = split_claude_one_m_marker(&source.value);
+        let one_m = Self::claude_model_supports_one_m(source_index)
+            && self.claude_model_one_m_enabled(source_index);
+        for index in 0..3 {
+            if let Some(input) = self.claude_model_input_mut(index) {
+                input.set(model.clone());
+            }
+            self.set_claude_model_one_m_enabled(
+                index,
+                Self::claude_model_supports_one_m(index) && one_m,
+            );
+        }
+        self.mark_claude_model_config_touched();
+        true
+    }
+
     pub fn claude_model_configured_count(&self) -> usize {
         [
-            &self.claude_reasoning_model,
             &self.claude_haiku_model,
             &self.claude_sonnet_model,
             &self.claude_opus_model,
         ]
         .into_iter()
-        .filter(|input| !input.is_blank())
+        .filter(|input| !input.is_blank_for_passive_display())
         .count()
     }
 
@@ -1617,12 +1964,6 @@ impl ProviderAddFormState {
             .filter(|value| !value.is_empty());
     }
 
-    pub fn codex_oauth_account_display(&self) -> String {
-        self.codex_oauth_account_id
-            .clone()
-            .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string())
-    }
-
     pub fn is_claude_codex_oauth_provider(&self) -> bool {
         if !matches!(self.app_type, AppType::Claude) {
             return false;
@@ -1646,7 +1987,8 @@ impl ProviderAddFormState {
             .and_then(|meta| meta.get("providerType"))
             .and_then(Value::as_str)
             .is_some_and(|value| value == "github_copilot");
-        let endpoint_matches = self.claude_base_url.value.contains("githubcopilot.com");
+        let endpoint_matches =
+            passive_text_contains(&self.claude_base_url.value, "githubcopilot.com");
 
         provider_type_matches || endpoint_matches
     }
@@ -1680,17 +2022,12 @@ impl ProviderAddFormState {
             .and_then(|value| value.as_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("official"));
 
-        let website_flag = self
-            .website_url
-            .value
-            .trim()
-            .eq_ignore_ascii_case("https://chatgpt.com/codex");
+        let website_flag = passive_trimmed_eq_ignore_ascii_case(
+            &self.website_url.value,
+            "https://chatgpt.com/codex",
+        );
 
-        let name_flag = self
-            .name
-            .value
-            .trim()
-            .eq_ignore_ascii_case("OpenAI Official");
+        let name_flag = passive_trimmed_eq_ignore_ascii_case(&self.name.value, "OpenAI Official");
 
         meta_flag || category_flag || website_flag || name_flag
     }
@@ -1758,8 +2095,7 @@ impl ProviderAddFormState {
         next.codex_auth_scroll = previous_codex_auth_scroll;
         next.codex_config_scroll = previous_codex_config_scroll;
         next.codex_model_catalog_field = previous_codex_model_catalog_field;
-        next.editing = false;
-        next.usage_query_editing = false;
+        next.clear_text_edit();
         next.hermes_models_editing = false;
         let fields_len = next.fields().len();
         next.field_idx = if fields_len == 0 {
@@ -1781,7 +2117,7 @@ impl ProviderAddFormState {
         };
         next.local_proxy_settings_field_idx = previous_local_proxy_settings_field_idx
             .min(next.local_proxy_settings_fields().len().saturating_sub(1));
-        let hermes_model_fields_len = next.hermes_model_fields().len();
+        let hermes_model_fields_len = next.hermes_model_field_count();
         next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
             0
         } else {
@@ -1860,8 +2196,7 @@ impl ProviderAddFormState {
         next.codex_auth_scroll = previous_codex_auth_scroll;
         next.codex_config_scroll = previous_codex_config_scroll;
         next.codex_model_catalog_field = previous_codex_model_catalog_field;
-        next.editing = false;
-        next.usage_query_editing = false;
+        next.clear_text_edit();
         next.hermes_models_editing = false;
 
         let fields_len = next.fields().len();
@@ -1884,7 +2219,7 @@ impl ProviderAddFormState {
         };
         next.local_proxy_settings_field_idx = previous_local_proxy_settings_field_idx
             .min(next.local_proxy_settings_fields().len().saturating_sub(1));
-        let hermes_model_fields_len = next.hermes_model_fields().len();
+        let hermes_model_fields_len = next.hermes_model_field_count();
         next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
             0
         } else {
@@ -1958,6 +2293,9 @@ impl ProviderAddFormState {
     }
 
     pub(crate) fn hermes_api_mode_value(&self) -> &str {
+        if self.hermes_api_mode.len() > PASSIVE_TEXT_SCAN_MAX_BYTES {
+            return HERMES_DEFAULT_API_MODE;
+        }
         if HERMES_API_MODES
             .iter()
             .any(|mode| *mode == self.hermes_api_mode.trim())

@@ -326,6 +326,108 @@ impl WebDavSyncSettings {
     }
 }
 
+/// S3-compatible object storage sync settings.
+///
+/// These settings live in `settings.json`; they are intentionally not part of
+/// the SQLite schema so they stay compatible with the desktop upstream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct S3SyncSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub auto_sync: bool,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub bucket: String,
+    #[serde(default)]
+    pub access_key_id: String,
+    #[serde(default)]
+    pub secret_access_key: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default = "default_webdav_remote_root")]
+    pub remote_root: String,
+    #[serde(default = "default_webdav_profile")]
+    pub profile: String,
+    #[serde(default)]
+    pub status: WebDavSyncStatus,
+}
+
+impl Default for S3SyncSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_sync: false,
+            region: String::new(),
+            bucket: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            endpoint: String::new(),
+            remote_root: default_webdav_remote_root(),
+            profile: default_webdav_profile(),
+            status: WebDavSyncStatus::default(),
+        }
+    }
+}
+
+impl S3SyncSettings {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.bucket.trim().is_empty() {
+            return Err(AppError::localized(
+                "s3.bucket.required",
+                "S3 存储桶不能为空",
+                "S3 bucket is required.",
+            ));
+        }
+        if self.region.trim().is_empty() {
+            return Err(AppError::localized(
+                "s3.region.required",
+                "S3 区域不能为空",
+                "S3 region is required.",
+            ));
+        }
+        if self.access_key_id.trim().is_empty() {
+            return Err(AppError::localized(
+                "s3.access_key_id.required",
+                "S3 Access Key ID 不能为空",
+                "S3 Access Key ID is required.",
+            ));
+        }
+        if self.secret_access_key.trim().is_empty() {
+            return Err(AppError::localized(
+                "s3.secret_access_key.required",
+                "S3 Secret Access Key 不能为空",
+                "S3 Secret Access Key is required.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn normalize(&mut self) {
+        self.region = self.region.trim().to_string();
+        self.bucket = self.bucket.trim().to_string();
+        self.access_key_id = self.access_key_id.trim().to_string();
+        self.endpoint = self.endpoint.trim().to_string();
+        self.remote_root = self.remote_root.trim().to_string();
+        self.profile = self.profile.trim().to_string();
+        if self.remote_root.is_empty() {
+            self.remote_root = default_webdav_remote_root();
+        }
+        if self.profile.is_empty() {
+            self.profile = default_webdav_profile();
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bucket.is_empty()
+            && self.region.is_empty()
+            && self.access_key_id.is_empty()
+            && self.secret_access_key.is_empty()
+    }
+}
+
 fn sanitize_path_segment(raw: &str) -> String {
     raw.trim()
         .trim_matches('/')
@@ -346,6 +448,12 @@ pub struct LocalMigrations {
         Option<CodexThirdPartyHistoryProviderBucketMigration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider_template_v1: Option<CodexProviderTemplateMigration>,
+    /// v2 also repairs dynamic provider ids emitted by older CLI builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_third_party_history_provider_bucket_v2:
+        Option<CodexThirdPartyHistoryProviderBucketMigration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_provider_template_v2: Option<CodexProviderTemplateMigration>,
     /// 统一会话开关的官方历史迁移标记。开关关闭时会被清除，
     /// 这样重新开启能把关闭期间落入 openai 桶的官方会话补迁进来。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -470,10 +578,15 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webdav_sync: Option<WebDavSyncSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3_sync: Option<S3SyncSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_retain_count: Option<u32>,
     /// 首选终端应用，用于会话恢复。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
+    /// Preferred external editor command. When absent, no editor is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_editor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_migrations: Option<LocalMigrations>,
     /// Claude 自定义端点列表
@@ -525,8 +638,10 @@ impl Default for AppSettings {
             skill_sync_method: crate::services::skill::SyncMethod::default(),
             security: None,
             webdav_sync: None,
+            s3_sync: None,
             backup_retain_count: None,
             preferred_terminal: None,
+            preferred_editor: None,
             local_migrations: None,
             custom_endpoints_claude: HashMap::new(),
             custom_endpoints_codex: HashMap::new(),
@@ -601,8 +716,22 @@ impl AppSettings {
             webdav.normalize();
         }
 
+        if let Some(s3) = self.s3_sync.as_mut() {
+            s3.normalize();
+        }
+        if self.s3_sync.as_ref().is_some_and(S3SyncSettings::is_empty) {
+            self.s3_sync = None;
+        }
+
         self.preferred_terminal = self
             .preferred_terminal
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        self.preferred_editor = self
+            .preferred_editor
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -713,6 +842,17 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
                 existing_migrations.codex_provider_template_v1;
         }
         if incoming_migrations
+            .codex_third_party_history_provider_bucket_v2
+            .is_none()
+        {
+            incoming_migrations.codex_third_party_history_provider_bucket_v2 =
+                existing_migrations.codex_third_party_history_provider_bucket_v2;
+        }
+        if incoming_migrations.codex_provider_template_v2.is_none() {
+            incoming_migrations.codex_provider_template_v2 =
+                existing_migrations.codex_provider_template_v2;
+        }
+        if incoming_migrations
             .codex_official_history_unify_v1
             .is_none()
         {
@@ -752,7 +892,7 @@ pub fn is_codex_third_party_history_provider_bucket_migrated() -> bool {
         .as_ref()
         .and_then(|migrations| {
             migrations
-                .codex_third_party_history_provider_bucket_v1
+                .codex_third_party_history_provider_bucket_v2
                 .as_ref()
         })
         .is_some_and(|migration| migration.scanned_history_files)
@@ -765,7 +905,7 @@ pub fn mark_codex_third_party_history_provider_bucket_migrated(
         let migrations = settings
             .local_migrations
             .get_or_insert_with(Default::default);
-        migrations.codex_third_party_history_provider_bucket_v1 = Some(migration);
+        migrations.codex_third_party_history_provider_bucket_v2 = Some(migration);
     })
 }
 
@@ -773,7 +913,7 @@ pub fn is_codex_provider_template_migrated() -> bool {
     get_settings()
         .local_migrations
         .as_ref()
-        .and_then(|migrations| migrations.codex_provider_template_v1.as_ref())
+        .and_then(|migrations| migrations.codex_provider_template_v2.as_ref())
         .is_some()
 }
 
@@ -784,7 +924,7 @@ pub fn mark_codex_provider_template_migrated(
         let migrations = settings
             .local_migrations
             .get_or_insert_with(Default::default);
-        migrations.codex_provider_template_v1 = Some(migration);
+        migrations.codex_provider_template_v2 = Some(migration);
     })
 }
 
@@ -840,6 +980,19 @@ pub fn get_preferred_terminal() -> Option<String> {
         .read()
         .ok()
         .and_then(|settings| settings.preferred_terminal.clone())
+}
+
+pub fn get_preferred_editor() -> Option<String> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|settings| settings.preferred_editor.clone())
+}
+
+pub fn set_preferred_editor(preferred_editor: Option<String>) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.preferred_editor = preferred_editor;
+    update_settings(settings)
 }
 
 pub fn ensure_security_auth_selected_type(selected_type: &str) -> Result<(), AppError> {
@@ -1067,8 +1220,7 @@ pub fn get_webdav_sync_settings() -> Option<WebDavSyncSettings> {
 }
 
 pub fn set_webdav_sync_settings(webdav_sync: Option<WebDavSyncSettings>) -> Result<(), AppError> {
-    let mut settings = get_settings();
-    settings.webdav_sync = match webdav_sync {
+    let webdav_sync = match webdav_sync {
         Some(mut cfg) => {
             cfg.normalize();
             cfg.validate()?;
@@ -1076,15 +1228,46 @@ pub fn set_webdav_sync_settings(webdav_sync: Option<WebDavSyncSettings>) -> Resu
         }
         None => None,
     };
-    update_settings(settings)
+    mutate_settings(move |settings| {
+        settings.webdav_sync = webdav_sync;
+    })
 }
 
 pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
-    let mut settings = get_settings();
-    if let Some(ref mut webdav) = settings.webdav_sync {
-        webdav.status = status;
-    }
-    update_settings(settings)
+    mutate_settings(move |settings| {
+        if let Some(ref mut webdav) = settings.webdav_sync {
+            webdav.status = status;
+        }
+    })
+}
+
+pub fn get_s3_sync_settings() -> Option<S3SyncSettings> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|settings| settings.s3_sync.clone())
+}
+
+pub fn set_s3_sync_settings(s3_sync: Option<S3SyncSettings>) -> Result<(), AppError> {
+    let s3_sync = match s3_sync {
+        Some(mut config) => {
+            config.normalize();
+            config.validate()?;
+            Some(config)
+        }
+        None => None,
+    };
+    mutate_settings(move |settings| {
+        settings.s3_sync = s3_sync;
+    })
+}
+
+pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
+    mutate_settings(move |settings| {
+        if let Some(ref mut s3) = settings.s3_sync {
+            s3.status = status;
+        }
+    })
 }
 
 pub fn webdav_jianguoyun_preset(username: &str, password: &str) -> WebDavSyncSettings {
@@ -1151,12 +1334,132 @@ pub fn set_skip_claude_onboarding(enabled: bool) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::AppSettings;
+    use super::{
+        get_preferred_editor, get_s3_sync_settings, get_webdav_sync_settings, set_preferred_editor,
+        set_s3_sync_settings, set_webdav_sync_settings, update_settings, AppSettings,
+        LocalMigrations, S3SyncSettings, WebDavSyncSettings,
+    };
+    use crate::test_support::TestEnvGuard;
+    use serde_json::json;
 
     #[test]
     fn codex_unified_session_history_defaults_off() {
         let settings = AppSettings::default();
         assert!(!settings.unify_codex_session_history);
         assert_eq!(settings.unify_codex_migrate_existing, None);
+    }
+
+    #[test]
+    fn preferred_editor_defaults_none_and_uses_camel_case() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+
+        let settings = AppSettings::default();
+        assert_eq!(settings.preferred_editor, None);
+        let default_json = serde_json::to_value(&settings).expect("serialize default settings");
+        assert!(default_json.get("preferredEditor").is_none());
+
+        let configured = AppSettings {
+            preferred_editor: Some("code --wait".to_string()),
+            ..settings
+        };
+        let configured_json =
+            serde_json::to_value(configured).expect("serialize configured editor");
+        assert_eq!(configured_json["preferredEditor"], "code --wait");
+    }
+
+    #[test]
+    fn preferred_editor_normalizes_trimmed_and_blank_values() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        update_settings(AppSettings::default()).expect("reset isolated settings");
+
+        set_preferred_editor(Some("  code --wait  ".to_string())).expect("save preferred editor");
+        assert_eq!(get_preferred_editor().as_deref(), Some("code --wait"));
+
+        set_preferred_editor(Some(" \t ".to_string())).expect("clear preferred editor");
+        assert_eq!(get_preferred_editor(), None);
+
+        let persisted = std::fs::read_to_string(home.path().join(".cc-switch/settings.json"))
+            .expect("read isolated settings");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&persisted).expect("parse isolated settings");
+        assert!(persisted.get("preferredEditor").is_none());
+    }
+
+    #[test]
+    fn codex_dynamic_provider_v2_does_not_reuse_v1_markers() {
+        let migrations: LocalMigrations = serde_json::from_value(json!({
+            "codexThirdPartyHistoryProviderBucketV1": {
+                "completedAt": "2026-07-15T00:00:00Z",
+                "targetProviderId": "custom",
+                "sourceProviderIds": ["aicodemirror"],
+                "migratedJsonlFiles": 1,
+                "migratedStateRows": 1,
+                "scannedHistoryFiles": true
+            },
+            "codexProviderTemplateV1": {
+                "completedAt": "2026-07-15T00:00:00Z",
+                "migratedProviderIds": ["aicodemirror"]
+            }
+        }))
+        .expect("deserialize v1 migration markers");
+
+        assert!(migrations
+            .codex_third_party_history_provider_bucket_v1
+            .is_some());
+        assert!(migrations.codex_provider_template_v1.is_some());
+        assert!(migrations
+            .codex_third_party_history_provider_bucket_v2
+            .is_none());
+        assert!(migrations.codex_provider_template_v2.is_none());
+    }
+
+    #[test]
+    fn s3_settings_use_upstream_camel_case_shape_and_defaults() {
+        let settings = S3SyncSettings::default();
+        assert!(!settings.auto_sync);
+        assert_eq!(settings.remote_root, "cc-switch-sync");
+        assert_eq!(settings.profile, "default");
+
+        let value = serde_json::to_value(settings).expect("serialize S3 settings");
+        assert!(value.get("accessKeyId").is_some());
+        assert!(value.get("secretAccessKey").is_some());
+        assert!(value.get("remoteRoot").is_some());
+    }
+
+    #[test]
+    fn saved_cloud_sync_backends_can_coexist_like_upstream() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        update_settings(AppSettings::default()).expect("reset isolated settings");
+
+        set_webdav_sync_settings(Some(WebDavSyncSettings {
+            enabled: true,
+            auto_sync: true,
+            base_url: "https://dav.example.com".to_string(),
+            username: "alice".to_string(),
+            password: "webdav-secret".to_string(),
+            ..WebDavSyncSettings::default()
+        }))
+        .expect("save WebDAV settings");
+        set_s3_sync_settings(Some(S3SyncSettings {
+            enabled: true,
+            auto_sync: false,
+            region: "us-east-1".to_string(),
+            bucket: "sync-bucket".to_string(),
+            access_key_id: "AKID".to_string(),
+            secret_access_key: "s3-secret".to_string(),
+            ..S3SyncSettings::default()
+        }))
+        .expect("save S3 settings");
+
+        let webdav = get_webdav_sync_settings().expect("WebDAV settings remain saved");
+        let s3 = get_s3_sync_settings().expect("S3 settings saved");
+        assert!(webdav.enabled);
+        assert!(webdav.auto_sync);
+        assert_eq!(webdav.password, "webdav-secret");
+        assert!(s3.enabled);
+        assert_eq!(s3.secret_access_key, "s3-secret");
     }
 }

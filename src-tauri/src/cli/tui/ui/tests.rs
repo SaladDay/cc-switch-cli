@@ -5,7 +5,7 @@ use ratatui::{
     style::{Color, Modifier},
     Terminal,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use serial_test::serial;
 use std::ffi::OsString;
 use std::path::Path;
@@ -20,15 +20,19 @@ use crate::{
         app,
         app::{
             Action, App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit,
-            Focus, Overlay, TextInputState, TextSubmit, UsagePane,
+            Focus, Overlay, SettingsItem, TextInputState, TextSubmit, UsagePane,
         },
         data::{
             ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot, ModelRouteSnapshot,
-            OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
-            ProxySnapshot, SkillsSnapshot, UiData, UsageLogRow, UsageProviderStatsRow,
-            UsageRangePreset, UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
+            OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderHealthSnapshot, ProviderRow,
+            ProvidersSnapshot, ProxySnapshot, ProxyTargetSnapshot, SkillsSnapshot, UiData,
+            UsageLogRow, UsageProviderStatsRow, UsageRangePreset, UsageSnapshot,
+            UsageSummarySnapshot, UsageTrendBucket,
         },
-        form::{FormFocus, FormState, PromptMetaFormState, ProviderAddField, TextInput},
+        form::{
+            ClaudeModelPickerColumn, FormFocus, FormState, PromptMetaFormState, ProviderAddField,
+            TextInput, UsageQueryField,
+        },
         route::{NavItem, Route},
         theme::theme_for,
     },
@@ -40,7 +44,127 @@ use crate::{
 };
 
 #[test]
-fn provider_form_shows_full_api_key_in_table_value() {
+fn visible_text_window_keeps_only_the_ascii_viewport_tail() {
+    let value = format!("{}TAIL", "x".repeat(1_000_000));
+
+    let (visible, cursor_x) = super::visible_text_window(&value, value.len(), 10);
+
+    assert_eq!(visible, "xxxxxTAIL");
+    assert_eq!(cursor_x, 9);
+}
+
+#[test]
+fn visible_text_window_respects_unicode_display_width() {
+    let (visible, cursor_x) = super::visible_text_window("ab你cd", "ab你".len(), 4);
+
+    assert_eq!(visible, "b你c");
+    assert_eq!(cursor_x, 3);
+}
+
+#[test]
+fn visible_text_window_bounds_zero_width_unicode_output() {
+    let value = "\u{0301}".repeat(1_000_000);
+
+    let (visible, cursor_x) = super::visible_text_window(&value, value.len(), 8);
+
+    assert!(visible.chars().count() <= 48);
+    assert_eq!(cursor_x, 0);
+}
+
+#[test]
+fn visible_text_window_bounds_a_million_multibyte_characters() {
+    let value = format!("{}TAIL", "你".repeat(1_000_000));
+
+    let (visible, cursor_x) = super::visible_text_window(&value, value.len(), 10);
+
+    assert!(UnicodeWidthStr::width(visible.as_str()) <= 10);
+    assert!(visible.chars().count() <= 10);
+    assert!(visible.ends_with("TAIL"));
+    assert_eq!(cursor_x, 8);
+}
+
+#[test]
+fn inline_window_keeps_plaintext_visible_while_bounding_large_values() {
+    let input = TextInput::new("x".repeat(1_000_000));
+
+    let (visible, cursor_x) = super::inline_input_window(&input, 10);
+
+    assert_eq!(visible, "xxxxxxxxx");
+    assert_eq!(cursor_x, 9);
+}
+
+#[test]
+fn inline_window_keeps_multibyte_plaintext_visible_within_display_width() {
+    let input = TextInput::new("你".repeat(1_000_000));
+
+    let (visible, cursor_x) = super::inline_input_window(&input, 10);
+
+    assert_eq!(visible, "你你你你");
+    assert_eq!(UnicodeWidthStr::width(visible.as_str()), 8);
+    assert_eq!(cursor_x, 8);
+}
+
+#[test]
+fn form_json_preview_scrolls_through_wrapped_segments_of_one_long_line() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let backend = TestBackend::new(18, 6);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let theme = theme_for(&AppType::Claude);
+    let text = format!("{{\"value\":\"{}VISIBLE_TAIL\"}}", "A".repeat(60));
+
+    terminal
+        .draw(|frame| {
+            super::render_form_json_preview(frame, &text, 2, true, frame.area(), &theme);
+        })
+        .expect("preview should render");
+
+    let rendered = all_text(terminal.backend().buffer());
+    assert!(!rendered.contains("{\"value\""), "{rendered}");
+    assert!(rendered.contains("VISIBLE_TA"), "{rendered}");
+    assert!(rendered.contains("IL\"}"), "{rendered}");
+}
+
+#[test]
+fn passive_text_helpers_bound_leading_space_and_zero_width_inputs() {
+    let leading = format!("{}secret-tail", " ".repeat(1_000_000));
+    let combining = "\u{0301}".repeat(1_000_000);
+
+    let leading_summary = super::bounded_trimmed_text_for_display(&leading);
+    let combining_summary = super::bounded_trimmed_text_for_display(&combining);
+    let truncated = super::truncate_to_display_width(&combining, 8);
+
+    assert_eq!(leading_summary, "…");
+    assert!(combining_summary.chars().count() <= 2_049);
+    assert!(combining_summary.ends_with('…'));
+    assert!(truncated.chars().count() <= 49);
+    assert!(truncated.ends_with('…'));
+}
+
+#[test]
+fn visible_selection_window_stays_fixed_around_edges_and_selection() {
+    assert_eq!(super::visible_selection_window(0, 0, 10), 0..0);
+    assert_eq!(super::visible_selection_window(100, 0, 10), 0..10);
+    assert_eq!(super::visible_selection_window(100, 50, 10), 45..55);
+    assert_eq!(super::visible_selection_window(100, 99, 10), 90..100);
+    assert_eq!(super::visible_selection_window(3, usize::MAX, 10), 0..3);
+}
+
+#[test]
+fn plaintext_json_preview_bounds_a_million_byte_object_key() {
+    let mut object = serde_json::Map::new();
+    object.insert("K".repeat(1_000_000), json!("secret-value"));
+
+    let preview = super::bounded_json_preview(&serde_json::Value::Object(object));
+    let rendered = serde_json::to_string(&preview).expect("bounded JSON should serialize");
+
+    assert!(rendered.len() < 1_000, "preview was not bounded");
+    assert!(rendered.contains("secret-value"), "{rendered}");
+    assert!(!rendered.contains("[redacted]"), "{rendered}");
+}
+
+#[test]
+fn provider_form_shows_api_key_in_table_value() {
     let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
     form.claude_api_key.set("sk-test-1234567890");
 
@@ -49,6 +173,603 @@ fn provider_form_shows_full_api_key_in_table_value() {
         crate::cli::tui::form::ProviderAddField::ClaudeApiKey,
     );
     assert_eq!(value, "sk-test-1234567890");
+}
+
+#[test]
+fn claude_model_picker_renders_role_scoped_one_m_controls_and_dynamic_keys() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.claude_haiku_model.set("haiku-model");
+    form.set_claude_model_from_config(1, "sonnet-model[1M]");
+    form.set_claude_model_from_config(2, "opus-model");
+    app.form = Some(FormState::ProviderAdd(form));
+    app.overlay = Overlay::ClaudeModelPicker {
+        selected: 1,
+        column: ClaudeModelPickerColumn::OneM,
+        editing: false,
+    };
+
+    let one_m = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        32,
+    ));
+    assert!(one_m.contains("Field"), "{one_m}");
+    assert!(one_m.contains("Value"), "{one_m}");
+    assert!(one_m.contains("1M"), "{one_m}");
+    assert!(one_m.contains("[x]"), "{one_m}");
+    assert!(one_m.contains("[ ]"), "{one_m}");
+    assert!(one_m.matches('—').count() >= 1, "{one_m}");
+    assert!(one_m.contains("Default Haiku Model"), "{one_m}");
+    assert!(one_m.contains("Default Sonnet Model"), "{one_m}");
+    assert!(one_m.contains("Default Opus Model"), "{one_m}");
+    assert!(!one_m.contains("Reasoning Model"), "{one_m}");
+    assert!(one_m.contains("switch column"), "{one_m}");
+    assert!(one_m.contains("toggle"), "{one_m}");
+    assert!(one_m.contains("Enter toggle"), "{one_m}");
+    assert!(
+        one_m.contains("Press Enter to toggle the 1M declaration."),
+        "{one_m}"
+    );
+    assert!(!one_m.contains("fetch model"), "{one_m}");
+    assert!(!one_m.contains("fill all"), "{one_m}");
+
+    app.overlay = Overlay::ClaudeModelPicker {
+        selected: 1,
+        column: ClaudeModelPickerColumn::Model,
+        editing: false,
+    };
+    let model = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        32,
+    ));
+    assert!(model.contains("fetch model"), "{model}");
+    assert!(model.contains("edit"), "{model}");
+    assert!(model.contains("Enter edit"), "{model}");
+    assert!(model.contains("Space fetch model"), "{model}");
+    assert!(
+        model.contains("Press Space to auto-fetch models from API."),
+        "{model}"
+    );
+    assert!(!model.contains("fill all"), "{model}");
+}
+
+#[test]
+fn claude_model_picker_keeps_one_m_visible_and_truncates_on_narrow_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.set_claude_model_from_config(
+        1,
+        "an-extremely-long-provider-model-name-with-a-tail-that-must-not-show[1M]",
+    );
+    app.form = Some(FormState::ProviderAdd(form));
+    app.overlay = Overlay::ClaudeModelPicker {
+        selected: 1,
+        column: ClaudeModelPickerColumn::OneM,
+        editing: false,
+    };
+
+    let narrow = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        64,
+        18,
+    ));
+    assert!(narrow.contains("1M"), "{narrow}");
+    assert!(narrow.contains("[x]"), "{narrow}");
+    assert!(narrow.contains('…'), "{narrow}");
+    assert!(!narrow.contains("must-not-show"), "{narrow}");
+
+    let smoke = render_with_size(&app, &minimal_data(&app.app_type), 40, 12);
+    assert_eq!(smoke.area.width, 40);
+    assert_eq!(smoke.area.height, 12);
+}
+
+#[test]
+fn claude_model_picker_no_color_marks_only_the_focused_cell_as_reversed() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.set_claude_model_from_config(2, "sonnet-model[1M]");
+    app.form = Some(FormState::ProviderAdd(form));
+    app.overlay = Overlay::ClaudeModelPicker {
+        selected: 2,
+        column: ClaudeModelPickerColumn::OneM,
+        editing: false,
+    };
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 160, 32);
+    let (row_y, row) = (0..buf.area.height)
+        .map(|y| (y, line_at(&buf, y)))
+        .find(|(_, line)| line.contains("[x]") && line.contains("sonnet-model"))
+        .unwrap_or_else(|| panic!("missing Sonnet row:\n{}", all_text(&buf)));
+    let check_x = cell_column_of(&buf, row_y, "[x]").expect("checkbox column");
+    let model_x = cell_column_of(&buf, row_y, "sonnet-model").expect("model column");
+    assert!(buf[(check_x, row_y)].modifier.contains(Modifier::REVERSED));
+    assert!(!buf[(model_x, row_y)].modifier.contains(Modifier::REVERSED));
+    assert!(buf[(model_x, row_y)].modifier.contains(Modifier::BOLD));
+    assert!(!row.contains('>'), "{row}");
+}
+
+#[test]
+fn provider_and_usage_url_rows_show_the_complete_value_without_mutating_it() {
+    let raw = "https://user:pass@example.test/v1/private?api_key=P2_URL_SECRET#fragment";
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.claude_base_url.set(raw);
+    form.usage_query_base_url.set(raw);
+
+    let (_, provider_value) = super::provider_field_label_and_value(
+        &form,
+        crate::cli::tui::form::ProviderAddField::ClaudeBaseUrl,
+    );
+    let (_, usage_value) = super::usage_query_field_label_and_value(
+        &form,
+        crate::cli::tui::form::UsageQueryField::BaseUrl,
+    );
+
+    assert_eq!(provider_value, raw);
+    assert_eq!(usage_value, raw);
+    assert_eq!(form.claude_base_url.value, raw);
+    assert_eq!(form.usage_query_base_url.value, raw);
+}
+
+#[test]
+fn provider_inline_api_key_edit_renders_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "sk-inline-super-secret";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::Fields;
+    form.name.set("Demo");
+    form.claude_api_key.set(secret);
+    assert!(form.begin_main_text_edit(ProviderAddField::ClaudeApiKey));
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains(secret), "{all}");
+    assert!(all.contains("Provider Config"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+    assert!(!all.contains("apply & next"), "{all}");
+    assert!(!all.contains("apply & previous"), "{all}");
+}
+
+#[test]
+fn mcp_preview_shows_environment_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "value-with-an-unremarkable-key";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.focus = FormFocus::JsonPreview;
+    form.id.set("server");
+    form.name.set("Server");
+    form.command.set("node");
+    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+        key: "CUSTOM_VALUE".to_string(),
+        value: secret.to_string(),
+    });
+    app.form = Some(FormState::McpAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        80,
+        35,
+    ));
+    assert!(all.contains(secret), "{all}");
+    assert!(all.contains("CUSTOM_VALUE"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+}
+
+#[test]
+fn mcp_preview_shows_custom_header_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "custom-header-super-secret";
+    let server = crate::app_config::McpServer {
+        id: "remote".to_string(),
+        name: "Remote".to_string(),
+        server: json!({
+            "type": "http",
+            "url": "https://example.test/mcp",
+            "headers": {
+                "X-Custom-Auth": secret,
+                "User-Agent": "safe-but-hidden-too"
+            }
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+    let mut form = crate::cli::tui::form::McpAddFormState::from_server(&server);
+    form.focus = FormFocus::JsonPreview;
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains(secret), "{all}");
+    assert!(all.contains("safe-but-hidden-too"), "{all}");
+    assert!(all.contains("X-Custom-Auth"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+}
+
+#[test]
+fn mcp_stdio_fields_and_preview_show_command_and_argument_payloads() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.focus = FormFocus::Fields;
+    form.id.set("server");
+    form.name.set("Server");
+    form.command.set("/usr/local/bin/node");
+    form.set_args_values(vec![
+        "--api-key".to_string(),
+        "B6_ARGS_SECRET".to_string(),
+        "positional-secret".to_string(),
+    ]);
+    app.form = Some(FormState::McpAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("/usr/local/bin/node"), "{all}");
+    assert!(all.contains("B6_ARGS_SECRET"), "{all}");
+    assert!(all.contains("positional-secret"), "{all}");
+    assert!(line_with(&all, "\"args\"").contains('['), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+}
+
+#[test]
+fn mcp_remote_fields_and_preview_show_the_complete_url() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.focus = FormFocus::Fields;
+    form.id.set("remote");
+    form.name.set("Remote");
+    form.server_type = crate::cli::tui::form::McpTransport::Http;
+    form.url
+        .set("https://user:pass@mcp.example.test/secret-path?access_token=URL_SECRET#frag");
+    app.form = Some(FormState::McpAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    for visible in ["user:pass", "secret-path", "URL_SECRET", "access_token"] {
+        assert!(all.contains(visible), "{all}");
+    }
+}
+
+#[test]
+fn mcp_fields_show_invalid_urls_and_shell_commands_verbatim() {
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.command.set("sh -c secret");
+    let (_, command) =
+        super::mcp_field_label_and_value(&form, crate::cli::tui::form::McpAddField::Command);
+    assert_eq!(command, "sh -c secret");
+
+    form.server_type = crate::cli::tui::form::McpTransport::Http;
+    form.url.set("not-a-url-with-secret");
+    let (_, url) = super::mcp_field_label_and_value(&form, crate::cli::tui::form::McpAddField::Url);
+    assert_eq!(url, "not-a-url-with-secret");
+}
+
+#[test]
+fn mcp_plaintext_preview_never_mutates_the_serialized_form_payload() {
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.command.set("node");
+    form.set_args_values(vec![
+        "--api-key".to_string(),
+        "persistence-secret".to_string(),
+    ]);
+    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+        key: "CUSTOM_VALUE".to_string(),
+        value: "environment-secret".to_string(),
+    });
+
+    let raw = form.to_mcp_server_json_value();
+    let preview = super::bounded_json_preview(&raw);
+
+    assert_eq!(raw["server"]["command"], json!("node"));
+    assert_eq!(
+        raw["server"]["args"],
+        json!(["--api-key", "persistence-secret"])
+    );
+    assert_eq!(
+        raw["server"]["env"]["CUSTOM_VALUE"],
+        json!("environment-secret")
+    );
+    assert_eq!(preview, raw);
+}
+
+#[test]
+fn mcp_env_picker_renders_environment_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "picker-super-secret";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+        key: "CUSTOM_VALUE".to_string(),
+        value: secret.to_string(),
+    });
+    app.form = Some(FormState::McpAdd(form));
+    app.overlay = Overlay::McpEnvPicker { selected: 0 };
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(all.contains(secret), "{all}");
+    assert!(all.contains("CUSTOM_VALUE"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+}
+
+#[test]
+fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let selected = 9_999usize;
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.env_rows = (0..10_000)
+        .map(|index| crate::cli::tui::form::McpEnvVarRow {
+            key: format!("ENV-{index:05}"),
+            value: format!("secret-{index}"),
+        })
+        .collect();
+    form.env_rows[selected].key = format!("SELECTED-ENV-{}", "X".repeat(1_000_000));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(form));
+    app.overlay = Overlay::McpEnvPicker { selected };
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(all.contains("SELECTED-ENV"), "{all}");
+    assert!(!all.contains("ENV-00000"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+    assert!(all.len() < 20_000, "picker frame was not bounded");
+}
+
+#[test]
+fn mcp_env_value_editor_shows_the_active_value_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "editor-super-secret";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(
+        crate::cli::tui::form::McpAddFormState::new(),
+    ));
+    app.overlay = Overlay::McpEnvEntryEditor(crate::cli::tui::app::McpEnvEntryEditorState {
+        row: None,
+        return_selected: 0,
+        field: crate::cli::tui::app::McpEnvEditorField::Value,
+        key: TextInput::new("CUSTOM_VALUE"),
+        value: TextInput::new(secret),
+    });
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(all.contains(secret), "{all}");
+    assert!(all.contains("CUSTOM_VALUE"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+}
+
+#[test]
+fn model_fetch_picker_renders_only_the_selected_large_collection_window() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let selected = 9_999usize;
+    let mut models = (0..10_000)
+        .map(|index| format!("FETCHED-{index:05}"))
+        .collect::<Vec<_>>();
+    models[selected] = format!("SELECTED-FETCHED-{}", "X".repeat(1_000_000));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::ModelFetchPicker {
+        request_id: 1,
+        field: ProviderAddField::ClaudeModelConfig,
+        claude_idx: Some(0),
+        input: TextInput::new(""),
+        query: String::new(),
+        fetching: false,
+        models,
+        filtered_indices: None,
+        filter_incomplete: false,
+        error: None,
+        selected_idx: selected,
+        selection_active: false,
+    };
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(all.contains("SELECTED-FETCHED"), "{all}");
+    assert!(!all.contains("FETCHED-00000"), "{all}");
+}
+
+#[test]
+fn model_fetch_picker_discloses_when_search_results_are_budget_limited() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::ModelFetchPicker {
+        request_id: 1,
+        field: ProviderAddField::ClaudeModelConfig,
+        claude_idx: Some(0),
+        input: TextInput::new("model"),
+        query: "model".to_string(),
+        fetching: false,
+        models: vec!["model-a".to_string()],
+        filtered_indices: Some(vec![0]),
+        filter_incomplete: true,
+        error: None,
+        selected_idx: 0,
+        selection_active: false,
+    };
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(all.contains("Search is limited; refine the query"), "{all}");
+}
+
+#[test]
+fn provider_inline_cursor_and_error_stay_on_the_selected_row() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::Fields;
+    form.name.set("alpha");
+    form.name.cursor = 3;
+    assert!(form.begin_main_text_edit(ProviderAddField::Name));
+    form.set_main_field_error(ProviderAddField::Name, "bad value");
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let data = minimal_data(&app.app_type);
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("terminal created");
+    terminal
+        .draw(|frame| super::render(frame, &app, &data))
+        .expect("draw ok");
+    let cursor = terminal.get_cursor_position().expect("cursor position");
+    let buf = terminal.backend().buffer();
+
+    assert!(line_at(buf, cursor.y).contains("alpha"));
+    assert!(line_at(buf, cursor.y + 1).contains("! bad value"));
+    assert!(!all_text(buf).contains(" Editing "));
+}
+
+#[test]
+fn provider_form_uses_one_pane_when_compact_and_two_when_wide() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::Fields;
+    app.form = Some(FormState::ProviderAdd(form));
+    let data = minimal_data(&app.app_type);
+
+    let compact_fields = all_text(&render_with_size(&app, &data, 80, 35));
+    assert!(compact_fields.contains("┌ Fields "), "{compact_fields}");
+    assert!(
+        !compact_fields.contains("┌ Provider Config "),
+        "{compact_fields}"
+    );
+
+    if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+        form.focus = FormFocus::JsonPreview;
+    }
+    let compact_preview = all_text(&render_with_size(&app, &data, 80, 35));
+    assert!(!compact_preview.contains("┌ Fields "), "{compact_preview}");
+    assert!(
+        compact_preview.contains("┌ Provider Config "),
+        "{compact_preview}"
+    );
+
+    let wide = all_text(&render_with_size(&app, &data, 160, 40));
+    assert!(wide.contains("┌ Fields "), "{wide}");
+    assert!(wide.contains("┌ Provider Config "), "{wide}");
 }
 
 #[test]
@@ -69,6 +790,39 @@ fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
     assert!(all.contains("No local sessions found"), "{all}");
     assert!(all.contains("local session files"), "{all}");
     assert!(all.contains("database"), "{all}");
+    assert!(all.contains("←→ switch panel"), "{all}");
+    assert!(!all.contains("←→/h/l"), "{all}");
+    assert!(!all.contains("show all"), "{all}");
+}
+
+#[test]
+fn tui_session_project_picker_keeps_secondary_page_keys_out_of_the_key_bar() {
+    let _lang = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::SessionProjectPicker(app::SessionProjectPickerState {
+        input: crate::cli::tui::text_edit::TextInput::new(""),
+        selected_idx: 0,
+        path_scroll: 0,
+        filtered_indices: None,
+        pinned_scope: None,
+        filter_error: None,
+    });
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(all.contains("↑↓"), "{all}");
+    assert!(all.contains("Shift+←→"), "{all}");
+    assert!(all.contains(texts::tui_key_scroll()), "{all}");
+    assert!(!all.contains('⇧'), "{all}");
+    assert!(!all.contains("PgUp"), "{all}");
+    assert!(!all.contains("PgDn"), "{all}");
 }
 
 #[test]
@@ -182,6 +936,73 @@ fn tui_usage_loading_state_keeps_existing_data_visible() {
     assert!(all.contains("800"), "{all}");
     assert!(all.contains("06/05"), "{all}");
     assert!(!all.contains("Loading..."), "{all}");
+}
+
+#[test]
+fn tui_usage_zero_cost_metric_does_not_hide_real_usage() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 2,
+        success_count: 2,
+        total_tokens: 800,
+        ..UsageSummarySnapshot::default()
+    };
+    data.usage.trends_7d = vec![UsageTrendBucket {
+        key: "2026-06-05".to_string(),
+        label: "06/05".to_string(),
+        request_count: 2,
+        total_tokens: 800,
+        ..UsageTrendBucket::default()
+    }];
+
+    let all = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(all.contains("06/05"), "{all}");
+    assert!(!all.contains("No usage recorded"), "{all}");
+}
+
+#[test]
+fn tui_usage_marks_unreported_cache_writes_without_hiding_reported_values() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 1,
+        success_count: 1,
+        total_tokens: 1_000,
+        cache_read_tokens: 500,
+        ..UsageSummarySnapshot::default()
+    };
+    data.usage.trends_7d = vec![UsageTrendBucket {
+        key: "2026-06-05".to_string(),
+        label: "06/05".to_string(),
+        request_count: 1,
+        total_tokens: 1_000,
+        ..UsageTrendBucket::default()
+    }];
+
+    let unavailable = all_text(&render_with_size(&app, &data, 180, 42));
+    assert!(unavailable.contains("Cache Write"), "{unavailable}");
+    assert!(unavailable.contains("N/A"), "{unavailable}");
+
+    data.usage.summary_7d.cache_creation_tokens = 1_250;
+    let reported = all_text(&render_with_size(&app, &data, 180, 42));
+    assert!(reported.contains("1.2k"), "{reported}");
+    assert!(!reported.contains("N/A"), "{reported}");
+
+    app.app_type = AppType::Claude;
+    data.usage.summary_7d.cache_creation_tokens = 0;
+    let reported_zero = all_text(&render_with_size(&app, &data, 180, 42));
+    assert!(reported_zero.contains("Cache Write"), "{reported_zero}");
+    assert!(!reported_zero.contains("N/A"), "{reported_zero}");
 }
 
 #[test]
@@ -521,6 +1342,35 @@ fn tui_usage_narrow_width_renders_without_losing_primary_sections() {
 }
 
 #[test]
+fn tui_manual_usage_refresh_status_stays_visible_at_eighty_columns() {
+    let _lang = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d.total_requests = 42;
+    data.pricing.rows.push(ModelPricingRow {
+        model_id: "gpt-5.4".to_string(),
+        display_name: "GPT 5.4".to_string(),
+        recent_request_count: 1,
+        ..ModelPricingRow::default()
+    });
+
+    app.route = Route::Usage;
+    let usage = all_text(&render_with_size(&app, &data, 80, 28));
+    assert!(usage.contains("Refreshing"), "{usage}");
+
+    app.route = Route::UsageLogs;
+    let logs = all_text(&render_with_size(&app, &data, 80, 28));
+    assert!(logs.contains("Refreshing"), "{logs}");
+
+    app.route = Route::Pricing;
+    let pricing = all_text(&render_with_size(&app, &data, 80, 28));
+    assert!(pricing.contains("Refreshing"), "{pricing}");
+}
+
+#[test]
 fn tui_pricing_renders_catalog_and_recent_usage_context() {
     let _lang = use_test_language(Language::English);
 
@@ -555,6 +1405,7 @@ fn tui_pricing_renders_catalog_and_recent_usage_context() {
         recent_unknown_models: 1,
         recent_unmatched_total_tokens: 500,
         recent_unmatched_total_cost_usd: 0.12,
+        ..ModelPricingSnapshot::default()
     };
 
     let all = all_text(&render_with_size(&app, &data, 180, 36));
@@ -681,6 +1532,219 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
     assert!(all.contains("demo-project"), "{all}");
     assert!(all.contains("codex resume abcdef123456"), "{all}");
     assert!(all.contains("Please review"), "{all}");
+}
+
+#[test]
+fn tui_sessions_page_boundary_uses_compact_bottom_border_cta() {
+    use crate::cli::tui::input::{ScrollDirection, WheelGestureId};
+
+    let _lang = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    let _request_id = app.sessions.start_scan("claude".to_string());
+    let scope_epoch = app.sessions.scope_epoch;
+    let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
+    let store =
+        crate::session_manager::paged_manifest::PagedManifestStore::open_at(manifest_dir.path())
+            .expect("manifest fixture store");
+    let mut builder = store
+        .begin_build("claude")
+        .expect("manifest fixture builder");
+    for index in 0..101 {
+        builder
+            .push(crate::session_manager::SessionMeta {
+                provider_id: "claude".to_string(),
+                session_id: format!("session-{index}"),
+                title: Some(format!("Session {index}")),
+                summary: None,
+                project_dir: Some("/tmp/project".to_string()),
+                created_at: Some(1_735_689_600_000 - index),
+                last_active_at: Some(1_735_689_900_000 - index),
+                source_path: Some(format!("/tmp/session-{index}.jsonl")),
+                resume_command: Some(format!("claude --resume session-{index}")),
+            })
+            .expect("manifest fixture row");
+    }
+    let published = builder.publish().expect("publish manifest fixture");
+    assert!(app.sessions.apply_opened_manifest(
+        scope_epoch,
+        "claude",
+        published.generation,
+        published.total_rows,
+        published.first_page.page_index,
+        published.first_page.rows,
+        published.reader,
+    ));
+    app.on_sessions_wheel(
+        ScrollDirection::Down,
+        10_000,
+        WheelGestureId::from_raw(1),
+        &minimal_data(&app.app_type),
+    );
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        180,
+        40,
+    ));
+    assert!(all.contains("next page"), "{all}");
+    assert!(all.contains("Enter"), "{all}");
+    assert!(all.contains("Session 99"), "{all}");
+    assert!(!all.contains("Session 100"), "{all}");
+}
+
+#[test]
+fn tui_usage_log_footer_keeps_current_page_during_prefetch_then_shows_cta() {
+    use crate::cli::tui::input::{ScrollDirection, WheelGestureId};
+
+    let _lang = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Recent;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.logs_total = 205;
+    data.usage.recent_logs = (0..100)
+        .map(|index| UsageLogRow {
+            request_id: format!("p0-{index}"),
+            model: format!("model-{index}"),
+            created_at: 1_000 - index,
+            cursor_rowid: index as i64 + 1,
+            ..UsageLogRow::default()
+        })
+        .collect();
+    app.on_usage_logs_wheel(
+        ScrollDirection::Down,
+        10_000,
+        WheelGestureId::from_raw(1),
+        &data,
+    );
+    assert!(app.usage.log_pager.start_request(
+        1,
+        9,
+        crate::cli::tui::data::UsageLogPageDirection::Older,
+    ));
+
+    let loading = all_text(&render_with_size(&app, &data, 180, 40));
+    assert!(loading.contains("Loading page 2"), "{loading}");
+    assert!(loading.contains("model-99"), "{loading}");
+
+    let page_rows = (0..50)
+        .map(|index| UsageLogRow {
+            request_id: format!("p1-{index}"),
+            model: format!("next-{index}"),
+            created_at: 899 - index,
+            ..UsageLogRow::default()
+        })
+        .collect::<Vec<_>>();
+    let next_cursor = page_rows
+        .last()
+        .map(crate::cli::tui::data::UsageLogCursor::from_row);
+    assert!(app.usage.log_pager.finish_request(
+        1,
+        9,
+        crate::cli::tui::data::UsageLogPageDirection::Older,
+        crate::cli::tui::data::UsageLogPage {
+            rows: page_rows,
+            next_cursor,
+            has_more: false,
+            ..crate::cli::tui::data::UsageLogPage::default()
+        },
+    ));
+
+    let ready = all_text(&render_with_size(&app, &data, 180, 40));
+    assert!(ready.contains("Scroll again"), "{ready}");
+    assert!(ready.contains("next page"), "{ready}");
+    assert!(ready.contains("model-99"), "{ready}");
+    assert!(!ready.contains("next-0"), "{ready}");
+    assert!(ready.contains("150 total rows"), "{ready}");
+    assert!(!ready.contains("205 total rows"), "{ready}");
+}
+
+#[test]
+fn tui_usage_background_prefetch_error_does_not_advertise_enter_retry_on_a_row() {
+    let _lang = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Recent;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.logs_total = 200;
+    data.usage.recent_logs = (0..100)
+        .map(|index| UsageLogRow {
+            request_id: format!("p0-{index}"),
+            model: format!("model-{index}"),
+            created_at: 1_000 - index,
+            cursor_rowid: index + 1,
+            ..UsageLogRow::default()
+        })
+        .collect();
+    app.usage.sync_log_pager(
+        &app.app_type,
+        app.usage.range,
+        &data.usage.recent_logs,
+        data.usage.logs_total,
+    );
+    assert!(app.usage.log_pager.start_request(
+        1,
+        11,
+        crate::cli::tui::data::UsageLogPageDirection::Older,
+    ));
+    assert!(app.usage.log_pager.fail_request(
+        1,
+        11,
+        crate::cli::tui::data::UsageLogPageDirection::Older,
+        "offline".to_string(),
+    ));
+
+    let rendered = all_text(&render_with_size(&app, &data, 180, 40));
+    assert!(!rendered.contains("Enter to retry"), "{rendered}");
+    assert!(rendered.contains("model-0"), "{rendered}");
+
+    let action = app.on_usage_logs_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        &data,
+    );
+    assert!(matches!(
+        action,
+        Action::SwitchRoute(Route::UsageLogDetail { rowid }) if rowid == 1
+    ));
+}
+
+#[test]
+fn tui_usage_log_detail_marks_a_capped_error_message() {
+    let _lang = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogDetail { rowid: 99 };
+    app.focus = Focus::Content;
+    app.usage.remember_log_detail(
+        AppType::Claude,
+        UsageRangePreset::SevenDays,
+        UsageLogRow {
+            request_id: "long-error".to_string(),
+            cursor_rowid: 99,
+            error_message: Some("upstream response failed".to_string()),
+            error_message_truncated: true,
+            ..UsageLogRow::default()
+        },
+    );
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        180,
+        40,
+    ));
+    assert!(rendered.contains("upstream response failed"), "{rendered}");
+    assert!(
+        rendered.contains("display capped at 4096 characters"),
+        "{rendered}",
+    );
 }
 
 #[test]
@@ -992,7 +2056,7 @@ fn tui_sessions_session_and_message_filters_are_independent() {
 }
 
 #[test]
-fn openclaw_tui_form_masks_api_key_in_default_view() {
+fn openclaw_tui_form_shows_api_key_in_default_view() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -1016,38 +2080,797 @@ fn openclaw_tui_form_masks_api_key_in_default_view() {
 
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
 
-    assert!(all.contains("[redacted]"), "{all}");
-    assert!(!all.contains("sk-openclaw-secret"), "{all}");
+    assert!(all.contains("sk-openclaw-secret"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
 }
 
 #[test]
-fn redact_sensitive_json_keeps_non_secret_token_count_fields_visible() {
+fn plaintext_json_preview_preserves_values_regardless_of_field_names() {
     let value = json!({
         "env": {
             "AWS_SECRET_ACCESS_KEY": "aws-secret-value",
-            "AWS_ACCESS_KEY_ID": "AKIA1234567890"
+            "AWS_ACCESS_KEY_ID": "AKIA1234567890",
+            "GITHUB_PAT": "ghp-visible-secret",
+            "DATABASE_URL": "postgres://user:password@example.test/db"
         },
         "models": [
             {
                 "maxTokens": 8192,
+                "max_output_tokens": 4096,
                 "apiKey": "sk-openclaw-secret"
             }
         ],
         "tokenLimit": 12345,
-        "password": "hidden"
+        "auths": { "name": "auths-container-secret" },
+        "oauths": { "maxTokens": 7777 },
+        "pats": { "tokenLimit": 8888 },
+        "unknown": {
+            "name": "unknown-parent-secret",
+            "maxTokens": 9999
+        },
+        "password": "hidden",
+        "cookies": { "session": "cookie-container-secret" },
+        "credentials": { "value": "credential-container-secret" },
+        "passwords": ["password-container-secret"],
+        "api_keys": { "primary": "api-key-container-secret" },
+        "auth_tokens": { "primary": "auth-token-container-secret" },
+        "headers": {
+            "X-Custom-Auth": "custom-header-secret",
+            "User-Agent": "safe-but-hidden"
+        },
+        "env_http_headers": {
+            "Authorization": "AUTH_HEADER_ENV",
+            "nested": {
+                "env": {
+                    "GITHUB_PAT": "nested-env-header-secret"
+                }
+            }
+        },
+        "evil_env_http_headers": {
+            "Authorization": "Bearer disguised-header-secret"
+        },
+        "PRIVATE_KEY": "private-key-value",
+        "SECRET_FOO": "secret-prefix-value",
+        "API_SECRET_VALUE": "secret-middle-value"
     });
 
-    let redacted = super::redact_sensitive_json(&value);
+    let preview = super::bounded_json_preview(&value);
 
+    assert_eq!(preview, value);
     assert_eq!(
-        redacted["env"]["AWS_SECRET_ACCESS_KEY"],
-        json!("[redacted]")
+        preview["env"]["AWS_SECRET_ACCESS_KEY"],
+        json!("aws-secret-value")
     );
-    assert_eq!(redacted["env"]["AWS_ACCESS_KEY_ID"], json!("[redacted]"));
-    assert_eq!(redacted["models"][0]["maxTokens"], json!(8192));
-    assert_eq!(redacted["tokenLimit"], json!(12345));
-    assert_eq!(redacted["models"][0]["apiKey"], json!("[redacted]"));
-    assert_eq!(redacted["password"], json!("[redacted]"));
+    assert_eq!(
+        preview["headers"]["X-Custom-Auth"],
+        json!("custom-header-secret")
+    );
+}
+
+#[test]
+fn plaintext_json_preview_preserves_nonstandard_token_metric_types() {
+    let value = json!({
+        "models": [{
+            "maxTokens": "8192-secret",
+            "minTokens": -1,
+            "inputTokens": 1.5,
+            "outputTokens": true,
+            "promptTokens": { "value": 2 },
+            "completionTokens": [3]
+        }],
+        "tokenLimit": "12345-secret"
+    });
+
+    let preview = super::bounded_json_preview(&value);
+
+    assert_eq!(preview, value);
+}
+
+#[test]
+fn plaintext_json_preview_bounds_all_large_collections() {
+    let models = (0..10_000)
+        .map(|index| {
+            json!({
+                "id": format!("model-{index}"),
+                "apiKey": format!("secret-{index}")
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = json!({
+        "args": (0..10_000).map(|index| format!("arg-secret-{index}")).collect::<Vec<_>>(),
+        "models": models,
+    });
+
+    let preview = super::bounded_json_preview(&value);
+    let rendered_args = preview["args"]
+        .as_array()
+        .expect("args should retain a bounded preview array");
+    let rendered_models = preview["models"]
+        .as_array()
+        .expect("models should retain a bounded preview array");
+
+    assert!(rendered_args.len() <= 129);
+    assert!(rendered_models.len() <= 129);
+    for collection in [rendered_args, rendered_models] {
+        assert!(collection
+            .last()
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.contains("preview truncated")));
+    }
+    let text = serde_json::to_string(&preview).expect("bounded preview should serialize");
+    assert!(text.contains("arg-secret-0"), "{text}");
+    assert!(text.contains("secret-0"), "{text}");
+    assert!(!text.contains("arg-secret-9999"));
+    assert!(!text.contains("secret-9999"));
+    assert!(!text.contains("[redacted]"), "{text}");
+}
+
+#[test]
+fn plaintext_json_preview_charges_depth_cutoff_nodes_to_the_global_budget() {
+    fn node_count(value: &Value) -> usize {
+        1 + match value {
+            Value::Array(items) => items.iter().map(node_count).sum::<usize>(),
+            Value::Object(map) => map.values().map(node_count).sum::<usize>(),
+            _ => 0,
+        }
+    }
+
+    let leaf = Value::Object(
+        (0..128)
+            .map(|index| (format!("key-{index}"), json!(format!("value-{index}"))))
+            .collect(),
+    );
+    let mut value = Value::Array((0..128).map(|_| leaf.clone()).collect());
+    for _ in 0..14 {
+        value = Value::Array(vec![value]);
+    }
+
+    let preview = super::bounded_json_preview(&value);
+
+    assert!(
+        node_count(&preview) <= 2_100,
+        "depth placeholders escaped the global node budget"
+    );
+    assert!(serde_json::to_string(&preview)
+        .expect("preview should serialize")
+        .contains("preview truncated"));
+}
+
+#[test]
+fn codex_auth_preview_preserves_every_leaf_in_plaintext() {
+    let auth = json!({
+        "id": "public-looking-secret",
+        "name": "another-secret",
+        "maxTokens": 8192,
+        "nested": { "enabled": true }
+    });
+
+    let preview = super::bounded_json_preview(&auth);
+
+    assert_eq!(preview, auth);
+}
+
+#[test]
+fn provider_json_preview_renders_all_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "ghp-live-preview-secret";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::JsonPreview;
+    form.extra = json!({
+        "settingsConfig": {
+            "env": {
+                "GITHUB_PAT": secret,
+                "NON_STANDARD_CREDENTIAL_NAME": "another-secret"
+            },
+            "cookies": {
+                "session": "provider-cookie-secret"
+            },
+            "credentials": {
+                "value": "provider-credential-secret"
+            }
+        }
+    });
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains(secret), "{all}");
+    assert!(all.contains("another-secret"), "{all}");
+    assert!(all.contains("provider-cookie-secret"), "{all}");
+    assert!(all.contains("provider-credential-secret"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+}
+
+#[test]
+fn provider_json_preview_omits_million_byte_scalar_while_field_stays_bounded_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::JsonPreview;
+    form.claude_api_key.set("S".repeat(1_000_000));
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(
+        all.contains(texts::tui_preview_omitted_too_large()),
+        "{all}"
+    );
+    assert!(all.contains("SSSSSSSS"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+    assert!(all.len() < 20_000, "provider frame was not bounded");
+}
+
+#[test]
+fn provider_passive_fields_bound_million_byte_classifiers_and_validation() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    for app_type in [AppType::Claude, AppType::Codex, AppType::Hermes] {
+        let mut app = App::new(Some(app_type.clone()));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(app_type);
+        form.focus = FormFocus::Fields;
+        form.name.set(" ".repeat(1_000_000));
+        form.website_url.set("W".repeat(1_000_000));
+        form.claude_base_url.set("C".repeat(1_000_000));
+        form.custom_user_agent.set("U".repeat(1_000_000));
+        form.hermes_api_mode = "H".repeat(1_000_000);
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let all = all_text(&render_with_size(
+            &app,
+            &minimal_data(&app.app_type),
+            160,
+            40,
+        ));
+        assert!(all.len() < 20_000, "passive frame was not bounded");
+    }
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.custom_user_agent.set("U".repeat(1_000_000));
+    form.open_local_proxy_settings_page();
+    app.form = Some(FormState::ProviderAdd(form));
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.len() < 20_000, "validation frame was not bounded");
+}
+
+#[test]
+fn codex_model_catalog_renders_only_the_selected_large_collection_window() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let selected = 9_999usize;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+    form.codex_model_catalog = (0..10_000)
+        .map(|index| crate::cli::tui::form::CodexModelCatalogRow {
+            model: format!("MODEL-{index:05}"),
+            display_name: format!("Display {index:05}"),
+            context_window: "128k".to_string(),
+        })
+        .collect();
+    form.codex_model_catalog[selected].model = format!("SELECTED-CODEX-{}", "X".repeat(1_000_000));
+    form.codex_model_catalog_idx = selected;
+    form.open_codex_model_catalog_page();
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("SELECTED-CODEX"), "{all}");
+    assert!(!all.contains("MODEL-00000"), "{all}");
+}
+
+#[test]
+fn provider_json_preview_omits_oversized_nested_source_and_common_snippet() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    for (extra, common_snippet, include_common_config) in [
+        (
+            json!({
+                "settingsConfig": {
+                    "env": { "TOKEN": "N".repeat(1_000_000) }
+                }
+            }),
+            String::new(),
+            true,
+        ),
+        (json!({}), " ".repeat(1_000_000), true),
+        // The save projection calls `trim()` before it checks this toggle, so
+        // an inactive snippet must still be rejected by the render preflight.
+        (json!({}), " ".repeat(1_000_000), false),
+    ] {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+        form.focus = FormFocus::JsonPreview;
+        form.include_common_config = include_common_config;
+        form.extra = extra;
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let mut data = minimal_data(&app.app_type);
+        data.config.common_snippet = common_snippet;
+        let all = all_text(&render_with_size(&app, &data, 160, 40));
+        assert!(
+            all.contains(texts::tui_preview_omitted_too_large()),
+            "{all}"
+        );
+        assert!(!all.contains("NNNNNNNN"), "{all}");
+    }
+}
+
+#[test]
+fn codex_toml_preview_keeps_all_literal_values_in_plaintext() {
+    let source = r#"experimental_bearer_token = "top-level-secret"
+max_tokens = 8192
+token_limit = 12345
+
+[model_providers.relay]
+experimental_bearer_token = "provider-secret"
+
+[model_providers.relay.http_headers]
+Authorization = "Bearer header-secret"
+X-Custom-Auth = "custom-header-secret"
+User-Agent = "cc-switch-test"
+
+[mcp_servers.demo.env]
+PRIVATE_KEY = "private-env-secret"
+SECRET_FOO = "other-env-secret"
+
+[mcp_servers.demo.env_http_headers]
+Authorization = "AUTH_HEADER_ENV"
+
+[mcp_servers.demo.env_http_headers.nested.env]
+GITHUB_PAT = "nested-env-header-secret"
+
+[evil_env_http_headers]
+Authorization = "Bearer disguised-header-secret"
+
+[cookies]
+session = "cookie-container-secret"
+
+[credentials]
+value = "credential-container-secret"
+
+[passwords]
+primary = "password-container-secret"
+
+[api_keys]
+primary = "api-key-container-secret"
+
+[auth_tokens]
+primary = "auth-token-container-secret"
+"#;
+
+    let preview = super::bounded_toml_preview(source);
+
+    for secret in [
+        "top-level-secret",
+        "provider-secret",
+        "header-secret",
+        "custom-header-secret",
+        "private-env-secret",
+        "other-env-secret",
+        "AUTH_HEADER_ENV",
+        "nested-env-header-secret",
+        "disguised-header-secret",
+        "cookie-container-secret",
+        "credential-container-secret",
+        "password-container-secret",
+        "api-key-container-secret",
+        "auth-token-container-secret",
+    ] {
+        assert!(preview.contains(secret), "{preview}");
+    }
+    assert!(!preview.contains("[redacted]"), "{preview}");
+    assert!(preview.contains("max_tokens = 8192"), "{preview}");
+    assert!(preview.contains("token_limit = 12345"), "{preview}");
+    assert!(preview.contains("cc-switch-test"), "{preview}");
+    assert!(preview.contains("env_http_headers"), "{preview}");
+}
+
+#[test]
+fn codex_toml_preview_keeps_invalid_source_visible_for_correction() {
+    let source = "experimental_bearer_token = \"unterminated-secret";
+    let preview = super::bounded_toml_preview(source);
+
+    assert_eq!(preview, source);
+    assert!(!preview.contains("[redacted]"));
+}
+
+#[test]
+fn codex_toml_preview_omits_oversized_input_before_parsing() {
+    let source = " ".repeat(super::TOML_PREVIEW_MAX_INPUT_BYTES + 1);
+    let preview = super::bounded_toml_preview(&source);
+
+    assert_eq!(preview, texts::tui_preview_omitted_too_large());
+}
+
+#[test]
+fn codex_toml_preview_bounds_known_collections_and_depth() {
+    let models = (0..500)
+        .map(|index| format!("{{ name = \"model-{index}\", apiKey = \"secret-{index}\" }}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let preview = super::bounded_toml_preview(&format!("models = [{models}]"));
+
+    assert!(preview.contains("preview truncated"), "{preview}");
+    assert!(preview.contains("secret-0"), "{preview}");
+    assert!(!preview.contains("secret-499"), "{preview}");
+    assert!(!preview.contains("[redacted]"), "{preview}");
+    assert!(preview.len() <= super::TOML_PREVIEW_MAX_INPUT_BYTES);
+
+    let deep_key = std::iter::repeat_n("models", 20)
+        .collect::<Vec<_>>()
+        .join(".");
+    let deep = super::bounded_toml_preview(&format!("{deep_key} = {{ name = \"deep-secret\" }}"));
+    assert!(deep.contains("preview truncated"), "{deep}");
+    assert!(!deep.contains("deep-secret"), "{deep}");
+    assert!(!deep.contains("[redacted]"), "{deep}");
+}
+
+#[test]
+fn compact_codex_preview_builds_only_the_selected_bounded_section() {
+    let hidden_config_secret = "hidden-config-secret";
+    let hidden_auth_secret = "hidden-auth-secret";
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+    form.id.set("relay");
+    form.name.set("Relay");
+    form.codex_api_key.set("current-api-key-secret");
+    form.extra = json!({
+        "settingsConfig": {
+            "auth": { "CUSTOM_AUTH": hidden_auth_secret },
+            "config": format!(
+                "token = \"{hidden_config_secret}\"\n# {}",
+                "x".repeat(super::TOML_PREVIEW_MAX_INPUT_BYTES)
+            )
+        }
+    });
+
+    let auth = super::codex_auth_preview_text(&form);
+    assert!(auth.contains("CUSTOM_AUTH"), "{auth}");
+    assert!(auth.contains("OPENAI_API_KEY"), "{auth}");
+    assert!(auth.contains(hidden_auth_secret), "{auth}");
+    assert!(auth.contains("current-api-key-secret"), "{auth}");
+    assert!(!auth.contains(hidden_config_secret), "{auth}");
+    assert!(!auth.contains("[redacted]"), "{auth}");
+    assert!(
+        !auth.contains(texts::tui_preview_omitted_too_large()),
+        "{auth}"
+    );
+
+    let config = super::codex_config_preview_text(&form);
+    assert_eq!(config, texts::tui_preview_omitted_too_large());
+    assert!(!config.contains(hidden_config_secret));
+}
+
+#[test]
+fn codex_toml_preview_preserves_values_regardless_of_metric_types_or_containers() {
+    let source = r#"max_tokens = "8192-secret"
+min_tokens = -1
+input_tokens = 1.5
+output_tokens = true
+prompt_tokens = [3]
+token_limit = "12345-secret"
+max_output_tokens = 4096
+
+[unknown]
+max_tokens = 9999
+
+[auths]
+name = "auths-container-secret"
+
+[oauths]
+max_tokens = 7777
+
+[pats]
+token_limit = 8888
+"#;
+
+    let preview = super::bounded_toml_preview(source);
+
+    assert!(preview.contains("max_output_tokens = 4096"), "{preview}");
+    for visible in [
+        "8192-secret",
+        "12345-secret",
+        "auths-container-secret",
+        "max_tokens = 9999",
+        "max_tokens = 7777",
+        "token_limit = 8888",
+    ] {
+        assert!(preview.contains(visible), "{preview}");
+    }
+    assert!(!preview.contains("[redacted]"), "{preview}");
+}
+
+#[test]
+fn bounded_display_helper_keeps_urls_and_commands_in_plaintext() {
+    let url = "https://user:pass@[2001:db8::1]:8443/path/token?secret=value#fragment";
+    assert_eq!(super::bounded_trimmed_text_for_display(url), url);
+    assert_eq!(
+        super::bounded_trimmed_text_for_display("file:///tmp/secret"),
+        "file:///tmp/secret"
+    );
+    assert_eq!(
+        super::bounded_trimmed_text_for_display("/usr/local/bin/node"),
+        "/usr/local/bin/node"
+    );
+    assert_eq!(
+        super::bounded_trimmed_text_for_display(r"C:\tools\node.exe"),
+        r"C:\tools\node.exe"
+    );
+    assert_eq!(
+        super::bounded_trimmed_text_for_display("API_KEY=secret node"),
+        "API_KEY=secret node"
+    );
+    assert_eq!(
+        super::bounded_trimmed_text_for_display("sh -c secret"),
+        "sh -c secret"
+    );
+}
+
+#[test]
+fn codex_provider_form_renders_toml_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "sk-live-preview-secret";
+    let plural_container_secret = "codex-cookie-container-secret";
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+    form.focus = FormFocus::JsonPreview;
+    form.codex_preview_section = crate::cli::tui::form::CodexPreviewSection::Config;
+    form.extra = json!({
+        "settingsConfig": {
+            "auth": {},
+            "config": format!(
+                "experimental_bearer_token = \"{secret}\"\nmodel = \"gpt-5.4\"\n\n[cookies]\nsession = \"{plural_container_secret}\"\n"
+            )
+        }
+    });
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains(secret), "{all}");
+    assert!(all.contains(plural_container_secret), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+    assert!(all.contains("gpt-5.4"), "{all}");
+}
+
+#[test]
+fn usage_query_script_validation_error_is_persistent_beside_preview() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let error = "Script must contain return";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.open_usage_query_page();
+    form.usage_query_enabled = true;
+    form.focus = FormFocus::JsonPreview;
+    form.set_usage_query_field_error(crate::cli::tui::form::UsageQueryField::Script, error);
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        80,
+        35,
+    ));
+    assert!(all.contains(&format!("! {error}")), "{all}");
+}
+
+#[test]
+fn usage_query_custom_script_preview_shows_literals_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "hardcoded-script-secret";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.open_usage_query_page();
+    form.usage_query_enabled = true;
+    form.usage_query_template = crate::cli::tui::form::UsageQueryTemplate::Custom;
+    form.usage_query_api_key.set("");
+    form.usage_query_access_token.set("");
+    form.usage_query_code = format!(
+        "fetch(url, {{ headers: {{ Authorization: \"Bearer {secret}\" }} }}); return {{}};"
+    );
+    form.focus = FormFocus::JsonPreview;
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains(secret), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
+}
+
+#[test]
+fn usage_query_preview_omits_a_million_byte_script_without_unbounded_rendering() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.open_usage_query_page();
+    form.usage_query_enabled = true;
+    form.usage_query_template = crate::cli::tui::form::UsageQueryTemplate::Custom;
+    form.usage_query_code = " ".repeat(1_000_000);
+    form.focus = FormFocus::JsonPreview;
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(
+        all.contains(texts::tui_preview_omitted_too_large()),
+        "{all}"
+    );
+    assert!(!all.contains("[redacted]"), "{all}");
+    assert!(all.len() < 20_000, "script preview frame was not bounded");
+}
+
+#[test]
+fn usage_query_exact_builtin_script_remains_previewable() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.open_usage_query_page();
+    form.usage_query_enabled = true;
+    form.usage_query_template = crate::cli::tui::form::UsageQueryTemplate::General;
+    form.usage_query_code =
+        crate::cli::tui::form::ProviderAddFormState::USAGE_QUERY_GENERAL_PRESET.to_string();
+    form.focus = FormFocus::JsonPreview;
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("response.balance"), "{all}");
+}
+
+#[test]
+fn prompt_long_wrapped_line_keeps_tail_and_cursor_visible() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let content = format!("{}TAIL", "x".repeat(500));
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Prompts;
+    app.focus = Focus::Content;
+    let mut form = PromptMetaFormState::new("long-line".to_string(), "Long line".to_string());
+    form.focus = FormFocus::Content;
+    form.content.replace_text(&content);
+    form.content.cursor_col = content.chars().count();
+    app.form = Some(FormState::PromptMeta(form));
+
+    let data = minimal_data(&app.app_type);
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal created");
+    terminal
+        .draw(|frame| super::render(frame, &app, &data))
+        .expect("draw ok");
+    let cursor = terminal.get_cursor_position().expect("cursor position");
+    let buf = terminal.backend().buffer();
+
+    assert!(all_text(buf).contains("TAIL"), "{}", all_text(buf));
+    assert!(
+        line_at(buf, cursor.y).contains("TAIL"),
+        "{}",
+        line_at(buf, cursor.y)
+    );
+}
+
+#[test]
+fn prompt_passive_render_jumps_a_stale_origin_near_a_distant_cursor() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let line_count = 100_000usize;
+    let content = (0..line_count)
+        .map(|index| {
+            if index + 1 == line_count {
+                "DISTANT-CURSOR-TARGET".to_string()
+            } else {
+                format!("line-{index:05}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut form = PromptMetaFormState::new("large-prompt".to_string(), "Large".to_string());
+    form.focus = FormFocus::Content;
+    form.content.replace_text(content);
+    form.content.cursor_row = line_count - 1;
+    form.content.cursor_col = "DISTANT-CURSOR-TARGET".len();
+    form.content.scroll = 0;
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Prompts;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::PromptMeta(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        80,
+        20,
+    ));
+    assert!(all.contains("DISTANT-CURSOR-TARGET"), "{all}");
+    assert!(!all.contains("line-00000"), "{all}");
 }
 
 #[test]
@@ -1144,8 +2967,9 @@ fn provider_form_fields_show_dashed_divider_before_hermes_rate_limit_delay() {
 }
 
 #[test]
-fn provider_form_usage_query_entry_uses_open_hint_not_value() {
+fn provider_form_disabled_entries_show_only_disabled_while_enabled_entries_keep_summaries() {
     let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
 
     let mut app = App::new(Some(AppType::Claude));
@@ -1156,28 +2980,41 @@ fn provider_form_usage_query_entry_uses_open_hint_not_value() {
     form.focus = FormFocus::Fields;
     form.name.set("Demo Provider");
 
-    // The value column no longer prints the bare "open" label; it stays blank.
-    let (_label, value) = super::provider_field_label_and_value(
+    let (_label, disabled_usage) = super::provider_field_label_and_value(
         &form,
         crate::cli::tui::form::ProviderAddField::UsageQuery,
     );
+    assert_eq!(disabled_usage, texts::disabled());
+
+    form.usage_query_enabled = true;
+    let (_label, enabled_usage) = super::provider_field_label_and_value(
+        &form,
+        crate::cli::tui::form::ProviderAddField::UsageQuery,
+    );
+    assert!(enabled_usage.contains(texts::enabled()), "{enabled_usage}");
     assert!(
-        value.is_empty(),
-        "usage query value column should be blank, got: {value:?}"
+        enabled_usage.contains(form.usage_query_template_value()),
+        "{enabled_usage}"
     );
 
-    // The open affordance moves to the help line under the table.
-    let (hint_line, _) = super::provider_field_editor_line(
-        &form,
-        Some(crate::cli::tui::form::ProviderAddField::UsageQuery),
-        80,
+    let mut codex_form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+    codex_form.id.set("relay");
+    let (_label, disabled_routing) = super::provider_field_label_and_value(
+        &codex_form,
+        crate::cli::tui::form::ProviderAddField::CodexLocalRouting,
     );
-    let hint: String = hint_line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-    assert!(hint.contains("open") || hint.contains("打开"), "{hint}");
+    assert_eq!(disabled_routing, texts::disabled());
+
+    codex_form.toggle_codex_local_routing_enabled();
+    let (_label, enabled_routing) = super::provider_field_label_and_value(
+        &codex_form,
+        crate::cli::tui::form::ProviderAddField::CodexLocalRouting,
+    );
+    assert!(
+        enabled_routing.contains(texts::enabled()),
+        "{enabled_routing}"
+    );
+    assert!(enabled_routing.contains('·'), "{enabled_routing}");
 
     app.form = Some(FormState::ProviderAdd(form));
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
@@ -1486,6 +3323,13 @@ fn line_with<'a>(text: &'a str, needle: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing `{needle}` in:\n{text}"))
 }
 
+fn contains_continuous_divider_row(line: &str) -> bool {
+    line.split('│').any(|segment| {
+        let divider = segment.trim();
+        divider.contains("────") && divider.chars().all(|ch| ch == '─')
+    })
+}
+
 fn column_in_line(line: &str, needle: &str) -> usize {
     line.find(needle)
         .unwrap_or_else(|| panic!("missing `{needle}` in line:\n{line}"))
@@ -1774,6 +3618,44 @@ fn hermes_models_overlay_separates_models_with_dashed_divider() {
         first_model < divider && divider < second_model,
         "expected dashed divider between Hermes models, got:\n{content}"
     );
+}
+
+#[test]
+fn hermes_models_overlay_materializes_only_the_selected_large_collection_window() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let selected = 9_999usize;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Hermes);
+    form.focus = FormFocus::Fields;
+    form.hermes_models = (0..10_000)
+        .map(|index| {
+            json!({
+                "id": format!("HERMES-{index:05}"),
+                "name": format!("Hermes {index:05}"),
+                "context_length": 131_072
+            })
+        })
+        .collect();
+    form.hermes_models[selected]["id"] =
+        json!(format!("SELECTED-HERMES-{}", "X".repeat(1_000_000)));
+    form.hermes_models_field_idx = selected.saturating_mul(3);
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::ProviderAdd(form));
+    app.overlay = Overlay::HermesModelsPicker { editing: false };
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        120,
+        40,
+    ));
+    assert!(all.contains("SELECTED-HERMES"), "{all}");
+    assert!(!all.contains("HERMES-00000"), "{all}");
 }
 
 #[test]
@@ -2081,6 +3963,101 @@ fn settings_page_shows_openclaw_config_dir_override_value() {
 }
 
 #[test]
+#[serial(home_settings)]
+fn settings_page_shows_preferred_editor_and_truncates_long_command() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    let command = format!(
+        "code --wait --reuse-window --profile {}UNSEEN_TAIL",
+        "x".repeat(160)
+    );
+    crate::settings::set_preferred_editor(Some(command)).expect("save preferred editor");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 72, 32);
+    let editor_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("External Editor"))
+        .expect("settings should render the External Editor row");
+
+    assert!(editor_line.contains('…'), "{editor_line}");
+    assert!(!editor_line.contains("UNSEEN_TAIL"), "{editor_line}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn settings_page_shows_external_editor_as_not_set_by_default() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 96, 32);
+    let editor_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("External Editor"))
+        .expect("settings should render the External Editor row");
+
+    assert!(editor_line.contains("Not set"), "{editor_line}");
+    assert!(!editor_line.contains("Automatic"), "{editor_line}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn external_editor_picker_renders_detected_and_fallback_options() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_preferred_editor(Some("code --wait".to_string()))
+        .expect("save preferred editor");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::ExternalEditorPicker {
+        selected: 0,
+        editors: vec![
+            crate::cli::editor::DetectedEditor {
+                label: "Visual Studio Code".to_string(),
+                command: "code --wait".to_string(),
+            },
+            crate::cli::editor::DetectedEditor {
+                label: "Neovim".to_string(),
+                command: "nvim".to_string(),
+            },
+        ],
+    };
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        28,
+    ));
+
+    assert!(all.contains("External Editor"), "{all}");
+    assert!(!all.contains("Automatic"), "{all}");
+    assert!(all.contains("Visual Studio Code  ·  code --wait"), "{all}");
+    assert!(all.contains("Neovim  ·  nvim"), "{all}");
+    assert!(all.contains("Custom command…"), "{all}");
+    assert!(all.contains("Enter=apply"), "{all}");
+    assert!(!all.contains("j/k"), "{all}");
+}
+
+#[test]
 fn settings_page_shows_managed_accounts_summary() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
@@ -2098,6 +4075,202 @@ fn settings_page_shows_managed_accounts_summary() {
         "{all}"
     );
     assert!(all.contains("default@example.com"), "{all}");
+}
+
+#[test]
+fn configuration_page_groups_actions_with_three_unlabeled_dividers() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Config;
+    app.focus = Focus::Content;
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 100, 32);
+    let content = content_text(&app, &buf);
+    let dividers = content
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| contains_continuous_divider_row(line).then_some(idx))
+        .collect::<Vec<_>>();
+    let path = line_index(&content, texts::tui_config_item_show_path());
+    let show_full = line_index(&content, texts::tui_config_item_show_full());
+    let export = line_index(&content, texts::tui_config_item_export());
+    let validate = line_index(&content, texts::tui_config_item_validate());
+    let snippet = line_index(&content, texts::tui_config_item_common_snippet());
+    let cloud_sync = line_index(&content, texts::tui_config_item_cloud_sync());
+    let reset = line_index(&content, texts::tui_config_item_reset());
+
+    assert_eq!(dividers.len(), 3, "{content}");
+    assert!(path < show_full && show_full < dividers[0], "{content}");
+    assert!(dividers[0] < export && validate < dividers[1], "{content}");
+    assert!(
+        dividers[1] < snippet && cloud_sync < dividers[2],
+        "{content}"
+    );
+    assert!(dividers[2] < reset, "{content}");
+}
+
+#[test]
+fn configuration_page_hides_dividers_while_filtering() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Config;
+    app.focus = Focus::Content;
+    app.filter.input.set("config".to_string());
+
+    let content = content_text(
+        &app,
+        &render_with_size(&app, &minimal_data(&app.app_type), 80, 32),
+    );
+
+    assert!(
+        content.contains(texts::tui_config_item_show_full()),
+        "{content}"
+    );
+    assert!(
+        content.contains(texts::tui_config_item_common_snippet()),
+        "{content}"
+    );
+    assert!(
+        content.contains(texts::tui_config_item_reset()),
+        "{content}"
+    );
+    assert!(
+        !content.lines().any(contains_continuous_divider_row),
+        "filtered results should not contain dividers:\n{content}"
+    );
+}
+
+#[test]
+fn configuration_dividers_do_not_shift_narrow_terminal_selection() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Config;
+    app.focus = Focus::Content;
+    app.config_idx = super::config_items_filtered(&app)
+        .iter()
+        .position(|item| matches!(item, ConfigItem::Reset))
+        .expect("Reset missing from visible config items");
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 50, 18);
+    let reset_y = (0..buf.area.height)
+        .find(|y| line_at(&buf, *y).contains(texts::tui_config_item_reset()))
+        .unwrap_or_else(|| panic!("Reset should scroll into view:\n{}", all_text(&buf)));
+    let divider_y = (0..buf.area.height)
+        .filter(|y| contains_continuous_divider_row(&line_at(&buf, *y)))
+        .next_back()
+        .unwrap_or_else(|| panic!("last divider should stay visible:\n{}", all_text(&buf)));
+
+    assert!(
+        (0..buf.area.width).any(|x| buf[(x, reset_y)].modifier.contains(Modifier::REVERSED)),
+        "Reset should own the highlight:\n{}",
+        all_text(&buf)
+    );
+    assert!(
+        (0..buf.area.width).all(|x| !buf[(x, divider_y)].modifier.contains(Modifier::REVERSED)),
+        "divider rows must not be selectable:\n{}",
+        all_text(&buf)
+    );
+}
+
+#[test]
+fn settings_page_groups_items_with_unlabeled_dividers() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 100, 32);
+    let content = content_text(&app, &buf);
+    let dividers = content
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| contains_continuous_divider_row(line).then_some(idx))
+        .collect::<Vec<_>>();
+    let managed_accounts = line_index(&content, texts::tui_settings_managed_accounts_title());
+    let editor = line_index(&content, texts::tui_settings_preferred_editor_label());
+    let visible_apps = line_index(&content, texts::tui_settings_visible_apps_mode_label());
+    let openclaw_dir = line_index(&content, texts::tui_settings_openclaw_config_dir_label());
+    let claude_integration = line_index(&content, texts::enable_claude_plugin_integration_label());
+    let codex_history = line_index(&content, texts::codex_unified_session_history_label());
+    let proxy = line_index(&content, texts::tui_config_item_proxy());
+
+    assert_eq!(dividers.len(), 3, "{content}");
+    assert!(
+        managed_accounts < editor && editor < dividers[0],
+        "{content}"
+    );
+    assert!(
+        dividers[0] < visible_apps && openclaw_dir < dividers[1],
+        "{content}"
+    );
+    assert!(
+        dividers[1] < claude_integration && codex_history < dividers[2],
+        "{content}"
+    );
+    assert!(dividers[2] < proxy, "{content}");
+    assert!(
+        !content.lines().any(|line| {
+            line.contains(texts::tui_settings_header_setting())
+                && line.contains(texts::tui_settings_header_value())
+        }),
+        "table header should be absent:\n{content}"
+    );
+    for label in ["General", "Applications", "Integrations", "System"] {
+        assert!(!content.contains(label), "unexpected {label}:\n{content}");
+    }
+}
+
+#[test]
+fn settings_section_rows_do_not_shift_selection_or_break_narrow_scrolling() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.settings_idx = SettingsItem::ALL
+        .iter()
+        .position(|item| matches!(item, SettingsItem::CheckForUpdates))
+        .expect("CheckForUpdates missing from SettingsItem::ALL");
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 50, 18);
+    let update_value = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let selected_y = (0..buf.area.height)
+        .find(|y| line_at(&buf, *y).contains(&update_value))
+        .unwrap_or_else(|| {
+            panic!(
+                "selected setting should scroll into view:\n{}",
+                all_text(&buf)
+            )
+        });
+    let divider_y = (0..buf.area.height)
+        .filter(|y| contains_continuous_divider_row(&line_at(&buf, *y)))
+        .next_back()
+        .unwrap_or_else(|| panic!("last divider should stay visible:\n{}", all_text(&buf)));
+
+    assert!(
+        (0..buf.area.width).any(|x| buf[(x, selected_y)].modifier.contains(Modifier::REVERSED)),
+        "selected setting should own the highlight:\n{}",
+        all_text(&buf)
+    );
+    assert!(
+        (0..buf.area.width).all(|x| !buf[(x, divider_y)].modifier.contains(Modifier::REVERSED)),
+        "section rows must not be selectable:\n{}",
+        all_text(&buf)
+    );
 }
 
 #[test]
@@ -2434,6 +4607,7 @@ fn openclaw_agents_picker_overlay_marks_current_option_when_editing_existing_fal
     app.overlay = Overlay::OpenClawAgentsFallbackPicker {
         insert_at: 1,
         selected: 1,
+        active: Some(0),
         options: vec![
             app::OpenClawModelOption {
                 value: "demo/fallback-b".to_string(),
@@ -2464,6 +4638,70 @@ fn openclaw_agents_picker_overlay_marks_current_option_when_editing_existing_fal
     assert!(
         all.contains(&buffer_cell_text("Demo Provider / 回退 C")),
         "{all}"
+    );
+}
+
+#[test]
+fn openclaw_agents_picker_bounds_large_options_and_keeps_edge_selections_visible() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let middle = 5_000usize;
+    let last = 9_999usize;
+    let mut options = (0..10_000)
+        .map(|index| app::OpenClawModelOption {
+            value: format!("demo/model-{index:05}"),
+            label: format!("MODEL-{index:05}"),
+        })
+        .collect::<Vec<_>>();
+    options[0].label = "FIRST-OPTION".to_string();
+    options[middle].label = format!("SELECTED-MIDDLE-{}", "X".repeat(2 * 1024 * 1024));
+    options[last].label = "LAST-OPTION".to_string();
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::OpenClawAgentsFallbackPicker {
+        insert_at: 0,
+        selected: 0,
+        active: None,
+        options,
+    };
+
+    for (selected, visible, hidden) in [
+        (0, "FIRST-OPTION", "SELECTED-MIDDLE"),
+        (middle, "SELECTED-MIDDLE", "FIRST-OPTION"),
+        (last, "LAST-OPTION", "SELECTED-MIDDLE"),
+    ] {
+        let Overlay::OpenClawAgentsFallbackPicker {
+            selected: picker_selected,
+            ..
+        } = &mut app.overlay
+        else {
+            panic!("expected OpenClaw model picker");
+        };
+        *picker_selected = selected;
+
+        let all = all_text(&render_with_size(
+            &app,
+            &minimal_data(&app.app_type),
+            100,
+            35,
+        ));
+        assert!(all.contains(visible), "selected={selected}: {all}");
+        assert!(!all.contains(hidden), "selected={selected}: {all}");
+        assert!(all.len() < 20_000, "picker frame was not bounded");
+    }
+
+    let Overlay::OpenClawAgentsFallbackPicker { options, .. } = &app.overlay else {
+        panic!("expected OpenClaw model picker");
+    };
+    assert_eq!(options.len(), 10_000);
+    assert_eq!(
+        options[middle].label.len(),
+        "SELECTED-MIDDLE-".len() + 2 * 1024 * 1024,
+        "display truncation must not mutate the saved option"
     );
 }
 
@@ -2652,6 +4890,9 @@ fn header_keeps_proxy_visible_and_truncates_long_provider_name() {
 fn nav_icons_have_left_padding_from_border() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
+    // This test is specifically about the emoji icon column, so pin emoji
+    // mode rather than depend on the ambient locale (auto-detection).
+    let _icons = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
 
     let app = App::new(Some(AppType::Claude));
     let data = minimal_data(&app.app_type);
@@ -3121,6 +5362,81 @@ fn home_shows_local_env_check_section() {
 }
 
 #[test]
+fn home_updates_local_tool_versions_independently() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    use crate::services::local_env_check::{LocalTool, ToolCheckResult, ToolCheckStatus};
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 0;
+    app.local_env_pending.remove(&LocalTool::Hermes);
+    app.local_env_results.push(ToolCheckResult {
+        tool: LocalTool::Hermes,
+        display_name: LocalTool::Hermes.display_name(),
+        status: ToolCheckStatus::Ok {
+            version: "1.2.3".to_string(),
+        },
+    });
+    let data = minimal_data(&app.app_type);
+
+    let first = all_text(&render(&app, &data));
+    let claude_line = first
+        .lines()
+        .find(|line| line.contains("Claude"))
+        .expect("Claude row should render");
+    let hermes_line = first
+        .lines()
+        .find(|line| line.contains("Hermes"))
+        .expect("Hermes row should render");
+    assert!(claude_line.contains('⠋'), "{claude_line}");
+    assert!(hermes_line.contains('✓'), "{hermes_line}");
+    assert!(first.contains("checking version…"), "{first}");
+    assert!(first.contains("1.2.3"), "{first}");
+
+    app.tick = 1;
+    let second = all_text(&render(&app, &data));
+    let claude_line = second
+        .lines()
+        .find(|line| line.contains("Claude"))
+        .expect("Claude row should render");
+    assert!(claude_line.contains('⠙'), "{claude_line}");
+}
+
+#[test]
+fn home_treats_version_timeout_as_installed_but_unavailable() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    use crate::services::local_env_check::{LocalTool, ToolCheckResult, ToolCheckStatus};
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.stop_local_env_refresh();
+    app.local_env_results.push(ToolCheckResult {
+        tool: LocalTool::Hermes,
+        display_name: LocalTool::Hermes.display_name(),
+        status: ToolCheckStatus::VersionUnavailable {
+            reason: "version check timed out after 10s".to_string(),
+        },
+    });
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render(&app, &data));
+    let hermes_line = all
+        .lines()
+        .find(|line| line.contains("Hermes"))
+        .expect("Hermes row should render");
+    assert!(hermes_line.contains('•'), "{hermes_line}");
+    assert!(!hermes_line.contains('!'), "{hermes_line}");
+    assert!(all.contains("installed · version unavailable"), "{all}");
+    assert!(!all.contains("timed out after 10s"), "{all}");
+}
+
+#[test]
 fn home_shows_webdav_section() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -3187,6 +5503,7 @@ fn home_shows_proxy_dashboard_when_current_app_proxy_is_on() {
     data.proxy.estimated_output_tokens_total = 4_800;
     data.proxy.current_provider = Some("Claude Test Provider".to_string());
     data.proxy.current_app_target = Some(super::super::data::ProxyTargetSnapshot {
+        provider_id: "claude-test".to_string(),
         provider_name: "Claude Test Provider".to_string(),
     });
     data.proxy.last_error = Some("last upstream failure".to_string());
@@ -3427,6 +5744,7 @@ fn home_proxy_dashboard_shows_idle_baseline_without_header_copy() {
     active.proxy.estimated_output_tokens_total = 0;
     active.proxy.default_cost_multiplier = Some("1.25".to_string());
     active.proxy.current_app_target = Some(super::super::data::ProxyTargetSnapshot {
+        provider_id: "claude-test".to_string(),
         provider_name: "Claude Test Provider".to_string(),
     });
 
@@ -3479,6 +5797,7 @@ fn home_proxy_dashboard_stacks_text_on_narrow_terminals() {
     data.proxy.success_rate = Some(91.7);
     data.proxy.uptime_seconds = 3661;
     data.proxy.current_app_target = Some(super::super::data::ProxyTargetSnapshot {
+        provider_id: "claude-test".to_string(),
         provider_name: "Claude Test Provider With A Very Long Name".to_string(),
     });
     data.proxy.last_error = Some(
@@ -3504,6 +5823,7 @@ fn transition_effect_changes_dashboard_cells_during_proxy_start() {
     let mut app = App::new(Some(AppType::Claude));
     app.route = Route::Main;
     app.focus = Focus::Content;
+    app.stop_local_env_refresh();
 
     let off = minimal_data(&app.app_type);
     app.observe_proxy_visual_state(&off);
@@ -3513,6 +5833,7 @@ fn transition_effect_changes_dashboard_cells_during_proxy_start() {
     on.proxy.claude_takeover = true;
     on.proxy.default_cost_multiplier = None;
     on.proxy.current_app_target = Some(super::super::data::ProxyTargetSnapshot {
+        provider_id: "p1".to_string(),
         provider_name: "Demo Provider".to_string(),
     });
 
@@ -3668,6 +5989,7 @@ fn home_proxy_dashboard_hides_internal_target_identifiers() {
     data.proxy.listen_address = "127.0.0.1".to_string();
     data.proxy.listen_port = 3456;
     data.proxy.current_app_target = Some(super::super::data::ProxyTargetSnapshot {
+        provider_id: "claude-test".to_string(),
         provider_name: "Claude Test Provider".to_string(),
     });
 
@@ -3759,6 +6081,68 @@ fn webdav_sync_time_formats_to_minute() {
     assert_eq!(&formatted[7..8], "/");
     assert_eq!(&formatted[10..11], " ");
     assert_eq!(&formatted[13..14], ":");
+}
+
+#[test]
+fn cloud_sync_backend_page_shows_plain_disabled_status_without_suffix() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::ConfigCloudSync;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.config.webdav_sync = Some(crate::settings::WebDavSyncSettings {
+        enabled: false,
+        base_url: "https://dav.example.com".to_string(),
+        ..crate::settings::WebDavSyncSettings::default()
+    });
+    data.config.s3_sync = Some(crate::settings::S3SyncSettings {
+        enabled: true,
+        region: "us-east-1".to_string(),
+        bucket: "sync-bucket".to_string(),
+        access_key_id: "AKID".to_string(),
+        secret_access_key: "SECRET".to_string(),
+        ..crate::settings::S3SyncSettings::default()
+    });
+
+    let content = content_text(&app, &render_with_size(&app, &data, 72, 16));
+    let webdav = line_with(&content, "WebDAV");
+    let s3 = line_with(&content, "S3 Compatible");
+    assert!(webdav.contains("Disabled"), "{content}");
+    assert!(!webdav.contains('·'), "{content}");
+    assert!(s3.contains("Enabled"), "{content}");
+}
+
+#[test]
+fn s3_form_ellipsizes_long_plaintext_and_survives_tiny_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::ConfigS3;
+    app.focus = Focus::Content;
+    let secret = format!("plain-secret-{}-tail", "x".repeat(160));
+    let settings = crate::settings::S3SyncSettings {
+        region: "us-east-1".to_string(),
+        bucket: "sync-bucket".to_string(),
+        access_key_id: "AKID".to_string(),
+        secret_access_key: secret.clone(),
+        ..crate::settings::S3SyncSettings::default()
+    };
+    app.form = Some(FormState::S3Sync(
+        crate::cli::tui::form::S3SyncFormState::from_settings(Some(&settings)),
+    ));
+    let data = minimal_data(&app.app_type);
+
+    let _ = render_with_size(&app, &data, 20, 8);
+    let content = content_text(&app, &render_with_size(&app, &data, 78, 18));
+    assert!(content.contains("plain-secret-"), "{content}");
+    assert!(content.contains('…'), "{content}");
+    assert!(!content.contains(&secret), "{content}");
+    assert!(!content.contains("[redacted]"), "{content}");
 }
 
 #[test]
@@ -4039,7 +6423,8 @@ fn mcp_page_renders_opencode_column() {
             homepage: None,
             docs: None,
             tags: vec![],
-        },
+        }
+        .into(),
     }];
 
     let buf = render(&app, &data);
@@ -4075,7 +6460,8 @@ fn mcp_page_renders_hermes_column() {
             homepage: None,
             docs: None,
             tags: vec![],
-        },
+        }
+        .into(),
     }];
 
     let buf = render(&app, &data);
@@ -4130,7 +6516,8 @@ fn mcp_page_uses_space_toggle_key() {
             homepage: None,
             docs: None,
             tags: vec![],
-        },
+        }
+        .into(),
     }];
     let buf = render(&app, &data);
     let all = all_text(&buf);
@@ -4155,13 +6542,37 @@ fn mcp_page_uses_import_existing_label() {
     assert!(all.contains(texts::tui_mcp_action_import_existing()));
 }
 
+fn global_help_text(app_type: AppType) -> String {
+    let app = App::new(Some(app_type));
+    let data = minimal_data(&app.app_type);
+    crate::cli::tui::help::context_help_for_app(&app, &data)
+        .lines
+        .join("\n")
+}
+
 #[test]
 fn help_text_mentions_import_existing_for_mcp() {
-    let help = texts::tui_help_text();
-
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    // MCP and Skills both generate their import line from the same label
+    // (tui_*_action_import_existing); assert the wording on BOTH lines so a
+    // regression on either page is caught, not just its presence somewhere.
+    let help = global_help_text(AppType::Claude);
+    let mcp_line = help
+        .lines()
+        .find(|line| line.starts_with("- MCP:"))
+        .unwrap_or_else(|| panic!("no MCP help line: {help}"));
+    let skills_line = help
+        .lines()
+        .find(|line| line.starts_with("- Skills:"))
+        .unwrap_or_else(|| panic!("no Skills help line: {help}"));
     assert!(
-        help.contains("i import existing") || help.contains("i 导入已有"),
-        "help text should use the same import wording for MCP and Skills"
+        mcp_line.contains("i Import Existing"),
+        "MCP help line missing shared import wording: {mcp_line}"
+    );
+    assert!(
+        skills_line.contains("i Import Existing"),
+        "Skills help line missing shared import wording: {skills_line}"
     );
 }
 
@@ -4171,7 +6582,7 @@ fn help_text_shows_space_as_the_mcp_toggle_key() {
     for lang in [Language::English, Language::Chinese] {
         let _lang = use_test_language(lang);
         for app_type in [AppType::Claude, AppType::Hermes] {
-            let help = texts::tui_help_text_for_app(&app_type);
+            let help = global_help_text(app_type.clone());
             // The MCP toggle handler listens for Space (content_entities.rs);
             // the help sheet used to claim `x` here.
             assert!(
@@ -4184,6 +6595,34 @@ fn help_text_shows_space_as_the_mcp_toggle_key() {
             );
         }
     }
+}
+
+#[test]
+fn generated_help_swaps_prompts_for_memory_on_hermes() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+
+    let claude = global_help_text(AppType::Claude);
+    assert!(claude.contains("- Prompts: "), "{claude}");
+    assert!(!claude.contains("- Memory:"), "{claude}");
+    assert!(claude.contains("- Config: "), "{claude}");
+
+    let hermes = global_help_text(AppType::Hermes);
+    assert!(hermes.contains("- Memory: "), "{hermes}");
+    assert!(!hermes.contains("- Prompts:"), "{hermes}");
+    // Hermes has no Config route, so no Config line in its help sheet.
+    assert!(!hermes.contains("- Config:"), "{hermes}");
+}
+
+#[test]
+fn generated_usage_help_omits_the_hidden_reverse_tab_alias() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let help = global_help_text(AppType::Claude);
+    // Shift+Tab (reverse metric) is a never-shown alias, so it is skipped in
+    // the generated help even though Tab (forward) is listed.
+    assert!(help.contains("Tab switch metric"), "{help}");
+    assert!(!help.contains("Shift+Tab"), "{help}");
 }
 
 #[test]
@@ -4296,22 +6735,27 @@ fn provider_form_truncates_overflowing_values_with_ellipsis() {
     let mut app = App::new(Some(AppType::Claude));
     app.route = Route::Providers;
     app.focus = Focus::Content;
-    app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(
-        crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
-    ));
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    let long_name = "provider-name-that-is-deliberately-too-long-for-the-value-column";
+    form.name.set(long_name);
+    app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(form));
     let data = minimal_data(&app.app_type);
 
     let buf = render(&app, &data);
     let row = (0..buf.area.height)
         .map(|y| line_at(&buf, y))
-        .find(|line| line.contains("Anthropic Messages"))
-        .expect("api format row should render");
+        .find(|line| line.contains("provider-name-that"))
+        .expect("name row should render");
 
     // The value column is too narrow for the full label at 120 cols; it
     // used to be cut dead ("…Messages (Nativ") with no truncation marker.
     assert!(
         row.contains('…'),
         "cut-off value should end with an ellipsis: {row:?}"
+    );
+    assert!(
+        !row.contains(long_name),
+        "value should be truncated: {row:?}"
     );
 }
 
@@ -4369,7 +6813,8 @@ fn mcp_page_shows_summary_bar() {
                 homepage: None,
                 docs: None,
                 tags: vec![],
-            },
+            }
+            .into(),
         },
         super::super::data::McpRow {
             id: "m2".to_string(),
@@ -4388,7 +6833,8 @@ fn mcp_page_shows_summary_bar() {
                 homepage: None,
                 docs: None,
                 tags: vec![],
-            },
+            }
+            .into(),
         },
     ];
 
@@ -4517,7 +6963,6 @@ fn text_input_overlay_renders_inner_input_box() {
         prompt: "Enter value".to_string(),
         input: TextInput::new("hello".to_string()),
         submit: TextSubmit::ConfigBackupName,
-        secret: false,
     });
     let data = minimal_data(&app.app_type);
 
@@ -5386,6 +7831,7 @@ fn openclaw_config_route_render_uses_dedicated_env_page() {
         vars: std::collections::HashMap::from([
             ("OPENCLAW_ENV_TOKEN".to_string(), json!("demo-token")),
             ("OPENCLAW_ENV_MODE".to_string(), json!("development")),
+            ("MODEL".to_string(), json!("P2_ENV_SECRET")),
         ]),
     });
     data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
@@ -5409,17 +7855,15 @@ fn openclaw_config_route_render_uses_dedicated_env_page() {
     ));
     assert!(all.contains(texts::tui_openclaw_config_env_description()));
     assert!(
-        line_with(&all, "OPENCLAW_ENV_TOKEN").contains("[redacted]"),
-        "{all}"
-    );
-    assert!(
-        !line_with(&all, "OPENCLAW_ENV_TOKEN").contains("demo-token"),
+        line_with(&all, "OPENCLAW_ENV_TOKEN").contains("demo-token"),
         "{all}"
     );
     assert!(
         line_with(&all, "OPENCLAW_ENV_MODE").contains("development"),
         "{all}"
     );
+    assert!(line_with(&all, "MODEL").contains("P2_ENV_SECRET"), "{all}");
+    assert!(!all.contains("[redacted]"), "{all}");
     assert!(
         !has_visible_action_button_or_block(&content, texts::tui_openclaw_tools_save_label()),
         "{all}"
@@ -5443,7 +7887,7 @@ fn openclaw_config_route_render_uses_dedicated_env_page() {
 }
 
 #[test]
-fn openclaw_env_route_render_aligns_redacted_and_plain_values_in_two_columns() {
+fn openclaw_env_route_render_aligns_all_plaintext_values_in_two_columns() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -5462,14 +7906,45 @@ fn openclaw_env_route_render_aligns_redacted_and_plain_values_in_two_columns() {
 
     let buf = render_with_size(&app, &data, 120, 24);
     let content = content_text(&app, &buf);
-    let redacted_line = line_with(&content, "OPENCLAW_ENV_TOKEN");
-    let plain_line = line_with(&content, "MODE");
+    let token_line = line_with(&content, "OPENCLAW_ENV_TOKEN");
+    let mode_line = line_with(&content, "MODE");
 
     assert_eq!(
-        display_column_in_line(redacted_line, "[redacted]"),
-        display_column_in_line(plain_line, "development"),
+        display_column_in_line(token_line, "demo-token"),
+        display_column_in_line(mode_line, "development"),
         "{content}"
     );
+    assert!(!content.contains("[redacted]"), "{content}");
+}
+
+#[test]
+fn openclaw_env_route_bounds_large_entries_to_the_visible_terminal_window() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawEnv;
+    app.focus = Focus::Content;
+
+    let vars = (0..500)
+        .map(|index| {
+            (
+                format!("KEY_{index:04}_{}", "K".repeat(256)),
+                json!(format!("plaintext-{index}-{}", "x".repeat(2_048))),
+            )
+        })
+        .collect();
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig { vars });
+
+    // The smallest render verifies that width/height arithmetic saturates.
+    let _ = render_with_size(&app, &data, 12, 8);
+    let content = content_text(&app, &render_with_size(&app, &data, 80, 12));
+
+    assert!(content.contains("more entries"), "{content}");
+    assert!(content.contains('…'), "{content}");
+    assert!(!content.contains("[redacted]"), "{content}");
 }
 
 #[test]
@@ -5615,7 +8090,7 @@ fn openclaw_env_description_uses_explicit_muted_style() {
 }
 
 #[test]
-fn openclaw_env_route_render_styles_redacted_values_as_protected_tokens() {
+fn openclaw_env_route_render_uses_default_style_for_plaintext_values() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -5634,39 +8109,39 @@ fn openclaw_env_route_render_styles_redacted_values_as_protected_tokens() {
 
     let buf = render_with_size(&app, &data, 120, 24);
     let content = content_text(&app, &buf);
-    let redacted_row_index = line_index(&content, "[redacted]");
-    let redacted_row = line_with(&content, "[redacted]");
-    let redacted_label_col = column_in_line(redacted_row, "OPENCLAW_ENV_TOKEN");
-    let redacted_col = column_in_line(redacted_row, "[redacted]");
-    let redacted_label_cell = content_cell_at(&app, &buf, redacted_label_col, redacted_row_index);
-    let redacted_cell = content_cell_at(&app, &buf, redacted_col, redacted_row_index);
+    let token_row_index = line_index(&content, "OPENCLAW_ENV_TOKEN");
+    let token_row = line_with(&content, "OPENCLAW_ENV_TOKEN");
+    let token_label_col = column_in_line(token_row, "OPENCLAW_ENV_TOKEN");
+    let token_col = column_in_line(token_row, "demo-token");
+    let token_label_cell = content_cell_at(&app, &buf, token_label_col, token_row_index);
+    let token_cell = content_cell_at(&app, &buf, token_col, token_row_index);
 
-    let plain_row_index = line_index(&content, "development");
-    let plain_row = line_with(&content, "development");
-    let plain_label_col = column_in_line(plain_row, "OPENCLAW_ENV_MODE");
-    let plain_col = column_in_line(plain_row, "development");
-    let plain_label_cell = content_cell_at(&app, &buf, plain_label_col, plain_row_index);
-    let plain_cell = content_cell_at(&app, &buf, plain_col, plain_row_index);
+    let second_row_index = line_index(&content, "OPENCLAW_ENV_MODE");
+    let second_row = line_with(&content, "OPENCLAW_ENV_MODE");
+    let second_label_col = column_in_line(second_row, "OPENCLAW_ENV_MODE");
+    let second_value_col = column_in_line(second_row, "development");
+    let second_label_cell = content_cell_at(&app, &buf, second_label_col, second_row_index);
+    let second_value_cell = content_cell_at(&app, &buf, second_value_col, second_row_index);
 
     assert_eq!(
-        cell_style_signature(plain_cell),
-        cell_style_signature(plain_label_cell),
+        cell_style_signature(second_value_cell),
+        cell_style_signature(second_label_cell),
         "{content}"
     );
-    assert_ne!(
-        cell_style_signature(redacted_cell),
-        cell_style_signature(redacted_label_cell),
+    assert_eq!(
+        cell_style_signature(token_cell),
+        cell_style_signature(token_label_cell),
         "{content}"
     );
-    assert_ne!(
-        cell_style_signature(redacted_cell),
-        cell_style_signature(plain_cell),
+    assert_eq!(
+        cell_style_signature(token_cell),
+        cell_style_signature(second_value_cell),
         "{content}"
     );
 }
 
 #[test]
-fn openclaw_env_no_color_keeps_protected_placeholder_visible() {
+fn openclaw_env_no_color_keeps_plaintext_values_visible() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::set("NO_COLOR", "1");
@@ -5684,13 +8159,12 @@ fn openclaw_env_no_color_keeps_protected_placeholder_visible() {
     });
 
     let content = content_text(&app, &render_with_size(&app, &data, 120, 24));
-    let redacted_line = line_with(&content, "OPENCLAW_ENV_TOKEN");
-    let plain_line = line_with(&content, "OPENCLAW_ENV_MODE");
+    let token_line = line_with(&content, "OPENCLAW_ENV_TOKEN");
+    let mode_line = line_with(&content, "OPENCLAW_ENV_MODE");
 
-    assert!(redacted_line.contains("[redacted]"), "{content}");
-    assert!(!redacted_line.contains("demo-token"), "{content}");
-    assert!(plain_line.contains("development"), "{content}");
-    assert!(!plain_line.contains("[redacted]"), "{content}");
+    assert!(token_line.contains("demo-token"), "{content}");
+    assert!(mode_line.contains("development"), "{content}");
+    assert!(!content.contains("[redacted]"), "{content}");
 }
 
 #[test]
@@ -5753,14 +8227,15 @@ fn openclaw_tools_route_shows_edit_and_delete_shortcuts_for_structured_rows() {
 }
 
 #[test]
-fn openclaw_tui_config_routes_redact_sensitive_preserved_fields() {
+fn openclaw_tui_config_routes_show_preserved_fields_in_plaintext() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
-    for (route, expected_label, setup) in [
+    for (route, expected_label, expected_value, setup) in [
         (
             Route::ConfigOpenClawTools,
             texts::tui_openclaw_tools_extra_fields_label(),
+            "tools-secret",
             json!({
                 "demo": {
                     "apiKey": "tools-secret"
@@ -5770,6 +8245,7 @@ fn openclaw_tui_config_routes_redact_sensitive_preserved_fields() {
         (
             Route::ConfigOpenClawAgents,
             texts::tui_openclaw_agents_preserved_fields_label(),
+            "Bearer agents-secret",
             json!({
                 "default": {
                     "Authorization": "Bearer agents-secret"
@@ -5796,9 +8272,52 @@ fn openclaw_tui_config_routes_redact_sensitive_preserved_fields() {
 
         let all = all_text(&render(&app, &data));
         assert!(all.contains(expected_label), "{all}");
-        assert!(all.contains("[redacted]"), "{all}");
-        assert!(!all.contains("tools-secret"), "{all}");
-        assert!(!all.contains("agents-secret"), "{all}");
+        assert!(all.contains(expected_value), "{all}");
+        assert!(!all.contains("[redacted]"), "{all}");
+    }
+}
+
+#[test]
+fn openclaw_tools_and_agents_extreme_preserved_rows_render_in_narrow_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let huge_multiline = "preserved-plaintext-value\n".repeat(10_000);
+
+    let mut tools_app = App::new(Some(AppType::OpenClaw));
+    tools_app.route = Route::ConfigOpenClawTools;
+    tools_app.focus = Focus::Content;
+    let mut tools_data = minimal_data(&tools_app.app_type);
+    tools_data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("coding".to_string()),
+        allow: vec![huge_multiline.clone()],
+        deny: vec![huge_multiline.clone()],
+        extra: std::collections::HashMap::from([(
+            "preserved".to_string(),
+            json!({ "payload": huge_multiline.clone() }),
+        )]),
+    });
+
+    let mut agents_app = App::new(Some(AppType::OpenClaw));
+    agents_app.route = Route::ConfigOpenClawAgents;
+    agents_app.focus = Focus::Content;
+    let mut agents_data = minimal_data(&agents_app.app_type);
+    agents_data.config.openclaw_agents_defaults =
+        Some(crate::openclaw_config::OpenClawAgentsDefaults {
+            model: None,
+            models: None,
+            extra: std::collections::HashMap::from([(
+                "preserved".to_string(),
+                json!({ "payload": huge_multiline }),
+            )]),
+        });
+
+    for (app, data) in [(&tools_app, &tools_data), (&agents_app, &agents_data)] {
+        for (width, height) in [(32, 7), (40, 10), (64, 12)] {
+            let rendered = render_with_size(app, data, width, height);
+            assert_eq!(rendered.area.width, width);
+            assert_eq!(rendered.area.height, height);
+        }
     }
 }
 
@@ -5911,6 +8430,101 @@ fn openclaw_config_warning_banner_wraps_multiple_long_warnings_without_clipping(
         );
         assert!(all.contains("tail-one"), "{all}");
         assert!(all.contains("tail-two"), "{all}");
+    }
+}
+
+#[test]
+fn openclaw_config_extreme_multiline_warnings_keep_narrow_routes_renderable() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let config_path = "/tmp/openclaw/openclaw.json";
+    let huge_multiline = "parse warning segment\n\n".repeat(10_000);
+    let warnings = (0..40)
+        .map(|index| crate::openclaw_config::OpenClawHealthWarning {
+            code: "config_parse_failed".to_string(),
+            message: format!("warning-{index}\n{huge_multiline}"),
+            path: Some(config_path.to_string()),
+        })
+        .collect::<Vec<_>>();
+
+    for (route, description) in [
+        (
+            Route::ConfigOpenClawEnv,
+            texts::tui_openclaw_config_env_description(),
+        ),
+        (
+            Route::ConfigOpenClawTools,
+            texts::tui_openclaw_tools_description(),
+        ),
+        (
+            Route::ConfigOpenClawAgents,
+            texts::tui_openclaw_agents_description(),
+        ),
+    ] {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+
+        let mut data = minimal_data(&app.app_type);
+        data.config.openclaw_config_path = Some(std::path::PathBuf::from(config_path));
+        data.config.openclaw_warnings = Some(warnings.clone());
+        data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig::default());
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig::default());
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults::default());
+
+        for (width, height) in [(32, 7), (40, 10), (64, 12)] {
+            let rendered = render_with_size(&app, &data, width, height);
+            assert_eq!(rendered.area.width, width);
+            assert_eq!(rendered.area.height, height);
+        }
+
+        let content = content_text(&app, &render_with_size(&app, &data, 80, 18));
+        assert!(
+            content.contains(texts::tui_openclaw_config_warning_title()),
+            "{content}"
+        );
+        let description_prefix = description.chars().take(24).collect::<String>();
+        assert!(content.contains(&description_prefix), "{content}");
+    }
+}
+
+#[test]
+fn openclaw_config_extreme_path_does_not_block_warning_matching_or_rendering() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let huge_path = std::path::PathBuf::from("p".repeat(2 * 1024 * 1024));
+    for (route, description) in [
+        (
+            Route::ConfigOpenClawEnv,
+            texts::tui_openclaw_config_env_description(),
+        ),
+        (
+            Route::ConfigOpenClawTools,
+            texts::tui_openclaw_tools_description(),
+        ),
+        (
+            Route::ConfigOpenClawAgents,
+            texts::tui_openclaw_agents_description(),
+        ),
+    ] {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+
+        let mut data = minimal_data(&app.app_type);
+        data.config.openclaw_config_path = Some(huge_path.clone());
+        data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig::default());
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig::default());
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults::default());
+
+        let content = content_text(&app, &render_with_size(&app, &data, 80, 18));
+        let description_prefix = description.chars().take(24).collect::<String>();
+        assert!(content.contains(&description_prefix), "{content}");
     }
 }
 
@@ -6460,7 +9074,7 @@ fn openclaw_tools_route_keeps_selected_rule_visible_in_short_viewport() {
 }
 
 #[test]
-fn openclaw_tools_route_wraps_long_rule_values_in_narrow_width() {
+fn openclaw_tools_route_ellipsizes_long_rule_values_in_narrow_width() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -6490,30 +9104,35 @@ fn openclaw_tools_route_wraps_long_rule_values_in_narrow_width() {
 
     let rendered = render_with_size(&app, &data, 72, 18);
     let content = content_text(&app, &rendered);
-    assert!(
-        content.contains(&buffer_cell_text(tail_fragment)),
-        "{content}"
-    );
+    assert!(content.contains("allow.rules.segment"), "{content}");
+    assert!(content.contains('…'), "{content}");
+    assert!(!content.contains(tail_fragment), "{content}");
 
     let _no_color = EnvGuard::set("NO_COLOR", "1");
     let no_color_rendered = render_with_size(&app, &data, 72, 18);
     let no_color_content = content_text(&app, &no_color_rendered);
     assert!(
-        no_color_content.contains(&buffer_cell_text(tail_fragment)),
+        no_color_content.contains("allow.rules.segment"),
+        "{no_color_content}"
+    );
+    assert!(no_color_content.contains('…'), "{no_color_content}");
+    assert!(
+        !no_color_content.contains(tail_fragment),
         "{no_color_content}"
     );
 
-    let tail_row = line_with(&no_color_content, &buffer_cell_text(tail_fragment));
-    let tail_row_index = line_index(&no_color_content, &buffer_cell_text(tail_fragment));
-    let tail_row_col = display_column_in_line(tail_row, &buffer_cell_text(tail_fragment));
-    let tail_cell = content_cell_at(&app, &no_color_rendered, tail_row_col, tail_row_index);
+    let rule_prefix = buffer_cell_text("allow.rules.segment");
+    let rule_row = line_with(&no_color_content, &rule_prefix);
+    let rule_row_index = line_index(&no_color_content, &rule_prefix);
+    let rule_row_col = display_column_in_line(rule_row, &rule_prefix);
+    let rule_cell = content_cell_at(&app, &no_color_rendered, rule_row_col, rule_row_index);
     let add_row = line_with(&no_color_content, &buffer_cell_text("+ Add allow rule"));
     let add_row_index = line_index(&no_color_content, &buffer_cell_text("+ Add allow rule"));
     let add_row_col = display_column_in_line(add_row, &buffer_cell_text("+ Add allow rule"));
     let add_cell = content_cell_at(&app, &no_color_rendered, add_row_col, add_row_index);
 
     assert!(
-        tail_cell.modifier.contains(Modifier::REVERSED),
+        rule_cell.modifier.contains(Modifier::REVERSED),
         "{no_color_content}"
     );
     assert!(
@@ -7331,6 +9950,39 @@ fn workspace_route_render_wraps_long_summary_and_daily_memory_values_in_narrow_w
     assert!(content.contains(long_workspace_tail), "{content}");
     assert!(content.contains(long_memory_tail), "{content}");
     assert!(content.contains(long_preview_tail), "{content}");
+}
+
+#[test]
+fn workspace_route_extreme_wrapped_heights_render_in_narrow_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawWorkspace;
+    app.focus = Focus::Content;
+    app.workspace_idx = 0;
+
+    let huge_component = "workspace-height-segment/".repeat(10_000);
+    let huge_preview = "daily-memory-height-segment\n".repeat(10_000);
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_workspace = OpenClawWorkspaceSnapshot {
+        directory_path: std::path::PathBuf::from(format!("/{huge_component}")),
+        file_exists: std::collections::HashMap::from([(ALLOWED_FILES[0].to_string(), true)]),
+        daily_memory_files: vec![DailyMemoryFileInfo {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            preview: huge_preview,
+        }],
+    };
+
+    for (width, height) in [(32, 7), (40, 10), (64, 12), (72, 17)] {
+        let rendered = render_with_size(&app, &data, width, height);
+        assert_eq!(rendered.area.width, width);
+        assert_eq!(rendered.area.height, height);
+    }
 }
 
 #[test]
@@ -8497,7 +11149,7 @@ fn openclaw_agents_route_render_keeps_runtime_rows_single_line_when_space_is_tig
 }
 
 #[test]
-fn openclaw_agents_route_wraps_runtime_notes_without_wrapping_value_rows() {
+fn openclaw_agents_route_wraps_runtime_notes_and_shows_unknown_preview_values() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -8545,13 +11197,16 @@ fn openclaw_agents_route_wraps_runtime_notes_without_wrapping_value_rows() {
         &buffer_cell_text(texts::tui_openclaw_agents_max_concurrent()),
     );
     let warning_tail = line_index(&content, "timeoutSeconds.");
-    let json_tail = line_index(&content, "after wrap\"");
+    let unknown_line = line_index(&content, "visibilityNote");
+    let retained_value_line = line_index(&content, "retained after wrap");
 
     assert!(warning_tail < workspace_line, "{content}");
     assert_eq!(timeout_line, workspace_line + 1, "{content}");
     assert_eq!(context_line, timeout_line + 1, "{content}");
     assert_eq!(max_line, context_line + 1, "{content}");
-    assert!(json_tail > max_line, "{content}");
+    assert!(unknown_line > max_line, "{content}");
+    assert!(retained_value_line >= unknown_line, "{content}");
+    assert!(!content.contains("[redacted]"), "{content}");
 }
 
 #[test]
@@ -8910,14 +11565,50 @@ fn workspace_daily_memory_route_render_shows_search_results_when_query_is_active
 }
 
 #[test]
-fn provider_form_model_field_enter_hint_uses_fetch_model() {
+fn provider_form_model_field_hints_enter_edit_and_f_fetch() {
     let keys =
         super::add_form_key_items(FormFocus::Fields, false, Some(ProviderAddField::CodexModel));
     let enter_label = keys
         .iter()
         .find(|(key, _label)| *key == "Enter")
         .map(|(_key, label)| *label);
-    assert_eq!(enter_label, Some(texts::tui_key_fetch_model()));
+    assert_eq!(enter_label, Some(texts::tui_key_edit_mode()));
+    assert_eq!(
+        keys.iter()
+            .find(|(key, _label)| *key == "f")
+            .map(|(_key, label)| *label),
+        Some(texts::tui_key_fetch_model())
+    );
+}
+
+#[test]
+fn form_toggle_key_bars_show_enter_without_space() {
+    let cases = [
+        super::add_form_key_items(
+            FormFocus::Fields,
+            false,
+            Some(ProviderAddField::IncludeCommonConfig),
+        ),
+        super::quick_config_form_key_items(),
+        super::usage_query_form_key_items(
+            FormFocus::Fields,
+            false,
+            Some(UsageQueryField::Enabled),
+            false,
+        ),
+    ];
+
+    for keys in cases {
+        assert!(
+            keys.iter()
+                .any(|(key, label)| { *key == "Enter" && *label == texts::tui_key_toggle() }),
+            "missing Enter toggle hint: {keys:?}"
+        );
+        assert!(
+            keys.iter().all(|(key, _)| *key != "Space"),
+            "form toggle should not advertise Space: {keys:?}"
+        );
+    }
 }
 
 #[test]
@@ -9012,7 +11703,7 @@ fn openclaw_provider_list_key_bar_uses_common_provider_actions() {
 }
 
 #[test]
-fn failover_provider_list_key_bar_hides_move_hint_and_keeps_common_switch_hint() {
+fn failover_provider_list_key_bar_hides_switch_while_queue_controls_routing() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -9029,7 +11720,7 @@ fn failover_provider_list_key_bar_hides_move_hint_and_keeps_common_switch_hint()
     data.proxy.auto_failover_enabled = true;
     let enabled_text = all_text(&render_with_size(&app, &data, 180, 40));
     let enabled_keys = line_with(&enabled_text, "manage failover");
-    assert!(enabled_keys.contains("Space"), "{enabled_keys}");
+    assert!(!enabled_keys.contains("Space"), "{enabled_keys}");
     assert!(!enabled_keys.contains("</>"), "{enabled_keys}");
 }
 
@@ -9099,18 +11790,23 @@ fn failover_queue_overlay_renders_enabled_state_and_toggle_hint() {
     let mut app = App::new(Some(AppType::Claude));
     app.route = Route::Providers;
     app.focus = Focus::Content;
-    app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+    app.overlay = Overlay::FailoverQueueManager {
+        selected_provider_id: Some("p1".to_string()),
+    };
     let mut data = minimal_data(&app.app_type);
     data.proxy.auto_failover_enabled = true;
 
     let all = all_text(&render(&app, &data));
 
-    assert!(all.contains("Automatic failover: enabled"), "{all}");
+    assert!(all.contains("Auto: on"), "{all}");
     assert!(all.contains("f auto failover"), "{all}");
-    // The reorder hint must survive the width-degrade logic in English.
-    assert!(all.contains("</>/K/J move"), "{all}");
+    assert!(all.contains("Enter add/remove"), "{all}");
+    assert!(all.contains("Ctrl+↑↓ move"), "{all}");
+    assert!(!all.contains("K/J move"), "{all}");
     assert!(
-        all.contains("Auto failover uses only checked providers"),
+        all.lines().any(|line| line.contains("Demo Provider")
+            && line.contains("not queued")
+            && !line.contains("https://example.com")),
         "{all}"
     );
 }
@@ -9123,15 +11819,110 @@ fn failover_queue_overlay_renders_disabled_state_and_toggle_hint() {
     let mut app = App::new(Some(AppType::Claude));
     app.route = Route::Providers;
     app.focus = Focus::Content;
-    app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+    app.overlay = Overlay::FailoverQueueManager {
+        selected_provider_id: Some("p1".to_string()),
+    };
     let mut data = minimal_data(&app.app_type);
     data.proxy.auto_failover_enabled = false;
 
     let all = all_text(&render(&app, &data));
 
-    assert!(all.contains("Automatic failover: disabled"), "{all}");
+    assert!(all.contains("Auto: off"), "{all}");
     assert!(all.contains("f auto failover"), "{all}");
-    assert!(all.contains("Direct provider selection is used"), "{all}");
+    assert!(all.contains("not queued"), "{all}");
+}
+
+#[test]
+fn failover_queue_overlay_renders_active_target_and_honest_health_states() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::FailoverQueueManager {
+        selected_provider_id: Some("active".to_string()),
+    };
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.auto_failover_enabled = true;
+    data.providers.rows = vec![
+        failover_provider_row("active", "Active Provider", false, true, Some(0)),
+        failover_provider_row("unknown", "Unknown Provider", false, true, Some(1)),
+        failover_provider_row("normal", "Normal Provider", false, true, Some(2)),
+        failover_provider_row("warning", "Warning Provider", false, true, Some(3)),
+        failover_provider_row("unhealthy", "Unhealthy Provider", false, true, Some(4)),
+        failover_provider_row("unused", "Unused Provider", false, false, None),
+    ];
+    data.proxy.current_app_target = Some(ProxyTargetSnapshot {
+        provider_id: "active".to_string(),
+        provider_name: "Stale Display Name".to_string(),
+    });
+    std::sync::Arc::make_mut(&mut data.proxy.provider_health).insert(
+        "normal".to_string(),
+        ProviderHealthSnapshot {
+            is_healthy: true,
+            consecutive_failures: 0,
+        },
+    );
+    std::sync::Arc::make_mut(&mut data.proxy.provider_health).insert(
+        "warning".to_string(),
+        ProviderHealthSnapshot {
+            is_healthy: true,
+            consecutive_failures: 2,
+        },
+    );
+    std::sync::Arc::make_mut(&mut data.proxy.provider_health).insert(
+        "unhealthy".to_string(),
+        ProviderHealthSnapshot {
+            is_healthy: false,
+            consecutive_failures: 4,
+        },
+    );
+
+    let all = all_text(&render_with_size(&app, &data, 140, 36));
+
+    assert!(all.contains("Active target: P1 Active Provider"), "{all}");
+    assert!(all.contains("target"), "{all}");
+    assert!(all.contains("no record"), "{all}");
+    assert!(all.contains("normal"), "{all}");
+    assert!(all.contains("failures (2)"), "{all}");
+    assert!(all.contains("unhealthy (4)"), "{all}");
+    assert!(all.contains("not queued"), "{all}");
+}
+
+#[test]
+fn failover_queue_overlay_keeps_priority_name_and_status_on_narrow_terminals() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::FailoverQueueManager {
+        selected_provider_id: Some("p1".to_string()),
+    };
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].provider.in_failover_queue = true;
+    data.providers.rows[0].provider.sort_index = Some(0);
+    std::sync::Arc::make_mut(&mut data.proxy.provider_health).insert(
+        "p1".to_string(),
+        ProviderHealthSnapshot {
+            is_healthy: false,
+            consecutive_failures: 4,
+        },
+    );
+
+    let all = all_text(&render_with_size(&app, &data, 64, 22));
+
+    assert!(all.contains("P1"), "{all}");
+    assert!(all.contains("Demo"), "{all}");
+    assert!(all.contains("unhealthy"), "{all}");
+    assert!(
+        all.lines().any(|line| line.contains("Demo")
+            && line.contains("unhealthy")
+            && !line.contains("https://example.com")),
+        "{all}"
+    );
 }
 
 #[test]
@@ -9187,7 +11978,8 @@ fn openclaw_provider_list_key_bar_shows_edit_for_tracked_provider() {
     let buf = render(&app, &minimal_data(&app.app_type));
     let all = all_text(&buf);
 
-    assert!(all.contains("e edit"), "{all}");
+    assert!(all.contains("Enter edit"), "{all}");
+    assert!(!all.contains("e edit"), "{all}");
     assert!(all.contains("x set default"), "{all}");
 }
 
@@ -9210,6 +12002,7 @@ fn hermes_provider_list_key_bar_hides_edit_delete_for_read_only_provider() {
 
     let keys = line_with(&all, "Space add/remove");
     assert!(keys.contains("t test"), "{keys}");
+    assert!(!keys.contains("Enter edit"), "{keys}");
     assert!(!keys.contains("e edit"), "{keys}");
     assert!(!keys.contains("d delete"), "{keys}");
 }
@@ -9334,4 +12127,99 @@ fn openclaw_provider_list_key_bar_localizes_actions_in_chinese() {
     assert!(!compact.contains("s添加/移除"), "{all}");
     assert!(!all.contains("add/remove"), "{all}");
     assert!(!all.contains("set default"), "{all}");
+}
+
+#[test]
+fn openclaw_tools_render_windows_ten_thousand_rules_without_mutating_full_values() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::app::OpenClawToolsFormState::from_snapshot(None);
+    form.profile = Some("coding".to_string());
+    form.allow = (0..10_000)
+        .map(|index| format!("allow-{index:05}"))
+        .collect();
+    form.deny = (0..10_000)
+        .map(|index| format!("deny-{index:05}"))
+        .collect();
+    form.extra
+        .insert("large".to_string(), json!("x".repeat(1_000_000)));
+    form.section = crate::cli::tui::app::OpenClawToolsSection::Deny;
+    form.row = 9_999;
+    app.openclaw_tools_form = Some(form);
+
+    let data = minimal_data(&app.app_type);
+    let content = content_text(&app, &render_with_size(&app, &data, 72, 15));
+
+    assert!(content.contains("deny-09999"), "{content}");
+    assert!(!content.contains("deny-00000"), "{content}");
+    let form = app
+        .openclaw_tools_form
+        .as_ref()
+        .expect("tools form retained");
+    assert_eq!(form.allow.len(), 10_000);
+    assert_eq!(form.deny.len(), 10_000);
+    assert_eq!(
+        form.extra
+            .get("large")
+            .and_then(Value::as_str)
+            .map(str::len),
+        Some(1_000_000)
+    );
+}
+
+#[test]
+fn openclaw_agents_render_windows_ten_thousand_fallbacks_and_borrows_huge_extra() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::app::OpenClawAgentsFormState::from_snapshot(None);
+    form.primary_model = "provider/primary".to_string();
+    form.fallbacks = (0..10_000)
+        .map(|index| format!("fallback-{index:05}"))
+        .collect();
+    form.model_extra.insert(
+        "large-model-extra".to_string(),
+        json!("m".repeat(1_000_000)),
+    );
+    form.defaults_extra.insert(
+        "large-default-extra".to_string(),
+        json!("d".repeat(1_000_000)),
+    );
+    form.section = crate::cli::tui::app::OpenClawAgentsSection::FallbackModels;
+    form.row = 9_999;
+    app.openclaw_agents_form = Some(form);
+
+    let data = minimal_data(&app.app_type);
+    let content = content_text(&app, &render_with_size(&app, &data, 80, 15));
+
+    assert!(content.contains("fallback-09999"), "{content}");
+    assert!(!content.contains("fallback-00000"), "{content}");
+    let form = app
+        .openclaw_agents_form
+        .as_ref()
+        .expect("agents form retained");
+    assert_eq!(form.fallbacks.len(), 10_000);
+    assert_eq!(
+        form.model_extra
+            .get("large-model-extra")
+            .and_then(Value::as_str)
+            .map(str::len),
+        Some(1_000_000)
+    );
+    assert_eq!(
+        form.defaults_extra
+            .get("large-default-extra")
+            .and_then(Value::as_str)
+            .map(str::len),
+        Some(1_000_000)
+    );
 }

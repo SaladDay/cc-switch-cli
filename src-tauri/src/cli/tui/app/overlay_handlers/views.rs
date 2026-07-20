@@ -374,7 +374,6 @@ impl App {
                     } else {
                         TextSubmit::ModelRouteAddPattern
                     },
-                    secret: false,
                 });
                 Action::None
             }
@@ -419,7 +418,6 @@ impl App {
                                 provider_id,
                             }
                         },
-                        secret: false,
                     });
                 }
                 Action::None

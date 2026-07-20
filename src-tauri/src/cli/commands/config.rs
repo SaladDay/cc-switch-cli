@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::app_config::AppType;
 use crate::cli::commands::config_common;
 use crate::cli::commands::config_openclaw;
+use crate::cli::commands::config_s3;
 use crate::cli::commands::config_webdav;
 use crate::cli::i18n::texts;
 use crate::cli::ui::{error, highlight, info, success, to_json};
@@ -60,6 +61,10 @@ pub enum ConfigCommand {
     /// Manage WebDAV sync settings and operations
     #[command(name = "webdav", subcommand)]
     WebDav(config_webdav::WebDavCommand),
+
+    /// Manage S3-compatible sync settings and operations
+    #[command(name = "s3", subcommand)]
+    S3(config_s3::S3Command),
 }
 
 pub fn execute(cmd: ConfigCommand, app: Option<AppType>) -> Result<(), AppError> {
@@ -77,6 +82,7 @@ pub fn execute(cmd: ConfigCommand, app: Option<AppType>) -> Result<(), AppError>
         ConfigCommand::Common(cmd) => config_common::execute(cmd, app.unwrap_or(AppType::Claude)),
         ConfigCommand::OpenClaw(cmd) => config_openclaw::execute(cmd),
         ConfigCommand::WebDav(cmd) => config_webdav::execute(cmd),
+        ConfigCommand::S3(cmd) => config_s3::execute(cmd),
     }
 }
 

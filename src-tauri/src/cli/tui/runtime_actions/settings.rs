@@ -204,6 +204,22 @@ pub(super) fn set_openclaw_config_dir(
     Ok(())
 }
 
+pub(super) fn set_preferred_editor(
+    ctx: &mut RuntimeActionContext<'_>,
+    command: Option<String>,
+) -> Result<(), AppError> {
+    if let Some(command) = command.as_deref() {
+        crate::cli::editor::validate_preferred_editor_command(command)?;
+    }
+
+    crate::settings::set_preferred_editor(command)?;
+    ctx.app.push_toast(
+        texts::tui_toast_preferred_editor_saved(),
+        super::super::app::ToastKind::Success,
+    );
+    Ok(())
+}
+
 pub(super) fn set_codex_unified_session_history(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,

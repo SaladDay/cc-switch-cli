@@ -322,12 +322,16 @@ fn migrate_legacy_codex_config_converts_flat_format() {
     let result = super::migrate_legacy_codex_config(legacy, &provider)
         .expect("legacy format should trigger migration");
     assert!(
-        result.contains("model_provider = \"my_provider\""),
-        "should set model_provider from provider id: {result}"
+        result.contains("model_provider = \"custom\""),
+        "should use the stable custom provider bucket: {result}"
     );
     assert!(
-        result.contains("[model_providers.my_provider]"),
-        "should create model_providers section: {result}"
+        result.contains("[model_providers.custom]"),
+        "should create the stable model_providers section: {result}"
+    );
+    assert!(
+        result.contains("name = \"My Provider\""),
+        "should keep the provider display name: {result}"
     );
     assert!(
         result.contains("base_url = \"https://custom.com/v1\""),

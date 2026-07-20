@@ -241,6 +241,17 @@ pub(crate) fn build_anthropic_usage_from_responses(usage: Option<&Value>) -> Val
         }
     }
 
+    let nested_cache_write = u
+        .pointer("/input_tokens_details/cache_write_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            u.pointer("/prompt_tokens_details/cache_write_tokens")
+                .and_then(|v| v.as_u64())
+        });
+    if let Some(cache_write) = nested_cache_write {
+        result["cache_creation_input_tokens"] = json!(cache_write);
+    }
+
     if let Some(v) = u.get("cache_read_input_tokens") {
         result["cache_read_input_tokens"] = v.clone();
     }
@@ -758,6 +769,22 @@ mod tests {
         assert_eq!(result["input_tokens"], json!(20));
         assert_eq!(result["output_tokens"], json!(50));
         assert_eq!(result["cache_read_input_tokens"], json!(80));
+    }
+
+    #[test]
+    fn responses_usage_maps_nested_cache_write_tokens() {
+        let result = build_anthropic_usage_from_responses(Some(&json!({
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "input_tokens_details": {
+                "cached_tokens": 30,
+                "cache_write_tokens": 20
+            }
+        })));
+
+        assert_eq!(result["input_tokens"], json!(50));
+        assert_eq!(result["cache_read_input_tokens"], json!(30));
+        assert_eq!(result["cache_creation_input_tokens"], json!(20));
     }
 
     #[test]

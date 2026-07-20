@@ -185,13 +185,14 @@ async fn stream_openai_chat_logs_request_with_session_id_and_usage() {
     assert_eq!(log_values[5], "gpt-5.2");
     assert_eq!(log_values[6], "11");
     assert_eq!(log_values[7], "7");
-    assert_eq!(log_values[10], "0.00001925");
-    assert_eq!(log_values[11], "0.000098");
-    assert_eq!(log_values[14], "0.0002345");
-    assert_eq!(log_values[18], "200");
-    assert_eq!(log_values[20], "claude-stream-session");
-    assert_eq!(log_values[22], "1");
-    assert_eq!(log_values[23], "2");
+    assert_eq!(log_values[10], "2");
+    assert_eq!(log_values[11], "0.00001925");
+    assert_eq!(log_values[12], "0.000098");
+    assert_eq!(log_values[15], "0.0002345");
+    assert_eq!(log_values[19], "200");
+    assert_eq!(log_values[21], "claude-stream-session");
+    assert_eq!(log_values[23], "1");
+    assert_eq!(log_values[24], "2");
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();

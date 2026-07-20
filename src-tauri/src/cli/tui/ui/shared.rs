@@ -22,6 +22,167 @@ pub(super) fn selection_style(theme: &super::theme::Theme) -> Style {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaginationFooterStatus {
+    Idle,
+    NextBoundary,
+    PreviousBoundary,
+    PreparingNext,
+    NextReady,
+    LoadingPage(usize),
+    LoadError,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PaginationFooter {
+    pub page: usize,
+    pub start: usize,
+    pub end: usize,
+    pub total: usize,
+    pub status: PaginationFooterStatus,
+}
+
+/// Adds pagination state to a list's bottom border without consuming a row.
+/// The action is kept when space is tight; the range label is intentionally
+/// dropped first so narrow terminals still expose the next available input.
+pub(super) fn with_pagination_footer<'a>(
+    mut block: Block<'a>,
+    area_width: u16,
+    footer: PaginationFooter,
+    theme: &super::theme::Theme,
+    tick: u64,
+) -> Block<'a> {
+    let available = area_width.saturating_sub(2) as usize;
+    if available == 0 || footer.total == 0 {
+        return block;
+    }
+
+    let range_full =
+        texts::tui_pagination_range(footer.page.max(1), footer.start, footer.end, footer.total);
+    let range_compact = texts::tui_pagination_range_compact(
+        footer.page.max(1),
+        footer.start,
+        footer.end,
+        footer.total,
+    );
+    let range = fit_owned_label(&[range_full, range_compact], available);
+    let action = pagination_action_label(footer, available, tick, theme);
+
+    match (range, action) {
+        (Some(range), Some((action, action_style)))
+            if padded_width(&range)
+                .saturating_add(padded_width(&action))
+                .saturating_add(1)
+                <= available =>
+        {
+            block = block
+                .title_bottom(
+                    Line::styled(format!(" {range} "), Style::default().fg(theme.dim))
+                        .alignment(Alignment::Left),
+                )
+                .title_bottom(
+                    Line::styled(format!(" {action} "), action_style).alignment(Alignment::Right),
+                );
+        }
+        (_, Some((action, action_style))) => {
+            block = block.title_bottom(
+                Line::styled(format!(" {action} "), action_style).alignment(Alignment::Right),
+            );
+        }
+        (Some(range), None) => {
+            block = block.title_bottom(
+                Line::styled(format!(" {range} "), Style::default().fg(theme.dim))
+                    .alignment(Alignment::Left),
+            );
+        }
+        (None, None) => {}
+    }
+
+    block
+}
+
+fn pagination_action_label(
+    footer: PaginationFooter,
+    available: usize,
+    tick: u64,
+    theme: &super::theme::Theme,
+) -> Option<(String, Style)> {
+    let (labels, style): (Vec<String>, Style) = match footer.status {
+        PaginationFooterStatus::Idle => return None,
+        PaginationFooterStatus::NextBoundary => (
+            vec![
+                texts::tui_pagination_next_trigger().to_string(),
+                texts::tui_pagination_next_trigger_compact().to_string(),
+                texts::tui_pagination_next_trigger_minimal().to_string(),
+            ],
+            selection_style(theme),
+        ),
+        PaginationFooterStatus::PreviousBoundary => (
+            vec![
+                texts::tui_pagination_previous_trigger().to_string(),
+                texts::tui_pagination_previous_trigger_compact().to_string(),
+                texts::tui_pagination_previous_trigger_minimal().to_string(),
+            ],
+            selection_style(theme),
+        ),
+        PaginationFooterStatus::PreparingNext => (
+            vec![format!(
+                "{} {}",
+                pagination_spinner(tick),
+                texts::tui_pagination_preparing_next()
+            )],
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        PaginationFooterStatus::NextReady => (
+            vec![format!("> {}", texts::tui_pagination_next_ready())],
+            Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
+        ),
+        PaginationFooterStatus::LoadingPage(page) => (
+            vec![format!(
+                "{} {}",
+                pagination_spinner(tick),
+                texts::tui_pagination_loading_page(page)
+            )],
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        PaginationFooterStatus::LoadError => (
+            vec![format!("! {}", texts::tui_pagination_load_failed())],
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        ),
+        PaginationFooterStatus::End => (
+            vec![format!("[end] {}", texts::tui_pagination_end(footer.total))],
+            Style::default().fg(theme.dim),
+        ),
+    };
+    let label = fit_owned_label(&labels, available)?;
+    Some((label, style))
+}
+
+fn pagination_spinner(tick: u64) -> &'static str {
+    match tick % 4 {
+        0 => "⠋",
+        1 => "⠙",
+        2 => "⠹",
+        _ => "⠸",
+    }
+}
+
+fn fit_owned_label(labels: &[String], available: usize) -> Option<String> {
+    labels
+        .iter()
+        .find(|label| padded_width(label) <= available)
+        .cloned()
+}
+
+fn padded_width(label: &str) -> usize {
+    UnicodeWidthStr::width(label).saturating_add(2)
+}
+
 pub(super) fn inactive_chip_style(theme: &super::theme::Theme) -> Style {
     if theme.no_color {
         Style::default()
@@ -85,25 +246,105 @@ pub(super) fn truncate_to_display_width(text: &str, width: u16) -> String {
         return String::new();
     }
 
-    if UnicodeWidthStr::width(text) <= width {
-        return text.to_string();
-    }
-
-    if width == 1 {
-        return "…".to_string();
-    }
-
+    const MAX_CHARS_PER_COLUMN: usize = 4;
+    const EXTRA_ZERO_WIDTH_CHARS: usize = 16;
+    let max_chars = width
+        .saturating_mul(MAX_CHARS_PER_COLUMN)
+        .saturating_add(EXTRA_ZERO_WIDTH_CHARS);
     let mut out = String::new();
     let mut used = 0usize;
-    for c in text.chars() {
+    let mut end_byte = 0usize;
+    let mut truncated = false;
+    for (count, (byte, c)) in text.char_indices().enumerate() {
+        if count >= max_chars {
+            truncated = true;
+            break;
+        }
         let w = UnicodeWidthChar::width(c).unwrap_or(0);
-        if used.saturating_add(w) > width.saturating_sub(1) {
+        if used.saturating_add(w) > width {
+            truncated = true;
             break;
         }
         out.push(c);
         used = used.saturating_add(w);
+        end_byte = byte.saturating_add(c.len_utf8());
+    }
+    truncated |= end_byte < text.len();
+
+    if !truncated {
+        return out;
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    while used > width.saturating_sub(1) {
+        let Some(c) = out.pop() else {
+            break;
+        };
+        used = used.saturating_sub(UnicodeWidthChar::width(c).unwrap_or(0));
     }
     out.push('…');
+    out
+}
+
+/// Produce a small, single-line passive summary without measuring or cloning
+/// an arbitrary complete input. Passive rows always show a bounded prefix and
+/// an ellipsis when the source exceeds this fixed safety budget.
+pub(super) fn bounded_trimmed_text_for_display(text: &str) -> String {
+    const MAX_DISPLAY_WIDTH: usize = 512;
+    const MAX_SCANNED_CHARS: usize = 2_048;
+
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut used = 0usize;
+    let mut started = false;
+    let mut end_byte = 0usize;
+    let mut truncated = false;
+
+    for (count, (byte, ch)) in text.char_indices().enumerate() {
+        if count >= MAX_SCANNED_CHARS {
+            truncated = true;
+            break;
+        }
+        end_byte = byte.saturating_add(ch.len_utf8());
+        if !started && ch.is_whitespace() {
+            continue;
+        }
+        started = true;
+        let display_char = if (ch.is_whitespace() && ch != ' ') || ch.is_control() {
+            ' '
+        } else {
+            ch
+        };
+        let char_width = UnicodeWidthChar::width(display_char).unwrap_or(0);
+        if used.saturating_add(char_width) > MAX_DISPLAY_WIDTH {
+            truncated = true;
+            break;
+        }
+        out.push(display_char);
+        used = used.saturating_add(char_width);
+    }
+    truncated |= end_byte < text.len();
+
+    while out.chars().next_back().is_some_and(char::is_whitespace) {
+        let Some(ch) = out.pop() else {
+            break;
+        };
+        used = used.saturating_sub(UnicodeWidthChar::width(ch).unwrap_or(0));
+    }
+
+    if truncated {
+        while used > MAX_DISPLAY_WIDTH.saturating_sub(1) {
+            let Some(ch) = out.pop() else {
+                break;
+            };
+            used = used.saturating_sub(UnicodeWidthChar::width(ch).unwrap_or(0));
+        }
+        out.push('…');
+    }
     out
 }
 
@@ -823,6 +1064,26 @@ pub(super) fn inset_top(area: Rect, top: u16) -> Rect {
     }
 }
 
+/// Returns a fixed-size slice around the selected row. Renderers use this
+/// before constructing ratatui rows so a large imported collection cannot turn
+/// every periodic redraw into O(total rows) work.
+pub(super) fn visible_selection_window(
+    len: usize,
+    selected: usize,
+    capacity: usize,
+) -> std::ops::Range<usize> {
+    if len == 0 || capacity == 0 {
+        return 0..0;
+    }
+
+    let capacity = capacity.min(len);
+    let selected = selected.min(len - 1);
+    let start = selected
+        .saturating_sub(capacity / 2)
+        .min(len.saturating_sub(capacity));
+    start..start.saturating_add(capacity)
+}
+
 pub(super) fn field_label_column_width<'a, I>(labels: I, left_padding: u16) -> u16
 where
     I: IntoIterator<Item = &'a str>,
@@ -835,56 +1096,272 @@ where
     max.saturating_add(left_padding)
 }
 
-pub(super) fn redacted_secret_placeholder() -> &'static str {
-    "[redacted]"
+const PREVIEW_NODE_BUDGET: usize = 2_048;
+const PREVIEW_MAX_COLLECTION_ITEMS: usize = 128;
+const PREVIEW_MAX_DEPTH: usize = 16;
+const PREVIEW_KEY_MAX_CHARS: usize = 128;
+pub(super) const TOML_PREVIEW_MAX_INPUT_BYTES: usize = 256 * 1024;
+
+struct PreviewBudget {
+    remaining: usize,
 }
 
-pub(super) fn redact_sensitive_json(value: &Value) -> Value {
+impl PreviewBudget {
+    fn new() -> Self {
+        Self::with_limit(PREVIEW_NODE_BUDGET)
+    }
+
+    fn with_limit(limit: usize) -> Self {
+        Self {
+            remaining: limit.min(PREVIEW_NODE_BUDGET),
+        }
+    }
+
+    fn take(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
+
+pub(super) fn bounded_json_preview(value: &Value) -> Value {
+    let mut budget = PreviewBudget::new();
+    bounded_json_preview_with_budget(value, &mut budget, 0)
+}
+
+pub(super) fn bounded_json_preview_with_node_limit(value: &Value, max_nodes: usize) -> Value {
+    let mut budget = PreviewBudget::with_limit(max_nodes);
+    bounded_json_preview_with_budget(value, &mut budget, 0)
+}
+
+/// Builds a bounded object preview directly from borrowed entries. This keeps
+/// callers with `HashMap<String, Value>` storage from cloning the complete map
+/// before the normal preview limits can take effect.
+pub(super) fn bounded_json_object_preview<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a Value)>,
+    total: usize,
+) -> Value {
+    let mut budget = PreviewBudget::new();
+    if !budget.take() {
+        return preview_truncated_value();
+    }
+
+    let mut out = serde_json::Map::new();
+    let mut rendered = 0usize;
+    for (key, value) in entries.into_iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
+        if budget.remaining == 0 {
+            break;
+        }
+        let display_key = unique_preview_key(&out, bounded_preview_key(key));
+        out.insert(
+            display_key,
+            bounded_json_preview_with_budget(value, &mut budget, 1),
+        );
+        rendered += 1;
+    }
+    let hidden = total.saturating_sub(rendered);
+    if hidden > 0 {
+        insert_json_truncation(&mut out, hidden);
+    }
+    Value::Object(out)
+}
+
+fn bounded_json_preview_with_budget(
+    value: &Value,
+    budget: &mut PreviewBudget,
+    depth: usize,
+) -> Value {
+    // Consume the global budget even for a depth-limit placeholder. Checking
+    // depth first would let every child at the cutoff allocate a marker without
+    // reducing `remaining`, multiplying a wide/deep tree far beyond the cap.
+    if !budget.take() || depth >= PREVIEW_MAX_DEPTH {
+        return preview_truncated_value();
+    }
+
     match value {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, value)| {
-                    let next = if is_sensitive_display_key(key) {
-                        redact_value_payload(value)
-                    } else {
-                        redact_sensitive_json(value)
-                    };
-                    (key.clone(), next)
-                })
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_json).collect()),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            let mut rendered = 0usize;
+            for (key, value) in map.iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
+                if budget.remaining == 0 {
+                    break;
+                }
+                let display_key = unique_preview_key(&out, bounded_preview_key(key));
+                out.insert(
+                    display_key,
+                    bounded_json_preview_with_budget(value, budget, depth.saturating_add(1)),
+                );
+                rendered += 1;
+            }
+            let hidden = map.len().saturating_sub(rendered);
+            if hidden > 0 {
+                insert_json_truncation(&mut out, hidden);
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => {
+            let mut out = Vec::new();
+            for item in items.iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
+                if budget.remaining == 0 {
+                    break;
+                }
+                out.push(bounded_json_preview_with_budget(
+                    item,
+                    budget,
+                    depth.saturating_add(1),
+                ));
+            }
+            let hidden = items.len().saturating_sub(out.len());
+            if hidden > 0 {
+                out.push(preview_truncated_count_value(hidden));
+            }
+            Value::Array(out)
+        }
+        Value::String(text) => Value::String(bounded_preview_text(text)),
         _ => value.clone(),
     }
 }
 
-fn redact_value_payload(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, value)| (key.clone(), redact_value_payload(value)))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.iter().map(redact_value_payload).collect()),
-        Value::Null => Value::Null,
-        _ => Value::String(redacted_secret_placeholder().to_string()),
+fn bounded_preview_key(key: &str) -> String {
+    let mut chars = key.chars();
+    let mut out = chars
+        .by_ref()
+        .take(PREVIEW_KEY_MAX_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+fn unique_preview_key(map: &serde_json::Map<String, Value>, base: String) -> String {
+    if !map.contains_key(&base) {
+        return base;
+    }
+    for suffix in 2usize.. {
+        let candidate = format!("{base} ({suffix})");
+        if !map.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("an unused preview key suffix must exist")
+}
+
+fn insert_json_truncation(map: &mut serde_json::Map<String, Value>, hidden: usize) {
+    let key = unique_preview_key(map, "…".to_string());
+    map.insert(key, preview_truncated_count_value(hidden));
+}
+
+fn preview_truncated_count_value(hidden: usize) -> Value {
+    Value::String(format!("[preview truncated: {hidden} more entries]"))
+}
+
+fn preview_truncated_value() -> Value {
+    Value::String("[preview truncated]".to_string())
+}
+
+/// Builds a display-only Codex TOML preview while keeping values in plaintext.
+pub(super) fn bounded_toml_preview(text: &str) -> String {
+    if text.len() > TOML_PREVIEW_MAX_INPUT_BYTES {
+        return texts::tui_preview_omitted_too_large().to_string();
+    }
+    if text.trim().is_empty() {
+        return String::new();
+    }
+
+    let Ok(mut value) = toml::from_str::<toml::Value>(text) else {
+        return text.to_string();
+    };
+    let mut budget = PreviewBudget::new();
+    bound_toml_preview_value(&mut value, &mut budget, 0);
+    let rendered = toml::to_string_pretty(&value).unwrap_or_else(|_| text.to_string());
+    if rendered.len() > TOML_PREVIEW_MAX_INPUT_BYTES {
+        texts::tui_preview_omitted_too_large().to_string()
+    } else {
+        rendered
     }
 }
 
-fn is_sensitive_display_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(|ch| ch.to_lowercase())
-        .collect::<String>();
+fn bound_toml_preview_value(value: &mut toml::Value, budget: &mut PreviewBudget, depth: usize) {
+    if !budget.take() || depth >= PREVIEW_MAX_DEPTH {
+        truncate_toml_preview_value(value);
+        return;
+    }
 
-    normalized == "authorization"
-        || normalized.ends_with("authorization")
-        || normalized.ends_with("apikey")
-        || normalized.ends_with("token")
-        || normalized.ends_with("password")
-        || normalized.ends_with("secret")
-        || normalized.ends_with("awsaccesskeyid")
-        || normalized.ends_with("awssecretaccesskey")
-        || normalized.ends_with("secretkey")
+    match value {
+        toml::Value::Table(table) => {
+            let original_len = table.len();
+            let original = std::mem::take(table);
+            let mut rendered = 0usize;
+            for (key, mut child) in original.into_iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
+                if budget.remaining == 0 {
+                    break;
+                }
+                bound_toml_preview_value(&mut child, budget, depth.saturating_add(1));
+                let display_key = unique_toml_preview_key(table, bounded_preview_key(&key));
+                table.insert(display_key, child);
+                rendered += 1;
+            }
+            insert_toml_truncation(table, original_len.saturating_sub(rendered));
+        }
+        toml::Value::Array(items) => {
+            let original_len = items.len();
+            let original = std::mem::take(items);
+            for mut item in original.into_iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
+                if budget.remaining == 0 {
+                    break;
+                }
+                bound_toml_preview_value(&mut item, budget, depth.saturating_add(1));
+                items.push(item);
+            }
+            let hidden = original_len.saturating_sub(items.len());
+            if hidden > 0 {
+                items.push(toml_preview_truncation_value(hidden));
+            }
+        }
+        toml::Value::String(text) => *text = bounded_preview_text(text),
+        _ => {}
+    }
+}
+
+fn truncate_toml_preview_value(value: &mut toml::Value) {
+    *value = toml::Value::String("[preview truncated]".to_string());
+}
+
+fn toml_preview_truncation_value(hidden: usize) -> toml::Value {
+    toml::Value::String(format!("[preview truncated: {hidden} more entries]"))
+}
+
+fn unique_toml_preview_key(table: &toml::map::Map<String, toml::Value>, base: String) -> String {
+    if !table.contains_key(&base) {
+        return base;
+    }
+    for suffix in 2usize.. {
+        let candidate = format!("{base} ({suffix})");
+        if !table.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("an unused TOML preview key suffix must exist")
+}
+
+fn insert_toml_truncation(table: &mut toml::map::Map<String, toml::Value>, hidden: usize) {
+    if hidden == 0 {
+        return;
+    }
+    let key = unique_toml_preview_key(table, "…".to_string());
+    table.insert(key, toml_preview_truncation_value(hidden));
+}
+
+fn bounded_preview_text(text: &str) -> String {
+    const MAX_CHARS: usize = 512;
+
+    let mut chars = text.chars();
+    let mut out = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
 }

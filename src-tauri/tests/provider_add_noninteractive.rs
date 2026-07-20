@@ -253,6 +253,10 @@ fn add_codex_field_mode_builds_config_toml() {
         .get("config")
         .and_then(|value| value.as_str())
         .expect("codex config toml");
+    assert!(config_text.contains("model_provider = \"custom\""));
+    assert!(config_text.contains("[model_providers.custom]"));
+    assert!(config_text.contains("name = \"CodexProxy\""));
+    assert!(!config_text.contains("[model_providers.codexproxy]"));
     assert!(config_text.contains("https://api.deepseek.com"));
     assert!(config_text.contains("gpt-5.4"));
     assert_eq!(

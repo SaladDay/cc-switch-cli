@@ -12,6 +12,7 @@
 //! (opencode.db / hermes state.db) are a single query and stay uncached.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use crate::session_manager::scan_cache_store::ScanCacheStore;
@@ -30,6 +31,63 @@ pub struct FileScanTarget {
     pub path: PathBuf,
     pub mtime_ns: i64,
     pub size: i64,
+}
+
+/// Hard upper bound for one streaming reconciliation batch. Discovery, cache
+/// lookup, parse results, and cache writes are all released before the next
+/// batch is accepted.
+pub(crate) const STREAM_SCAN_BATCH_SIZE: usize = 128;
+
+/// Why a bounded provider stream ended before authoritative EOF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamScanStop {
+    Cancelled,
+    SinkStopped,
+    /// The source could not be enumerated or decoded authoritatively. Callers
+    /// must discard the staging generation and retain the last published one.
+    Incomplete,
+}
+
+pub(crate) trait IntoStreamParseResult {
+    fn into_stream_parse_result(self) -> Result<Option<SessionMeta>, StreamScanStop>;
+}
+
+impl IntoStreamParseResult for Option<SessionMeta> {
+    fn into_stream_parse_result(self) -> Result<Option<SessionMeta>, StreamScanStop> {
+        Ok(self)
+    }
+}
+
+impl IntoStreamParseResult for Result<Option<SessionMeta>, StreamScanStop> {
+    fn into_stream_parse_result(self) -> Result<Option<SessionMeta>, StreamScanStop> {
+        self
+    }
+}
+
+/// Bounded observability counters. None of these counters retain row data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StreamScanStats {
+    pub discovered: usize,
+    pub emitted: usize,
+    pub cache_hits: usize,
+    pub reparsed: usize,
+    pub uncacheable: usize,
+    pub stale_cache_deleted: usize,
+    pub max_batch_targets: usize,
+}
+
+impl StreamScanStats {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.discovered = self.discovered.saturating_add(other.discovered);
+        self.emitted = self.emitted.saturating_add(other.emitted);
+        self.cache_hits = self.cache_hits.saturating_add(other.cache_hits);
+        self.reparsed = self.reparsed.saturating_add(other.reparsed);
+        self.uncacheable = self.uncacheable.saturating_add(other.uncacheable);
+        self.stale_cache_deleted = self
+            .stale_cache_deleted
+            .saturating_add(other.stale_cache_deleted);
+        self.max_batch_targets = self.max_batch_targets.max(other.max_batch_targets);
+    }
 }
 
 /// One row read back from the persistent cache.
@@ -69,24 +127,34 @@ pub struct ScanDelta {
 }
 
 /// `stat` a single path, returning its `(mtime_ns, size)`. Returns `None` when the
-/// path is missing or is not a regular file. An unreadable modification time falls
-/// back to `0`, which never matches a cached row and so forces a re-parse.
+/// path is missing, is not a regular file, or cannot be inspected.
 pub fn stat_target(path: &Path) -> Option<FileScanTarget> {
-    let meta = std::fs::metadata(path).ok()?;
+    stat_target_strict(path).ok().flatten()
+}
+
+/// Strict counterpart used by authoritative streams. A concurrent removal is
+/// represented as `Ok(None)`; permission and other I/O failures remain errors
+/// so callers cannot accidentally publish a partial generation.
+pub(crate) fn stat_target_strict(path: &Path) -> std::io::Result<Option<FileScanTarget>> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
     if !meta.is_file() {
-        return None;
+        return Ok(None);
     }
     let mtime_ns = meta
-        .modified()
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0);
-    Some(FileScanTarget {
+    Ok(Some(FileScanTarget {
         path: path.to_path_buf(),
         mtime_ns,
         size: meta.len() as i64,
-    })
+    }))
 }
 
 /// Mix a sibling dependency's `(mtime, size)` into a target's fingerprint.
@@ -100,40 +168,74 @@ pub fn stat_target(path: &Path) -> Option<FileScanTarget> {
 /// Works for directories as well (a directory's mtime changes when entries
 /// are added or removed).
 pub fn mix_sibling_into_fingerprint(target: &mut FileScanTarget, sibling: &Path) {
-    let Ok(meta) = std::fs::metadata(sibling) else {
-        return;
+    let _ = mix_sibling_into_fingerprint_strict(target, sibling);
+}
+
+/// Strict sibling fingerprinting for authoritative streams. A missing optional
+/// sibling is valid; other metadata failures mean the derived SessionMeta could
+/// not be observed consistently.
+pub(crate) fn mix_sibling_into_fingerprint_strict(
+    target: &mut FileScanTarget,
+    sibling: &Path,
+) -> std::io::Result<()> {
+    let meta = match std::fs::metadata(sibling) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
     let sibling_mtime = meta
-        .modified()
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0);
     target.mtime_ns = target.mtime_ns.max(sibling_mtime);
     target.size = target.size.wrapping_add(meta.len() as i64);
+    Ok(())
 }
 
 /// Recursively collect files whose extension equals `ext`, statting each once.
 /// Mirrors the directory walks the file scanners already use, but reads only
 /// metadata (readdir + stat) rather than opening file contents.
+#[allow(dead_code)]
 pub fn collect_targets_recursive(root: &Path, ext: &str, out: &mut Vec<FileScanTarget>) {
+    let _ = collect_targets_recursive_cancellable(root, ext, out, &|| false);
+}
+
+/// Cancellation-aware form of [`collect_targets_recursive`]. Returns `false`
+/// when traversal stopped early; callers must discard the partial target list.
+pub(crate) fn collect_targets_recursive_cancellable(
+    root: &Path,
+    ext: &str,
+    out: &mut Vec<FileScanTarget>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> bool {
+    if is_cancelled() {
+        return false;
+    }
     if !root.exists() {
-        return;
+        return true;
     }
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(_) => return true,
     };
     for entry in entries.flatten() {
+        if is_cancelled() {
+            return false;
+        }
         let path = entry.path();
         if path.is_dir() {
-            collect_targets_recursive(&path, ext, out);
+            if !collect_targets_recursive_cancellable(&path, ext, out, is_cancelled) {
+                return false;
+            }
         } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
             if let Some(target) = stat_target(&path) {
                 out.push(target);
             }
         }
     }
+    true
 }
 
 /// Collect files **directly inside** `dir` whose extension equals `ext`, statting
@@ -143,12 +245,30 @@ pub fn collect_targets_recursive(root: &Path, ext: &str, out: &mut Vec<FileScanT
 /// `sessions/*.jsonl`), so the cache path collects exactly the same files the
 /// legacy path shows. `stat_target` excludes non-regular files, so a directory
 /// whose name happens to end in `.ext` is skipped just like the legacy walk.
+#[allow(dead_code)]
 pub fn collect_targets_flat(dir: &Path, ext: &str, out: &mut Vec<FileScanTarget>) {
+    let _ = collect_targets_flat_cancellable(dir, ext, out, &|| false);
+}
+
+/// Cancellation-aware form of [`collect_targets_flat`]. Returns `false` when
+/// the partial result must be discarded.
+pub(crate) fn collect_targets_flat_cancellable(
+    dir: &Path,
+    ext: &str,
+    out: &mut Vec<FileScanTarget>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> bool {
+    if is_cancelled() {
+        return false;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(_) => return true,
     };
     for entry in entries.flatten() {
+        if is_cancelled() {
+            return false;
+        }
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some(ext) {
             continue;
@@ -157,6 +277,175 @@ pub fn collect_targets_flat(dir: &Path, ext: &str, out: &mut Vec<FileScanTarget>
             out.push(target);
         }
     }
+    true
+}
+
+/// Visit matching files one at a time without first collecting the directory
+/// tree. The only traversal state is the recursive directory stack; each target
+/// is statted immediately before being handed to the caller.
+pub(crate) fn visit_targets_recursive_cancellable(
+    root: &Path,
+    ext: &str,
+    on_target: &mut dyn FnMut(FileScanTarget) -> Result<(), StreamScanStop>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), StreamScanStop> {
+    visit_targets_recursive_inner(root, ext, on_target, is_cancelled, true)
+}
+
+fn visit_targets_recursive_inner(
+    root: &Path,
+    ext: &str,
+    on_target: &mut dyn FnMut(FileScanTarget) -> Result<(), StreamScanStop>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    logical_root: bool,
+) -> Result<(), StreamScanStop> {
+    if is_cancelled() {
+        return Err(StreamScanStop::Cancelled);
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if logical_root && error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            log::warn!(
+                "authoritative session walk failed at {}: {error}",
+                root.display()
+            );
+            return Err(StreamScanStop::Incomplete);
+        }
+    };
+    for entry in entries {
+        if is_cancelled() {
+            return Err(StreamScanStop::Cancelled);
+        }
+        let entry = entry.map_err(|error| {
+            log::warn!(
+                "authoritative session directory entry failed at {}: {error}",
+                root.display()
+            );
+            StreamScanStop::Incomplete
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            log::warn!(
+                "authoritative session file type failed at {}: {error}",
+                path.display()
+            );
+            StreamScanStop::Incomplete
+        })?;
+        if file_type.is_dir() {
+            visit_targets_recursive_inner(&path, ext, on_target, is_cancelled, false)?;
+            continue;
+        }
+
+        // Follow regular-file symlinks for compatibility with the legacy
+        // scanners. Directory symlinks are deliberately not followed: provider
+        // roots are already followed by `read_dir`, while nested links could
+        // create cycles and would require provider-wide visited state.
+        let is_candidate = file_type.is_file()
+            || (file_type.is_symlink()
+                && std::fs::metadata(&path)
+                    .map(|metadata| metadata.is_file())
+                    .map_err(|error| {
+                        log::warn!(
+                            "authoritative session symlink stat failed at {}: {error}",
+                            path.display()
+                        );
+                        StreamScanStop::Incomplete
+                    })?);
+        if !is_candidate || path.extension().and_then(|value| value.to_str()) != Some(ext) {
+            continue;
+        }
+        let target = stat_target_strict(&path)
+            .map_err(|error| {
+                log::warn!(
+                    "authoritative session stat failed at {}: {error}",
+                    path.display()
+                );
+                StreamScanStop::Incomplete
+            })?
+            .ok_or(StreamScanStop::Incomplete)?;
+        on_target(target)?;
+    }
+    Ok(())
+}
+
+fn visit_target_entry_flat(
+    entry: std::fs::DirEntry,
+    ext: &str,
+    on_target: &mut dyn FnMut(FileScanTarget) -> Result<(), StreamScanStop>,
+) -> Result<(), StreamScanStop> {
+    let path = entry.path();
+    if path.extension().and_then(|value| value.to_str()) != Some(ext) {
+        return Ok(());
+    }
+    let file_type = entry.file_type().map_err(|error| {
+        log::warn!(
+            "authoritative session file type failed at {}: {error}",
+            path.display()
+        );
+        StreamScanStop::Incomplete
+    })?;
+    let is_candidate = file_type.is_file()
+        || (file_type.is_symlink()
+            && std::fs::metadata(&path)
+                .map(|metadata| metadata.is_file())
+                .map_err(|error| {
+                    log::warn!(
+                        "authoritative session symlink stat failed at {}: {error}",
+                        path.display()
+                    );
+                    StreamScanStop::Incomplete
+                })?);
+    if is_candidate {
+        let target = stat_target_strict(&path)
+            .map_err(|error| {
+                log::warn!(
+                    "authoritative session stat failed at {}: {error}",
+                    path.display()
+                );
+                StreamScanStop::Incomplete
+            })?
+            .ok_or(StreamScanStop::Incomplete)?;
+        on_target(target)?;
+    }
+    Ok(())
+}
+
+/// Flat counterpart to [`visit_targets_recursive_cancellable`].
+pub(crate) fn visit_targets_flat_cancellable(
+    dir: &Path,
+    ext: &str,
+    on_target: &mut dyn FnMut(FileScanTarget) -> Result<(), StreamScanStop>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), StreamScanStop> {
+    if is_cancelled() {
+        return Err(StreamScanStop::Cancelled);
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            log::warn!(
+                "authoritative session walk failed at {}: {error}",
+                dir.display()
+            );
+            return Err(StreamScanStop::Incomplete);
+        }
+    };
+    for entry in entries {
+        if is_cancelled() {
+            return Err(StreamScanStop::Cancelled);
+        }
+        let entry = entry.map_err(|error| {
+            log::warn!(
+                "authoritative session directory entry failed at {}: {error}",
+                dir.display()
+            );
+            StreamScanStop::Incomplete
+        })?;
+        visit_target_entry_flat(entry, ext, on_target)?;
+    }
+    Ok(())
 }
 
 /// Reconcile the freshly-`stat`ed `targets` against the `cached` rows.
@@ -184,6 +473,7 @@ pub fn collect_targets_flat(dir: &Path, ext: &str, out: &mut Vec<FileScanTarget>
 /// deleted session. A re-stat that vanished or changed skips the upsert and, by
 /// not entering `keep`, lets any pre-existing cache row for that path be deleted;
 /// the file is reprocessed on the next scan.
+#[allow(dead_code)]
 pub fn revalidate<F, C, R>(
     provider: &str,
     targets: Vec<FileScanTarget>,
@@ -198,11 +488,89 @@ where
     C: Fn(&SessionMeta) -> bool + Sync,
     R: Fn(&Path) -> Option<FileScanTarget>,
 {
+    revalidate_progressive(
+        provider,
+        targets,
+        cached,
+        force,
+        parse,
+        cacheable,
+        restat,
+        |_| {},
+    )
+}
+
+/// Progressive variant of [`revalidate`]. `on_session` runs on the calling
+/// scan thread as soon as each cache hit or parsed session becomes available;
+/// it is never called from parser worker threads. The returned delta remains
+/// complete and preserves the same authoritative ordering/semantics as
+/// [`revalidate`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "cache reconciliation injects parsing, cacheability, restat, and progress policies"
+)]
+pub fn revalidate_progressive<F, C, R, P>(
+    provider: &str,
+    targets: Vec<FileScanTarget>,
+    cached: HashMap<String, CachedScanRow>,
+    force: bool,
+    parse: F,
+    cacheable: C,
+    restat: R,
+    on_session: P,
+) -> ScanDelta
+where
+    F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    C: Fn(&SessionMeta) -> bool + Sync,
+    R: Fn(&Path) -> Option<FileScanTarget>,
+    P: FnMut(&SessionMeta),
+{
+    revalidate_progressive_cancellable(
+        provider,
+        targets,
+        cached,
+        force,
+        parse,
+        cacheable,
+        restat,
+        on_session,
+        &|| false,
+    )
+    .expect("non-cancellable session scan cannot be cancelled")
+}
+
+/// Cancellation-aware cache reconciliation. A cancelled pass returns `None`
+/// and never persists a partial delta, so an obsolete search cannot delete or
+/// overwrite sidecar rows discovered by an authoritative scan.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "cache reconciliation injects parsing, cacheability, restat, progress, and cancellation policies"
+)]
+pub(crate) fn revalidate_progressive_cancellable<F, C, R, P>(
+    provider: &str,
+    targets: Vec<FileScanTarget>,
+    cached: HashMap<String, CachedScanRow>,
+    force: bool,
+    parse: F,
+    cacheable: C,
+    restat: R,
+    mut on_session: P,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<ScanDelta>
+where
+    F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    C: Fn(&SessionMeta) -> bool + Sync,
+    R: Fn(&Path) -> Option<FileScanTarget>,
+    P: FnMut(&SessionMeta),
+{
     let mut sessions = Vec::new();
     let mut keep: HashSet<String> = HashSet::new();
     let mut to_parse: Vec<FileScanTarget> = Vec::new();
 
     for target in targets {
+        if is_cancelled() {
+            return None;
+        }
         let key = target.path.to_string_lossy().to_string();
         if !force {
             if let Some(row) = cached.get(&key) {
@@ -215,6 +583,7 @@ where
                         // （如曾被误缓存的无 title 会话）不走捷径，落到重新
                         // 解析，随后旧行走 deletes 被清除。
                         if cacheable(&meta) {
+                            on_session(&meta);
                             sessions.push(meta);
                             keep.insert(key);
                             continue;
@@ -228,10 +597,14 @@ where
 
     // Parse only the new/changed files, reusing the parallel fan-out so the
     // first-ever run (empty cache → every file parses) keeps today's throughput.
-    let parsed = parse_targets_parallel(&to_parse, &parse);
+    let parsed =
+        parse_targets_parallel_cancellable(&to_parse, &parse, &mut on_session, is_cancelled)?;
     let mut upserts = Vec::new();
     let mut uncacheable = 0usize;
     for (target, meta) in to_parse.into_iter().zip(parsed) {
+        if is_cancelled() {
+            return None;
+        }
         let key = target.path.to_string_lossy().to_string();
         let Some(meta) = meta else {
             continue; // not a session file; leave it out of `keep` so any stale row is deleted
@@ -273,49 +646,128 @@ where
         sessions.push(meta);
     }
 
-    let deletes = cached
-        .into_keys()
-        .filter(|key| !keep.contains(key))
-        .collect();
+    let mut deletes = Vec::new();
+    for key in cached.into_keys() {
+        if is_cancelled() {
+            return None;
+        }
+        if !keep.contains(&key) {
+            deletes.push(key);
+        }
+    }
 
-    ScanDelta {
+    if is_cancelled() {
+        return None;
+    }
+
+    Some(ScanDelta {
         sessions,
         upserts,
         deletes,
         uncacheable,
-    }
+    })
 }
 
 /// Parse `targets` into metadata, preserving input order and pairing each result
 /// with its target. Small inputs run serially; larger ones fan out with the same
 /// conservative worker cap as [`super::providers::utils::parse_sessions_parallel`]
 /// so the background scan never starves the single-threaded UI loop.
-fn parse_targets_parallel<F>(targets: &[FileScanTarget], parse: &F) -> Vec<Option<SessionMeta>>
+fn parse_targets_parallel<F, P>(
+    targets: &[FileScanTarget],
+    parse: &F,
+    on_session: &mut P,
+) -> Vec<Option<SessionMeta>>
 where
     F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    P: FnMut(&SessionMeta),
+{
+    parse_targets_parallel_cancellable(targets, parse, on_session, &|| false)
+        .expect("non-cancellable session parse cannot be cancelled")
+}
+
+fn parse_targets_parallel_cancellable<F, P>(
+    targets: &[FileScanTarget],
+    parse: &F,
+    on_session: &mut P,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<Option<SessionMeta>>>
+where
+    F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    P: FnMut(&SessionMeta),
 {
     let workers = std::thread::available_parallelism()
         .map(|n| (n.get() / 2).max(1))
         .unwrap_or(2)
         .min(4);
     if workers <= 1 || targets.len() < 64 {
-        return targets.iter().map(|t| parse(&t.path)).collect();
+        let mut parsed = Vec::with_capacity(targets.len());
+        for target in targets {
+            if is_cancelled() {
+                return None;
+            }
+            let result = parse(&target.path);
+            if let Some(meta) = result.as_ref() {
+                on_session(meta);
+            }
+            parsed.push(result);
+        }
+        return Some(parsed);
     }
     let chunk_size = targets.len().div_ceil(workers);
     std::thread::scope(|scope| {
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
         let handles: Vec<_> = targets
             .chunks(chunk_size)
-            .map(|chunk| scope.spawn(|| chunk.iter().map(|t| parse(&t.path)).collect::<Vec<_>>()))
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| {
-                // 结果必须与 targets 逐位对齐（调用方按 zip 配对路径与解析结果），
-                // 吞掉 panic 会让结果变短、错位写坏缓存；这里选择向上传播，由
-                // session worker 的 catch_unwind 统一降级为扫描失败。
-                handle.join().expect("session parse worker panicked")
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                let result_tx = result_tx.clone();
+                scope.spawn(move || {
+                    let offset = chunk_index * chunk_size;
+                    for (within_chunk, target) in chunk.iter().enumerate() {
+                        if is_cancelled() {
+                            break;
+                        }
+                        if result_tx
+                            .send((offset + within_chunk, parse(&target.path)))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
             })
-            .collect()
+            .collect();
+        drop(result_tx);
+
+        let mut parsed: Vec<Option<Option<SessionMeta>>> = std::iter::repeat_with(|| None)
+            .take(targets.len())
+            .collect();
+        while !is_cancelled() {
+            match result_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok((index, result)) => {
+                    if let Some(meta) = result.as_ref() {
+                        on_session(meta);
+                    }
+                    parsed[index] = Some(result);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        drop(result_rx);
+        for handle in handles {
+            // Propagate parser panics to the outer session worker catch_unwind.
+            handle.join().expect("session parse worker panicked");
+        }
+        if is_cancelled() {
+            return None;
+        }
+        Some(
+            parsed
+                .into_iter()
+                .map(|result| result.expect("session parse result index must be filled"))
+                .collect(),
+        )
     })
 }
 
@@ -336,6 +788,26 @@ where
     F: Fn(&Path) -> Option<SessionMeta> + Sync,
     C: Fn(&SessionMeta) -> bool + Sync,
 {
+    scan_provider_cached_progressive(store, provider, targets, force, parse, cacheable, |_| {})
+}
+
+/// Progressive version of [`scan_provider_cached`]. The callback is invoked
+/// before the full provider scan completes whenever at least one valid session
+/// can be produced, including on a first run with an empty sidecar.
+pub fn scan_provider_cached_progressive<F, C, P>(
+    store: &ScanCacheStore,
+    provider: &str,
+    targets: Vec<FileScanTarget>,
+    force: bool,
+    parse: F,
+    cacheable: C,
+    on_session: P,
+) -> Vec<SessionMeta>
+where
+    F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    C: Fn(&SessionMeta) -> bool + Sync,
+    P: FnMut(&SessionMeta),
+{
     let started = std::time::Instant::now();
     let cached = store.load_for_provider(provider).unwrap_or_else(|err| {
         log::warn!("session scan cache load failed for {provider}: {err}");
@@ -345,7 +817,7 @@ where
     let target_count = targets.len();
     let cached_count = cached.len();
     // fix 3：生产侧用真实 stat_target 做 upsert 前的 re-stat（关闭 parse 期间竞态）。
-    let delta = revalidate(
+    let delta = revalidate_progressive(
         provider,
         targets,
         cached,
@@ -353,6 +825,7 @@ where
         parse,
         cacheable,
         stat_target,
+        on_session,
     );
     log::debug!(
         "[SESSION-SCAN] provider={provider} targets={target_count} cached={cached_count} \
@@ -377,11 +850,559 @@ where
     delta.sessions
 }
 
+/// Search-only variant of [`scan_provider_cached_progressive`]. Cancellation
+/// discards the partial reconciliation before any cache write.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "provider scan receives parser, cacheability, progress, and cancellation policies"
+)]
+pub(crate) fn scan_provider_cached_progressive_cancellable<F, C, P>(
+    store: &ScanCacheStore,
+    provider: &str,
+    targets: Vec<FileScanTarget>,
+    force: bool,
+    parse: F,
+    cacheable: C,
+    on_session: P,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<SessionMeta>>
+where
+    F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    C: Fn(&SessionMeta) -> bool + Sync,
+    P: FnMut(&SessionMeta),
+{
+    let started = std::time::Instant::now();
+    let cached = match store.load_for_provider_cancellable(provider, is_cancelled) {
+        Ok(Some(cached)) => cached,
+        Ok(None) => return None,
+        Err(err) => {
+            log::warn!("session scan cache load failed for {provider}: {err}");
+            HashMap::new()
+        }
+    };
+
+    let target_count = targets.len();
+    let cached_count = cached.len();
+    let delta = revalidate_progressive_cancellable(
+        provider,
+        targets,
+        cached,
+        force,
+        parse,
+        cacheable,
+        stat_target,
+        on_session,
+        is_cancelled,
+    )?;
+    if is_cancelled() {
+        return None;
+    }
+    log::debug!(
+        "[SESSION-SEARCH-SCAN] provider={provider} targets={target_count} cached={cached_count} \
+         reparsed={} deleted={} uncacheable={} force={force} elapsed={:?}",
+        delta.upserts.len(),
+        delta.deletes.len(),
+        delta.uncacheable,
+        started.elapsed()
+    );
+
+    if is_cancelled() {
+        None
+    } else {
+        Some(delta.sessions)
+    }
+}
+
+/// Progressive uncached scan used when the local sidecar cannot be opened.
+/// Parsing still streams completed rows to the worker while retaining every
+/// result for the final authoritative Vec.
+pub fn scan_provider_uncached_progressive<F, P>(
+    targets: Vec<FileScanTarget>,
+    parse: F,
+    mut on_session: P,
+) -> Vec<SessionMeta>
+where
+    F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    P: FnMut(&SessionMeta),
+{
+    parse_targets_parallel(&targets, &parse, &mut on_session)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+pub(crate) fn scan_provider_uncached_progressive_cancellable<F, P>(
+    targets: Vec<FileScanTarget>,
+    parse: F,
+    mut on_session: P,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<SessionMeta>>
+where
+    F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    P: FnMut(&SessionMeta),
+{
+    Some(
+        parse_targets_parallel_cancellable(&targets, &parse, &mut on_session, is_cancelled)?
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
+}
+
+/// Stream a file-backed provider into an owned-row sink without ever building
+/// either a full target list, a provider-wide cache map, or a provider result
+/// `Vec`. `walk` must call the supplied target callback as paths are discovered.
+///
+/// Cache failures degrade to reparsing the affected fixed-size batch. A
+/// completed traversal also removes cache rows whose source file disappeared,
+/// using a keyset cursor in [`ScanCacheStore`] rather than an O(N) seen set.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming reconciliation injects walker, parser, fingerprint, cacheability, sink, and cancellation policies"
+)]
+pub(crate) fn stream_file_provider_cancellable<F, O, C, R, W>(
+    store: Option<&ScanCacheStore>,
+    provider: &str,
+    force: bool,
+    parse: F,
+    cacheable: C,
+    restat: R,
+    walk: W,
+    on_session: &mut dyn FnMut(SessionMeta) -> ControlFlow<()>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<StreamScanStats, StreamScanStop>
+where
+    F: Fn(&Path) -> O + Sync,
+    O: IntoStreamParseResult,
+    C: Fn(&SessionMeta) -> bool + Sync,
+    R: Fn(&Path) -> Option<FileScanTarget>,
+    W: FnOnce(
+        &mut dyn FnMut(FileScanTarget) -> Result<(), StreamScanStop>,
+        &(dyn Fn() -> bool + Sync),
+    ) -> Result<(), StreamScanStop>,
+{
+    if is_cancelled() {
+        return Err(StreamScanStop::Cancelled);
+    }
+
+    let started = std::time::Instant::now();
+    let mut stats = StreamScanStats::default();
+    let mut batch = Vec::with_capacity(STREAM_SCAN_BATCH_SIZE);
+    let mut accept_target = |target: FileScanTarget| {
+        if is_cancelled() {
+            return Err(StreamScanStop::Cancelled);
+        }
+        stats.discovered = stats.discovered.saturating_add(1);
+        batch.push(target);
+        stats.max_batch_targets = stats.max_batch_targets.max(batch.len());
+        if batch.len() == STREAM_SCAN_BATCH_SIZE {
+            process_stream_batch(
+                store,
+                provider,
+                force,
+                &parse,
+                &cacheable,
+                &restat,
+                &mut batch,
+                on_session,
+                is_cancelled,
+                &mut stats,
+            )?;
+        }
+        Ok(())
+    };
+
+    walk(&mut accept_target, is_cancelled)?;
+    drop(accept_target);
+    process_stream_batch(
+        store,
+        provider,
+        force,
+        &parse,
+        &cacheable,
+        &restat,
+        &mut batch,
+        on_session,
+        is_cancelled,
+        &mut stats,
+    )?;
+    if is_cancelled() {
+        return Err(StreamScanStop::Cancelled);
+    }
+
+    if let Some(store) = store {
+        match store.delete_missing_for_provider_bounded(
+            provider,
+            STREAM_SCAN_BATCH_SIZE,
+            is_cancelled,
+        ) {
+            Ok(Some(deleted)) => {
+                stats.stale_cache_deleted = stats.stale_cache_deleted.saturating_add(deleted);
+            }
+            Ok(None) => return Err(StreamScanStop::Cancelled),
+            Err(error) => {
+                log::warn!("session scan cache stale cleanup incomplete for {provider}: {error}");
+                // The provider walk and every emitted row are already
+                // authoritative at this point.  This sidecar is disposable:
+                // a stale entry can cost a later `stat`, but it must never
+                // prevent a complete source scan from being published.
+                if is_cancelled() {
+                    return Err(StreamScanStop::Cancelled);
+                }
+            }
+        }
+    }
+    if is_cancelled() {
+        return Err(StreamScanStop::Cancelled);
+    }
+
+    log::debug!(
+        "[SESSION-STREAM-SCAN] provider={provider} discovered={} emitted={} cache_hits={} \
+         reparsed={} uncacheable={} stale_deleted={} max_batch={} force={force} elapsed={:?}",
+        stats.discovered,
+        stats.emitted,
+        stats.cache_hits,
+        stats.reparsed,
+        stats.uncacheable,
+        stats.stale_cache_deleted,
+        stats.max_batch_targets,
+        started.elapsed()
+    );
+    Ok(stats)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one bounded batch carries injected cache, parse, fingerprint, sink, and cancellation policies"
+)]
+fn process_stream_batch<F, O, C, R>(
+    store: Option<&ScanCacheStore>,
+    provider: &str,
+    force: bool,
+    parse: &F,
+    cacheable: &C,
+    restat: &R,
+    batch: &mut Vec<FileScanTarget>,
+    on_session: &mut dyn FnMut(SessionMeta) -> ControlFlow<()>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    stats: &mut StreamScanStats,
+) -> Result<(), StreamScanStop>
+where
+    F: Fn(&Path) -> O + Sync,
+    O: IntoStreamParseResult,
+    C: Fn(&SessionMeta) -> bool + Sync,
+    R: Fn(&Path) -> Option<FileScanTarget>,
+{
+    if batch.is_empty() {
+        return Ok(());
+    }
+    if is_cancelled() {
+        return Err(StreamScanStop::Cancelled);
+    }
+
+    let paths: Vec<String> = batch
+        .iter()
+        .map(|target| target.path.to_string_lossy().into_owned())
+        .collect();
+    let cached = match store {
+        Some(store) => match store.load_batch_cancellable(provider, &paths, is_cancelled) {
+            Ok(Some(rows)) => rows,
+            Ok(None) => return Err(StreamScanStop::Cancelled),
+            Err(error) => {
+                log::warn!("session scan cache batch load failed for {provider}: {error}");
+                HashMap::new()
+            }
+        },
+        None => HashMap::new(),
+    };
+
+    let mut to_parse = Vec::with_capacity(batch.len());
+    for target in batch.drain(..) {
+        if is_cancelled() {
+            return Err(StreamScanStop::Cancelled);
+        }
+        let key = target.path.to_string_lossy().into_owned();
+        let observed = authoritative_restat(restat, &target.path)?;
+        let hit = (!force)
+            .then(|| cached.get(&key))
+            .flatten()
+            .filter(|row| {
+                row.cache_version == SCAN_CACHE_VERSION
+                    && row.mtime_ns == target.mtime_ns
+                    && row.size == target.size
+            })
+            .and_then(|row| serde_json::from_str::<SessionMeta>(&row.meta_json).ok())
+            .filter(|meta| cacheable(meta))
+            .filter(|_| {
+                observed
+                    .as_ref()
+                    .is_some_and(|fresh| same_fingerprint(fresh, &target))
+            });
+        if let Some(meta) = hit {
+            if on_session(meta).is_break() {
+                return Err(StreamScanStop::SinkStopped);
+            }
+            stats.cache_hits = stats.cache_hits.saturating_add(1);
+            stats.emitted = stats.emitted.saturating_add(1);
+        } else {
+            to_parse.push(target);
+        }
+    }
+
+    let mut upserts = Vec::with_capacity(to_parse.len());
+    let mut deletes = Vec::new();
+    parse_targets_completed_cancellable(&to_parse, parse, is_cancelled, &mut |target, parsed| {
+        stats.reparsed = stats.reparsed.saturating_add(1);
+        let key = target.path.to_string_lossy().into_owned();
+        let observed = authoritative_restat(restat, &target.path)?;
+        let stable = observed
+            .as_ref()
+            .is_some_and(|fresh| same_fingerprint(fresh, target));
+
+        let (settled_target, settled_meta) = if stable {
+            (target.clone(), parsed)
+        } else {
+            let Some(fresh) = observed else {
+                // The target existed at discovery but disappeared during parse.
+                // Publishing the partial scan would resurrect/lose rows depending
+                // on timing, so retain the previous manifest instead.
+                return Err(StreamScanStop::Incomplete);
+            };
+            if let Some(meta) = cached_meta_for_target(&cached, &key, &fresh, cacheable) {
+                if on_session(meta).is_break() {
+                    return Err(StreamScanStop::SinkStopped);
+                }
+                stats.cache_hits = stats.cache_hits.saturating_add(1);
+                stats.emitted = stats.emitted.saturating_add(1);
+                return Ok(());
+            }
+
+            // The file changed while it was parsed. Retry exactly once against
+            // the latest fingerprint; another change makes the whole generation
+            // incomplete rather than emitting a torn SessionMeta.
+            if is_cancelled() {
+                return Err(StreamScanStop::Cancelled);
+            }
+            let retry = parse(&fresh.path).into_stream_parse_result()?;
+            if is_cancelled() {
+                return Err(StreamScanStop::Cancelled);
+            }
+            stats.reparsed = stats.reparsed.saturating_add(1);
+            let after_retry = authoritative_restat(restat, &fresh.path)?;
+            if !after_retry
+                .as_ref()
+                .is_some_and(|after| same_fingerprint(after, &fresh))
+            {
+                return Err(StreamScanStop::Incomplete);
+            }
+            (fresh, retry)
+        };
+
+        let Some(meta) = settled_meta else {
+            // A stable parse-to-None means this file is authoritatively not a
+            // session. Only this case may remove an older cache row.
+            if cached.contains_key(&key) {
+                deletes.push(key);
+            }
+            return Ok(());
+        };
+
+        if cacheable(&meta) {
+            match serde_json::to_string(&meta) {
+                Ok(meta_json) => upserts.push(SessionScanCacheEntry {
+                    file_path: key.clone(),
+                    provider: provider.to_string(),
+                    mtime_ns: settled_target.mtime_ns,
+                    size: settled_target.size,
+                    meta_json,
+                    cache_version: SCAN_CACHE_VERSION,
+                }),
+                Err(_) if cached.contains_key(&key) => deletes.push(key.clone()),
+                Err(_) => {}
+            }
+        } else {
+            stats.uncacheable = stats.uncacheable.saturating_add(1);
+            if cached.contains_key(&key) {
+                deletes.push(key);
+            }
+        }
+
+        if on_session(meta).is_break() {
+            return Err(StreamScanStop::SinkStopped);
+        }
+        stats.emitted = stats.emitted.saturating_add(1);
+        Ok(())
+    })?;
+
+    if is_cancelled() {
+        return Err(StreamScanStop::Cancelled);
+    }
+    if let Some(store) = store {
+        if let Err(error) = store.upsert_batch(&upserts) {
+            log::warn!("session scan cache batch upsert failed for {provider}: {error}");
+        }
+        if let Err(error) = store.delete_paths(&deletes) {
+            log::warn!("session scan cache batch delete failed for {provider}: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn same_fingerprint(left: &FileScanTarget, right: &FileScanTarget) -> bool {
+    left.mtime_ns == right.mtime_ns && left.size == right.size
+}
+
+fn authoritative_restat<R>(
+    restat: &R,
+    path: &Path,
+) -> Result<Option<FileScanTarget>, StreamScanStop>
+where
+    R: Fn(&Path) -> Option<FileScanTarget>,
+{
+    match stat_target_strict(path) {
+        Ok(Some(_)) => Ok(restat(path)),
+        Ok(None) => Ok(None),
+        Err(error) => {
+            log::warn!(
+                "authoritative session re-stat failed at {}: {error}",
+                path.display()
+            );
+            Err(StreamScanStop::Incomplete)
+        }
+    }
+}
+
+fn cached_meta_for_target<C>(
+    cached: &HashMap<String, CachedScanRow>,
+    key: &str,
+    target: &FileScanTarget,
+    cacheable: &C,
+) -> Option<SessionMeta>
+where
+    C: Fn(&SessionMeta) -> bool + Sync,
+{
+    let row = cached.get(key)?;
+    if row.cache_version != SCAN_CACHE_VERSION
+        || row.mtime_ns != target.mtime_ns
+        || row.size != target.size
+    {
+        return None;
+    }
+    let meta = serde_json::from_str::<SessionMeta>(&row.meta_json).ok()?;
+    cacheable(&meta).then_some(meta)
+}
+
+/// Parse a fixed batch on a bounded worker pool and deliver results in actual
+/// completion order. The sync channel retains at most two results per worker;
+/// one slow target therefore cannot hold back unrelated completed metadata.
+fn parse_targets_completed_cancellable<F, O, P>(
+    targets: &[FileScanTarget],
+    parse: &F,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    on_result: &mut P,
+) -> Result<(), StreamScanStop>
+where
+    F: Fn(&Path) -> O + Sync,
+    O: IntoStreamParseResult,
+    P: FnMut(&FileScanTarget, Option<SessionMeta>) -> Result<(), StreamScanStop>,
+{
+    if targets.is_empty() {
+        return Ok(());
+    }
+    if is_cancelled() {
+        return Err(StreamScanStop::Cancelled);
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1))
+        .unwrap_or(2)
+        .min(4)
+        .min(targets.len());
+    if workers <= 1 {
+        for target in targets {
+            if is_cancelled() {
+                return Err(StreamScanStop::Cancelled);
+            }
+            on_result(target, parse(&target.path).into_stream_parse_result()?)?;
+        }
+        return Ok(());
+    }
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let stopped = AtomicBool::new(false);
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(workers * 2);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let result_tx = result_tx.clone();
+                let next = &next;
+                let stopped = &stopped;
+                scope.spawn(move || loop {
+                    if stopped.load(Ordering::Acquire) || is_cancelled() {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(target) = targets.get(index) else {
+                        break;
+                    };
+                    let result = parse(&target.path).into_stream_parse_result();
+                    if result_tx.send((index, result)).is_err() {
+                        break;
+                    }
+                })
+            })
+            .collect();
+        drop(result_tx);
+
+        let mut received = 0usize;
+        let mut outcome = Ok(());
+        while received < targets.len() {
+            if is_cancelled() {
+                outcome = Err(StreamScanStop::Cancelled);
+                break;
+            }
+            match result_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok((index, result)) => {
+                    received += 1;
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(stop) => {
+                            outcome = Err(stop);
+                            break;
+                        }
+                    };
+                    if let Err(stop) = on_result(&targets[index], result) {
+                        outcome = Err(stop);
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    if received != targets.len() {
+                        outcome = Err(StreamScanStop::Incomplete);
+                    }
+                    break;
+                }
+            }
+        }
+        stopped.store(true, Ordering::Release);
+        drop(result_rx);
+        for handle in handles {
+            handle.join().expect("session parse worker panicked");
+        }
+        if is_cancelled() {
+            Err(StreamScanStop::Cancelled)
+        } else {
+            outcome
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// A parse closure that records how often it runs and derives the session id
     /// from the file's first line, so a cache hit (no re-read) is observable both
@@ -493,6 +1514,379 @@ mod tests {
         );
         assert!(fourth.is_empty());
         assert!(store.load_for_provider("claude").expect("load").is_empty());
+    }
+
+    #[test]
+    fn cancellable_revalidation_stops_parser_fanout_and_discards_partial_delta() {
+        let cancelled = AtomicBool::new(false);
+        let parsed = AtomicUsize::new(0);
+        let targets: Vec<_> = (0..1_000)
+            .map(|index| FileScanTarget {
+                path: PathBuf::from(format!("/virtual/session-{index}.jsonl")),
+                mtime_ns: 1,
+                size: 1,
+            })
+            .collect();
+
+        let result = revalidate_progressive_cancellable(
+            "claude",
+            targets,
+            HashMap::new(),
+            false,
+            |_| {
+                let count = parsed.fetch_add(1, Ordering::AcqRel) + 1;
+                if count >= 4 {
+                    cancelled.store(true, Ordering::Release);
+                }
+                Some(sample_meta(&format!("session-{count}")))
+            },
+            |_| true,
+            |_| None,
+            |_| {},
+            &|| cancelled.load(Ordering::Acquire),
+        );
+
+        assert!(
+            result.is_none(),
+            "cancelled scan must not expose a partial delta"
+        );
+        assert!(
+            parsed.load(Ordering::Acquire) < 32,
+            "parser workers should stop near the cancellation point"
+        );
+    }
+
+    #[test]
+    fn streaming_scan_never_retains_more_than_one_fixed_batch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for index in 0..1_025 {
+            std::fs::write(dir.path().join(format!("s-{index:04}.jsonl")), "row").expect("write");
+        }
+        let parsed = AtomicUsize::new(0);
+        let emitted = AtomicUsize::new(0);
+        let first_emit_parse_count = AtomicUsize::new(usize::MAX);
+        let mut sink = |_: SessionMeta| {
+            if emitted.fetch_add(1, Ordering::AcqRel) == 0 {
+                first_emit_parse_count.store(parsed.load(Ordering::Acquire), Ordering::Release);
+            }
+            ControlFlow::Continue(())
+        };
+        let stats = stream_file_provider_cancellable(
+            None,
+            "claude",
+            false,
+            |path| {
+                parsed.fetch_add(1, Ordering::AcqRel);
+                Some(sample_meta(
+                    path.file_stem()
+                        .and_then(|value| value.to_str())
+                        .expect("stem"),
+                ))
+            },
+            |_| true,
+            stat_target,
+            |on_target, cancel| {
+                visit_targets_recursive_cancellable(dir.path(), "jsonl", on_target, cancel)
+            },
+            &mut sink,
+            &|| false,
+        )
+        .expect("stream");
+
+        assert_eq!(stats.discovered, 1_025);
+        assert_eq!(stats.emitted, 1_025);
+        assert_eq!(stats.max_batch_targets, STREAM_SCAN_BATCH_SIZE);
+        assert!(
+            first_emit_parse_count.load(Ordering::Acquire) <= STREAM_SCAN_BATCH_SIZE,
+            "the first owned row must be emitted after one batch, not after full discovery"
+        );
+    }
+
+    #[test]
+    fn streaming_scan_observes_sink_stop_and_cancellation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for index in 0..400 {
+            std::fs::write(dir.path().join(format!("s-{index:04}.jsonl")), "row").expect("write");
+        }
+
+        let emitted = AtomicUsize::new(0);
+        let mut stopping_sink = |_: SessionMeta| {
+            if emitted.fetch_add(1, Ordering::AcqRel) >= 4 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        let stopped = stream_file_provider_cancellable(
+            None,
+            "claude",
+            false,
+            |_| Some(sample_meta("row")),
+            |_| true,
+            stat_target,
+            |on_target, cancel| {
+                visit_targets_recursive_cancellable(dir.path(), "jsonl", on_target, cancel)
+            },
+            &mut stopping_sink,
+            &|| false,
+        );
+        assert_eq!(stopped, Err(StreamScanStop::SinkStopped));
+        assert_eq!(emitted.load(Ordering::Acquire), 5);
+
+        let cancelled = AtomicBool::new(false);
+        let parsed = AtomicUsize::new(0);
+        let mut cancelling_sink = |_: SessionMeta| {
+            cancelled.store(true, Ordering::Release);
+            ControlFlow::Continue(())
+        };
+        let result = stream_file_provider_cancellable(
+            None,
+            "claude",
+            false,
+            |_| {
+                parsed.fetch_add(1, Ordering::AcqRel);
+                Some(sample_meta("row"))
+            },
+            |_| true,
+            stat_target,
+            |on_target, cancel| {
+                visit_targets_recursive_cancellable(dir.path(), "jsonl", on_target, cancel)
+            },
+            &mut cancelling_sink,
+            &|| cancelled.load(Ordering::Acquire),
+        );
+        assert_eq!(result, Err(StreamScanStop::Cancelled));
+        assert!(parsed.load(Ordering::Acquire) <= STREAM_SCAN_BATCH_SIZE);
+    }
+
+    #[test]
+    fn incomplete_walk_never_runs_stale_cache_cleanup() {
+        let store = ScanCacheStore::in_memory().expect("store");
+        let missing = "/definitely/missing/session.jsonl".to_string();
+        store
+            .upsert_batch(&[SessionScanCacheEntry {
+                file_path: missing.clone(),
+                provider: "claude".to_string(),
+                mtime_ns: 1,
+                size: 1,
+                meta_json: serde_json::to_string(&sample_meta("old")).expect("json"),
+                cache_version: SCAN_CACHE_VERSION,
+            }])
+            .expect("seed cache");
+        let mut sink = |_: SessionMeta| ControlFlow::Continue(());
+        let result = stream_file_provider_cancellable(
+            Some(&store),
+            "claude",
+            false,
+            |_| Some(sample_meta("unused")),
+            |_| true,
+            stat_target,
+            |_, _| Err(StreamScanStop::Incomplete),
+            &mut sink,
+            &|| false,
+        );
+        assert_eq!(result, Err(StreamScanStop::Incomplete));
+        assert!(store
+            .load_for_provider("claude")
+            .expect("load cache")
+            .contains_key(&missing));
+    }
+
+    #[test]
+    fn completed_stream_publishes_when_disposable_stale_cleanup_fails() {
+        let store = ScanCacheStore::in_memory().expect("store");
+        let invalid_stale_path = "/invalid/\0/session.jsonl".to_string();
+        store
+            .upsert_batch(&[SessionScanCacheEntry {
+                file_path: invalid_stale_path,
+                provider: "claude".to_string(),
+                mtime_ns: 1,
+                size: 1,
+                meta_json: serde_json::to_string(&sample_meta("stale")).expect("json"),
+                cache_version: SCAN_CACHE_VERSION,
+            }])
+            .expect("seed stale cache row");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("live.jsonl"), "row").expect("write live source");
+        let mut emitted = Vec::new();
+        let result = stream_file_provider_cancellable(
+            Some(&store),
+            "claude",
+            false,
+            |_| Some(sample_meta("live")),
+            |_| true,
+            stat_target,
+            |on_target, cancel| {
+                visit_targets_flat_cancellable(dir.path(), "jsonl", on_target, cancel)
+            },
+            &mut |row| {
+                emitted.push(row.session_id);
+                ControlFlow::Continue(())
+            },
+            &|| false,
+        );
+
+        assert!(
+            result.is_ok(),
+            "sidecar cleanup errors are non-authoritative"
+        );
+        assert_eq!(emitted, ["live"]);
+    }
+
+    #[test]
+    fn parsed_target_that_keeps_changing_is_never_emitted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("moving.jsonl");
+        std::fs::write(&path, "seed").expect("seed");
+        let parses = AtomicUsize::new(0);
+        let mut emitted = Vec::new();
+        let result = stream_file_provider_cancellable(
+            None,
+            "claude",
+            false,
+            |path| {
+                parses.fetch_add(1, Ordering::AcqRel);
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .expect("append");
+                file.write_all(b"x").expect("mutate during parse");
+                Some(sample_meta("moving"))
+            },
+            |_| true,
+            stat_target,
+            |on_target, cancel| {
+                visit_targets_flat_cancellable(dir.path(), "jsonl", on_target, cancel)
+            },
+            &mut |meta| {
+                emitted.push(meta.session_id);
+                ControlFlow::Continue(())
+            },
+            &|| false,
+        );
+        assert_eq!(result, Err(StreamScanStop::Incomplete));
+        assert_eq!(
+            parses.load(Ordering::Acquire),
+            2,
+            "only one retry is allowed"
+        );
+        assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn parser_results_are_delivered_in_completion_order() {
+        if std::thread::available_parallelism().map_or(1, |value| value.get()) < 2 {
+            return;
+        }
+        let targets: Vec<_> = (0..8)
+            .map(|index| FileScanTarget {
+                path: PathBuf::from(if index == 0 {
+                    "slow.jsonl".to_string()
+                } else {
+                    format!("fast-{index}.jsonl")
+                }),
+                mtime_ns: 1,
+                size: 1,
+            })
+            .collect();
+        let mut completed = Vec::new();
+        parse_targets_completed_cancellable(
+            &targets,
+            &|path| {
+                if path.file_name().and_then(|value| value.to_str()) == Some("slow.jsonl") {
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                }
+                Some(sample_meta(
+                    path.file_stem()
+                        .and_then(|value| value.to_str())
+                        .expect("stem"),
+                ))
+            },
+            &|| false,
+            &mut |target, _| {
+                completed.push(target.path.clone());
+                Ok(())
+            },
+        )
+        .expect("parse batch");
+        assert_ne!(
+            completed.first().and_then(|path| path.file_name()),
+            Some(std::ffi::OsStr::new("slow.jsonl")),
+            "one slow target must not head-of-line block completed peers"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authoritative_walker_follows_regular_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real.data");
+        let linked = dir.path().join("linked.jsonl");
+        std::fs::write(&real, "row").expect("write");
+        symlink(&real, &linked).expect("symlink");
+        let mut paths = Vec::new();
+        visit_targets_flat_cancellable(
+            dir.path(),
+            "jsonl",
+            &mut |target| {
+                paths.push(target.path);
+                Ok(())
+            },
+            &|| false,
+        )
+        .expect("walk");
+        assert_eq!(paths, vec![linked]);
+    }
+
+    #[test]
+    fn streaming_scan_uses_bounded_sidecar_batches_and_prunes_missing_rows() {
+        let store = ScanCacheStore::in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tempdir");
+        for index in 0..300 {
+            std::fs::write(dir.path().join(format!("s-{index:03}.jsonl")), "row").expect("write");
+        }
+        let parse_count = AtomicUsize::new(0);
+        let scan = |parse_count: &AtomicUsize| {
+            let mut sink = |_: SessionMeta| ControlFlow::Continue(());
+            stream_file_provider_cancellable(
+                Some(&store),
+                "claude",
+                false,
+                |path| {
+                    parse_count.fetch_add(1, Ordering::AcqRel);
+                    Some(sample_meta(
+                        path.file_stem()
+                            .and_then(|value| value.to_str())
+                            .expect("stem"),
+                    ))
+                },
+                |_| true,
+                stat_target,
+                |on_target, cancel| {
+                    visit_targets_recursive_cancellable(dir.path(), "jsonl", on_target, cancel)
+                },
+                &mut sink,
+                &|| false,
+            )
+            .expect("stream")
+        };
+
+        let first = scan(&parse_count);
+        assert_eq!(first.reparsed, 300);
+        assert_eq!(parse_count.load(Ordering::Acquire), 300);
+        let second = scan(&parse_count);
+        assert_eq!(second.cache_hits, 300);
+        assert_eq!(second.reparsed, 0);
+        assert_eq!(second.max_batch_targets, STREAM_SCAN_BATCH_SIZE);
+
+        std::fs::remove_file(dir.path().join("s-150.jsonl")).expect("remove");
+        let third = scan(&parse_count);
+        assert_eq!(third.emitted, 299);
+        assert_eq!(third.stale_cache_deleted, 1);
+        assert_eq!(store.load_for_provider("claude").expect("cache").len(), 299);
     }
 
     /// 平铺收集器只取目录直属文件、不递归子目录，且跳过非目标扩展名。
@@ -654,6 +2048,55 @@ mod tests {
         assert_eq!(delta.upserts[0].file_path, "/tmp/b.jsonl");
         assert!(delta.deletes.is_empty());
         assert_eq!(delta.sessions.len(), 2);
+    }
+
+    #[test]
+    fn progressive_callback_fires_before_file_provider_scan_completes() {
+        let fast = FileScanTarget {
+            path: PathBuf::from("/tmp/fast.jsonl"),
+            mtime_ns: 1,
+            size: 1,
+        };
+        let slow = FileScanTarget {
+            path: PathBuf::from("/tmp/slow.jsonl"),
+            mtime_ns: 2,
+            size: 1,
+        };
+        let targets = vec![fast, slow];
+        let restat = echoing_restat(&targets);
+        let slow_parsed = std::sync::atomic::AtomicBool::new(false);
+        let preview_before_slow = std::sync::atomic::AtomicBool::new(false);
+
+        let delta = revalidate_progressive(
+            "claude",
+            targets,
+            HashMap::new(),
+            false,
+            |path| {
+                if path.file_stem().and_then(|value| value.to_str()) == Some("slow") {
+                    slow_parsed.store(true, Ordering::SeqCst);
+                }
+                Some(sample_meta(
+                    path.file_stem()
+                        .and_then(|value| value.to_str())
+                        .expect("test path stem"),
+                ))
+            },
+            |_| true,
+            restat,
+            |_| {
+                if !slow_parsed.load(Ordering::SeqCst) {
+                    preview_before_slow.store(true, Ordering::SeqCst);
+                }
+            },
+        );
+
+        assert_eq!(delta.sessions.len(), 2);
+        assert!(slow_parsed.load(Ordering::SeqCst));
+        assert!(
+            preview_before_slow.load(Ordering::SeqCst),
+            "the first preview must be observable before the provider's remaining files finish"
+        );
     }
 
     #[test]
