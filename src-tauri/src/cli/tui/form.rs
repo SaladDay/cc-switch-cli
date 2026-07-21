@@ -166,6 +166,39 @@ impl ClaudeApiFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptCacheRoutingMode {
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl PromptCacheRoutingMode {
+    pub fn from_raw(value: &str) -> Self {
+        match value {
+            "enabled" => Self::Enabled,
+            "disabled" => Self::Disabled,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Enabled,
+            Self::Enabled => Self::Disabled,
+            Self::Disabled => Self::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormFocus {
     Templates,
     Fields,
@@ -227,6 +260,7 @@ pub enum ProviderAddField {
     #[allow(dead_code)]
     CodexModel,
     CodexAdvancedDivider,
+    CodexPromptCacheRouting,
     CodexLocalRouting,
     CodexQuickConfig,
     CodexGoalMode,
@@ -523,6 +557,7 @@ pub struct ProviderAddFormState {
     pub codex_env_key: TextInput,
     pub codex_api_key: TextInput,
     pub codex_chat_reasoning: CodexChatReasoningConfig,
+    pub codex_prompt_cache_routing: PromptCacheRoutingMode,
     pub codex_model_catalog: Vec<CodexModelCatalogRow>,
     /// Independent "需要本地路由映射" toggle (decoupled from the upstream
     /// format, mirroring upstream a4eb5f37). Gates model-mapping / reasoning

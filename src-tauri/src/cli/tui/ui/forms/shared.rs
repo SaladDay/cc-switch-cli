@@ -63,6 +63,7 @@ pub(crate) fn add_form_key_items(
                     ) => texts::tui_key_toggle(),
                     Some(
                         ProviderAddField::GeminiAuthType
+                        | ProviderAddField::CodexPromptCacheRouting
                         | ProviderAddField::OpenClawApiProtocol
                         | ProviderAddField::HermesApiMode,
                     ) => texts::tui_key_select(),

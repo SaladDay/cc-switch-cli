@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use super::codex_config::{build_codex_third_party_config_toml, update_codex_config_snippet};
 use super::{
     normalize_local_proxy_header_overrides, parse_codex_model_catalog_context_window,
-    ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, UsageQueryTemplate,
-    OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
+    ClaudeApiFormat, GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState,
+    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
 
 impl ProviderAddFormState {
@@ -580,6 +580,12 @@ impl ProviderAddFormState {
             && !self.is_claude_official_provider();
         let should_write_codex_api_format =
             matches!(self.app_type, AppType::Codex) && !self.is_codex_official_provider();
+        let should_write_prompt_cache_routing = should_write_codex_api_format
+            && self.codex_is_chat_format()
+            && !matches!(
+                self.codex_prompt_cache_routing,
+                PromptCacheRoutingMode::Auto
+            );
         let should_write_claude_api_key_field = matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider()
             && !self.is_claude_codex_oauth_provider()
@@ -597,6 +603,7 @@ impl ProviderAddFormState {
         if !should_write_common_config_meta
             && !should_write_claude_api_format
             && !should_write_codex_api_format
+            && !should_write_prompt_cache_routing
             && !should_write_claude_api_key_field
             && !is_codex_oauth
             && !should_write_local_proxy_settings
@@ -663,6 +670,7 @@ impl ProviderAddFormState {
             if self.is_codex_official_provider() {
                 meta_obj.remove("apiFormat");
                 meta_obj.remove("codexChatReasoning");
+                meta_obj.remove("promptCacheRouting");
             } else {
                 let api_format = match self.claude_api_format {
                     ClaudeApiFormat::OpenAiChat => "openai_chat",
@@ -681,6 +689,15 @@ impl ProviderAddFormState {
                     }
                 } else {
                     meta_obj.remove("codexChatReasoning");
+                }
+
+                if should_write_prompt_cache_routing {
+                    meta_obj.insert(
+                        "promptCacheRouting".to_string(),
+                        json!(self.codex_prompt_cache_routing.as_str()),
+                    );
+                } else {
+                    meta_obj.remove("promptCacheRouting");
                 }
             }
         }

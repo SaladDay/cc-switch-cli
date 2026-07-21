@@ -1955,6 +1955,25 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_codex_prompt_cache_routing() -> &'static str {
+        if is_chinese() {
+            "提示词缓存路由"
+        } else {
+            "Prompt cache routing"
+        }
+    }
+
+    pub fn tui_codex_prompt_cache_routing_value(mode: &str) -> &'static str {
+        match (is_chinese(), mode) {
+            (true, "enabled") => "开启",
+            (true, "disabled") => "关闭",
+            (true, _) => "自动（推荐）",
+            (false, "enabled") => "Enabled",
+            (false, "disabled") => "Disabled",
+            (false, _) => "Auto (recommended)",
+        }
+    }
+
     pub fn tui_label_codex_model_mapping() -> &'static str {
         if is_chinese() {
             "模型映射"

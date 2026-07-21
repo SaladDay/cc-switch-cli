@@ -541,6 +541,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Default Codex model. Third-party non-GPT models usually need local routing.\nUpstream model mapping generates model_catalog_json so Codex /model can show third-party models. Restart Codex after catalog changes.",
             ),
         ),
+        ProviderAddField::CodexPromptCacheRouting => HelpContent::new(
+            texts::tui_label_codex_prompt_cache_routing(),
+            help_lines(
+                "仅用于 Codex Responses → Chat Completions 转换，和模型映射相互独立。\n自动（推荐）：只向已确认兼容的上游发送 prompt_cache_key；未知或自建网关默认不发送。\n开启：用于其他已确认兼容的网关。\n关闭：始终不发送；严格网关因未知字段返回 HTTP 400 时使用。\n请求自带的 key 优先，否则只使用客户端提供的稳定会话 ID。",
+                "Applies only to Codex Responses → Chat Completions conversion and is independent of model mapping.\nAuto (recommended): sends prompt_cache_key only to known-compatible upstreams; unknown or self-hosted gateways default to off.\nEnabled: use it for another gateway you know is compatible.\nDisabled: never sends it; use this if a strict gateway rejects the unknown field with HTTP 400.\nAn explicit request key wins; otherwise only a stable client-provided session ID is used.",
+            ),
+        ),
         ProviderAddField::CodexLocalRouting => HelpContent::new(
             texts::tui_label_codex_model_mapping(),
             help_lines(

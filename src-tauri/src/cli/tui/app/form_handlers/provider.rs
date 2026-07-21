@@ -345,6 +345,16 @@ impl App {
                 };
                 Action::None
             }
+            ProviderAddField::CodexPromptCacheRouting => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.cycle_codex_prompt_cache_routing();
+                Action::None
+            }
             ProviderAddField::CodexWireApi => {
                 if !matches!(key.code, KeyCode::Enter) {
                     return Action::None;

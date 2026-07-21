@@ -21,7 +21,8 @@ mod tests {
     use crate::cli::tui::data::ProviderRow;
     use crate::cli::tui::form::{
         CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, McpEnvVarRow,
-        McpTransport, ProviderAddFormState, TextInput, UsageQueryField, UsageQueryTemplate,
+        McpTransport, PromptCacheRoutingMode, ProviderAddFormState, TextInput, UsageQueryField,
+        UsageQueryTemplate,
     };
     use crate::cli::tui::runtime_actions::{
         handle_action, run_external_editor_for_prompt_form_content,
@@ -13207,6 +13208,30 @@ mod tests {
     }
 
     #[test]
+    fn provider_codex_prompt_cache_routing_enter_cycles_and_space_is_noop() {
+        let mut app = App::new(Some(AppType::Codex));
+        let mut form = ProviderAddFormState::new(AppType::Codex);
+        form.focus = FormFocus::Fields;
+        form.claude_api_format = super::super::form::ClaudeApiFormat::OpenAiChat;
+        app.form = Some(FormState::ProviderAdd(form));
+        select_provider_field(&mut app, ProviderAddField::CodexPromptCacheRouting);
+
+        app.on_key(key(KeyCode::Char(' ')), &data());
+        let mode = |app: &App| match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.codex_prompt_cache_routing,
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(mode(&app), PromptCacheRoutingMode::Auto);
+
+        app.on_key(key(KeyCode::Enter), &data());
+        assert_eq!(mode(&app), PromptCacheRoutingMode::Enabled);
+        app.on_key(key(KeyCode::Enter), &data());
+        assert_eq!(mode(&app), PromptCacheRoutingMode::Disabled);
+        app.on_key(key(KeyCode::Enter), &data());
+        assert_eq!(mode(&app), PromptCacheRoutingMode::Auto);
+    }
+
+    #[test]
     fn provider_codex_local_routing_model_catalog_edits_inline_and_adds_models() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Providers;
@@ -14830,6 +14855,24 @@ mod tests {
         assert!(text.contains("Upstream format"), "{text}");
         assert!(text.contains("natively Responses API"), "{text}");
         assert!(!text.contains("上游格式"), "{text}");
+    }
+
+    #[test]
+    fn context_help_codex_prompt_cache_routing_explains_three_modes() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Codex));
+        let mut form = ProviderAddFormState::new(AppType::Codex);
+        form.claude_api_format = super::super::form::ClaudeApiFormat::OpenAiChat;
+        app.form = Some(FormState::ProviderAdd(form));
+        select_provider_field(&mut app, ProviderAddField::CodexPromptCacheRouting);
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+        let text = help_text(&app);
+        assert!(text.contains("Prompt cache routing"), "{text}");
+        assert!(text.contains("known-compatible upstreams"), "{text}");
+        assert!(text.contains("strict gateway"), "{text}");
+        assert!(text.contains("stable client-provided session ID"), "{text}");
+        assert!(!text.contains("提示词缓存路由"), "{text}");
     }
 
     #[test]

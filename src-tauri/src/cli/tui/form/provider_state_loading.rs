@@ -4,8 +4,8 @@ use super::{
     claude_disable_auto_upgrade_enabled, claude_hide_attribution_enabled, claude_teammates_enabled,
     claude_tool_search_enabled, detect_balance_provider_for_usage_query,
     detect_coding_plan_provider_for_usage_query, normalize_local_proxy_header_overrides,
-    ClaudeApiFormat, CodexWireApi, ProviderAddFormState, UsageQueryTemplate,
-    OPENCLAW_DEFAULT_API_PROTOCOL,
+    ClaudeApiFormat, CodexWireApi, PromptCacheRoutingMode, ProviderAddFormState,
+    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 use crate::app_config::AppType;
 use crate::provider::Provider;
@@ -236,6 +236,12 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
         .as_ref()
         .and_then(|meta| meta.codex_chat_reasoning.clone())
         .unwrap_or_default();
+    form.codex_prompt_cache_routing = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.prompt_cache_routing.as_deref())
+        .map(PromptCacheRoutingMode::from_raw)
+        .unwrap_or(PromptCacheRoutingMode::Auto);
     form.codex_model_catalog = provider
         .settings_config
         .get("modelCatalog")

@@ -15,9 +15,10 @@ use super::provider_state_loading::populate_form_from_provider;
 use super::{
     ClaudeApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
     CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType, HermesModelField,
-    InlineFieldError, LocalProxySettingsField, ProviderAddField, ProviderAddFormState,
-    ProviderFormPage, ProviderTextField, TextEditSession, TextInput, UsageQueryField,
-    UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
+    InlineFieldError, LocalProxySettingsField, PromptCacheRoutingMode, ProviderAddField,
+    ProviderAddFormState, ProviderFormPage, ProviderTextField, TextEditSession, TextInput,
+    UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
+    OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
 fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
@@ -205,6 +206,7 @@ impl ProviderAddFormState {
             codex_env_key: TextInput::new("OPENAI_API_KEY"),
             codex_api_key: TextInput::new(""),
             codex_chat_reasoning: CodexChatReasoningConfig::default(),
+            codex_prompt_cache_routing: PromptCacheRoutingMode::Auto,
             codex_model_catalog: Vec::new(),
             codex_local_routing_enabled: false,
             custom_user_agent: TextInput::new(""),
@@ -431,6 +433,9 @@ impl ProviderAddFormState {
                     // Upstream format is an independent picker; local routing /
                     // model mapping is decoupled from it.
                     fields.push(ProviderAddField::ClaudeApiFormat);
+                    if self.codex_is_chat_format() {
+                        fields.push(ProviderAddField::CodexPromptCacheRouting);
+                    }
                     fields.push(ProviderAddField::CodexLocalRouting);
                     fields.push(ProviderAddField::LocalProxySettings);
                 }
@@ -604,6 +609,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexPromptCacheRouting
             | ProviderAddField::CodexLocalRouting
             | ProviderAddField::LocalProxySettings
             | ProviderAddField::CodexQuickConfig
@@ -667,6 +673,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexPromptCacheRouting
             | ProviderAddField::CodexLocalRouting
             | ProviderAddField::LocalProxySettings
             | ProviderAddField::CodexQuickConfig
@@ -1306,6 +1313,10 @@ impl ProviderAddFormState {
         self.codex_local_routing_field_idx = self
             .codex_local_routing_field_idx
             .min(len.saturating_sub(1));
+    }
+
+    pub fn cycle_codex_prompt_cache_routing(&mut self) {
+        self.codex_prompt_cache_routing = self.codex_prompt_cache_routing.next();
     }
 
     pub fn toggle_codex_reasoning_thinking(&mut self) {

@@ -1877,6 +1877,9 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::CodexModel => texts::model_label().to_string(),
+        ProviderAddField::CodexPromptCacheRouting => {
+            texts::tui_label_codex_prompt_cache_routing().to_string()
+        }
         ProviderAddField::CodexLocalRouting => texts::tui_label_codex_model_mapping().to_string(),
         ProviderAddField::CodexWireApi => {
             strip_trailing_colon(texts::codex_wire_api_label()).to_string()
@@ -1998,6 +2001,10 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
+        ProviderAddField::CodexPromptCacheRouting => texts::tui_codex_prompt_cache_routing_value(
+            provider.codex_prompt_cache_routing.as_str(),
+        )
+        .to_string(),
         ProviderAddField::CodexLocalRouting => {
             if provider.codex_local_routing_enabled {
                 format!(

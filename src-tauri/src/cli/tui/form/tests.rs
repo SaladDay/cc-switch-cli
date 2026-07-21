@@ -1896,6 +1896,7 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
     form.claude_api_format = ClaudeApiFormat::OpenAiChat;
     form.codex_chat_reasoning.supports_thinking = Some(true);
     form.codex_chat_reasoning.supports_effort = Some(true);
+    form.codex_prompt_cache_routing = PromptCacheRoutingMode::Disabled;
     form.codex_local_routing_field_idx = 3;
     form.apply_codex_model_catalog_value(json!([
         { "model": "deepseek-chat", "displayName": "DeepSeek Chat" }
@@ -1912,6 +1913,10 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
         vec![CodexLocalRoutingField::Enabled]
     );
     assert_eq!(form.codex_chat_reasoning, Default::default());
+    assert_eq!(
+        form.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Auto
+    );
     assert!(form.codex_model_catalog.is_empty());
 
     let provider = form.to_provider_json_value();
@@ -1921,6 +1926,7 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
 
     form.claude_api_format = ClaudeApiFormat::OpenAiChat;
     form.codex_chat_reasoning.supports_thinking = Some(true);
+    form.codex_prompt_cache_routing = PromptCacheRoutingMode::Enabled;
     form.apply_codex_model_catalog_value(json!([{ "model": "qwen-coder" }]))
         .expect("catalog should apply");
 
@@ -1929,6 +1935,10 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
     assert!(form.is_codex_official_provider());
     assert!(!form.codex_local_routing_enabled());
     assert_eq!(form.codex_chat_reasoning, Default::default());
+    assert_eq!(
+        form.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Auto
+    );
     assert!(form.codex_model_catalog.is_empty());
     let official_provider = form.to_provider_json_value();
     assert!(official_provider["meta"].get("apiFormat").is_none());
@@ -2600,6 +2610,101 @@ fn provider_add_form_codex_local_routing_is_off_by_default_and_persisted() {
 
     assert!(!form.codex_local_routing_enabled());
     assert_eq!(provider["meta"]["apiFormat"], "openai_responses");
+}
+
+#[test]
+fn provider_add_form_codex_prompt_cache_routing_is_chat_only() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.id.set("custom");
+    form.name.set("Custom");
+
+    assert_eq!(
+        form.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Auto
+    );
+    assert!(!form
+        .fields()
+        .contains(&ProviderAddField::CodexPromptCacheRouting));
+    assert!(form.to_provider_json_value()["meta"]
+        .get("promptCacheRouting")
+        .is_none());
+
+    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    assert!(!form.codex_local_routing_enabled());
+    assert!(form
+        .fields()
+        .contains(&ProviderAddField::CodexPromptCacheRouting));
+
+    form.codex_prompt_cache_routing = PromptCacheRoutingMode::Enabled;
+    let chat = form.to_provider_json_value();
+    assert_eq!(chat["meta"]["promptCacheRouting"], "enabled");
+
+    form.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+    let responses = form.to_provider_json_value();
+    assert!(responses["meta"].get("promptCacheRouting").is_none());
+}
+
+#[test]
+fn provider_add_form_codex_prompt_cache_routing_round_trips_and_normalizes() {
+    let mut provider = Provider::with_id(
+        "custom".to_string(),
+        "Custom".to_string(),
+        json!({ "config": "" }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        api_format: Some("openai_chat".to_string()),
+        prompt_cache_routing: Some("disabled".to_string()),
+        ..Default::default()
+    });
+
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(
+        form.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Disabled
+    );
+    assert_eq!(
+        form.to_provider_json_value()["meta"]["promptCacheRouting"],
+        "disabled"
+    );
+
+    provider
+        .meta
+        .as_mut()
+        .expect("meta should exist")
+        .prompt_cache_routing = Some("unexpected".to_string());
+    let normalized = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(
+        normalized.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Auto
+    );
+    assert!(normalized.to_provider_json_value()["meta"]
+        .get("promptCacheRouting")
+        .is_none());
+}
+
+#[test]
+fn provider_add_form_codex_official_removes_prompt_cache_routing() {
+    let mut provider = Provider::with_id(
+        "official".to_string(),
+        "OpenAI Official".to_string(),
+        json!({ "config": "", "auth": {} }),
+        None,
+    );
+    provider.category = Some("official".to_string());
+    provider.meta = Some(crate::provider::ProviderMeta {
+        api_format: Some("openai_chat".to_string()),
+        prompt_cache_routing: Some("enabled".to_string()),
+        ..Default::default()
+    });
+
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert!(!form
+        .fields()
+        .contains(&ProviderAddField::CodexPromptCacheRouting));
+    assert!(form.to_provider_json_value()["meta"]
+        .get("promptCacheRouting")
+        .is_none());
 }
 
 #[test]

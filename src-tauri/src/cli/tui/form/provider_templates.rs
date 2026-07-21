@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 
 use super::{
     ClaudeApiFormat, CodexModelCatalogField, CodexModelCatalogRow, CodexWireApi, FormMode,
-    GeminiAuthType, ProviderAddFormState, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
+    GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState, HERMES_DEFAULT_API_MODE,
+    OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
 const DEEPSEEK_CODEX_CONFIG: &str = r#"model_provider = "custom"
@@ -487,6 +488,9 @@ impl ProviderAddFormState {
         self.clear_text_edit();
         self.id_is_manual = false;
         self.reset_local_proxy_settings_state();
+        if matches!(self.app_type, AppType::Codex) {
+            self.codex_prompt_cache_routing = PromptCacheRoutingMode::Auto;
+        }
 
         if idx >= builtin_defs.len() && idx < builtin_defs.len() + sponsor_presets.len() {
             let sponsor_idx = idx.saturating_sub(builtin_defs.len());
@@ -549,6 +553,7 @@ impl ProviderAddFormState {
                     self.codex_env_key = defaults.codex_env_key;
                     self.codex_api_key = defaults.codex_api_key;
                     self.codex_chat_reasoning = defaults.codex_chat_reasoning;
+                    self.codex_prompt_cache_routing = defaults.codex_prompt_cache_routing;
                     self.codex_model_catalog = defaults.codex_model_catalog;
                     self.codex_local_routing_enabled = defaults.codex_local_routing_enabled;
                     self.codex_goal_mode = defaults.codex_goal_mode;
@@ -996,6 +1001,7 @@ impl ProviderAddFormState {
     fn reset_codex_local_routing_state(&mut self) {
         self.claude_api_format = ClaudeApiFormat::OpenAiResponses;
         self.codex_chat_reasoning = CodexChatReasoningConfig::default();
+        self.codex_prompt_cache_routing = PromptCacheRoutingMode::Auto;
         self.codex_model_catalog.clear();
         self.codex_local_routing_enabled = false;
         self.codex_local_routing_field_idx = 0;

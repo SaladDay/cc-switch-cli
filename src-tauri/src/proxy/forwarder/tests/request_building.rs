@@ -1709,15 +1709,23 @@ async fn non_managed_upstream_allows_proxy_managed_placeholder_guard() {
 
 #[tokio::test]
 async fn codex_chat_prepare_request_rewrites_responses_to_chat_completions() {
-    let provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    let mut provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    provider
+        .meta
+        .as_mut()
+        .expect("Codex Chat provider should have metadata")
+        .prompt_cache_routing = Some("enabled".to_string());
     let (_db, router) = test_router().await;
-    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let forwarder = RequestForwarder::new(router)
+        .expect("create forwarder")
+        .with_session("session-key".to_string(), true);
     let mut headers = HeaderMap::new();
     headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
     let request_body = json!({
         "model": "gpt-5.4",
         "input": "hello",
-        "stream": true
+        "stream": true,
+        "prompt_cache_key": "request-key"
     });
 
     let request = forwarder
@@ -1756,6 +1764,70 @@ async fn codex_chat_prepare_request_rewrites_responses_to_chat_completions() {
     assert_eq!(body["messages"][0]["content"], "hello");
     assert_eq!(body["stream"], true);
     assert_eq!(body["stream_options"]["include_usage"], true);
+    assert_eq!(body["prompt_cache_key"], "request-key");
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_uses_only_client_provided_session_for_prompt_cache() {
+    let mut provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    provider
+        .meta
+        .as_mut()
+        .expect("Codex Chat provider should have metadata")
+        .prompt_cache_routing = Some("enabled".to_string());
+    let body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let (_db, router) = test_router().await;
+    let request = RequestForwarder::new(router)
+        .expect("create forwarder")
+        .with_session("client-session".to_string(), true)
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses",
+            &body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare request with client session")
+        .build()
+        .expect("build request with client session");
+    assert_eq!(
+        request_body_json(&request)["prompt_cache_key"],
+        "client-session"
+    );
+
+    let (_db, router) = test_router().await;
+    let request = RequestForwarder::new(router)
+        .expect("create forwarder")
+        .with_session("generated-session".to_string(), false)
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses",
+            &body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare request with generated session")
+        .build()
+        .expect("build request with generated session");
+    assert!(request_body_json(&request)
+        .get("prompt_cache_key")
+        .is_none());
 }
 
 #[tokio::test]

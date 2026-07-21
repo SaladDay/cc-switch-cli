@@ -37,8 +37,9 @@ pub use codex::CodexAdapter;
 #[allow(unused_imports)]
 pub use codex::{
     apply_codex_chat_upstream_model, codex_provider_catalog_tool_profile,
-    codex_provider_upstream_model, codex_provider_uses_chat_completions, is_origin_only_url,
-    resolve_codex_chat_reasoning_config, should_convert_codex_responses_to_chat,
+    codex_provider_upstream_model, codex_provider_uses_chat_completions,
+    inject_codex_chat_prompt_cache_key, is_origin_only_url, resolve_codex_chat_reasoning_config,
+    should_convert_codex_responses_to_chat,
 };
 pub use gemini::GeminiAdapter;
 
