@@ -364,7 +364,7 @@ pub(super) fn render_page_frame(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", icons::strip_icon(title)));
+        .title(format!(" {} ", title));
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 

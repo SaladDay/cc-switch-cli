@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +103,9 @@ pub struct ProxyStatus {
     /// 当前活跃的 daemon-managed worker 列表
     #[serde(default)]
     pub active_workers: Vec<ActiveWorker>,
+    /// 按 provider 聚合的预估 token 数（provider_id → token_count）
+    #[serde(default)]
+    pub provider_token_map: HashMap<String, u64>,
 }
 
 /// 活跃的 daemon-managed worker 信息

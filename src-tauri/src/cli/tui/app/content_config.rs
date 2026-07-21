@@ -997,6 +997,9 @@ impl App {
                     Action::None
                 }
                 Some(SettingsItem::Proxy) => self.push_route_and_switch(Route::SettingsProxy),
+                Some(SettingsItem::ModelRoutes) => {
+                    self.push_route_and_switch(Route::SettingsModelRoutes)
+                }
                 Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
                 None => Action::None,
             },
@@ -1067,6 +1070,13 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
+                Some(LocalProxySettingsItem::ProxySwitch) =>
+                {
+                    #[allow(clippy::needless_return)]
+                    return Action::SetProxyEnabled {
+                        enabled: !data.proxy.enabled,
+                    }
+                }
                 Some(LocalProxySettingsItem::AutoFailover) => {
                     self.request_auto_failover_toggle(data)
                 }
@@ -1131,6 +1141,59 @@ impl App {
             },
             KeyCode::Char(' ') => self.switch_selected_managed_account(),
             KeyCode::Enter => self.activate_managed_account_row(),
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_settings_model_routes_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        let routes_len = data.model_routes.rows.len();
+        match key.code {
+            KeyCode::Up => {
+                self.model_routes_idx = self.model_routes_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                if routes_len > 0 {
+                    self.model_routes_idx = (self.model_routes_idx + 1).min(routes_len - 1);
+                }
+                Action::None
+            }
+            KeyCode::Char('a') => {
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::tui_model_route_add_pattern_title().to_string(),
+                    prompt: texts::tui_model_route_add_pattern_prompt().to_string(),
+                    input: TextInput::new(String::new()),
+                    submit: TextSubmit::ModelRouteAddPattern,
+                });
+                Action::None
+            }
+            KeyCode::Char('e') => {
+                if let Some(row) = data.model_routes.rows.get(self.model_routes_idx) {
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_model_route_edit_pattern_title().to_string(),
+                        prompt: texts::tui_model_route_edit_pattern_prompt().to_string(),
+                        input: TextInput::new(row.pattern.clone()),
+                        submit: TextSubmit::ModelRouteEditPattern { id: row.id.clone() },
+                    });
+                }
+                Action::None
+            }
+            KeyCode::Char('d') => {
+                if let Some(row) = data.model_routes.rows.get(self.model_routes_idx) {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_model_route_confirm_delete_title().to_string(),
+                        message: texts::tui_model_route_confirm_delete_message(&row.pattern),
+                        action: ConfirmAction::ModelRouteDelete { id: row.id.clone() },
+                    });
+                }
+                Action::None
+            }
+            KeyCode::Char(' ') => {
+                if let Some(row) = data.model_routes.rows.get(self.model_routes_idx) {
+                    return Action::ModelRouteToggle { id: row.id.clone() };
+                }
+                Action::None
+            }
             _ => Action::None,
         }
     }

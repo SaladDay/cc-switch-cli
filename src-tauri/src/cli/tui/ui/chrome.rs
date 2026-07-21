@@ -317,16 +317,9 @@ pub(super) fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
         .saturating_add(NAV_TEXT_EXTRA_WIDTH)
         .max(NAV_TEXT_MIN_WIDTH);
 
-    // In ASCII mode the emoji column is collapsed, so it reserves no width.
-    let icon_col_width = if icons::use_emoji() {
-        NAV_ICON_COL_WIDTH
-    } else {
-        0
-    };
-
     NAV_BORDER_WIDTH
         .saturating_add(highlight_width)
-        .saturating_add(icon_col_width)
+        .saturating_add(NAV_ICON_COL_WIDTH)
         .saturating_add(NAV_COL_SPACING)
         .saturating_add(text_col_width)
 }
@@ -336,34 +329,23 @@ pub(super) fn render_nav(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let emoji = icons::use_emoji();
     let rows = app.nav_items().iter().map(|item| {
         let (icon, text) = split_nav_label(nav_label(*item));
-        // ASCII mode drops the emoji entirely (an empty, zero-width column)
-        // so wide-rendered glyphs can never push the text past the border.
-        let icon_cell = if emoji {
-            cell_pad(icon).replace('\u{FE0F}', "")
-        } else {
-            String::new()
-        };
-        Row::new(vec![Cell::from(icon_cell), Cell::from(text)])
+        let icon_clean = cell_pad(icon).replace('\u{FE0F}', "");
+        Row::new(vec![Cell::from(icon_clean), Cell::from(text)])
     });
 
-    let icon_col_width = if emoji { 3 } else { 0 };
-    let table = Table::new(
-        rows,
-        [Constraint::Length(icon_col_width), Constraint::Min(10)],
-    )
-    .column_spacing(1)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
-            .border_style(pane_border_style(app, Focus::Nav, theme))
-            .title(format!(" {} ", texts::tui_nav_title())),
-    )
-    .row_highlight_style(selection_style(theme))
-    .highlight_symbol(highlight_symbol(theme));
+    let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(10)])
+        .column_spacing(1)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(pane_border_style(app, Focus::Nav, theme))
+                .title(format!(" {} ", texts::tui_nav_title())),
+        )
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
 
     let mut state = TableState::default();
     state.select(Some(app.nav_idx));

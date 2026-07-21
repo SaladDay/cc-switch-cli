@@ -628,6 +628,7 @@ pub(crate) enum ProxyReq {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ProxyMsg {
     ManagedSessionFinished {
         request_id: u64,

@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app_config::MultiAppConfig;
+use crate::model_route::ModelRoute;
 use crate::prompt::Prompt;
 use crate::provider::{Provider, ProviderManager};
 use indexmap::IndexMap;
@@ -261,13 +262,13 @@ fn schema_migration_sets_user_version_when_missing() {
 fn schema_migration_rejects_future_version() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");
-    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    Database::set_user_version(&conn, SCHEMA_VERSION + 2).expect("set future version");
 
     let err =
         Database::apply_schema_migrations_on_conn(&conn).expect_err("should reject higher version");
     let message = err.to_string();
     assert!(message.contains("由较新版本的 CC Switch 创建"));
-    assert!(message.contains(&format!("数据库版本: {}", SCHEMA_VERSION + 1)));
+    assert!(message.contains(&format!("数据库版本: {}", SCHEMA_VERSION + 2)));
     assert!(message.contains(&format!("最高支持数据库版本: {SCHEMA_VERSION}")));
     assert!(message.contains("cc-switch update"));
 }
@@ -280,7 +281,7 @@ fn init_rejects_future_schema_before_creating_tables() {
     let _guard = ConfigDirEnvGuard::set(temp.path());
     let db_path = temp.path().join("cc-switch.db");
     let conn = Connection::open(&db_path).expect("open db");
-    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    Database::set_user_version(&conn, SCHEMA_VERSION + 2).expect("set future version");
     drop(conn);
 
     let err = match Database::init() {
@@ -2793,6 +2794,363 @@ fn model_pricing_upsert_rejects_invalid_values() {
 
     assert!(ModelPricingUpdate::new("bad-negative", "Bad Negative", "-1", "1", "0", "0").is_err());
     assert!(ModelPricingUpdate::new("", "Blank Model", "1", "1", "0", "0").is_err());
+}
+
+#[test]
+fn create_tables_on_conn_creates_model_routes_table() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+
+    // Simulate a minimal pre-existing schema so create_tables_on_conn doesn't
+    // trip over foreign-key references on model_routes (providers, mcp_servers,
+    // skills, prompts, skill_repos, proxy_config).
+    conn.execute_batch(
+        r#"
+        CREATE TABLE providers (
+            id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL,
+            settings_config TEXT NOT NULL, website_url TEXT, category TEXT,
+            created_at INTEGER, sort_index INTEGER, notes TEXT, icon TEXT,
+            icon_color TEXT, meta TEXT NOT NULL DEFAULT '{}',
+            is_current BOOLEAN NOT NULL DEFAULT 0,
+            in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, server_config TEXT NOT NULL,
+            description TEXT, homepage TEXT, docs TEXT, tags TEXT NOT NULL DEFAULT '[]',
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0, enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0, enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_hermes BOOLEAN NOT NULL DEFAULT 0
+        );
+        "#,
+    )
+    .expect("seed minimal schema");
+
+    // create_tables_on_conn must create model_routes via CREATE TABLE IF NOT EXISTS.
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    assert!(
+        Database::table_exists(&conn, "model_routes").expect("check model_routes exists"),
+        "model_routes table should exist after create_tables_on_conn"
+    );
+    assert!(
+        Database::has_column(&conn, "model_routes", "pattern").expect("check pattern column"),
+        "model_routes.pattern column should exist"
+    );
+    assert!(
+        Database::has_column(&conn, "model_routes", "priority").expect("check priority column"),
+        "model_routes.priority column should exist"
+    );
+    assert!(
+        Database::has_column(&conn, "model_routes", "enabled").expect("check enabled column"),
+        "model_routes.enabled column should exist"
+    );
+}
+
+#[test]
+fn repair_usage_daily_rollups_rebuilds_legacy_table_when_already_at_current_schema() {
+    // 模拟历史路径：user_version 已是 SCHEMA_VERSION，但 usage_daily_rollups 停留在
+    // 更早的 v6 schema（缺 request_model/pricing_model，旧 4 列主键），迁移循环从未运行，
+    // 仅靠 apply_schema_migrations 的 repair 阶段重建。
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    conn.execute_batch(
+        "DROP TABLE usage_daily_rollups;
+         CREATE TABLE usage_daily_rollups (
+             date TEXT NOT NULL,
+             app_type TEXT NOT NULL,
+             provider_id TEXT NOT NULL,
+             model TEXT NOT NULL,
+             request_count INTEGER NOT NULL DEFAULT 0,
+             success_count INTEGER NOT NULL DEFAULT 0,
+             input_tokens INTEGER NOT NULL DEFAULT 0,
+             output_tokens INTEGER NOT NULL DEFAULT 0,
+             cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+             cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+             total_cost_usd TEXT NOT NULL DEFAULT '0',
+             avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY (date, app_type, provider_id, model)
+         );
+         INSERT INTO usage_daily_rollups
+             (date, app_type, provider_id, model, request_count, input_tokens, output_tokens)
+         VALUES ('2026-06-22', 'claude', 'prov-1', 'glm-5.2', 5, 100, 200);",
+    )
+    .expect("seed legacy rollups table");
+
+    // version 已是当前 schema，迁移循环不进入，仅 repair 阶段应重建 rollups
+    Database::apply_schema_migrations_on_conn(&conn).expect("repair via migration entrypoint");
+
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "request_model")
+            .expect("check request_model"),
+        "request_model column should exist after repair"
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "pricing_model")
+            .expect("check pricing_model"),
+        "pricing_model column should exist after repair"
+    );
+
+    // 历史聚合数据应保留
+    let (request_count, input_tokens): (i64, i64) = conn
+        .query_row(
+            "SELECT request_count, input_tokens FROM usage_daily_rollups
+             WHERE provider_id = 'prov-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("query migrated row");
+    assert_eq!(request_count, 5);
+    assert_eq!(input_tokens, 100);
+}
+
+#[test]
+fn model_route_dao_crud_roundtrip() {
+    let db = Database::memory().expect("create memory db");
+
+    // Seed a provider for FK validation
+    let conn = db.conn.lock().expect("lock conn");
+    conn.execute(
+        "INSERT INTO providers (id, app_type, name, settings_config, meta)
+         VALUES ('test-prov', 'claude', 'Test Provider', '{}', '{}')",
+        [],
+    )
+    .expect("seed provider");
+    drop(conn);
+
+    // Create
+    let created = db
+        .create_model_route(&ModelRoute {
+            id: String::new(),
+            app_type: "claude".into(),
+            pattern: "*-sonnet".into(),
+            provider_id: "test-prov".into(),
+            priority: 10,
+            enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .expect("create model route");
+
+    assert_eq!(created.id.len(), 36); // UUID v4
+    assert_eq!(created.pattern, "*-sonnet");
+    assert_eq!(created.provider_id, "test-prov");
+    assert_eq!(created.priority, 10);
+    assert!(created.enabled);
+    assert!(created.created_at.is_some());
+
+    // Get by id
+    let got = db.get_model_route(&created.id).expect("get model route");
+    assert!(got.is_some());
+    assert_eq!(got.unwrap().pattern, "*-sonnet");
+
+    // Create second route
+    let second = db
+        .create_model_route(&ModelRoute {
+            id: String::new(),
+            app_type: "claude".into(),
+            pattern: "gpt-*".into(),
+            provider_id: "test-prov".into(),
+            priority: 20,
+            enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .expect("create second route");
+
+    // FK constraint: reject non-existent provider
+    let result = db.create_model_route(&ModelRoute {
+        id: String::new(),
+        app_type: "claude".into(),
+        pattern: "bad-*".into(),
+        provider_id: "nonexistent".into(),
+        priority: 1,
+        enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
+        created_at: None,
+        updated_at: None,
+    });
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not found"),
+        "expected 'not found' error, got: {err_msg}"
+    );
+
+    // Update
+    let updated = db
+        .update_model_route(
+            &created.id,
+            &ModelRoute {
+                id: String::new(),
+                app_type: "claude".into(),
+                pattern: "claude-*".into(),
+                provider_id: "test-prov".into(),
+                priority: 5,
+                enabled: false,
+                hit_count: 0,
+                last_hit_at: None,
+                created_at: None,
+                updated_at: None,
+            },
+        )
+        .expect("update model route");
+
+    assert_eq!(updated.pattern, "claude-*");
+    assert_eq!(updated.priority, 5);
+    assert!(!updated.enabled);
+
+    // Toggle
+    let toggled_off = db.toggle_model_route(&created.id).expect("toggle off");
+    assert!(toggled_off.enabled, "toggle off should re-enable");
+
+    let toggled_on = db.toggle_model_route(&created.id).expect("toggle on");
+    assert!(!toggled_on.enabled, "toggle on should disable");
+
+    // Delete
+    db.delete_model_route(&created.id)
+        .expect("delete model route");
+    let gone = db.get_model_route(&created.id).expect("get deleted route");
+    assert!(gone.is_none());
+
+    // Clean up the second route
+    db.delete_model_route(&second.id)
+        .expect("delete second route");
+
+    // List ordering: create 3 routes with priorities 5, 1, 3
+    db.create_model_route(&ModelRoute {
+        id: String::new(),
+        app_type: "claude".into(),
+        pattern: "mid".into(),
+        provider_id: "test-prov".into(),
+        priority: 5,
+        enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create priority 5");
+    db.create_model_route(&ModelRoute {
+        id: String::new(),
+        app_type: "claude".into(),
+        pattern: "low".into(),
+        provider_id: "test-prov".into(),
+        priority: 1,
+        enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create priority 1");
+    db.create_model_route(&ModelRoute {
+        id: String::new(),
+        app_type: "claude".into(),
+        pattern: "high".into(),
+        provider_id: "test-prov".into(),
+        priority: 3,
+        enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create priority 3");
+
+    let routes = db.list_model_routes("claude").expect("list routes");
+    assert_eq!(routes.len(), 3);
+    assert_eq!(routes[0].priority, 1);
+    assert_eq!(routes[1].priority, 3);
+    assert_eq!(routes[2].priority, 5);
+
+    // List filtering: create a codex route
+    let conn2 = db.conn.lock().expect("lock conn");
+    conn2
+        .execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta)
+             VALUES ('codex-prov', 'codex', 'Codex Provider', '{}', '{}')",
+            [],
+        )
+        .expect("seed codex provider");
+    drop(conn2);
+
+    db.create_model_route(&ModelRoute {
+        id: String::new(),
+        app_type: "codex".into(),
+        pattern: "*-codex".into(),
+        provider_id: "codex-prov".into(),
+        priority: 1,
+        enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create codex route");
+
+    let claude_routes = db.list_model_routes("claude").expect("list claude routes");
+    assert_eq!(claude_routes.len(), 3, "only claude routes listed");
+
+    let codex_routes = db.list_model_routes("codex").expect("list codex routes");
+    assert_eq!(codex_routes.len(), 1);
+    assert_eq!(codex_routes[0].pattern, "*-codex");
+}
+
+#[test]
+fn model_route_cascade_delete_on_provider_removal() {
+    let db = Database::memory().expect("create memory db");
+
+    // Seed provider
+    let conn = db.conn.lock().expect("lock conn");
+    conn.execute(
+        "INSERT INTO providers (id, app_type, name, settings_config, meta)
+         VALUES ('cascade-prov', 'claude', 'Cascade Provider', '{}', '{}')",
+        [],
+    )
+    .expect("seed provider");
+    drop(conn);
+
+    // Create a model_route pointing to this provider
+    db.create_model_route(&ModelRoute {
+        id: String::new(),
+        app_type: "claude".into(),
+        pattern: "*-test".into(),
+        provider_id: "cascade-prov".into(),
+        priority: 1,
+        enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create model route");
+
+    assert_eq!(
+        db.list_model_routes("claude").expect("list routes").len(),
+        1
+    );
+
+    // Delete the provider — should cascade delete the model_route
+    let conn2 = db.conn.lock().expect("lock conn");
+    conn2
+        .execute(
+            "DELETE FROM providers WHERE id = 'cascade-prov' AND app_type = 'claude'",
+            [],
+        )
+        .expect("delete provider");
+    drop(conn2);
+
+    let routes = db.list_model_routes("claude").expect("list after cascade");
+    assert!(
+        routes.is_empty(),
+        "model_routes should be empty after provider cascade delete"
+    );
 }
 
 #[test]

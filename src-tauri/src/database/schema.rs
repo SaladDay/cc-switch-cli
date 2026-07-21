@@ -309,6 +309,8 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        Self::create_model_routes_table(conn)?;
+
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN live_takeover_active INTEGER NOT NULL DEFAULT 0",
@@ -1431,6 +1433,49 @@ impl Database {
                 "INTEGER NOT NULL DEFAULT 0",
             )?;
         }
+        Ok(())
+    }
+
+    fn create_model_routes_table(conn: &Connection) -> Result<(), AppError> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_routes (
+                id TEXT PRIMARY KEY,
+                app_type TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                last_hit_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 model_routes 表失败: {e}")))?;
+
+        Self::add_column_if_missing(
+            conn,
+            "model_routes",
+            "hit_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Self::add_column_if_missing(conn, "model_routes", "last_hit_at", "TEXT")?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_lookup
+             ON model_routes(app_type, enabled, priority DESC, created_at ASC, id ASC)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 model_routes lookup 索引失败: {e}")))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_provider
+             ON model_routes(provider_id, app_type)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 model_routes provider 索引失败: {e}")))?;
+
         Ok(())
     }
 

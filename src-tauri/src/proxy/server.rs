@@ -19,6 +19,7 @@ use super::{
     circuit_breaker::CircuitBreakerConfig,
     error::ProxyError,
     handlers,
+    model_router::ModelRouter,
     provider_router::ProviderRouter,
     providers::codex_chat_history::CodexChatHistoryStore,
     providers::gemini_shadow::GeminiShadowStore,
@@ -35,8 +36,10 @@ pub struct ProxyServerState {
     pub start_time: Arc<RwLock<Option<Instant>>>,
     pub current_providers: Arc<RwLock<HashMap<String, (String, String)>>>,
     pub provider_router: Arc<ProviderRouter>,
+    pub model_router: Arc<ModelRouter>,
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
     pub gemini_shadow: Arc<GeminiShadowStore>,
+    pub provider_token_map: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl ProxyServerState {
@@ -60,6 +63,8 @@ impl ProxyServerState {
             .collect::<Vec<_>>();
         active_targets.sort_by(|left, right| left.app_type.cmp(&right.app_type));
         status.active_targets = active_targets;
+
+        status.provider_token_map = self.provider_token_map.read().await.clone();
 
         status
     }
@@ -91,6 +96,14 @@ impl ProxyServerState {
             status.estimated_output_tokens_total.saturating_add(tokens);
     }
 
+    /// 按 provider 记录预估 token 数，用于仪表盘点阵图多色展示。
+    /// 即使 token 估算为 0（非流式响应无 char_count 估算），也至少记录一次
+    /// 命中计数为 1，避免点阵图因 estimated_output_tokens == 0 而完全空。
+    pub async fn record_provider_activity(&self, provider_id: &str, tokens: u64) {
+        let mut map = self.provider_token_map.write().await;
+        *map.entry(provider_id.to_string()).or_default() += tokens.max(1);
+    }
+
     pub async fn record_active_target(&self, app_type: &AppType, provider: &Provider) {
         self.current_providers.write().await.insert(
             app_type.as_str().to_string(),
@@ -107,10 +120,17 @@ impl ProxyServerState {
         app_type: &AppType,
         provider: &Provider,
         current_provider_id_at_start: &str,
+        is_model_routed: bool,
     ) {
         self.record_active_target(app_type, provider).await;
 
         if provider.id == current_provider_id_at_start {
+            return;
+        }
+
+        // 模型路由选中的 provider 不应切换当前 provider / 更新 live backup。
+        // 路由命中是瞬态行为，不应覆盖用户主动选择的 provider。
+        if is_model_routed {
             return;
         }
 
@@ -175,6 +195,325 @@ impl ProxyServerState {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+    use serial_test::serial;
+    use std::env;
+    use tempfile::TempDir;
+
+    struct TempHome {
+        #[allow(dead_code)]
+        dir: TempDir,
+        original_home: Option<String>,
+        original_userprofile: Option<String>,
+        original_config_dir: Option<String>,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let dir = TempDir::new().expect("create temp home");
+            let original_home = env::var("HOME").ok();
+            let original_userprofile = env::var("USERPROFILE").ok();
+            let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
+
+            env::set_var("HOME", dir.path());
+            env::set_var("USERPROFILE", dir.path());
+            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
+            crate::settings::reload_test_settings();
+
+            Self {
+                dir,
+                original_home,
+                original_userprofile,
+                original_config_dir,
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(value) => env::set_var("HOME", value),
+                None => env::remove_var("HOME"),
+            }
+
+            match &self.original_userprofile {
+                Some(value) => env::set_var("USERPROFILE", value),
+                None => env::remove_var("USERPROFILE"),
+            }
+
+            match &self.original_config_dir {
+                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
+
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    fn test_provider(id: &str, name: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: name.to_string(),
+            settings_config: json!({}),
+            website_url: None,
+            category: Some("claude".to_string()),
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    fn test_provider_with_settings(
+        id: &str,
+        name: &str,
+        settings_config: serde_json::Value,
+    ) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: name.to_string(),
+            settings_config,
+            website_url: None,
+            category: Some("claude".to_string()),
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    fn test_state(db: Arc<Database>) -> ProxyServerState {
+        ProxyServerState {
+            db: db.clone(),
+            config: Arc::new(RwLock::new(ProxyConfig::default())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            start_time: Arc::new(RwLock::new(None)),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            provider_router: Arc::new(ProviderRouter::new(db.clone())),
+            model_router: Arc::new(ModelRouter::new(db)),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            gemini_shadow: Arc::new(GeminiShadowStore::default()),
+            provider_token_map: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    async fn set_takeover_enabled(db: &Database, app_type: &str, enabled: bool) {
+        let mut config = db
+            .get_proxy_config_for_app(app_type)
+            .await
+            .expect("read app proxy config");
+        config.enabled = enabled;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("update app proxy config");
+    }
+
+    #[tokio::test]
+    #[serial(home_settings)]
+    async fn sync_successful_provider_selection_updates_state_after_failover() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider_with_settings(
+            "claude-current",
+            "Claude Current",
+            json!({"apiKey": "current-key", "base_url": "https://current.example"}),
+        );
+        let failover = test_provider_with_settings(
+            "claude-failover",
+            "Claude Failover",
+            json!({"apiKey": "failover-key", "base_url": "https://failover.example"}),
+        );
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &failover)
+            .expect("save failover provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&current.id))
+            .expect("set local current provider");
+        db.save_live_backup(
+            "claude",
+            &serde_json::to_string(&current.settings_config).expect("serialize current backup"),
+        )
+        .await
+        .expect("save current live backup");
+        set_takeover_enabled(&db, "claude", true).await;
+
+        let state = test_state(db.clone());
+        state
+            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id, false)
+            .await;
+
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("read current provider after sync")
+                .as_deref(),
+            Some("claude-failover")
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            Some("claude-failover")
+        );
+        // The original takeover live backup must be preserved verbatim: auto-failover
+        // writes a separate failover snapshot instead of mutating proxy_live_backup, so
+        // restore_live_config_for_app still restores the user's original provider config.
+        let backup = db
+            .get_live_backup("claude")
+            .await
+            .expect("read live backup after sync")
+            .expect("live backup should remain present");
+        let backup_snapshot: serde_json::Value =
+            serde_json::from_str(&backup.original_config).expect("parse live backup snapshot");
+        assert_eq!(
+            backup_snapshot
+                .get("base_url")
+                .and_then(serde_json::Value::as_str),
+            Some("https://current.example")
+        );
+
+        // The failover provider's config is captured in a dedicated failover snapshot.
+        let failover_snapshot = db
+            .get_failover_live_snapshot("claude", &failover.id)
+            .await
+            .expect("read failover snapshot after sync")
+            .expect("failover snapshot should be written");
+        let failover_config: serde_json::Value =
+            serde_json::from_str(&failover_snapshot.config_json).expect("parse failover snapshot");
+        assert_eq!(
+            failover_config
+                .get("base_url")
+                .and_then(serde_json::Value::as_str),
+            Some("https://failover.example")
+        );
+
+        let status = state.snapshot_status().await;
+        assert_eq!(
+            status.current_provider_id.as_deref(),
+            Some("claude-failover")
+        );
+        assert_eq!(status.current_provider.as_deref(), Some("Claude Failover"));
+        assert_eq!(status.failover_count, 1);
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].app_type, "claude");
+        assert_eq!(status.active_targets[0].provider_id, "claude-failover");
+    }
+
+    #[tokio::test]
+    async fn sync_successful_provider_selection_keeps_failover_count_when_provider_unchanged() {
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider("claude-current", "Claude Current");
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+
+        let state = test_state(db.clone());
+        state
+            .sync_successful_provider_selection(&AppType::Claude, &current, &current.id, false)
+            .await;
+
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("read current provider after sync")
+                .as_deref(),
+            Some("claude-current")
+        );
+
+        let status = state.snapshot_status().await;
+        assert_eq!(
+            status.current_provider_id.as_deref(),
+            Some("claude-current")
+        );
+        assert_eq!(status.current_provider.as_deref(), Some("Claude Current"));
+        assert_eq!(status.failover_count, 0);
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].provider_id, "claude-current");
+    }
+
+    #[tokio::test]
+    #[serial(home_settings)]
+    async fn sync_successful_provider_selection_skips_backup_update_when_takeover_disabled() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider_with_settings(
+            "claude-current",
+            "Claude Current",
+            json!({"apiKey": "current-key", "base_url": "https://current.example"}),
+        );
+        let failover = test_provider_with_settings(
+            "claude-failover",
+            "Claude Failover",
+            json!({"apiKey": "failover-key", "base_url": "https://failover.example"}),
+        );
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &failover)
+            .expect("save failover provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&current.id))
+            .expect("set local current provider");
+        db.save_live_backup(
+            "claude",
+            &serde_json::to_string(&current.settings_config).expect("serialize current backup"),
+        )
+        .await
+        .expect("save current live backup");
+
+        let state = test_state(db.clone());
+        state
+            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id, false)
+            .await;
+
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("read current provider after sync")
+                .as_deref(),
+            Some("claude-failover")
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            Some("claude-failover")
+        );
+        let backup = db
+            .get_live_backup("claude")
+            .await
+            .expect("read live backup after sync")
+            .expect("live backup should remain present");
+        let backup_snapshot: serde_json::Value =
+            serde_json::from_str(&backup.original_config).expect("parse live backup snapshot");
+        assert_eq!(
+            backup_snapshot
+                .get("base_url")
+                .and_then(serde_json::Value::as_str),
+            Some("https://current.example")
+        );
+
+        let status = state.snapshot_status().await;
+        assert_eq!(
+            status.current_provider_id.as_deref(),
+            Some("claude-failover")
+        );
+        assert_eq!(status.current_provider.as_deref(), Some("Claude Failover"));
+        assert_eq!(status.failover_count, 1);
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].provider_id, "claude-failover");
+    }
+}
+
 fn update_success_rate(status: &mut ProxyStatus) {
     status.success_rate = if status.total_requests == 0 {
         0.0
@@ -192,6 +531,7 @@ pub struct ProxyServer {
 impl ProxyServer {
     pub fn new(config: ProxyConfig, db: Arc<Database>) -> Self {
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
+        let model_router = Arc::new(ModelRouter::new(db.clone()));
         let managed_session_token = std::env::var(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY)
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -208,8 +548,10 @@ impl ProxyServer {
                 start_time: Arc::new(RwLock::new(None)),
                 current_providers: Arc::new(RwLock::new(HashMap::new())),
                 provider_router,
+                model_router,
                 codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
                 gemini_shadow: Arc::new(GeminiShadowStore::default()),
+                provider_token_map: Arc::new(RwLock::new(HashMap::new())),
             },
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
@@ -341,6 +683,7 @@ impl ProxyServer {
         Router::new()
             .route("/health", get(handlers::health_check))
             .route("/status", get(handlers::get_status))
+            .route("/v1/models", get(handlers::handle_models))
             .route("/v1/messages", post(handlers::handle_messages))
             .route("/claude/v1/messages", post(handlers::handle_messages))
             .route("/chat/completions", post(handlers::handle_chat_completions))
@@ -381,318 +724,5 @@ impl ProxyServer {
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
             .layer(cors)
             .with_state(self.state.clone())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use serde_json::json;
-    use serial_test::serial;
-    use std::env;
-    use tempfile::TempDir;
-
-    struct TempHome {
-        #[allow(dead_code)]
-        dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
-        original_config_dir: Option<String>,
-    }
-
-    impl TempHome {
-        fn new() -> Self {
-            let dir = TempDir::new().expect("create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
-            let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
-
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
-            crate::settings::reload_test_settings();
-
-            Self {
-                dir,
-                original_home,
-                original_userprofile,
-                original_config_dir,
-            }
-        }
-    }
-
-    impl Drop for TempHome {
-        fn drop(&mut self) {
-            match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-
-            match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
-            }
-
-            match &self.original_config_dir {
-                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
-            }
-
-            crate::settings::reload_test_settings();
-        }
-    }
-
-    fn test_provider(id: &str, name: &str) -> Provider {
-        Provider {
-            id: id.to_string(),
-            name: name.to_string(),
-            settings_config: json!({}),
-            website_url: None,
-            category: Some("claude".to_string()),
-            created_at: None,
-            sort_index: None,
-            notes: None,
-            meta: None,
-            icon: None,
-            icon_color: None,
-            in_failover_queue: false,
-        }
-    }
-
-    fn test_provider_with_settings(
-        id: &str,
-        name: &str,
-        settings_config: serde_json::Value,
-    ) -> Provider {
-        Provider {
-            id: id.to_string(),
-            name: name.to_string(),
-            settings_config,
-            website_url: None,
-            category: Some("claude".to_string()),
-            created_at: None,
-            sort_index: None,
-            notes: None,
-            meta: None,
-            icon: None,
-            icon_color: None,
-            in_failover_queue: false,
-        }
-    }
-
-    fn test_state(db: Arc<Database>) -> ProxyServerState {
-        ProxyServerState {
-            db: db.clone(),
-            config: Arc::new(RwLock::new(ProxyConfig::default())),
-            status: Arc::new(RwLock::new(ProxyStatus::default())),
-            start_time: Arc::new(RwLock::new(None)),
-            current_providers: Arc::new(RwLock::new(HashMap::new())),
-            provider_router: Arc::new(ProviderRouter::new(db)),
-            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
-            gemini_shadow: Arc::new(GeminiShadowStore::default()),
-        }
-    }
-
-    async fn set_takeover_enabled(db: &Database, app_type: &str, enabled: bool) {
-        let mut config = db
-            .get_proxy_config_for_app(app_type)
-            .await
-            .expect("read app proxy config");
-        config.enabled = enabled;
-        db.update_proxy_config_for_app(config)
-            .await
-            .expect("update app proxy config");
-    }
-
-    #[tokio::test]
-    #[serial(home_settings)]
-    async fn sync_successful_provider_selection_updates_state_after_failover() {
-        let _home = TempHome::new();
-        let db = Arc::new(Database::memory().expect("create memory database"));
-        let current = test_provider_with_settings(
-            "claude-current",
-            "Claude Current",
-            json!({"apiKey": "current-key", "base_url": "https://current.example"}),
-        );
-        let failover = test_provider_with_settings(
-            "claude-failover",
-            "Claude Failover",
-            json!({"apiKey": "failover-key", "base_url": "https://failover.example"}),
-        );
-
-        db.save_provider("claude", &current)
-            .expect("save current provider");
-        db.save_provider("claude", &failover)
-            .expect("save failover provider");
-        db.set_current_provider("claude", &current.id)
-            .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some(&current.id))
-            .expect("set local current provider");
-        db.save_live_backup(
-            "claude",
-            &serde_json::to_string(&current.settings_config).expect("serialize current backup"),
-        )
-        .await
-        .expect("save current live backup");
-        set_takeover_enabled(&db, "claude", true).await;
-
-        let state = test_state(db.clone());
-        state
-            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id)
-            .await;
-
-        assert_eq!(
-            db.get_current_provider("claude")
-                .expect("read current provider after sync")
-                .as_deref(),
-            Some("claude-failover")
-        );
-        assert_eq!(
-            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
-            Some("claude-failover")
-        );
-        let backup = db
-            .get_live_backup("claude")
-            .await
-            .expect("read live backup after sync")
-            .expect("live backup should remain present");
-        let backup_snapshot: serde_json::Value =
-            serde_json::from_str(&backup.original_config).expect("parse live backup snapshot");
-        assert_eq!(
-            backup_snapshot
-                .get("base_url")
-                .and_then(serde_json::Value::as_str),
-            Some("https://current.example")
-        );
-
-        let snapshot = db
-            .get_failover_live_snapshot("claude", "claude-failover")
-            .await
-            .expect("read failover snapshot after sync")
-            .expect("failover snapshot should exist");
-        let snapshot_value: serde_json::Value =
-            serde_json::from_str(&snapshot.config_json).expect("parse failover snapshot");
-        assert_eq!(
-            snapshot_value
-                .get("base_url")
-                .and_then(serde_json::Value::as_str),
-            Some("https://failover.example")
-        );
-
-        let status = state.snapshot_status().await;
-        assert_eq!(
-            status.current_provider_id.as_deref(),
-            Some("claude-failover")
-        );
-        assert_eq!(status.current_provider.as_deref(), Some("Claude Failover"));
-        assert_eq!(status.failover_count, 1);
-        assert_eq!(status.active_targets.len(), 1);
-        assert_eq!(status.active_targets[0].app_type, "claude");
-        assert_eq!(status.active_targets[0].provider_id, "claude-failover");
-    }
-
-    #[tokio::test]
-    async fn sync_successful_provider_selection_keeps_failover_count_when_provider_unchanged() {
-        let db = Arc::new(Database::memory().expect("create memory database"));
-        let current = test_provider("claude-current", "Claude Current");
-
-        db.save_provider("claude", &current)
-            .expect("save current provider");
-        db.set_current_provider("claude", &current.id)
-            .expect("set current provider");
-
-        let state = test_state(db.clone());
-        state
-            .sync_successful_provider_selection(&AppType::Claude, &current, &current.id)
-            .await;
-
-        assert_eq!(
-            db.get_current_provider("claude")
-                .expect("read current provider after sync")
-                .as_deref(),
-            Some("claude-current")
-        );
-
-        let status = state.snapshot_status().await;
-        assert_eq!(
-            status.current_provider_id.as_deref(),
-            Some("claude-current")
-        );
-        assert_eq!(status.current_provider.as_deref(), Some("Claude Current"));
-        assert_eq!(status.failover_count, 0);
-        assert_eq!(status.active_targets.len(), 1);
-        assert_eq!(status.active_targets[0].provider_id, "claude-current");
-    }
-
-    #[tokio::test]
-    #[serial(home_settings)]
-    async fn sync_successful_provider_selection_skips_backup_update_when_takeover_disabled() {
-        let _home = TempHome::new();
-        let db = Arc::new(Database::memory().expect("create memory database"));
-        let current = test_provider_with_settings(
-            "claude-current",
-            "Claude Current",
-            json!({"apiKey": "current-key", "base_url": "https://current.example"}),
-        );
-        let failover = test_provider_with_settings(
-            "claude-failover",
-            "Claude Failover",
-            json!({"apiKey": "failover-key", "base_url": "https://failover.example"}),
-        );
-
-        db.save_provider("claude", &current)
-            .expect("save current provider");
-        db.save_provider("claude", &failover)
-            .expect("save failover provider");
-        db.set_current_provider("claude", &current.id)
-            .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some(&current.id))
-            .expect("set local current provider");
-        db.save_live_backup(
-            "claude",
-            &serde_json::to_string(&current.settings_config).expect("serialize current backup"),
-        )
-        .await
-        .expect("save current live backup");
-
-        let state = test_state(db.clone());
-        state
-            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id)
-            .await;
-
-        assert_eq!(
-            db.get_current_provider("claude")
-                .expect("read current provider after sync")
-                .as_deref(),
-            Some("claude-failover")
-        );
-        assert_eq!(
-            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
-            Some("claude-failover")
-        );
-        let backup = db
-            .get_live_backup("claude")
-            .await
-            .expect("read live backup after sync")
-            .expect("live backup should remain present");
-        let backup_snapshot: serde_json::Value =
-            serde_json::from_str(&backup.original_config).expect("parse live backup snapshot");
-        assert_eq!(
-            backup_snapshot
-                .get("base_url")
-                .and_then(serde_json::Value::as_str),
-            Some("https://current.example")
-        );
-
-        let status = state.snapshot_status().await;
-        assert_eq!(
-            status.current_provider_id.as_deref(),
-            Some("claude-failover")
-        );
-        assert_eq!(status.current_provider.as_deref(), Some("Claude Failover"));
-        assert_eq!(status.failover_count, 1);
-        assert_eq!(status.active_targets.len(), 1);
-        assert_eq!(status.active_targets[0].provider_id, "claude-failover");
     }
 }

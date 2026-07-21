@@ -18,6 +18,7 @@ mod config;
 mod editor;
 mod helpers;
 mod mcp;
+mod model_routes;
 mod pricing;
 mod prompts;
 mod providers;
@@ -850,6 +851,19 @@ pub(crate) fn handle_action(
         Action::PromptOpenImportCandidate { filename, content } => {
             prompts::open_import_candidate(&mut ctx, filename, content)
         }
+        Action::ModelRouteAdd {
+            pattern,
+            provider_id,
+            priority,
+        } => model_routes::handle_add(&mut ctx, pattern, provider_id, priority),
+        Action::ModelRouteEdit {
+            id,
+            pattern,
+            provider_id,
+            priority,
+        } => model_routes::handle_edit(&mut ctx, id, pattern, provider_id, priority),
+        Action::ModelRouteDelete { id } => model_routes::handle_delete(&mut ctx, id),
+        Action::ModelRouteToggle { id } => model_routes::handle_toggle(&mut ctx, id),
         Action::ConfigExport { path } => config::export(&mut ctx, path),
         Action::ConfigShowFull => config::show_full(&mut ctx),
         Action::ConfigImport { path } => config::import(&mut ctx, path),

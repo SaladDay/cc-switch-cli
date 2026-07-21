@@ -19,6 +19,7 @@ mod import_export;
 #[allow(dead_code)]
 mod init_status;
 mod mcp;
+mod model_route;
 mod openclaw_config;
 mod opencode_config;
 mod prompt;
@@ -63,6 +64,7 @@ pub use mcp::{
     sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
+pub use model_route::ModelRoute;
 pub use provider::{Provider, ProviderMeta, UsageScript};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{

@@ -21,6 +21,15 @@ pub(crate) fn render_overlay(
         Overlay::BackupPicker { selected } => {
             super::basic::render_backup_picker_overlay(frame, data, content_area, theme, *selected)
         }
+        Overlay::ModelRouteProviderPicker { selected, .. } => {
+            super::basic::render_model_route_provider_picker(
+                frame,
+                data,
+                content_area,
+                theme,
+                *selected,
+            )
+        }
         Overlay::TextView(view) => super::basic::render_text_view_overlay(
             frame,
             content_area,

@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -125,6 +126,23 @@ pub enum Action {
         codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
         claude_idx: Option<usize>,
+    },
+    ModelRouteAdd {
+        pattern: String,
+        provider_id: String,
+        priority: i32,
+    },
+    ModelRouteEdit {
+        id: String,
+        pattern: String,
+        provider_id: String,
+        priority: i32,
+    },
+    ModelRouteDelete {
+        id: String,
+    },
+    ModelRouteToggle {
+        id: String,
     },
     UsageCustomRange {
         range: data::UsageCustomRange,
@@ -489,11 +507,12 @@ pub enum SettingsItem {
     ClaudePluginIntegration,
     CodexUnifiedSessionHistory,
     Proxy,
+    ModelRoutes,
     CheckForUpdates,
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 13] = [
+    pub const ALL: [SettingsItem; 14] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::Theme,
@@ -506,19 +525,22 @@ impl SettingsItem {
         SettingsItem::ClaudePluginIntegration,
         SettingsItem::CodexUnifiedSessionHistory,
         SettingsItem::Proxy,
+        SettingsItem::ModelRoutes,
         SettingsItem::CheckForUpdates,
     ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalProxySettingsItem {
+    ProxySwitch,
     ListenAddress,
     ListenPort,
     AutoFailover,
 }
 
 impl LocalProxySettingsItem {
-    pub const ALL: [LocalProxySettingsItem; 3] = [
+    pub const ALL: [LocalProxySettingsItem; 4] = [
+        LocalProxySettingsItem::ProxySwitch,
         LocalProxySettingsItem::ListenAddress,
         LocalProxySettingsItem::ListenPort,
         LocalProxySettingsItem::AutoFailover,
@@ -676,6 +698,9 @@ pub struct App {
     pub proxy_output_activity_samples: Vec<u64>,
     pub proxy_activity_last_input_tokens: Option<u64>,
     pub proxy_activity_last_output_tokens: Option<u64>,
+    /// 按 provider 聚合的 activity 样本（provider_id → samples），用于仪表盘点阵图多色展示
+    pub proxy_provider_activity_samples: HashMap<String, Vec<u64>>,
+    pub proxy_activity_last_provider_tokens: Option<HashMap<String, u64>>,
     pub proxy_visual_state: Option<bool>,
     pub proxy_visual_transition: Option<ProxyVisualTransition>,
     pub quota_auto_target_key: Option<String>,
@@ -726,6 +751,8 @@ pub struct App {
     pub settings_idx: usize,
     pub settings_proxy_idx: usize,
     pub settings_managed_accounts_idx: usize,
+    /// Selected index in the model routes table.
+    pub model_routes_idx: usize,
     pub managed_auth_status: Option<crate::services::ManagedAuthStatus>,
     pub managed_auth_loading: bool,
     pub managed_auth_login: Option<ManagedAuthLoginState>,

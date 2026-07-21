@@ -10,9 +10,7 @@ For context — the foundations the remaining items build on:
 - **Keymap registry** (`src/cli/tui/keymap.rs`): one binding table per page
   drives both key dispatch and the page key bar, so hints can never drift
   from handlers. Migrated: Providers, MCP, Prompts, Skills (installed),
-  Usage, Sessions. Sessions binds only its action keys (Enter/R/d/r/a);
-  pane/list navigation stays explicit in the handler (pane-dependent and
-  reused by the filter path), with a static nav-hint prefix on the bar.
+  Usage.
 - **Overlay frame** (`src/cli/tui/ui/overlay/frame.rs`): all ~24 dialogs
   render through `overlay_frame`/`overlay_frame_at` with unified body
   padding; fixed-count pickers size to their options (`FitRows`).
@@ -23,51 +21,45 @@ For context — the foundations the remaining items build on:
   semantic colors (`fg_strong`, `on_accent`, `on_comment`), Settings ›
   Theme (Auto/Dark/Light, persisted), COLORFGBG auto-detection, curated
   ansi256 pins for both palettes.
-- **Help sheet generation** (`src/cli/tui/help.rs::global_help_lines`): the
-  MCP/Prompts/Sessions/Skills/Usage page lines are generated from
-  `keymap::<page>::help_items` (a `never` sentinel + `fn_addr_eq` skips
-  hidden aliases like Usage's reverse-Tab), so those hints track dispatch.
-  Providers/Config/Settings and the Hermes-only Memory line stay
-  hand-written (`texts::tui_help_line_*`) for their app-scope prose; the
-  static prelude is `texts::tui_help_prelude`. `context_help_for_app` now
-  takes `&UiData` to evaluate the keymap labels.
-- **Icon fallback** (`src/cli/tui/icons.rs`): `CC_SWITCH_ICONS=auto|emoji|
-  ascii` env override + a persisted Settings › Icons row, mirroring the
-  color-mode philosophy. `Auto` keeps emoji unless the locale is clearly
-  not UTF-8 (never flips the default when locale info is absent). The nav
-  sidebar collapses its emoji column to zero width in ASCII mode and
-  page/overlay titles strip a leading emoji via `icons::strip_icon`, so
-  wide glyphs can no longer break border alignment on legacy terminals.
-  Also accepts the full-width `？` as the help hotkey.
 - Word-wrapped, message-adaptive dialogs; breadcrumb titles on sub-pages;
   empty-state guidance on empty lists; `? more` degradation for
-  overflowing key bars.
+  overflowing key bars; help sheet synced with actual bindings.
 
 ## Remaining work
 
 ### 1. Finish the mechanical migrations (low risk, mostly delegatable)
 
-- **config.rs sub-pages → `render_page_frame`**: **done** for Config,
-  WebDAV, Settings, and Managed Accounts (the clean 1:1 fits — the last
-  uses the frame's `Some(summary)` path then splits the body into two
-  columns). Added `shared::breadcrumb_path` (unpadded) for frame callers,
-  since the frame wraps the title itself. Still hand-rolled — and
-  deliberately skipped because their layouts don't match the frame:
-  - **Settings › Proxy** (`render_settings_proxy`): trailing 2-line
-    footer (`[1, Min, 2]`) and a *conditional* key bar.
-  - **Hermes Memory** (`render_hermes_memory`): a custom info-row
-    paragraph (`[1, 2, Min]`), not a summary bar.
-  - **OpenClaw** Env/Tools/Agents routes and Workspace/Daily Memory: a
-    section-scroll layout, not a table body.
-  These need `render_page_frame` variants (footer slot / info-row slot)
-  before they can migrate; not maintenance-only.
+- **config.rs sub-pages → `render_page_frame`**: Config, WebDAV, OpenClaw
+  Workspace/Daily Memory/Env/Tools/Agents, Hermes Memory, Settings,
+  Settings › Proxy, Managed Accounts still hand-roll the page shell.
+  Visual output is already consistent (padded titles, persistent key
+  bars); this is maintenance-only deduplication.
+- **Sessions page → keymap registry**: the last main page still
+  dispatching raw key codes. Its Enter/R/d/r/a actions are
+  pane-dependent (`SessionsPane`), so the migration needs the intent
+  handler to keep the pane checks — follow the Providers pattern where
+  guards stay in the handler body.
 
-Help-sheet generation (was #2) and the icon fallback (was #3, issue #314
-class) are both done — see the Landed section. A possible follow-up on the
-icon work: per-item ASCII nav markers instead of the current text-only
-collapse, if a visible glyph in ASCII mode is wanted.
+### 2. Help sheet generated from the keymap registry
 
-### 2. Provider form decomposition (largest remaining UX item)
+`texts::tui_help_text*` page-key lines are still hand-written prose. Once
+Sessions is migrated, generate the per-page lines from
+`keymap::<page>::BINDINGS` (display + label, skipping `shown == never`
+aliases) so dispatch, key bars, and help share one source of truth. The
+static text should keep the global-keys and text-editing sections.
+
+### 3. Terminal compatibility: icon fallback (issue #314 class)
+
+Nav/emoji glyphs (🏠 🔑 …) render double-width on some SSH/legacy
+terminals and break border alignment. Plan:
+
+- `CC_SWITCH_ICONS=ascii|emoji|auto` env override plus a Settings row;
+- `auto`: fall back to ASCII markers when the locale is not UTF-8
+  (`LC_ALL`/`LC_CTYPE`/`LANG` without `utf-8`), mirroring the
+  color-mode philosophy — add per-terminal cases, never flip defaults
+  (see the pinned tests in `theme.rs`).
+
+### 4. Provider form decomposition (largest remaining UX item)
 
 The add/edit form spans ~60 fields across six apps in one scrolling
 table. Plan:
@@ -80,13 +72,13 @@ table. Plan:
 - Sub-pages already show breadcrumbs; also surface a toast when `Ctrl+S`
   is ignored on a sub-page (`form_handlers/mod.rs` refuses silently).
 
-### 3. Command palette (optional, largest discoverability win)
+### 5. Command palette (optional, largest discoverability win)
 
 `Ctrl+P` (or `:`) fuzzy palette over the 24 routes plus per-page intents.
 The `Route` enum and keymap intent tables make the candidate list nearly
 free; the work is the overlay UX and dispatch plumbing.
 
-### 4. Key vocabulary leftovers
+### 6. Key vocabulary leftovers
 
 - Case-pair traps kept for now: Sessions `R` (restore) vs `r` (refresh),
   Skill detail `s` (sync) vs `S` (sync all). If they cause real
@@ -94,12 +86,15 @@ free; the work is the overlay UX and dispatch plumbing.
 - Usage `P` (pricing) vs Main `p` (proxy) cross-screen overload:
   tolerated because both are chip-labeled.
 
-### 5. Upstream housekeeping (not TUI, found along the way) — done
+### 7. Upstream housekeeping (not TUI, found along the way)
 
-- **done** — `.gitignore` `skills/` anchored to `/skills/` so it no
-  longer swallows `src/cli/tui/ui/skills/`.
-- **done** — deleted `src/cli/i18n/texts/` (the uncompiled divergent copy
-  of the inline `texts` module in `i18n.rs`).
+- `.gitignore` line `skills/` is unanchored and swallows
+  `src/cli/tui/ui/skills/` — new files there are silently ignored
+  (`git add` needs `-f`). Should be `/skills/`.
+- `src/cli/i18n/texts/` is an uncompiled copy of the inline `texts`
+  module (nothing declares `mod texts;` against the directory) and has
+  already diverged from `i18n.rs`. Either finish that split or delete
+  the directory.
 
 ## Conventions for new work
 
