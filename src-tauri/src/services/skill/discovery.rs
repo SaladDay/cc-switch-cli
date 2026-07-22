@@ -1,5 +1,9 @@
 use super::*;
 
+const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
+const GITHUB_API_VERSION: &str = "2022-11-28";
+const SKILLS_GITHUB_TOKEN_ENV: &str = "CC_SWITCH_SKILLS_GITHUB_TOKEN";
+
 impl SkillService {
     pub(super) fn merge_local_ssot_skills(
         index: &SkillsIndex,
@@ -221,14 +225,40 @@ impl SkillService {
             vec![repo.branch.as_str(), "main", "master"]
         };
 
+        let token = Self::github_token_for_repo(repo);
         let mut last_error: Option<AppError> = None;
         for branch in branches {
-            let url = format!(
-                "https://github.com/{}/{}/archive/refs/heads/{}.zip",
-                repo.owner, repo.name, branch
-            );
+            if let Some(token) = token.as_deref() {
+                match Self::github_api_zipball_url(repo, branch) {
+                    Ok(url) => match self
+                        .download_and_extract(&url, &temp_path, Some(token))
+                        .await
+                    {
+                        Ok(()) => return Ok(temp_path),
+                        Err(e) => {
+                            last_error = Some(e);
+                        }
+                    },
+                    Err(e) => {
+                        last_error = Some(e);
+                    }
+                }
 
-            match self.download_and_extract(&url, &temp_path).await {
+                // Private repos need a token; public repos should ignore bad global tokens.
+                let url = Self::github_archive_url(repo, branch);
+                if self
+                    .download_and_extract(&url, &temp_path, None)
+                    .await
+                    .is_ok()
+                {
+                    return Ok(temp_path);
+                }
+
+                continue;
+            }
+
+            let url = Self::github_archive_url(repo, branch);
+            match self.download_and_extract(&url, &temp_path, None).await {
                 Ok(()) => return Ok(temp_path),
                 Err(e) => {
                     last_error = Some(e);
@@ -250,8 +280,17 @@ impl SkillService {
         &self,
         url: &str,
         dest: &Path,
+        token: Option<&str>,
     ) -> Result<(), AppError> {
-        let response = self.http_client.get(url).send().await.map_err(|e| {
+        let mut request = self.http_client.get(url);
+        if let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) {
+            request = request
+                .header(reqwest::header::ACCEPT, GITHUB_API_ACCEPT)
+                .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+                .bearer_auth(token);
+        }
+
+        let response = request.send().await.map_err(|e| {
             AppError::localized(
                 "skills.download_failed",
                 format!("下载失败: {e}"),
@@ -312,15 +351,13 @@ impl SkillService {
             let mut file = archive
                 .by_index(i)
                 .map_err(|e| AppError::Message(e.to_string()))?;
-            let file_path = file.name();
-
-            let relative_path =
-                if let Some(stripped) = file_path.strip_prefix(&format!("{root_name}/")) {
-                    stripped
-                } else {
-                    continue;
-                };
-            if relative_path.is_empty() {
+            let Some(safe_path) = file.enclosed_name() else {
+                continue;
+            };
+            let Ok(relative_path) = safe_path.strip_prefix(&root_name) else {
+                continue;
+            };
+            if relative_path.as_os_str().is_empty() {
                 continue;
             }
 
@@ -341,6 +378,63 @@ impl SkillService {
         }
 
         Ok(())
+    }
+
+    fn github_archive_url(repo: &SkillRepo, branch: &str) -> String {
+        format!(
+            "https://github.com/{}/{}/archive/refs/heads/{}.zip",
+            repo.owner, repo.name, branch
+        )
+    }
+
+    fn github_api_zipball_url(repo: &SkillRepo, branch: &str) -> Result<String, AppError> {
+        let mut url = reqwest::Url::parse("https://api.github.com/")
+            .map_err(|e| AppError::Message(format!("Failed to build GitHub zipball URL: {e}")))?;
+        url.path_segments_mut()
+            .map_err(|_| AppError::Message("Failed to build GitHub zipball URL".to_string()))?
+            .extend(["repos", &repo.owner, &repo.name, "zipball", branch]);
+        Ok(url.to_string())
+    }
+
+    fn github_token_for_repo(repo: &SkillRepo) -> Option<String> {
+        Self::github_token_from_lookup(repo, |key| std::env::var(key).ok())
+    }
+
+    fn github_token_from_lookup<F>(repo: &SkillRepo, mut lookup: F) -> Option<String>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        Self::github_token_env_keys(repo)
+            .into_iter()
+            .filter_map(|key| lookup(&key))
+            .map(|token| token.trim().to_string())
+            .find(|token| !token.is_empty())
+    }
+
+    fn github_token_env_keys(repo: &SkillRepo) -> Vec<String> {
+        let owner = Self::github_env_segment(&repo.owner);
+        let name = Self::github_env_segment(&repo.name);
+
+        vec![
+            format!("{SKILLS_GITHUB_TOKEN_ENV}_{owner}_{name}"),
+            format!("{SKILLS_GITHUB_TOKEN_ENV}_{owner}"),
+            SKILLS_GITHUB_TOKEN_ENV.to_string(),
+            "GITHUB_TOKEN".to_string(),
+            "GH_TOKEN".to_string(),
+        ]
+    }
+
+    fn github_env_segment(value: &str) -> String {
+        value
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect()
     }
 
     pub(super) fn scan_skill_dirs(root: &Path) -> Result<Vec<PathBuf>, AppError> {
@@ -423,5 +517,78 @@ impl SkillService {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn repo(owner: &str, name: &str) -> SkillRepo {
+        SkillRepo {
+            owner: owner.to_string(),
+            name: name.to_string(),
+            branch: "main".to_string(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn github_token_env_keys_follow_expected_priority() {
+        let keys = SkillService::github_token_env_keys(&repo("acme-inc", "private.skills"));
+
+        assert_eq!(
+            keys,
+            vec![
+                "CC_SWITCH_SKILLS_GITHUB_TOKEN_ACME_INC_PRIVATE_SKILLS",
+                "CC_SWITCH_SKILLS_GITHUB_TOKEN_ACME_INC",
+                "CC_SWITCH_SKILLS_GITHUB_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_TOKEN"
+            ]
+        );
+    }
+
+    #[test]
+    fn github_token_lookup_prefers_repo_specific_token() {
+        let values = HashMap::from([
+            ("CC_SWITCH_SKILLS_GITHUB_TOKEN_ACME_PRIVATE", "repo-token"),
+            ("CC_SWITCH_SKILLS_GITHUB_TOKEN_ACME", "owner-token"),
+            ("CC_SWITCH_SKILLS_GITHUB_TOKEN", "global-token"),
+            ("GITHUB_TOKEN", "github-token"),
+            ("GH_TOKEN", "gh-token"),
+        ]);
+
+        let token = SkillService::github_token_from_lookup(&repo("acme", "private"), |key| {
+            values.get(key).map(|value| value.to_string())
+        });
+
+        assert_eq!(token.as_deref(), Some("repo-token"));
+    }
+
+    #[test]
+    fn github_token_lookup_skips_empty_values() {
+        let values = HashMap::from([
+            ("CC_SWITCH_SKILLS_GITHUB_TOKEN_ACME_PRIVATE", " "),
+            ("CC_SWITCH_SKILLS_GITHUB_TOKEN_ACME", "owner-token"),
+        ]);
+
+        let token = SkillService::github_token_from_lookup(&repo("acme", "private"), |key| {
+            values.get(key).map(|value| value.to_string())
+        });
+
+        assert_eq!(token.as_deref(), Some("owner-token"));
+    }
+
+    #[test]
+    fn github_zipball_url_encodes_branch_as_path_segment() {
+        let url = SkillService::github_api_zipball_url(&repo("acme", "private"), "feature/a")
+            .expect("zipball URL should build");
+
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/acme/private/zipball/feature%2Fa"
+        );
     }
 }
