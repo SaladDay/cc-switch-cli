@@ -1710,7 +1710,7 @@ impl ProxyService {
             Some(provider),
         )?;
         if matches!(app_type, AppType::Codex) {
-            self.write_codex_live_for_provider(&live, Some(provider))
+            self.write_codex_takeover_live_for_provider(&live, Some(provider))
         } else {
             self.write_live_config_for_app(app_type, &live)
         }
@@ -2686,7 +2686,7 @@ impl ProxyService {
             provider_for_write.as_ref(),
         )?;
         if matches!(app_type, AppType::Codex) {
-            self.write_codex_live_for_provider(&taken_over, provider_for_write.as_ref())?;
+            self.write_codex_takeover_live_for_provider(&taken_over, provider_for_write.as_ref())?;
         } else {
             self.write_live_config_for_app(app_type, &taken_over)?;
         }
@@ -3454,6 +3454,60 @@ impl ProxyService {
             profile,
         )
         .map_err(|error| format!("write Codex live config failed: {error}"))
+    }
+
+    fn write_codex_takeover_live_for_provider(
+        &self,
+        config: &Value,
+        provider: Option<&Provider>,
+    ) -> Result<(), String> {
+        if crate::settings::preserve_codex_official_auth_on_switch() {
+            if let Some(auth) = config
+                .get("auth")
+                .filter(|auth| Self::codex_auth_has_proxy_placeholder(auth))
+            {
+                let mut settings = config.clone();
+                if settings
+                    .get("modelCatalog")
+                    .and_then(|catalog| catalog.get("models"))
+                    .is_none()
+                {
+                    if let (Some(root), Some(provider)) = (settings.as_object_mut(), provider) {
+                        root.insert(
+                            "modelCatalog".to_string(),
+                            provider
+                                .settings_config
+                                .get("modelCatalog")
+                                .cloned()
+                                .unwrap_or_else(|| json!({ "models": [] })),
+                        );
+                    }
+                }
+
+                let config_text = config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let profile = provider
+                    .map(crate::proxy::providers::codex_provider_catalog_tool_profile)
+                    .unwrap_or(crate::codex_config::CodexCatalogToolProfile::ProxyChat);
+                let prepared_config =
+                    crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+                        &settings,
+                        config_text,
+                        profile,
+                    )
+                    .map_err(|error| format!("write Codex live config failed: {error}"))?;
+                let live_config =
+                    crate::codex_config::prepare_codex_provider_live_config(auth, &prepared_config)
+                        .map_err(|error| format!("write Codex live config failed: {error}"))?;
+                crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
+                    .map_err(|error| format!("write Codex live config failed: {error}"))?;
+                return Ok(());
+            }
+        }
+
+        self.write_codex_live_for_provider(config, provider)
     }
 
     fn write_codex_provider_live_config_only(
@@ -6998,6 +7052,177 @@ base_url = "https://new.example/v1"
         assert!(!config.contains("model_provider = \"custom\""));
         assert!(!config.contains("[model_providers.custom]"));
         assert!(config.contains("[mcp_servers.echo]"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_takeover_preserves_oauth_auth_when_provider_category_is_misclassified() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            ..Default::default()
+        })
+        .expect("enable Codex official auth preservation");
+
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#,
+            ),
+        )
+        .expect("seed live Codex OAuth config");
+        let original_auth =
+            std::fs::read(get_codex_auth_path()).expect("read seeded Codex auth.json");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let mut provider = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "deepseek-key"
+                },
+                "config": r#"model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#,
+                "modelCatalog": {
+                    "models": [
+                        {
+                            "model": "deepseek-v4-flash",
+                            "displayName": "DeepSeek V4 Flash"
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        db.save_provider("codex", &provider)
+            .expect("save misclassified Codex provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("set database current Codex provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("set effective current Codex provider");
+
+        service
+            .enable_takeover_for_app_unlocked_with_options(&AppType::Codex, None, true)
+            .await
+            .expect("enable Codex takeover");
+
+        let taken_over_auth =
+            std::fs::read(get_codex_auth_path()).expect("read taken-over Codex auth.json");
+        assert_eq!(
+            taken_over_auth, original_auth,
+            "preserve-mode takeover must leave the OAuth auth.json byte-identical"
+        );
+
+        let live_config =
+            std::fs::read_to_string(get_codex_config_path()).expect("read Codex config.toml");
+        assert!(
+            live_config.contains(PROXY_TOKEN_PLACEHOLDER),
+            "the proxy placeholder should move into config.toml"
+        );
+        assert!(
+            live_config.contains("model_catalog_json"),
+            "takeover should retain the provider model catalog projection"
+        );
+        let generated_catalog: Value =
+            read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+                .expect("read generated Codex model catalog");
+        assert_eq!(
+            generated_catalog
+                .pointer("/models/0/slug")
+                .and_then(Value::as_str),
+            Some("deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_takeover_preserve_disabled_uses_legacy_auth_write_path() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let service = ProxyService::new(Arc::new(Database::memory().expect("create database")));
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model_provider = "deepseek"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#,
+            ),
+        )
+        .expect("seed live Codex OAuth config");
+
+        let mut provider = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({}),
+            None,
+        );
+        provider.category = Some("cn_official".to_string());
+        service
+            .write_codex_takeover_live_for_provider(
+                &json!({
+                    "auth": {
+                        "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                    },
+                    "config": r#"model_provider = "deepseek"
+
+[model_providers.deepseek]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#
+                }),
+                Some(&provider),
+            )
+            .expect("write Codex takeover with preservation disabled");
+
+        let live_auth: Value = read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth,
+            json!({
+                "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+            }),
+            "disabled preservation should retain the legacy auth.json takeover write"
+        );
+        let live_config =
+            std::fs::read_to_string(get_codex_config_path()).expect("read live config");
+        assert!(
+            !live_config.contains("experimental_bearer_token"),
+            "disabled preservation should not move the placeholder into config.toml"
+        );
     }
 
     #[test]
