@@ -179,6 +179,20 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
     }
 }
 
+fn resolve_zhipu_tier_name(unit: Option<i64>, number: Option<i64>) -> String {
+    match (unit, number) {
+        (Some(unit), Some(number)) => {
+            let seconds = match unit {
+                3 => number * 3_600,   // hours
+                6 => number * 604_800, // weeks
+                _ => number * 3_600,   // fallback: treat as hours
+            };
+            super::subscription::window_seconds_to_tier_name(seconds)
+        }
+        _ => "five_hour".to_string(),
+    }
+}
+
 // ── 智谱 GLM ────────────────────────────────────────────────
 
 async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
@@ -258,8 +272,15 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
                 continue;
             }
 
+            // 根据 unit 字段推断时间窗口名称：
+            // unit 3 = hours, unit 6 = weeks（参见 z.ai / 智谱 GLM API 文档）
+            let tier_name = resolve_zhipu_tier_name(
+                limit_item.get("unit").and_then(|v| v.as_i64()),
+                limit_item.get("number").and_then(|v| v.as_i64()),
+            );
+
             tiers.push(QuotaTier {
-                name: "five_hour".to_string(),
+                name: tier_name,
                 utilization: percentage,
                 resets_at: next_reset,
             });
@@ -448,4 +469,53 @@ pub async fn get_coding_plan_quota(
     };
 
     Ok(quota)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── resolve_zhipu_tier_name 测试 ─────────────────────────────
+
+    #[test]
+    fn zhipu_tier_name_unit_3_number_5_is_five_hour() {
+        assert_eq!(resolve_zhipu_tier_name(Some(3), Some(5)), "five_hour");
+    }
+
+    #[test]
+    fn zhipu_tier_name_unit_6_number_1_is_seven_day() {
+        assert_eq!(resolve_zhipu_tier_name(Some(6), Some(1)), "seven_day");
+    }
+
+    #[test]
+    fn zhipu_tier_name_unit_3_number_2_is_2_hour() {
+        assert_eq!(resolve_zhipu_tier_name(Some(3), Some(2)), "2_hour");
+    }
+
+    #[test]
+    fn zhipu_tier_name_unit_6_number_2_is_14_day() {
+        // 2 weeks = 14 days
+        assert_eq!(resolve_zhipu_tier_name(Some(6), Some(2)), "14_day");
+    }
+
+    #[test]
+    fn zhipu_tier_name_unknown_unit_falls_back_to_hours() {
+        // unknown unit → treated as hours
+        assert_eq!(resolve_zhipu_tier_name(Some(99), Some(3)), "3_hour");
+    }
+
+    #[test]
+    fn zhipu_tier_name_missing_unit_falls_back_to_five_hour() {
+        assert_eq!(resolve_zhipu_tier_name(None, Some(5)), "five_hour");
+    }
+
+    #[test]
+    fn zhipu_tier_name_missing_number_falls_back_to_five_hour() {
+        assert_eq!(resolve_zhipu_tier_name(Some(3), None), "five_hour");
+    }
+
+    #[test]
+    fn zhipu_tier_name_both_missing_falls_back_to_five_hour() {
+        assert_eq!(resolve_zhipu_tier_name(None, None), "five_hour");
+    }
 }

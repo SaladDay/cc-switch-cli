@@ -533,7 +533,7 @@ fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
-fn window_seconds_to_tier_name(secs: i64) -> String {
+pub(crate) fn window_seconds_to_tier_name(secs: i64) -> String {
     match secs {
         18_000 => "five_hour".to_string(),
         604_800 => "seven_day".to_string(),
