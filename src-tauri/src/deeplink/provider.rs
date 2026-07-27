@@ -572,12 +572,13 @@ fn merge_codex_config(
     }
 
     if let Some(config_str) = config.get("config").and_then(|v| v.as_str()) {
-        if let Ok(toml_value) = toml::from_str::<toml::Value>(config_str) {
-            if request.endpoint.as_ref().is_none_or(|s| s.is_empty()) {
-                if let Some(base_url) = extract_codex_base_url(&toml_value) {
-                    request.endpoint = Some(base_url);
-                }
+        if request.endpoint.as_ref().is_none_or(|s| s.is_empty()) {
+            if let Some(base_url) = crate::codex_config::extract_codex_base_url(config_str) {
+                request.endpoint = Some(base_url);
             }
+        }
+
+        if let Ok(toml_value) = toml::from_str::<toml::Value>(config_str) {
             if request.model.is_none() {
                 if let Some(model) = toml_value.get("model").and_then(|v| v.as_str()) {
                     request.model = Some(model.to_string());
@@ -783,20 +784,55 @@ fn reject_legacy_openclaw_aliases(config: &Map<String, Value>) -> Result<(), App
     )))
 }
 
-fn extract_codex_base_url(toml_value: &toml::Value) -> Option<String> {
-    // CLI edition stores base_url in root snippet.
-    if let Some(base_url) = toml_value.get("base_url").and_then(|v| v.as_str()) {
-        if !base_url.trim().is_empty() {
-            return Some(base_url.to_string());
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn import_request() -> DeepLinkImportRequest {
+        serde_json::from_value(json!({
+            "version": "1",
+            "resource": "provider"
+        }))
+        .expect("build import request")
     }
 
-    if let Some(providers) = toml_value.get("model_providers").and_then(|v| v.as_table()) {
-        for (_key, provider) in providers.iter() {
-            if let Some(base_url) = provider.get("base_url").and_then(|v| v.as_str()) {
-                return Some(base_url.to_string());
-            }
-        }
+    #[test]
+    fn merge_codex_config_uses_only_the_active_provider_base_url() {
+        let mut request = import_request();
+        let config = json!({
+            "config": r#"base_url = "https://stale.example.com/v1"
+model_provider = "current"
+
+[model_providers.inactive]
+base_url = "https://inactive.example.com/v1"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+"#
+        });
+
+        merge_codex_config(&mut request, &config).expect("merge config");
+
+        assert_eq!(
+            request.endpoint.as_deref(),
+            Some("https://current.example.com/v1")
+        );
     }
-    None
+
+    #[test]
+    fn merge_codex_config_does_not_use_stale_root_for_missing_active_url() {
+        let mut request = import_request();
+        let config = json!({
+            "config": r#"base_url = "https://stale.example.com/v1"
+model_provider = "current"
+
+[model_providers.current]
+wire_api = "responses"
+"#
+        });
+
+        merge_codex_config(&mut request, &config).expect("merge config");
+
+        assert_eq!(request.endpoint, None);
+    }
 }

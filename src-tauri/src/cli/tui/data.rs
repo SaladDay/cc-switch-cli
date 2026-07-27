@@ -1471,22 +1471,10 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .get("ANTHROPIC_BASE_URL")?
             .as_str()
             .map(|s| s.to_string()),
-        AppType::Codex => {
-            if let Some(config_str) = settings_config.get("config")?.as_str() {
-                for line in config_str.lines() {
-                    let line = line.trim();
-                    if line.starts_with("base_url") {
-                        if let Some(url_part) = line.split('=').nth(1) {
-                            let url = url_part.trim().trim_matches('"').trim_matches('\'');
-                            if !url.is_empty() {
-                                return Some(url.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        }
+        AppType::Codex => settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(crate::codex_config::extract_codex_base_url),
         AppType::Gemini => settings_config
             .get("env")
             .and_then(|env| {
@@ -4394,6 +4382,27 @@ mod tests {
         assert_eq!(
             extract_api_url(&settings, &AppType::Gemini),
             Some("https://legacy.example".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_api_url_codex_uses_active_provider_section() {
+        let settings = json!({
+            "config": r#"model_provider = "current"
+
+# base_url = "https://commented.example.com/v1"
+
+[model_providers.inactive]
+base_url = "https://inactive.example.com/v1"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+"#
+        });
+
+        assert_eq!(
+            extract_api_url(&settings, &AppType::Codex),
+            Some("https://current.example.com/v1".to_string())
         );
     }
 

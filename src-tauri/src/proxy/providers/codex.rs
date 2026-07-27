@@ -62,20 +62,7 @@ pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
         return is_chat_wire_api(&wire_api);
     }
 
-    if let Some(base_url) = provider
-        .settings_config
-        .get("base_url")
-        .or_else(|| provider.settings_config.get("baseURL"))
-        .and_then(|v| v.as_str())
-    {
-        return is_chat_completions_url(base_url);
-    }
-
-    provider
-        .settings_config
-        .get("config")
-        .and_then(|v| v.as_str())
-        .and_then(extract_codex_base_url_from_toml)
+    codex_provider_base_url(provider)
         .map(|url| is_chat_completions_url(&url))
         .unwrap_or(false)
 }
@@ -106,21 +93,7 @@ pub fn should_send_codex_chat_prompt_cache_key(provider: &Provider) -> bool {
         _ => {}
     }
 
-    let base_url = provider
-        .settings_config
-        .get("base_url")
-        .or_else(|| provider.settings_config.get("baseURL"))
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("config")
-                .and_then(|value| value.as_str())
-                .and_then(extract_codex_base_url_from_toml)
-        });
-
-    let Some(base_url) = base_url else {
+    let Some(base_url) = codex_provider_base_url(provider) else {
         return false;
     };
     let Ok(url) = url::Url::parse(&base_url) else {
@@ -264,19 +237,7 @@ fn infer_codex_chat_reasoning_config(
         .or_else(|| codex_provider_upstream_model(provider))
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let base_url = provider
-        .settings_config
-        .get("base_url")
-        .or_else(|| provider.settings_config.get("baseURL"))
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("config")
-                .and_then(|v| v.as_str())
-                .and_then(extract_codex_base_url_from_toml)
-        })
+    let base_url = codex_provider_base_url(provider)
         .unwrap_or_default()
         .to_ascii_lowercase();
     let name = provider.name.to_ascii_lowercase();
@@ -457,22 +418,40 @@ fn extract_codex_model_from_toml(config_text: &str) -> Option<String> {
 }
 
 fn extract_codex_base_url_from_toml(config_text: &str) -> Option<String> {
-    let doc = config_text.parse::<TomlValue>().ok()?;
+    crate::codex_config::extract_codex_base_url(config_text)
+}
 
-    if let Some(active_provider) = doc.get("model_provider").and_then(|v| v.as_str()) {
-        if let Some(base_url) = doc
-            .get("model_providers")
-            .and_then(|providers| providers.get(active_provider))
-            .and_then(|provider| provider.get("base_url"))
-            .and_then(|v| v.as_str())
+fn normalize_codex_base_url(base_url: &str) -> Option<String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    (!base_url.is_empty()).then(|| base_url.to_string())
+}
+
+fn codex_provider_base_url(provider: &Provider) -> Option<String> {
+    if let Some(config) = provider.settings_config.get("config") {
+        if let Some(config_text) = config.as_str() {
+            if !config_text.trim().is_empty() {
+                return extract_codex_base_url_from_toml(config_text)
+                    .and_then(|base_url| normalize_codex_base_url(&base_url));
+            }
+        }
+
+        if let Some(base_url) = config
+            .get("base_url")
+            .and_then(|value| value.as_str())
+            .and_then(normalize_codex_base_url)
         {
-            return Some(base_url.to_string());
+            return Some(base_url);
         }
     }
 
-    doc.get("base_url")
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
+    // Older provider records store the endpoint directly in settingsConfig.
+    // An empty/null config payload does not supersede those legacy aliases.
+    provider
+        .settings_config
+        .get("base_url")
+        .or_else(|| provider.settings_config.get("baseURL"))
+        .and_then(|value| value.as_str())
+        .and_then(normalize_codex_base_url)
 }
 
 impl CodexAdapter {
@@ -545,41 +524,8 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
-        if let Some(url) = provider
-            .settings_config
-            .get("base_url")
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.trim_end_matches('/').to_string());
-        }
-
-        if let Some(url) = provider
-            .settings_config
-            .get("baseURL")
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.trim_end_matches('/').to_string());
-        }
-
-        if let Some(config) = provider.settings_config.get("config") {
-            if let Some(url) = config.get("base_url").and_then(|v| v.as_str()) {
-                return Ok(url.trim_end_matches('/').to_string());
-            }
-
-            if let Some(config_str) = config.as_str() {
-                if let Some(start) = config_str.find("base_url = \"") {
-                    let rest = &config_str[start + 12..];
-                    if let Some(end) = rest.find('"') {
-                        return Ok(rest[..end].trim_end_matches('/').to_string());
-                    }
-                }
-                if let Some(start) = config_str.find("base_url = '") {
-                    let rest = &config_str[start + 12..];
-                    if let Some(end) = rest.find('\'') {
-                        return Ok(rest[..end].trim_end_matches('/').to_string());
-                    }
-                }
-            }
+        if let Some(base_url) = codex_provider_base_url(provider) {
+            return Ok(base_url);
         }
 
         Err(ProxyError::ConfigError(
@@ -630,6 +576,84 @@ mod tests {
             settings_config,
             None,
         )
+    }
+
+    #[test]
+    fn extract_base_url_uses_active_provider_instead_of_commented_assignment() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "config": r#"model_provider = "current"
+model = "gpt-5.6-sol"
+
+# [model_providers.old]
+# base_url = "https://old.example.com/v1"
+# wire_api = "responses"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+wire_api = "responses"
+"#
+        }));
+
+        assert_eq!(
+            adapter
+                .extract_base_url(&provider)
+                .expect("extract base URL"),
+            "https://current.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn extract_base_url_prefers_config_toml_over_legacy_aliases() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "base_url": "https://stale.example.com/v1",
+            "baseURL": "https://also-stale.example.com/v1",
+            "config": r#"model_provider = "current"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1/"
+"#
+        }));
+
+        assert_eq!(
+            adapter
+                .extract_base_url(&provider)
+                .expect("extract base URL"),
+            "https://current.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn extract_base_url_does_not_fall_back_when_config_toml_is_invalid() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "base_url": "https://stale.example.com/v1",
+            "config": "model_provider = \"current\"\n[broken"
+        }));
+
+        assert!(adapter.extract_base_url(&provider).is_err());
+    }
+
+    #[test]
+    fn extract_base_url_keeps_legacy_alias_without_config_toml() {
+        let adapter = CodexAdapter::new();
+        for config in [None, Some(json!("")), Some(serde_json::Value::Null)] {
+            let mut settings = json!({
+                "baseURL": "https://legacy.example.com/v1/"
+            });
+            if let Some(config) = config {
+                settings["config"] = config;
+            }
+            let provider = create_provider(settings);
+
+            assert_eq!(
+                adapter
+                    .extract_base_url(&provider)
+                    .expect("extract legacy base URL"),
+                "https://legacy.example.com/v1"
+            );
+        }
     }
 
     #[test]

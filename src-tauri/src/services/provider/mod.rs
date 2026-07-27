@@ -506,31 +506,7 @@ impl ProviderService {
     }
 
     fn codex_config_has_base_url(config_text: &str) -> bool {
-        let Ok(table) = toml::from_str::<toml::Table>(config_text.trim()) else {
-            return false;
-        };
-
-        if table
-            .get("base_url")
-            .and_then(|value| value.as_str())
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            return true;
-        }
-
-        let Some(provider_key) = table.get("model_provider").and_then(|value| value.as_str())
-        else {
-            return false;
-        };
-
-        table
-            .get("model_providers")
-            .and_then(|value| value.as_table())
-            .and_then(|providers| providers.get(provider_key))
-            .and_then(|value| value.as_table())
-            .and_then(|provider| provider.get("base_url"))
-            .and_then(|value| value.as_str())
-            .is_some_and(|value| !value.trim().is_empty())
+        crate::codex_config::extract_codex_base_url(config_text).is_some()
     }
 
     pub fn sync_openclaw_to_live(state: &AppState) -> Result<(), AppError> {

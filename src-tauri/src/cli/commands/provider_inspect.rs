@@ -1111,6 +1111,30 @@ mod tests {
     }
 
     #[test]
+    fn cli_api_url_uses_active_codex_model_provider() {
+        let provider = Provider::with_id(
+            "current".to_string(),
+            "Current".to_string(),
+            json!({
+                "config": r#"model_provider = "current"
+
+# [model_providers.old]
+# base_url = "https://old.example.com/v1"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+"#
+            }),
+            None,
+        );
+
+        assert_eq!(
+            extract_api_url(&provider, &AppType::Codex).as_deref(),
+            Some("https://current.example.com/v1")
+        );
+    }
+
+    #[test]
     fn provider_quota_text_shows_script_empty_success_as_not_available_only() {
         let output = quota_output(ProviderUsageQuota::Script(UsageResult {
             success: true,

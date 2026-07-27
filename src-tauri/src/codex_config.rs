@@ -274,6 +274,37 @@ pub fn extract_codex_api_key(auth: Option<&Value>, config_text: Option<&str>) ->
         .or_else(|| config_text.and_then(extract_codex_experimental_bearer_token))
 }
 
+/// Extract the upstream base URL from a Codex `config.toml` string.
+///
+/// Prefer the active `[model_providers.<model_provider>].base_url`. A top-level
+/// `base_url` is accepted only when `model_provider` is absent, for legacy flat
+/// configurations. Inactive provider sections and commented assignments are
+/// never considered.
+pub fn extract_codex_base_url(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<toml::Value>().ok()?;
+
+    if let Some(active_provider) = doc.get("model_provider") {
+        return active_provider
+            .as_str()
+            .filter(|active_provider| !active_provider.trim().is_empty())
+            .and_then(|active_provider| {
+                doc.get("model_providers")
+                    .and_then(|providers| providers.get(active_provider))
+            })
+            .and_then(|provider| provider.get("base_url"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|base_url| !base_url.is_empty())
+            .map(str::to_string);
+    }
+
+    doc.get("base_url")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|base_url| !base_url.is_empty())
+        .map(str::to_string)
+}
+
 pub fn codex_auth_has_login_material(auth: &Value) -> bool {
     let Some(obj) = auth.as_object() else {
         return false;
@@ -1467,50 +1498,73 @@ pub fn update_codex_config_snippet(
         Err(_) => return original.to_string(),
     };
 
+    let provider_key = match doc.get("model_provider") {
+        Some(value) => match value
+            .as_str()
+            .filter(|provider_id| !provider_id.trim().is_empty())
+        {
+            Some(value) => Some(value.to_string()),
+            None => return original.to_string(),
+        },
+        None => None,
+    };
+
     if let Some(model) = non_empty(model) {
         doc["model"] = toml_edit::value(model);
     } else {
         doc.remove("model");
     }
 
-    let provider_key = doc
-        .get("model_provider")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string());
-
     if let Some(key) = provider_key {
         if doc.get("model_providers").is_none() {
             doc["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
-        let providers = doc["model_providers"]
-            .as_table_like_mut()
-            .expect("model_providers should be a table");
+        let Some(providers) = doc["model_providers"].as_table_like_mut() else {
+            return original.to_string();
+        };
         if providers.get(&key).is_none() {
             providers.insert(&key, toml_edit::Item::Table(toml_edit::Table::new()));
         }
 
-        if let Some(section) = providers
+        let Some(section) = providers
             .get_mut(&key)
             .and_then(|value| value.as_table_like_mut())
-        {
-            if let Some(base_url) = non_empty(base_url) {
-                section.insert("base_url", toml_edit::value(base_url));
-            } else {
-                section.remove("base_url");
-            }
+        else {
+            return original.to_string();
+        };
 
-            section.insert("wire_api", toml_edit::value(wire_api));
-            section.insert(
-                "requires_openai_auth",
-                toml_edit::value(requires_openai_auth),
-            );
+        if let Some(base_url) = non_empty(base_url) {
+            section.insert("base_url", toml_edit::value(base_url));
+        } else {
+            section.remove("base_url");
+        }
 
-            if requires_openai_auth {
-                section.remove("env_key");
-            } else {
-                let env_key = non_empty(env_key).unwrap_or("OPENAI_API_KEY");
-                section.insert("env_key", toml_edit::value(env_key));
-            }
+        section.insert("wire_api", toml_edit::value(wire_api));
+        section.insert(
+            "requires_openai_auth",
+            toml_edit::value(requires_openai_auth),
+        );
+
+        if requires_openai_auth {
+            section.remove("env_key");
+        } else {
+            let env_key = non_empty(env_key).unwrap_or("OPENAI_API_KEY");
+            section.insert("env_key", toml_edit::value(env_key));
+        }
+    } else {
+        if let Some(base_url) = non_empty(base_url) {
+            doc["base_url"] = toml_edit::value(base_url);
+        } else {
+            doc.remove("base_url");
+        }
+
+        doc["wire_api"] = toml_edit::value(wire_api);
+        doc["requires_openai_auth"] = toml_edit::value(requires_openai_auth);
+
+        if requires_openai_auth {
+            doc.remove("env_key");
+        } else {
+            doc["env_key"] = toml_edit::value(non_empty(env_key).unwrap_or("OPENAI_API_KEY"));
         }
     }
 
@@ -1862,6 +1916,116 @@ mod tests {
         fn drop(&mut self) {
             let _ = crate::settings::update_settings(self.original.clone());
         }
+    }
+
+    #[test]
+    fn extract_base_url_prefers_active_provider_and_ignores_comments() {
+        let config = r#"model_provider = 'current'
+
+# [model_providers.stale]
+# base_url = "https://commented.example.com/v1"
+
+[model_providers.inactive]
+base_url = "https://inactive.example.com/v1"
+
+[model_providers.current]
+base_url = 'https://current.example.com/v1'
+"#;
+
+        assert_eq!(
+            extract_codex_base_url(config).as_deref(),
+            Some("https://current.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn extract_base_url_supports_legacy_top_level_literal_string() {
+        let config = r#"# base_url = "https://commented.example.com/v1"
+base_url = 'https://legacy.example.com/v1'
+"#;
+
+        assert_eq!(
+            extract_codex_base_url(config).as_deref(),
+            Some("https://legacy.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn extract_base_url_does_not_recover_inactive_or_invalid_toml() {
+        let inactive_only = r#"[model_providers.inactive]
+base_url = "https://inactive.example.com/v1"
+"#;
+
+        assert_eq!(extract_codex_base_url(inactive_only), None);
+        assert_eq!(
+            extract_codex_base_url(
+                "model_provider = \"current\"\n# base_url = \"https://stale.example\"\n[broken"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_base_url_does_not_fall_back_when_active_provider_is_invalid() {
+        for config in [
+            r#"base_url = "https://stale.example.com/v1"
+model_provider = "current"
+
+[model_providers.current]
+wire_api = "responses"
+"#,
+            r#"base_url = "https://stale.example.com/v1"
+model_provider = 42
+"#,
+            r#"base_url = "https://stale.example.com/v1"
+model_provider = "   "
+
+[model_providers."   "]
+base_url = "https://blank-id.example.com/v1"
+"#,
+        ] {
+            assert_eq!(extract_codex_base_url(config), None);
+        }
+    }
+
+    #[test]
+    fn update_config_snippet_preserves_and_updates_legacy_flat_shape() {
+        let updated = update_codex_config_snippet(
+            r#"base_url = "https://old.example.com/v1"
+model = "gpt-old"
+wire_api = "chat"
+requires_openai_auth = false
+env_key = "OLD_API_KEY"
+"#,
+            "https://new.example.com/v1",
+            "gpt-new",
+            "responses",
+            true,
+            "OPENAI_API_KEY",
+        );
+        let table = toml::from_str::<toml::Table>(&updated).expect("parse updated config");
+
+        assert_eq!(
+            table.get("base_url").and_then(|value| value.as_str()),
+            Some("https://new.example.com/v1")
+        );
+        assert_eq!(
+            table.get("model").and_then(|value| value.as_str()),
+            Some("gpt-new")
+        );
+        assert_eq!(
+            table.get("wire_api").and_then(|value| value.as_str()),
+            Some("responses")
+        );
+        assert_eq!(
+            table
+                .get("requires_openai_auth")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(table.get("env_key").is_none());
+        assert!(table.get("model_provider").is_none());
+        assert!(table.get("model_providers").is_none());
     }
 
     #[test]

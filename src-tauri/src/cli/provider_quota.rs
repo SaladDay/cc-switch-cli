@@ -273,39 +273,11 @@ fn is_gemini_official_provider(provider: &Provider) -> bool {
 }
 
 fn codex_config_has_base_url(settings_config: &Value) -> bool {
-    let Some(config_text) = settings_config
+    settings_config
         .get("config")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-
-    let Ok(table) = toml::from_str::<toml::Table>(config_text) else {
-        return false;
-    };
-
-    if table
-        .get("base_url")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return true;
-    }
-
-    let Some(provider_key) = table.get("model_provider").and_then(|value| value.as_str()) else {
-        return false;
-    };
-
-    table
-        .get("model_providers")
-        .and_then(|value| value.as_table())
-        .and_then(|providers| providers.get(provider_key))
-        .and_then(|value| value.as_table())
-        .and_then(|provider| provider.get("base_url"))
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| !value.trim().is_empty())
+        .and_then(crate::codex_config::extract_codex_base_url)
+        .is_some()
 }
 
 fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String> {
@@ -315,22 +287,10 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .get("ANTHROPIC_BASE_URL")?
             .as_str()
             .map(|s| s.to_string()),
-        AppType::Codex => {
-            if let Some(config_str) = settings_config.get("config")?.as_str() {
-                for line in config_str.lines() {
-                    let line = line.trim();
-                    if line.starts_with("base_url") {
-                        if let Some(url_part) = line.split('=').nth(1) {
-                            let url = url_part.trim().trim_matches('"').trim_matches('\'');
-                            if !url.is_empty() {
-                                return Some(url.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        }
+        AppType::Codex => settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(crate::codex_config::extract_codex_base_url),
         AppType::Gemini => settings_config
             .get("env")
             .and_then(|env| {

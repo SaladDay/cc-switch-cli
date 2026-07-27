@@ -2542,6 +2542,48 @@ requires_openai_auth = true
 }
 
 #[test]
+fn provider_edit_form_codex_updates_legacy_flat_config() {
+    let provider = Provider::with_id(
+        "legacy".to_string(),
+        "Legacy Codex".to_string(),
+        json!({
+            "auth": {
+                "OPENAI_API_KEY": "sk-old"
+            },
+            "config": r#"base_url = "https://old.example.com/v1"
+model = "gpt-old"
+wire_api = "chat"
+requires_openai_auth = false
+env_key = "LEGACY_API_KEY"
+"#,
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert!(form.codex_is_chat_format());
+    assert_eq!(form.codex_wire_api, CodexWireApi::Responses);
+    assert!(!form.codex_requires_openai_auth);
+    assert_eq!(form.codex_env_key.value, "LEGACY_API_KEY");
+
+    form.codex_base_url.set("https://new.example.com/v1");
+    let out = form.to_provider_json_value();
+    let config = out["settingsConfig"]["config"]
+        .as_str()
+        .expect("settingsConfig.config should be string");
+
+    assert_eq!(
+        crate::codex_config::extract_codex_base_url(config).as_deref(),
+        Some("https://new.example.com/v1")
+    );
+    assert!(!config.contains("model_provider"));
+    assert!(config.contains("wire_api = \"responses\""));
+    assert!(config.contains("requires_openai_auth = false"));
+    assert!(config.contains("env_key = \"LEGACY_API_KEY\""));
+    assert_eq!(out["meta"]["apiFormat"], "openai_chat");
+}
+
+#[test]
 fn provider_add_form_codex_model_mapping_available_for_both_formats() {
     let mut form = ProviderAddFormState::new(AppType::Codex);
 
