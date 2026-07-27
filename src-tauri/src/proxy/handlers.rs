@@ -175,6 +175,7 @@ async fn handle_claude_request(
             return proxy_error_response(error);
         }
     };
+    forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = body
         .get("stream")
@@ -517,6 +518,7 @@ async fn handle_passthrough_request(
             return proxy_error_response(error);
         }
     };
+    forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = request_is_streaming(&context.app_type, &endpoint, &body);
     let codex_tool_context = matches!(context.app_type, AppType::Codex).then(|| {

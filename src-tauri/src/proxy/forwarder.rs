@@ -174,6 +174,12 @@ impl RequestForwarder {
         })
     }
 
+    pub(super) fn prewarm_provider_clients(&self, app_type: &AppType, providers: &[Provider]) {
+        for provider in providers {
+            let _ = self.client_for_provider(app_type, provider);
+        }
+    }
+
     pub fn with_optimizer_config(mut self, optimizer_config: OptimizerConfig) -> Self {
         self.optimizer_config = optimizer_config;
         self
@@ -707,6 +713,9 @@ impl RequestForwarder {
         options: ForwardOptions,
         rectifier_config: &RectifierConfig,
     ) -> Result<StreamingAttemptOutcome, StreamingRequestError> {
+        // Provider-specific clients may need to load native roots. Build and
+        // retain this one before the upstream request timeout starts.
+        let client = self.client_for_provider(app_type, provider);
         let started_at = Instant::now();
         let allow_transport_retry = uses_internal_transport_retry(app_type);
         let mut request_body = body.clone();
@@ -714,9 +723,10 @@ impl RequestForwarder {
 
         'request_loop: loop {
             let base_request = self
-                .prepare_request(
+                .prepare_request_with_client(
                     app_type,
                     provider,
+                    &client,
                     endpoint,
                     &request_body,
                     headers,
@@ -877,6 +887,9 @@ impl RequestForwarder {
         options: ForwardOptions,
         rectifier_config: &RectifierConfig,
     ) -> Result<BufferedAttemptOutcome, BufferedRequestError> {
+        // Keep provider proxy client construction outside the shared request
+        // timeout and retain it for rectifier retries.
+        let client = self.client_for_provider(app_type, provider);
         let mut request_body = body.clone();
         let mut rectifier_retried = false;
         let request_started_at = Instant::now();
@@ -884,9 +897,10 @@ impl RequestForwarder {
 
         'request_loop: loop {
             let base_request = self
-                .prepare_request(
+                .prepare_request_with_client(
                     app_type,
                     provider,
+                    &client,
                     endpoint,
                     &request_body,
                     headers,

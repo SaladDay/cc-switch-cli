@@ -97,10 +97,32 @@ fn provider_uses_full_url(provider: &Provider) -> bool {
 }
 
 impl RequestForwarder {
+    #[cfg(test)]
     pub(super) async fn prepare_request(
         &self,
         app_type: &AppType,
         provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+        headers: &HeaderMap,
+        options: ForwardOptions,
+    ) -> Result<reqwest::RequestBuilder, ProxyError> {
+        let client = self.client_for_provider(app_type, provider);
+        self.prepare_request_with_client(
+            app_type, provider, &client, endpoint, body, headers, options,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request construction needs the prewarmed client plus provider request fields"
+    )]
+    pub(super) async fn prepare_request_with_client(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        client: &reqwest::Client,
         endpoint: &str,
         body: &Value,
         headers: &HeaderMap,
@@ -294,10 +316,9 @@ impl RequestForwarder {
         let force_identity_encoding = needs_transform
             || codex_responses_to_chat
             || is_streaming_request(&upstream_endpoint, &filtered_body, headers);
-        let client = self.client_for_provider(provider);
 
         build_request(
-            &client,
+            client,
             &*adapter,
             provider,
             &base_url,
@@ -379,8 +400,14 @@ impl RequestForwarder {
         matches!(vendor_result, Ok(Some(vendor)) if vendor.eq_ignore_ascii_case("openai"))
     }
 
-    fn client_for_provider(&self, provider: &Provider) -> reqwest::Client {
+    pub(super) fn client_for_provider(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> reqwest::Client {
         http_client::get_for_provider(
+            app_type.as_str(),
+            &provider.id,
             provider
                 .meta
                 .as_ref()
