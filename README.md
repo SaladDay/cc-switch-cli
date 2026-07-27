@@ -39,12 +39,12 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 <table>
   <tr>
     <td width="180">
-      <a href="https://console.claudeapi.com/register?source=cc-switch-cli">
+      <a href="https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii">
         <img src="assets/partners/logos/claudeapi.png" alt="ClaudeAPI" width="150">
       </a>
     </td>
     <td>
-      Thanks to <b>ClaudeAPI</b> for supporting this project! <b>ClaudeAPI</b> is a Claude-focused API access provider built on official and AWS channels, offering high stability, low latency, and full support for Claude Code, Codex, Agent workflows, and enterprise use cases. It also supports business onboarding, team usage management, and invoicing. Exclusive offer for CC-Switch CLI users: register via this <a href="https://console.claudeapi.com/register?source=cc-switch-cli">exclusive link</a> to receive free trial credits and get started with Claude Code instantly.
+      Thanks to <b>ClaudeAPI</b> for supporting this project! <b>ClaudeAPI</b> is a Claude-focused API access provider built on official and AWS channels, offering high stability, low latency, and full support for Claude Code, Codex, Agent workflows, and enterprise use cases. It also supports business onboarding, team usage management, and invoicing. Exclusive offer for CC-Switch CLI users: register via this <a href="https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii">exclusive link</a> to receive free trial credits and get started with Claude Code instantly.
     </td>
   </tr>
   <tr>

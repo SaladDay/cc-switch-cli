@@ -35,12 +35,12 @@
 <table>
   <tr>
     <td width="180">
-      <a href="https://console.claudeapi.com/register?source=cc-switch-cli">
+      <a href="https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii">
         <img src="assets/partners/logos/claudeapi.png" alt="ClaudeAPI" width="150">
       </a>
     </td>
     <td>
-      感谢 <b>ClaudeAPI</b> 赞助本项目！<b>ClaudeAPI</b> 是一家专注 Claude 的 API 接入服务商，走官方与 AWS 渠道，主打高稳定、低延迟，完整支持 Claude Code、Codex 与 Agent 工作流。支持企业对接、发票服务，并可在 <b>CC-Switch CLI</b> 中一键配置调用。CC-Switch CLI 用户专属福利：通过<a href="https://console.claudeapi.com/register?source=cc-switch-cli">此链接</a>注册，即可领取免费测试额度。
+      感谢 <b>ClaudeAPI</b> 赞助本项目！<b>ClaudeAPI</b> 是一家专注 Claude 的 API 接入服务商，走官方与 AWS 渠道，主打高稳定、低延迟，完整支持 Claude Code、Codex 与 Agent 工作流。支持企业对接、发票服务，并可在 <b>CC-Switch CLI</b> 中一键配置调用。CC-Switch CLI 用户专属福利：通过<a href="https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii">此链接</a>注册，即可领取免费测试额度。
     </td>
   </tr>
   <tr>

@@ -189,9 +189,9 @@ const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 8] = [
         id: ProviderAddTemplate::Claudeapi,
         provider_name: "ClaudeAPI",
         chip_label: "* ClaudeAPI",
-        website_url: "https://console.claudeapi.com",
+        website_url: "https://www.apito.ai",
         partner_promotion_key: "claudeapi",
-        claude_base_url: "https://gw.claudeapi.com",
+        claude_base_url: "https://gw.apito.ai",
         codex_base_url: "",
         gemini_base_url: "",
         opencode_base_url: "",
@@ -1643,11 +1643,11 @@ requires_openai_auth = true
         assert_eq!(provider.name, "ClaudeAPI");
         assert_eq!(
             provider.website_url.as_deref(),
-            Some("https://console.claudeapi.com")
+            Some("https://www.apito.ai")
         );
         assert_eq!(
             provider.settings_config["env"]["ANTHROPIC_BASE_URL"],
-            "https://gw.claudeapi.com"
+            "https://gw.apito.ai"
         );
         assert_eq!(
             provider

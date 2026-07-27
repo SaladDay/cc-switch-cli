@@ -503,7 +503,7 @@ fn provider_add_form_claudeapi_preset_keeps_affiliate_register_url_in_metadata()
 
     assert_eq!(
         claudeapi.register_url(),
-        "https://console.claudeapi.com/register?source=cc-switch-cli"
+        "https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii"
     );
 }
 
@@ -569,10 +569,10 @@ fn provider_add_form_claudeapi_template_claude_sets_base_url_and_partner_meta() 
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "ClaudeAPI");
-    assert_eq!(provider["websiteUrl"], "https://console.claudeapi.com");
+    assert_eq!(provider["websiteUrl"], "https://www.apito.ai");
     assert_eq!(
         provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
-        "https://gw.claudeapi.com"
+        "https://gw.apito.ai"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "claudeapi");
