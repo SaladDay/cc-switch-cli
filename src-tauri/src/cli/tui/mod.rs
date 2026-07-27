@@ -571,6 +571,12 @@ impl UiDataByAppCache {
         self.incomplete_by_app.remove(app_type);
     }
 
+    fn preserve_current_snapshot_for_refresh(&mut self, app_type: &AppType, data: &data::UiData) {
+        self.pending_by_app.remove(app_type);
+        self.incomplete_by_app.remove(app_type);
+        self.by_app.insert(app_type.clone(), data.clone());
+    }
+
     fn remove_usage_pricing_for_app(&mut self, app_type: &AppType) {
         self.usage_pricing_by_key
             .retain(|(cached_app_type, _), _| cached_app_type != app_type);
@@ -874,6 +880,11 @@ impl UiDataByAppCache {
         }
 
         let Some(tx) = usage_pricing_req_tx else {
+            app.usage.set_usage_pricing_error(
+                app_type,
+                range,
+                Some("Usage/pricing worker is not running.".to_string()),
+            );
             if matches!(range, data::UsageRangePreset::Custom(_)) {
                 app.push_toast(
                     "Usage/pricing worker is not running; custom range cannot be loaded."
@@ -911,6 +922,11 @@ impl UiDataByAppCache {
             {
                 self.usage_pricing_phase_by_key.remove(&key);
             }
+            app.usage.set_usage_pricing_error(
+                app_type,
+                range,
+                Some(format!("Refresh request failed: {err}")),
+            );
             app.push_toast(
                 format!("Usage/pricing refresh request failed: {err}"),
                 ToastKind::Warning,
@@ -1122,6 +1138,7 @@ fn handle_usage_pricing_msg(
 
             match *result {
                 Ok(usage_pricing) => {
+                    app.usage.set_usage_pricing_error(&app_type, range, None);
                     data_cache.update_usage_pricing(&app_type, range, usage_pricing.clone());
                     if app.app_type == app_type {
                         // Aggregate/head refreshes are background updates. The
@@ -1141,6 +1158,8 @@ fn handle_usage_pricing_msg(
                 }
                 Err(UsagePricingLoadError::Cancelled) => {}
                 Err(UsagePricingLoadError::Failed(err)) => {
+                    app.usage
+                        .set_usage_pricing_error(&app_type, range, Some(err.clone()));
                     if app.app_type == app_type {
                         app.push_toast(
                             format!("Usage/pricing refresh failed: {err}"),
@@ -1258,24 +1277,56 @@ fn handle_usage_pricing_msg(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionUsageSyncQueueState {
+    Queued,
+    AlreadyRunning,
+}
+
 fn queue_background_session_usage_sync(
     sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
     sync_tracker: &mut RequestTracker,
-) -> bool {
-    let Some(tx) = sync_req_tx else {
-        return false;
-    };
+) -> Result<SessionUsageSyncQueueState, String> {
+    let tx = sync_req_tx
+        .ok_or_else(|| texts::tui_error_session_usage_sync_worker_unavailable().to_string())?;
     if sync_tracker.active.is_some() {
-        return true;
+        return Ok(SessionUsageSyncQueueState::AlreadyRunning);
     }
 
     let request_id = sync_tracker.start();
     if let Err(err) = tx.send(SessionUsageSyncReq::Run { request_id }) {
         sync_tracker.cancel();
-        log::debug!("queue background session usage sync failed: {err}");
-        false
+        Err(texts::tui_error_session_usage_sync_queue_failed(
+            &err.to_string(),
+        ))
     } else {
-        true
+        Ok(SessionUsageSyncQueueState::Queued)
+    }
+}
+
+fn report_session_usage_sync_queue_error(app: &mut App, error: String) {
+    app.usage.set_session_sync_error(Some(error.clone()));
+    app.push_toast(
+        texts::tui_toast_session_usage_sync_failed(&error),
+        ToastKind::Warning,
+    );
+}
+
+fn session_sync_incomplete_error(
+    result: &crate::services::session_usage::SessionSyncResult,
+) -> Option<String> {
+    if let Some(error) = result.errors.first() {
+        Some(format!(
+            "{} session usage sync error(s); first: {error}",
+            result.errors.len()
+        ))
+    } else if result.deferred_files > 0 {
+        Some(format!(
+            "{} session file(s) deferred; data may be incomplete",
+            result.deferred_files
+        ))
+    } else {
+        None
     }
 }
 
@@ -1321,7 +1372,7 @@ fn queue_codex_usage_rebuild(
 /// this run. The sync scans the whole session-log history (expensive on large
 /// histories) and only feeds the Usage view, so it is deferred off startup.
 fn maybe_queue_usage_session_sync(
-    app: &App,
+    app: &mut App,
     sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
     sync_tracker: &mut RequestTracker,
     started: &mut bool,
@@ -1336,7 +1387,9 @@ fn maybe_queue_usage_session_sync(
         return;
     }
     *started = true;
-    let _ = queue_background_session_usage_sync(sync_req_tx, sync_tracker);
+    if let Err(error) = queue_background_session_usage_sync(sync_req_tx, sync_tracker) {
+        report_session_usage_sync_queue_error(app, error);
+    }
 }
 
 /// Lazily load the active app's usage/pricing when a Usage or Pricing view is
@@ -1564,6 +1617,46 @@ fn queue_usage_log_detail_refresh(
     }
 }
 
+fn session_sync_provider_error(
+    result: &crate::services::session_usage::SessionSyncResult,
+    provider: &str,
+    include_deferred_files: bool,
+) -> Option<String> {
+    let prefix = format!("{provider}: ");
+    let mut matching = result
+        .errors
+        .iter()
+        .filter(|error| error.starts_with(&prefix));
+    let first = matching.next();
+    let count = usize::from(first.is_some()) + matching.count();
+    if let Some(first) = first {
+        Some(format!(
+            "{count} {provider} session usage sync error(s); first: {first}"
+        ))
+    } else if include_deferred_files && result.deferred_files > 0 {
+        Some(format!(
+            "{} Codex session file(s) deferred; data may be incomplete",
+            result.deferred_files
+        ))
+    } else {
+        None
+    }
+}
+
+fn session_sync_global_error(
+    result: &crate::services::session_usage::SessionSyncResult,
+) -> Option<String> {
+    const PROVIDER_PREFIXES: [&str; 4] = ["Claude: ", "Codex: ", "Gemini: ", "OpenCode: "];
+    let mut matching = result.errors.iter().filter(|error| {
+        !PROVIDER_PREFIXES
+            .iter()
+            .any(|prefix| error.starts_with(prefix))
+    });
+    let first = matching.next();
+    let count = usize::from(first.is_some()) + matching.count();
+    first.map(|first| format!("{count} session usage sync error(s); first: {first}"))
+}
+
 fn handle_session_usage_sync_msg(
     app: &mut App,
     data: &mut data::UiData,
@@ -1583,8 +1676,40 @@ fn handle_session_usage_sync_msg(
     match msg {
         SessionUsageSyncMsg::Finished { result, .. } => {
             app.usage.finish_manual_session_refresh();
-            if let Err(err) = result {
-                log::debug!("background session usage sync failed: {err}");
+            match result {
+                Ok(result) => {
+                    app.usage
+                        .set_session_sync_error(session_sync_global_error(&result));
+                    for (app_type, provider, include_deferred_files) in [
+                        (AppType::Claude, "Claude", false),
+                        (AppType::Codex, "Codex", true),
+                        (AppType::Gemini, "Gemini", false),
+                        (AppType::OpenCode, "OpenCode", false),
+                    ] {
+                        app.usage.set_session_sync_error_for(
+                            &app_type,
+                            session_sync_provider_error(&result, provider, include_deferred_files),
+                        );
+                    }
+                    if let Some(error) = app
+                        .usage
+                        .session_sync_error_for(&app.app_type)
+                        .map(str::to_owned)
+                    {
+                        app.push_toast(
+                            texts::tui_toast_session_usage_sync_failed(&error),
+                            ToastKind::Warning,
+                        );
+                    }
+                }
+                Err(error) => {
+                    log::debug!("background session usage sync failed: {error}");
+                    app.usage.set_session_sync_error(Some(error.clone()));
+                    app.push_toast(
+                        texts::tui_toast_session_usage_sync_failed(&error),
+                        ToastKind::Warning,
+                    );
+                }
             }
         }
         SessionUsageSyncMsg::CodexRebuilt { result, .. } => {
@@ -1592,6 +1717,10 @@ fn handle_session_usage_sync_msg(
             match result {
                 Ok(result) => {
                     let errors = result.errors.len();
+                    app.usage.set_session_sync_error_for(
+                        &AppType::Codex,
+                        session_sync_incomplete_error(&result),
+                    );
                     let kind = if errors > 0 || result.deferred_files > 0 {
                         ToastKind::Warning
                     } else {
@@ -1607,10 +1736,14 @@ fn handle_session_usage_sync_msg(
                         kind,
                     );
                 }
-                Err(error) => app.push_toast(
-                    texts::tui_toast_codex_usage_rebuild_failed(&error),
-                    ToastKind::Error,
-                ),
+                Err(error) => {
+                    app.usage
+                        .set_session_sync_error_for(&AppType::Codex, Some(error.clone()));
+                    app.push_toast(
+                        texts::tui_toast_codex_usage_rebuild_failed(&error),
+                        ToastKind::Error,
+                    );
+                }
             }
         }
     }
@@ -1686,6 +1819,22 @@ fn handle_app_data_msg(
             match result {
                 Ok(mut loaded) => {
                     if matches!(kind, AppDataLoadKind::Full) {
+                        let preserved = if app.app_type == app_type {
+                            Some((data.usage.clone(), data.pricing.clone(), data.quota.clone()))
+                        } else {
+                            data_cache.by_app.get(&app_type).map(|cached| {
+                                (
+                                    cached.usage.clone(),
+                                    cached.pricing.clone(),
+                                    cached.quota.clone(),
+                                )
+                            })
+                        };
+                        if let Some((usage, pricing, quota)) = preserved {
+                            loaded.usage = usage;
+                            loaded.pricing = pricing;
+                            loaded.quota = quota;
+                        }
                         data_cache.remove_usage_pricing_for_app(&app_type);
                         data_cache.mark_app_data_loaded(&app_type);
                         if app.app_type == app_type {
@@ -2022,7 +2171,7 @@ fn apply_current_app_data_changed(
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
 ) -> Result<(), AppError> {
     let app_type = app.app_type.clone();
-    data_cache.remove_app_snapshot(&app_type);
+    data_cache.preserve_current_snapshot_for_refresh(&app_type, data);
     data_cache.remove_usage_pricing_for_app(&app_type);
 
     match data_cache.queue_current_app_data_refresh(app_data_req_tx, &app_type) {
@@ -2087,7 +2236,11 @@ fn apply_loaded_data_cache_invalidation(
     let active_custom_range = if matches!(invalidation, CacheInvalidation::None) {
         None
     } else if let data::UsageRangePreset::Custom(range) = app.usage.range {
-        data.usage.begin_custom_range(range);
+        if !matches!(invalidation, CacheInvalidation::CurrentAppReloaded)
+            || data.usage.custom_range != Some(range)
+        {
+            data.usage.begin_custom_range(range);
+        }
         Some(range)
     } else {
         None
@@ -2237,11 +2390,23 @@ fn handle_tui_action(
             // Match upstream's manual flow: import session logs first, then
             // invalidate/requery Usage. Repeated `r` shares the active import;
             // if either worker is unavailable, fall back to the async DB query.
-            let sync_queued = is_usage_route
-                && usage_pricing_req_tx.is_some()
-                && session_usage_sync
-                    .map(|(tx, tracker)| queue_background_session_usage_sync(Some(tx), tracker))
-                    .unwrap_or(false);
+            let sync_queued = if is_usage_route && usage_pricing_req_tx.is_some() {
+                let result = match session_usage_sync {
+                    Some((tx, tracker)) => queue_background_session_usage_sync(Some(tx), tracker),
+                    None => {
+                        Err(texts::tui_error_session_usage_sync_worker_unavailable().to_string())
+                    }
+                };
+                match result {
+                    Ok(_) => true,
+                    Err(error) => {
+                        report_session_usage_sync_queue_error(app, error);
+                        false
+                    }
+                }
+            } else {
+                false
+            };
             if sync_queued {
                 app.usage.start_manual_session_refresh();
             } else {
@@ -3279,7 +3444,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         // Kick off the deferred session-usage sync the first time the user lands
         // on a Usage route (not at startup).
         maybe_queue_usage_session_sync(
-            &app,
+            &mut app,
             session_usage.as_ref().map(|s| &s.req_tx),
             &mut session_usage_sync,
             &mut session_usage_sync_started,

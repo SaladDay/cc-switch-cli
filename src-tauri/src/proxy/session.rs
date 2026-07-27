@@ -1,6 +1,8 @@
 use axum::http::HeaderMap;
 use serde_json::Value;
 
+use crate::services::session_identity::ProxySessionIdEncoding;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionIdSource {
     Header,
@@ -21,6 +23,14 @@ pub fn extract_session_id(
     body: &Value,
     client_format: &str,
 ) -> SessionIdResult {
+    extract_session_id_with_encoding(headers, body, client_format).0
+}
+
+pub(crate) fn extract_session_id_with_encoding(
+    headers: &HeaderMap,
+    body: &Value,
+    client_format: &str,
+) -> (SessionIdResult, ProxySessionIdEncoding) {
     if client_format == "claude" {
         if let Some(result) = extract_claude_session(headers, body) {
             return result;
@@ -37,22 +47,31 @@ pub fn extract_session_id(
         return result;
     }
 
-    SessionIdResult {
-        session_id: uuid::Uuid::new_v4().to_string(),
-        source: SessionIdSource::Generated,
-        client_provided: false,
-    }
+    (
+        SessionIdResult {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            source: SessionIdSource::Generated,
+            client_provided: false,
+        },
+        ProxySessionIdEncoding::Native,
+    )
 }
 
-fn extract_claude_session(headers: &HeaderMap, body: &Value) -> Option<SessionIdResult> {
+fn extract_claude_session(
+    headers: &HeaderMap,
+    body: &Value,
+) -> Option<(SessionIdResult, ProxySessionIdEncoding)> {
     for header_name in ["x-claude-code-session-id", "claude-code-session-id"] {
         if let Some(session_id) = headers.get(header_name).and_then(|v| v.to_str().ok()) {
             if !session_id.is_empty() {
-                return Some(SessionIdResult {
-                    session_id: session_id.to_string(),
-                    source: SessionIdSource::Header,
-                    client_provided: true,
-                });
+                return Some((
+                    SessionIdResult {
+                        session_id: session_id.to_string(),
+                        source: SessionIdSource::Header,
+                        client_provided: true,
+                    },
+                    ProxySessionIdEncoding::Native,
+                ));
             }
         }
     }
@@ -60,15 +79,21 @@ fn extract_claude_session(headers: &HeaderMap, body: &Value) -> Option<SessionId
     extract_from_metadata(body)
 }
 
-fn extract_codex_session(headers: &HeaderMap, body: &Value) -> Option<SessionIdResult> {
+fn extract_codex_session(
+    headers: &HeaderMap,
+    body: &Value,
+) -> Option<(SessionIdResult, ProxySessionIdEncoding)> {
     for header_name in ["session_id", "x-session-id"] {
         if let Some(session_id) = headers.get(header_name).and_then(|v| v.to_str().ok()) {
             if session_id.len() > 20 {
-                return Some(SessionIdResult {
-                    session_id: format!("codex_{session_id}"),
-                    source: SessionIdSource::Header,
-                    client_provided: true,
-                });
+                return Some((
+                    SessionIdResult {
+                        session_id: format!("codex_{session_id}"),
+                        source: SessionIdSource::Header,
+                        client_provided: true,
+                    },
+                    ProxySessionIdEncoding::CodexTransport,
+                ));
             }
         }
     }
@@ -79,29 +104,35 @@ fn extract_codex_session(headers: &HeaderMap, body: &Value) -> Option<SessionIdR
         .and_then(|v| v.as_str())
     {
         if session_id.len() > 10 {
-            return Some(SessionIdResult {
-                session_id: format!("codex_{session_id}"),
-                source: SessionIdSource::MetadataSessionId,
-                client_provided: true,
-            });
+            return Some((
+                SessionIdResult {
+                    session_id: format!("codex_{session_id}"),
+                    source: SessionIdSource::MetadataSessionId,
+                    client_provided: true,
+                },
+                ProxySessionIdEncoding::CodexTransport,
+            ));
         }
     }
 
     None
 }
 
-fn extract_from_metadata(body: &Value) -> Option<SessionIdResult> {
+fn extract_from_metadata(body: &Value) -> Option<(SessionIdResult, ProxySessionIdEncoding)> {
     if let Some(user_id) = body
         .get("metadata")
         .and_then(|metadata| metadata.get("user_id"))
         .and_then(|v| v.as_str())
     {
         if let Some(session_id) = parse_session_from_user_id(user_id) {
-            return Some(SessionIdResult {
-                session_id,
-                source: SessionIdSource::MetadataUserId,
-                client_provided: true,
-            });
+            return Some((
+                SessionIdResult {
+                    session_id,
+                    source: SessionIdSource::MetadataUserId,
+                    client_provided: true,
+                },
+                ProxySessionIdEncoding::Native,
+            ));
         }
     }
 
@@ -111,11 +142,14 @@ fn extract_from_metadata(body: &Value) -> Option<SessionIdResult> {
         .and_then(|v| v.as_str())
     {
         if !session_id.is_empty() {
-            return Some(SessionIdResult {
-                session_id: session_id.to_string(),
-                source: SessionIdSource::MetadataSessionId,
-                client_provided: true,
-            });
+            return Some((
+                SessionIdResult {
+                    session_id: session_id.to_string(),
+                    source: SessionIdSource::MetadataSessionId,
+                    client_provided: true,
+                },
+                ProxySessionIdEncoding::Native,
+            ));
         }
     }
 
@@ -157,10 +191,53 @@ mod tests {
         );
         let body = json!({});
 
-        let result = extract_session_id(&headers, &body, "claude");
+        let (result, encoding) = extract_session_id_with_encoding(&headers, &body, "claude");
         assert_eq!(result.session_id, "claude-header-session");
         assert_eq!(result.source, SessionIdSource::Header);
         assert!(result.client_provided);
+        assert_eq!(encoding, ProxySessionIdEncoding::Native);
+    }
+
+    #[test]
+    fn preserves_codex_native_prefix_from_metadata_user_id() {
+        let headers = HeaderMap::new();
+        let body = json!({
+            "metadata": {
+                "user_id": "user_session_codex_thread-a"
+            }
+        });
+
+        let (result, encoding) = extract_session_id_with_encoding(&headers, &body, "codex");
+        assert_eq!(result.session_id, "codex_thread-a");
+        assert_eq!(result.source, SessionIdSource::MetadataUserId);
+        assert!(result.client_provided);
+        assert_eq!(encoding, ProxySessionIdEncoding::Native);
+    }
+
+    #[test]
+    fn tracks_codex_metadata_session_id_encoding_across_length_threshold() {
+        let headers = HeaderMap::new();
+        let short_body = json!({
+            "metadata": {
+                "session_id": "codex_x"
+            }
+        });
+        let long_body = json!({
+            "metadata": {
+                "session_id": "codex_thread-a"
+            }
+        });
+
+        let (short, short_encoding) =
+            extract_session_id_with_encoding(&headers, &short_body, "codex");
+        let (long, long_encoding) = extract_session_id_with_encoding(&headers, &long_body, "codex");
+
+        assert_eq!(short.source, SessionIdSource::MetadataSessionId);
+        assert_eq!(short.session_id, "codex_x");
+        assert_eq!(short_encoding, ProxySessionIdEncoding::Native);
+        assert_eq!(long.source, SessionIdSource::MetadataSessionId);
+        assert_eq!(long.session_id, "codex_codex_thread-a");
+        assert_eq!(long_encoding, ProxySessionIdEncoding::CodexTransport);
     }
 
     #[test]
@@ -172,13 +249,14 @@ mod tests {
         );
         let body = json!({});
 
-        let result = extract_session_id(&headers, &body, "codex");
+        let (result, encoding) = extract_session_id_with_encoding(&headers, &body, "codex");
         assert_eq!(
             result.session_id,
             "codex_00000000-0000-4000-8000-000000000000"
         );
         assert_eq!(result.source, SessionIdSource::Header);
         assert!(result.client_provided);
+        assert_eq!(encoding, ProxySessionIdEncoding::CodexTransport);
     }
 
     #[test]
@@ -188,9 +266,10 @@ mod tests {
             "previous_response_id": "resp_abc123"
         });
 
-        let result = extract_session_id(&headers, &body, "codex");
+        let (result, encoding) = extract_session_id_with_encoding(&headers, &body, "codex");
         assert!(!result.session_id.starts_with("codex_resp_abc123"));
         assert_eq!(result.source, SessionIdSource::Generated);
         assert!(!result.client_provided);
+        assert_eq!(encoding, ProxySessionIdEncoding::Native);
     }
 }

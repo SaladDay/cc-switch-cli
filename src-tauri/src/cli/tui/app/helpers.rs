@@ -5,6 +5,14 @@ use std::{collections::HashMap, path::Path};
 use chrono::{Local, TimeZone};
 use serde_json::Value;
 
+pub(crate) fn format_usage_session_time(timestamp: i64) -> String {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|datetime| datetime.format("%Y/%m/%d %H:%M").to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
 pub(crate) enum OpenClawDailyMemoryListItem<'a> {
     File(&'a crate::commands::workspace::DailyMemoryFileInfo),
     Search(&'a crate::commands::workspace::DailyMemorySearchResult),

@@ -58,6 +58,7 @@ const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
     "proxy_live_backup",
     "proxy_failover_live_snapshots",
     "usage_daily_rollups",
+    "session_log_sync",
 ];
 
 const SYNC_EXPORT_RESETTABLE_TABLES: &[&str] = &["provider_health"];
@@ -1191,6 +1192,12 @@ mod tests {
                 ) VALUES ('local-provider', 'Local Provider', 'claude', 'operational', 1, 'ok', 42, 200, 'claude-3', 0, 1000)",
                 [],
             )?;
+            conn.execute(
+                "INSERT INTO session_log_sync (
+                    file_path, last_modified, last_line_offset, last_synced_at
+                 ) VALUES ('/local/session.jsonl', 123, 45, 678)",
+                [],
+            )?;
         }
 
         local_db.import_sql_string_for_sync(&remote_sql)?;
@@ -1228,7 +1235,7 @@ mod tests {
         );
         assert_eq!(current_profile, "remote-profile");
 
-        let (request_logs, rollups, stream_logs): (i64, i64, i64) = {
+        let (request_logs, rollups, stream_logs, session_cursors): (i64, i64, i64, i64) = {
             let conn = crate::database::lock_conn!(local_db.conn);
             let request_logs =
                 conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
@@ -1242,13 +1249,21 @@ mod tests {
                 conn.query_row("SELECT COUNT(*) FROM stream_check_logs", [], |row| {
                     row.get(0)
                 })?;
-            (request_logs, rollups, stream_logs)
+            let session_cursors =
+                conn.query_row("SELECT COUNT(*) FROM session_log_sync", [], |row| {
+                    row.get(0)
+                })?;
+            (request_logs, rollups, stream_logs, session_cursors)
         };
         assert_eq!(request_logs, 1, "local request logs should be preserved");
         assert_eq!(rollups, 1, "local rollups should be preserved");
         assert_eq!(
             stream_logs, 1,
             "local stream check logs should be preserved"
+        );
+        assert_eq!(
+            session_cursors, 1,
+            "local session import cursors should be preserved with local usage rows"
         );
 
         let semantics: (i64, i64) = {

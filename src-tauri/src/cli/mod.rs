@@ -578,6 +578,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_sessions_usage_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "sessions",
+            "usage",
+            "--provider",
+            "codex",
+            "--range",
+            "30d",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Sessions(super::commands::sessions::SessionsCommand::Usage {
+                provider,
+                range,
+                json,
+            })) => {
+                assert_eq!(provider, Some(super::AppType::Codex));
+                assert_eq!(
+                    range,
+                    super::commands::sessions::SessionUsageRange::ThirtyDays
+                );
+                assert!(json);
+            }
+            _ => panic!("expected sessions usage command"),
+        }
+    }
+
+    #[test]
     fn parses_sessions_show_with_provider() {
         let cli = Cli::parse_from([
             "cc-switch",

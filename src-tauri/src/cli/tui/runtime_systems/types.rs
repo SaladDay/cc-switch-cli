@@ -402,7 +402,7 @@ pub(crate) enum SessionUsageSyncReq {
 pub(crate) enum SessionUsageSyncMsg {
     Finished {
         request_id: u64,
-        result: Result<(), String>,
+        result: Result<crate::services::session_usage::SessionSyncResult, String>,
     },
     CodexRebuilt {
         request_id: u64,

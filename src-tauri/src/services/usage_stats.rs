@@ -215,6 +215,7 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
 }
 
 pub(crate) const SESSION_PROXY_DEDUP_WINDOW_SECONDS: i64 = 10 * 60;
+const TEMP_MATCHED_USAGE_REQUEST_IDS: &str = "cc_switch_matched_usage_request_ids";
 
 /// SQL 片段：把指定别名的 `data_source` 包成 COALESCE，NULL 视作 'proxy'。
 ///
@@ -225,40 +226,497 @@ fn data_source_expr(log_alias: &str) -> String {
     format!("COALESCE({log_alias}.data_source, 'proxy')")
 }
 
-pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
-    let data_source = data_source_expr(log_alias);
-    let proxy_data_source = data_source_expr("proxy_dedup");
+fn identified_session_source_sql(log_alias: &str) -> String {
+    let source = data_source_expr(log_alias);
     format!(
-        "NOT (
-            {data_source} IN ('session_log', 'codex_session', 'gemini_session', 'opencode_session')
-            AND EXISTS (
-                SELECT 1
-                FROM proxy_request_logs proxy_dedup
-                WHERE {proxy_data_source} = 'proxy'
-                  AND proxy_dedup.app_type = {log_alias}.app_type
-                  AND proxy_dedup.status_code >= 200
-                  AND proxy_dedup.status_code < 300
-                  AND proxy_dedup.input_tokens = {log_alias}.input_tokens
-                  AND proxy_dedup.output_tokens = {log_alias}.output_tokens
-                  AND proxy_dedup.cache_read_tokens = {log_alias}.cache_read_tokens
-                  AND (
-                      proxy_dedup.cache_creation_tokens = {log_alias}.cache_creation_tokens
-                      OR (
-                          {log_alias}.cache_creation_tokens = 0
-                          AND {data_source} IN ('codex_session', 'gemini_session', 'opencode_session')
-                      )
-                  )
-                  AND proxy_dedup.created_at BETWEEN
-                      {log_alias}.created_at - {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
-                      AND {log_alias}.created_at + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
-                  AND (
-                      LOWER(proxy_dedup.model) = LOWER({log_alias}.model)
-                      OR LOWER(proxy_dedup.model) = 'unknown'
-                      OR LOWER({log_alias}.model) = 'unknown'
-                  )
+        "(
+            ({log_alias}.app_type = 'claude' AND {source} = 'session_log')
+            OR ({log_alias}.app_type = 'codex' AND {source} = 'codex_session')
+        )"
+    )
+}
+
+pub(crate) fn normalized_session_sql(log_alias: &str) -> String {
+    crate::services::session_identity::canonical_session_sql(log_alias)
+}
+
+fn successful_nonzero_usage_sql(log_alias: &str) -> String {
+    format!(
+        "(
+            {log_alias}.status_code >= 200
+            AND {log_alias}.status_code < 300
+            AND (
+                {log_alias}.input_tokens <> 0
+                OR {log_alias}.output_tokens <> 0
+                OR {log_alias}.cache_read_tokens <> 0
+                OR {log_alias}.cache_creation_tokens <> 0
             )
         )"
     )
+}
+
+fn provider_model_tail_sql(log_alias: &str) -> String {
+    let model = format!("LOWER(TRIM(COALESCE({log_alias}.model, '')))");
+    // SQLite has no reverse(), so trim all non-slash characters from the
+    // right to locate the final slash. This mirrors rsplit_once('/') used by
+    // the Codex importer and also handles the common single-prefix form.
+    format!(
+        "substr(
+            {model},
+            length(rtrim({model}, replace({model}, '/', ''))) + 1
+        )"
+    )
+}
+
+fn normalized_dedup_model_sql(log_alias: &str) -> String {
+    let model_tail = provider_model_tail_sql(log_alias);
+    let without_iso_date = format!(
+        "CASE
+            WHEN {log_alias}.app_type = 'codex'
+             AND length({model_tail}) > 11
+             AND substr({model_tail}, -11) GLOB
+                 '-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+            THEN substr({model_tail}, 1, length({model_tail}) - 11)
+            ELSE {model_tail}
+         END"
+    );
+    format!(
+        "CASE
+            WHEN {log_alias}.app_type = 'codex'
+             AND length({without_iso_date}) > 9
+             AND substr({without_iso_date}, -9) GLOB
+                 '-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+            THEN substr(
+                {without_iso_date},
+                1,
+                length({without_iso_date}) - 9
+            )
+            ELSE {without_iso_date}
+         END"
+    )
+}
+
+/// Return one uncorrelated query containing matched proxy/import request-ID pairs.
+/// `app_scope` narrows the work to one supported app when the caller already has
+/// that context.
+///
+/// Candidate rows are materialized once, assigned a dense fingerprint group,
+/// and then merged by two time-ordered cursors per group. The recursive step is
+/// independent of the outer log row, so callers pay for one projection per SQL
+/// statement instead of rebuilding the matcher for every imported row.
+pub(crate) fn identified_matched_request_pairs_sql(app_scope: Option<&str>) -> String {
+    let eligible_app_filter = match app_scope {
+        Some("claude") => "dedup_candidate.app_type = 'claude'",
+        Some("codex") => "dedup_candidate.app_type = 'codex'",
+        _ => "dedup_candidate.app_type IN ('claude', 'codex')",
+    };
+    let claude_identity_scope = if matches!(app_scope, Some("codex")) {
+        "AND 1 = 0"
+    } else {
+        ""
+    };
+    let candidate = "dedup_candidate";
+    let data_source = data_source_expr(candidate);
+    let import_source = identified_session_source_sql(candidate);
+    let session_key = normalized_session_sql(candidate);
+    let raw_session = format!("TRIM(COALESCE({candidate}.session_id, ''))");
+    let session_is_uuid = crate::services::session_identity::hyphenated_uuid_sql(&raw_session);
+    let claude_marker = crate::services::session_identity::CLAUDE_STABLE_SESSION_PROVIDER_TYPE;
+    let codex_evidence = crate::services::session_identity::codex_imported_session_keys_cte_sql(
+        !matches!(app_scope, Some("claude")),
+    );
+    let stable_proxy = format!(
+        "(
+            (
+                {candidate}.app_type = 'codex'
+            )
+            OR (
+                {candidate}.app_type = 'claude'
+                AND (
+                    COALESCE({candidate}.provider_type, '') = '{claude_marker}'
+                    OR NOT ({session_is_uuid})
+                    OR {session_key} IN (
+                        SELECT session_key FROM claude_proven_sessions
+                    )
+                )
+            )
+        )"
+    );
+    let eligible = successful_nonzero_usage_sql(candidate);
+    let model_key = normalized_dedup_model_sql(candidate);
+    let identity = "claude_identity";
+    let identity_source = data_source_expr(identity);
+    let identity_raw_session = format!("TRIM(COALESCE({identity}.session_id, ''))");
+    let identity_session =
+        crate::services::session_identity::normalized_native_session_sql(&identity_raw_session);
+
+    format!(
+        "WITH RECURSIVE
+            {codex_evidence},
+            claude_identity_rows AS MATERIALIZED (
+                SELECT
+                    {identity_session} AS session_key,
+                    {identity_source} AS data_source,
+                    COALESCE({identity}.provider_type, '') AS provider_type
+                FROM proxy_request_logs {identity}
+                WHERE {identity}.app_type = 'claude'
+                  {claude_identity_scope}
+                  AND NULLIF({identity_session}, '') IS NOT NULL
+            ),
+            claude_proven_sessions AS MATERIALIZED (
+                SELECT session_key
+                FROM claude_identity_rows
+                WHERE data_source = 'session_log'
+                   OR (
+                       data_source = 'proxy'
+                       AND provider_type = '{claude_marker}'
+                   )
+                UNION
+                SELECT session_key
+                FROM claude_identity_rows
+                WHERE data_source = 'proxy'
+                GROUP BY session_key
+                HAVING COUNT(*) > 1
+            ),
+            eligible_rows AS MATERIALIZED (
+                SELECT
+                    {candidate}.request_id,
+                    {candidate}.app_type,
+                    {session_key} AS session_key,
+                    {model_key} AS model_key,
+                    {candidate}.input_tokens,
+                    {candidate}.output_tokens,
+                    {candidate}.cache_read_tokens,
+                    CASE
+                        WHEN {candidate}.app_type = 'codex' THEN 0
+                        ELSE {candidate}.cache_creation_tokens
+                    END AS cache_creation_key,
+                    {candidate}.created_at,
+                    CASE WHEN {data_source} = 'proxy' THEN 1 ELSE 0 END
+                        AS is_proxy
+                FROM proxy_request_logs {candidate}
+                WHERE {eligible_app_filter}
+                  AND {eligible}
+                  AND NULLIF({session_key}, '') IS NOT NULL
+                  AND (
+                      {import_source}
+                      OR ({data_source} = 'proxy' AND {stable_proxy})
+                  )
+            ),
+            grouped_rows AS MATERIALIZED (
+                SELECT
+                    eligible_rows.*,
+                    DENSE_RANK() OVER (
+                        ORDER BY
+                            app_type,
+                            session_key,
+                            model_key,
+                            input_tokens,
+                            output_tokens,
+                            cache_read_tokens,
+                            cache_creation_key
+                    ) AS group_id
+                FROM eligible_rows
+            ),
+            proxy_rows AS MATERIALIZED (
+                SELECT
+                    group_id,
+                    request_id,
+                    created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY group_id
+                        ORDER BY created_at, request_id
+                    ) AS source_position
+                FROM grouped_rows
+                WHERE is_proxy = 1
+            ),
+            import_rows AS MATERIALIZED (
+                SELECT
+                    group_id,
+                    request_id,
+                    created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY group_id
+                        ORDER BY created_at, request_id
+                    ) AS source_position
+                FROM grouped_rows
+                WHERE is_proxy = 0
+            ),
+            matching_groups AS MATERIALIZED (
+                SELECT group_id
+                FROM grouped_rows
+                GROUP BY group_id
+                HAVING MAX(is_proxy) = 1 AND MIN(is_proxy) = 0
+            ),
+            greedy(
+                group_id,
+                proxy_position,
+                import_position,
+                proxy_request_id,
+                excluded_request_id
+            ) AS (
+                SELECT
+                    group_id,
+                    1,
+                    1,
+                    CAST(NULL AS TEXT),
+                    CAST(NULL AS TEXT)
+                FROM matching_groups
+                UNION ALL
+                SELECT
+                    greedy.group_id,
+                    CASE
+                        WHEN proxy_row.created_at
+                             + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                             < import_row.created_at
+                        THEN greedy.proxy_position + 1
+                        WHEN import_row.created_at
+                             + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                             < proxy_row.created_at
+                        THEN greedy.proxy_position
+                        ELSE greedy.proxy_position + 1
+                    END,
+                    CASE
+                        WHEN proxy_row.created_at
+                             + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                             < import_row.created_at
+                        THEN greedy.import_position
+                        ELSE greedy.import_position + 1
+                    END,
+                    CASE
+                        WHEN proxy_row.created_at
+                             + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                             < import_row.created_at
+                          OR import_row.created_at
+                             + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                             < proxy_row.created_at
+                        THEN NULL
+                        ELSE proxy_row.request_id
+                    END,
+                    CASE
+                        WHEN proxy_row.created_at
+                             + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                             < import_row.created_at
+                          OR import_row.created_at
+                             + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                             < proxy_row.created_at
+                        THEN NULL
+                        -- Aggregate/read filters exclude only the import side.
+                        -- Keeping the proxy ID alongside it lets rollup fold a
+                        -- pair atomically when the cutoff separates the rows.
+                        ELSE import_row.request_id
+                    END
+                FROM greedy
+                JOIN proxy_rows proxy_row
+                  ON proxy_row.group_id = greedy.group_id
+                 AND proxy_row.source_position = greedy.proxy_position
+                JOIN import_rows import_row
+                  ON import_row.group_id = greedy.group_id
+                 AND import_row.source_position = greedy.import_position
+            )
+        SELECT proxy_request_id, excluded_request_id
+        FROM greedy
+        WHERE proxy_request_id IS NOT NULL
+          AND excluded_request_id IS NOT NULL"
+    )
+}
+
+fn identified_matched_request_ids_sql(app_scope: Option<&str>) -> String {
+    let matched_pairs = identified_matched_request_pairs_sql(app_scope);
+    format!(
+        "SELECT excluded_request_id
+         FROM ({matched_pairs}) matched_pairs"
+    )
+}
+
+fn effective_usage_log_filter_with_identified_exclusion(
+    log_alias: &str,
+    identified_exclusion: &str,
+) -> String {
+    let data_source = data_source_expr(log_alias);
+    let proxy_data_source = data_source_expr("proxy_dedup");
+    format!(
+        "(
+            {identified_exclusion}
+            AND NOT (
+                {log_alias}.app_type NOT IN ('claude', 'codex')
+                AND {data_source} IN (
+                    'session_log',
+                    'codex_session',
+                    'gemini_session',
+                    'opencode_session'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM proxy_request_logs proxy_dedup
+                    WHERE {proxy_data_source} = 'proxy'
+                      AND proxy_dedup.app_type = {log_alias}.app_type
+                      AND proxy_dedup.status_code >= 200
+                      AND proxy_dedup.status_code < 300
+                      AND proxy_dedup.input_tokens = {log_alias}.input_tokens
+                      AND proxy_dedup.output_tokens = {log_alias}.output_tokens
+                      AND proxy_dedup.cache_read_tokens = {log_alias}.cache_read_tokens
+                      AND (
+                          proxy_dedup.cache_creation_tokens =
+                              {log_alias}.cache_creation_tokens
+                          OR (
+                              {log_alias}.cache_creation_tokens = 0
+                              AND {data_source} IN (
+                                  'codex_session',
+                                  'gemini_session',
+                                  'opencode_session'
+                              )
+                          )
+                      )
+                      AND proxy_dedup.created_at BETWEEN
+                          {log_alias}.created_at - {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                          AND {log_alias}.created_at + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+                      AND (
+                          LOWER(proxy_dedup.model) = LOWER({log_alias}.model)
+                          OR LOWER(proxy_dedup.model) = 'unknown'
+                          OR LOWER({log_alias}.model) = 'unknown'
+                      )
+                )
+            )
+        )"
+    )
+}
+
+/// Project physical usage rows into the aggregate Usage view.
+///
+/// This removes only cross-source duplicates that can be paired safely.
+/// Unassigned proxy rows and ambiguous rows remain because Summary, Trend,
+/// Models, and Providers report all effective usage. The Sessions view adds
+/// its own identified-session predicate on top of this projection.
+pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
+    let identified_matches = identified_matched_request_ids_sql(None);
+    let identified_exclusion = format!(
+        "{log_alias}.request_id NOT IN (
+            {identified_matches}
+        )"
+    );
+    effective_usage_log_filter_with_identified_exclusion(log_alias, &identified_exclusion)
+}
+
+fn materialized_usage_log_filter(log_alias: &str) -> String {
+    let identified_exclusion = format!(
+        "{log_alias}.request_id NOT IN (
+            SELECT request_id
+            FROM temp.{TEMP_MATCHED_USAGE_REQUEST_IDS}
+        )"
+    );
+    effective_usage_log_filter_with_identified_exclusion(log_alias, &identified_exclusion)
+}
+
+#[cfg(test)]
+pub(crate) fn effective_usage_log_filter_for_connection(
+    conn: &Connection,
+    log_alias: &str,
+) -> Result<String, AppError> {
+    let projection_exists = conn.query_row(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM sqlite_temp_master
+            WHERE type = 'table' AND name = ?1
+        )",
+        [TEMP_MATCHED_USAGE_REQUEST_IDS],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(if projection_exists {
+        materialized_usage_log_filter(log_alias)
+    } else {
+        effective_usage_log_filter(log_alias)
+    })
+}
+
+pub(crate) fn effective_usage_log_filter_for_app_connection(
+    conn: &Connection,
+    log_alias: &str,
+    app_type: &str,
+) -> Result<String, AppError> {
+    let projection_exists = conn.query_row(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM sqlite_temp_master
+            WHERE type = 'table' AND name = ?1
+        )",
+        [TEMP_MATCHED_USAGE_REQUEST_IDS],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if projection_exists {
+        return Ok(materialized_usage_log_filter(log_alias));
+    }
+    if !matches!(app_type, "claude" | "codex") {
+        return Ok(effective_usage_log_filter_with_identified_exclusion(
+            log_alias, "1 = 1",
+        ));
+    }
+
+    let identified_matches = identified_matched_request_ids_sql(Some(app_type));
+    let identified_exclusion = format!(
+        "{log_alias}.request_id NOT IN (
+            {identified_matches}
+        )"
+    );
+    Ok(effective_usage_log_filter_with_identified_exclusion(
+        log_alias,
+        &identified_exclusion,
+    ))
+}
+
+pub(crate) struct MaterializedUsageLogProjection<'conn> {
+    _transaction: rusqlite::Transaction<'conn>,
+}
+
+#[cfg(test)]
+pub(crate) fn materialize_usage_log_projection(
+    conn: &Connection,
+) -> Result<MaterializedUsageLogProjection<'_>, AppError> {
+    materialize_usage_log_projection_scoped(conn, None)
+}
+
+pub(crate) fn materialize_usage_log_projection_for_app<'conn>(
+    conn: &'conn Connection,
+    app_type: &str,
+) -> Result<MaterializedUsageLogProjection<'conn>, AppError> {
+    if !matches!(app_type, "claude" | "codex") {
+        return Err(AppError::InvalidInput(format!(
+            "usage projection app must be claude or codex; got {app_type}"
+        )));
+    }
+    materialize_usage_log_projection_scoped(conn, Some(app_type))
+}
+
+fn materialize_usage_log_projection_scoped<'conn>(
+    conn: &'conn Connection,
+    app_scope: Option<&str>,
+) -> Result<MaterializedUsageLogProjection<'conn>, AppError> {
+    if !conn.is_autocommit() {
+        return Err(AppError::Database(
+            "cannot materialize usage projection inside an active transaction".to_string(),
+        ));
+    }
+    conn.execute(
+        &format!("DROP TABLE IF EXISTS temp.{TEMP_MATCHED_USAGE_REQUEST_IDS}"),
+        [],
+    )?;
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute_batch(&format!(
+        "CREATE TEMP TABLE {TEMP_MATCHED_USAGE_REQUEST_IDS} (
+             request_id TEXT PRIMARY KEY
+         ) WITHOUT ROWID;"
+    ))?;
+
+    let insert_sql = format!(
+        "INSERT INTO temp.{TEMP_MATCHED_USAGE_REQUEST_IDS} (request_id)
+         {}",
+        identified_matched_request_ids_sql(app_scope)
+    );
+    transaction.execute(&insert_sql, [])?;
+
+    Ok(MaterializedUsageLogProjection {
+        _transaction: transaction,
+    })
 }
 
 /// 跨源去重指纹键。
@@ -278,8 +736,11 @@ pub(crate) struct DedupKey<'a> {
 
 /// session 日志写入前的统一去重判定。
 ///
-/// 命中以下任一条件即跳过插入：① `request_id` 已存在；② 时间窗口内存在
-/// 与 `key` 匹配的 proxy 日志（指纹去重）。
+/// Claude/Codex only skip an exact request ID. Their approximate proxy/session
+/// reconciliation is a reversible read projection over retained detail in
+/// [`effective_usage_log_filter`]. Daily rollups do not preserve request
+/// identity, so they must never be used to guess that a late transcript is a
+/// duplicate. Other importers retain the upstream fingerprint check.
 pub(crate) fn should_skip_session_insert(
     conn: &Connection,
     request_id: &str,
@@ -287,6 +748,9 @@ pub(crate) fn should_skip_session_insert(
 ) -> Result<bool, AppError> {
     if proxy_request_id_exists(conn, request_id)? {
         return Ok(true);
+    }
+    if matches!(key.app_type, "claude" | "codex") {
+        return Ok(false);
     }
     has_matching_proxy_usage_log(conn, key)
 }
@@ -1275,7 +1739,9 @@ impl Database {
     ) -> Result<PaginatedLogs, AppError> {
         let conn = lock_conn!(self.conn);
 
-        let mut conditions = vec![effective_usage_log_filter("l")];
+        // Request Logs is a physical audit surface. Keep every stored row here;
+        // aggregate views apply their own effective-log projection.
+        let mut conditions = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(ref app_type) = filters.app_type {
@@ -1373,10 +1839,10 @@ impl Database {
         let detail_sql = format!(
             "SELECT l.request_id, l.provider_id, {detail_pname} as provider_name, l.app_type, l.model,
                     l.request_model, l.cost_multiplier,
-                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
-                    is_streaming, latency_ms, first_token_ms, duration_ms,
-                    status_code, error_message, created_at, l.data_source,
+                    l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
+                    l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd, l.cache_creation_cost_usd, l.total_cost_usd,
+                    l.is_streaming, l.latency_ms, l.first_token_ms, l.duration_ms,
+                    l.status_code, l.error_message, l.created_at, l.data_source,
                     l.input_token_semantics
              FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
@@ -2118,7 +2584,7 @@ mod tests {
     }
 
     fn create_legacy_nullable_logs_table(conn: &Connection) -> Result<(), AppError> {
-        conn.execute(
+        conn.execute_batch(
             "CREATE TABLE proxy_request_logs (
                 request_id TEXT PRIMARY KEY,
                 app_type TEXT NOT NULL,
@@ -2128,10 +2594,16 @@ mod tests {
                 cache_read_tokens INTEGER NOT NULL,
                 cache_creation_tokens INTEGER NOT NULL,
                 status_code INTEGER NOT NULL,
+                session_id TEXT,
+                provider_type TEXT,
                 created_at INTEGER NOT NULL,
                 data_source TEXT
-            )",
-            [],
+            );
+            CREATE TABLE usage_daily_rollups (
+                date TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                PRIMARY KEY (date, app_type)
+            );",
         )?;
         Ok(())
     }
@@ -2153,6 +2625,278 @@ mod tests {
         let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
         assert_eq!(count, 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn rollups_never_suppress_late_identified_imports() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = crate::database::lock_conn!(db.conn);
+        let before_midnight = local_ts(2024, 3, 1, 23, 58, 0);
+        conn.execute(
+            "INSERT INTO usage_daily_rollups (
+                date, app_type, provider_id, model
+             ) VALUES (
+                date(?1, 'unixepoch', 'localtime'),
+                'codex', 'provider', 'gpt-5.4'
+             )",
+            [before_midnight],
+        )?;
+
+        let late_codex = DedupKey {
+            app_type: "codex",
+            model: "gpt-5.4",
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_tokens: 1,
+            cache_creation_tokens: 0,
+            created_at: before_midnight + 4 * 60,
+        };
+        assert!(!should_skip_session_insert(
+            &conn,
+            "late-codex",
+            &late_codex
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn effective_filter_keeps_late_import_when_only_a_rollup_remains() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let created_at = local_ts(2024, 3, 1, 12, 0, 0);
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO usage_daily_rollups (
+                    date, app_type, provider_id, model, request_count,
+                    success_count, input_tokens, output_tokens
+                 ) VALUES (
+                    date(?1, 'unixepoch', 'localtime'),
+                    'claude', 'provider', 'claude-sonnet', 1, 1, 10, 2
+                 )",
+                [created_at],
+            )?;
+            insert_usage_log(
+                &conn,
+                "late-import",
+                "claude",
+                "_session",
+                "claude-sonnet",
+                "session_log",
+                created_at,
+                10,
+                2,
+                0,
+                0,
+                200,
+                "0",
+            )?;
+        }
+
+        let summary = db.get_usage_summary(None, None, Some("claude"))?;
+        assert_eq!(summary.total_requests, 2);
+        assert_eq!(summary.total_input_tokens, 20);
+        assert_eq!(summary.total_output_tokens, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_filter_materializes_identified_matcher_once() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        create_legacy_nullable_logs_table(&conn)?;
+        let filter = effective_usage_log_filter("l");
+        let sql =
+            format!("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM proxy_request_logs l WHERE {filter}");
+        let mut stmt = conn.prepare(&sql)?;
+        let plan = stmt
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert!(
+            plan.iter().any(|detail| detail.contains("LIST SUBQUERY")),
+            "identified request IDs must be built as one list subquery: {plan:#?}"
+        );
+        assert_eq!(
+            plan.iter()
+                .filter(|detail| detail.contains("MATERIALIZE greedy"))
+                .count(),
+            1,
+            "the recursive matcher must be instantiated once: {plan:#?}"
+        );
+
+        let matcher_sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            identified_matched_request_ids_sql(None)
+        );
+        let mut matcher_stmt = conn.prepare(&matcher_sql)?;
+        let matcher_plan = matcher_stmt
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            matcher_plan
+                .iter()
+                .all(|detail| !detail.contains("CORRELATED")),
+            "the identified matcher must not depend on an outer row: {matcher_plan:#?}"
+        );
+        assert_eq!(
+            matcher_plan
+                .iter()
+                .filter(|detail| {
+                    detail.contains("MATERIALIZE ccswitch_codex_imported_session_keys")
+                })
+                .count(),
+            1,
+            "Codex transcript evidence must be materialized once: {matcher_plan:#?}"
+        );
+
+        let gemini_filter = effective_usage_log_filter_for_app_connection(&conn, "l", "gemini")?;
+        assert!(
+            !gemini_filter.contains("WITH RECURSIVE"),
+            "unrelated apps must not build the Claude/Codex matcher"
+        );
+        let codex_filter = effective_usage_log_filter_for_app_connection(&conn, "l", "codex")?;
+        assert!(codex_filter.contains("dedup_candidate.app_type = 'codex'"));
+        assert!(codex_filter.contains("AND 1 = 0"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_codex_dedup_model_normalization_matches_importer_rules() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        let normalized = normalized_dedup_model_sql("candidate");
+        let sql = format!(
+            "SELECT {normalized}
+             FROM (
+                 SELECT
+                     'codex' AS app_type,
+                     'gateway/openai/GPT-5.4-20260305' AS model
+             ) candidate"
+        );
+        let model: String = conn.query_row(&sql, [], |row| row.get(0))?;
+        assert_eq!(model, "gpt-5.4");
+        Ok(())
+    }
+
+    #[test]
+    fn test_materialized_usage_projection_matches_inline_and_cleans_up() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        create_legacy_nullable_logs_table(&conn)?;
+        conn.execute_batch(
+            "INSERT INTO proxy_request_logs (
+                request_id, app_type, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, status_code,
+                session_id, created_at, data_source
+            ) VALUES
+                ('proxy', 'codex', 'openai/GPT-5.4-20260305',
+                 10, 2, 1, 7, 200, 'codex_thread-a', 100, 'proxy'),
+                ('import', 'codex', 'gpt-5.4',
+                 10, 2, 1, 0, 200, 'thread-a', 100, 'codex_session');",
+        )?;
+
+        let inline_filter = effective_usage_log_filter("l");
+        let inline_count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM proxy_request_logs l WHERE {inline_filter}"),
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(inline_count, 1);
+
+        assert!(conn.is_autocommit());
+        let projection = materialize_usage_log_projection_for_app(&conn, "codex")?;
+        assert!(!conn.is_autocommit());
+        let projected_filter = effective_usage_log_filter_for_connection(&conn, "l")?;
+        assert!(projected_filter.contains(TEMP_MATCHED_USAGE_REQUEST_IDS));
+        let projected_count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM proxy_request_logs l WHERE {projected_filter}"),
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(projected_count, inline_count);
+        drop(projection);
+        assert!(conn.is_autocommit());
+
+        let projection_exists: bool = conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM sqlite_temp_master
+                WHERE type = 'table' AND name = ?1
+            )",
+            [TEMP_MATCHED_USAGE_REQUEST_IDS],
+            |row| row.get(0),
+        )?;
+        assert!(!projection_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn test_materialized_usage_projection_supports_read_only_main_db() -> Result<(), AppError> {
+        let temp = tempfile::tempdir()
+            .map_err(|error| AppError::Database(format!("create temp directory: {error}")))?;
+        let path = temp.path().join("usage.db");
+        {
+            let writable = Connection::open(&path)?;
+            create_legacy_nullable_logs_table(&writable)?;
+        }
+
+        let readonly = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let user_version_before: i64 =
+            readonly.query_row("PRAGMA main.user_version", [], |row| row.get(0))?;
+        let main_schema_rows_before: i64 =
+            readonly.query_row("SELECT COUNT(*) FROM main.sqlite_master", [], |row| {
+                row.get(0)
+            })?;
+        let projection = materialize_usage_log_projection(&readonly)?;
+        assert!(!readonly.is_autocommit());
+        let leaked_into_main: bool = readonly.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM main.sqlite_master
+                WHERE name = ?1
+            )",
+            [TEMP_MATCHED_USAGE_REQUEST_IDS],
+            |row| row.get(0),
+        )?;
+        assert!(!leaked_into_main);
+        drop(projection);
+        assert!(readonly.is_autocommit());
+        assert_eq!(
+            readonly.query_row("PRAGMA main.user_version", [], |row| row.get::<_, i64>(0))?,
+            user_version_before
+        );
+        assert_eq!(
+            readonly.query_row("SELECT COUNT(*) FROM main.sqlite_master", [], |row| row
+                .get::<_, i64>(0),)?,
+            main_schema_rows_before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_materialized_usage_projection_refuses_an_outer_transaction() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(&format!(
+            "CREATE TEMP TABLE {TEMP_MATCHED_USAGE_REQUEST_IDS} (
+                 request_id TEXT PRIMARY KEY
+             ) WITHOUT ROWID;
+             BEGIN DEFERRED;"
+        ))?;
+
+        let error = match materialize_usage_log_projection(&conn) {
+            Ok(_) => panic!("an outer transaction must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("active transaction"));
+        let projection_still_exists: bool = conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM sqlite_temp_master
+                WHERE type = 'table' AND name = ?1
+            )",
+            [TEMP_MATCHED_USAGE_REQUEST_IDS],
+            |row| row.get(0),
+        )?;
+        assert!(projection_still_exists);
+        conn.execute_batch("ROLLBACK")?;
         Ok(())
     }
 
@@ -2735,6 +3479,21 @@ mod tests {
                 200,
                 "0.02",
             )?;
+            conn.execute_batch(
+                "UPDATE proxy_request_logs
+                 SET session_id = 'codex_thread-1'
+                 WHERE request_id = 'codex-proxy';
+                 UPDATE proxy_request_logs
+                 SET session_id = 'thread-1'
+                 WHERE request_id = 'codex-session-dup';
+                 UPDATE proxy_request_logs
+                 SET session_id = 'claude-session-1',
+                     provider_type = 'ccswitch:claude-session'
+                 WHERE request_id = 'claude-proxy';
+                 UPDATE proxy_request_logs
+                 SET session_id = 'claude-session-1'
+                 WHERE request_id = 'claude-session-dup';",
+            )?;
         }
 
         let summary = db.get_usage_summary(None, None, None)?;
@@ -2788,14 +3547,14 @@ mod tests {
             .iter()
             .map(|log| log.request_id.as_str())
             .collect();
-        assert_eq!(logs.total, 4);
+        assert_eq!(logs.total, 7);
         assert!(request_ids.contains(&"codex-proxy"));
         assert!(request_ids.contains(&"claude-proxy"));
         assert!(request_ids.contains(&"gemini-proxy"));
         assert!(request_ids.contains(&"codex-session-only"));
-        assert!(!request_ids.contains(&"codex-session-dup"));
-        assert!(!request_ids.contains(&"claude-session-dup"));
-        assert!(!request_ids.contains(&"gemini-session-dup"));
+        assert!(request_ids.contains(&"codex-session-dup"));
+        assert!(request_ids.contains(&"claude-session-dup"));
+        assert!(request_ids.contains(&"gemini-session-dup"));
 
         let breakdown = crate::services::session_usage::get_data_source_breakdown(&db)?;
         let proxy_count = breakdown
@@ -2819,6 +3578,89 @@ mod tests {
         assert_eq!(gemini_session_count, None);
         assert_eq!(session_log_count, None);
 
+        Ok(())
+    }
+
+    #[test]
+    fn request_logs_return_raw_proxy_and_import_rows() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "raw-proxy",
+                "codex",
+                "openai",
+                "gpt-5.4",
+                "proxy",
+                10_000,
+                100,
+                20,
+                10,
+                0,
+                200,
+                "0.10",
+            )?;
+            insert_usage_log(
+                &conn,
+                "raw-import-1",
+                "codex",
+                "_codex_session",
+                "gpt-5.4",
+                "codex_session",
+                10_001,
+                100,
+                20,
+                10,
+                0,
+                200,
+                "0.10",
+            )?;
+            insert_usage_log(
+                &conn,
+                "raw-import-2",
+                "codex",
+                "_codex_session",
+                "gpt-5.4",
+                "codex_session",
+                10_002,
+                100,
+                20,
+                10,
+                0,
+                200,
+                "0.10",
+            )?;
+            conn.execute_batch(
+                "UPDATE proxy_request_logs
+                 SET session_id = 'codex_raw-session'
+                 WHERE request_id = 'raw-proxy';
+                 UPDATE proxy_request_logs
+                 SET session_id = 'raw-session'
+                 WHERE request_id IN ('raw-import-1', 'raw-import-2');",
+            )?;
+        }
+
+        let filters = LogFilters {
+            app_type: Some("codex".to_string()),
+            ..LogFilters::default()
+        };
+        let logs = db.get_request_logs(&filters, 0, 10)?;
+        let request_ids = logs
+            .data
+            .iter()
+            .map(|log| log.request_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(logs.total, 3);
+        assert_eq!(logs.data.len(), 3);
+
+        for request_id in ["raw-proxy", "raw-import-1", "raw-import-2"] {
+            assert!(request_ids.contains(&request_id));
+            let detail = db
+                .get_request_detail(request_id)?
+                .expect("raw request-log detail");
+            assert_eq!(detail.request_id, request_id);
+        }
         Ok(())
     }
 

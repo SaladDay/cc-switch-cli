@@ -53,7 +53,10 @@ use std::time::Duration;
 
 /// 数据库备份保留数量
 const DB_BACKUP_RETAIN: usize = 10;
-const USAGE_ROLLUP_RETAIN_DAYS: i64 = 30;
+// Sessions exposes at most 30 local days. Keep one extra complete day so the
+// ±10 minute proxy/transcript matcher cannot straddle the visible boundary;
+// identity decisions otherwise remain intentionally based on retained detail.
+const USAGE_ROLLUP_RETAIN_DAYS: i64 = 31;
 const USAGE_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
 static DATABASE_PERMISSION_CHECK: Once = Once::new();
@@ -643,7 +646,11 @@ impl Database {
             log::warn!("Failed to ensure incremental auto-vacuum: {err}");
         }
         db.ensure_model_pricing_seeded()?;
-        db.run_usage_maintenance("startup");
+        if let Some(guard) = migration_sync_guard.as_ref() {
+            db.run_usage_maintenance_with_session_guard("startup", guard);
+        } else {
+            db.run_usage_maintenance("startup");
+        }
 
         drop(migration_sync_guard);
 
@@ -807,6 +814,21 @@ impl Database {
     }
 
     fn run_usage_maintenance(&self, context: &str) {
+        let guard = match crate::services::session_usage::acquire_session_sync_guard(self) {
+            Ok(guard) => guard,
+            Err(error) => {
+                log::warn!("Usage maintenance session lock failed ({context}): {error}");
+                return;
+            }
+        };
+        self.run_usage_maintenance_with_session_guard(context, &guard);
+    }
+
+    fn run_usage_maintenance_with_session_guard(
+        &self,
+        context: &str,
+        guard: &crate::services::session_usage::SessionSyncGuard,
+    ) {
         match self.backfill_missing_usage_costs() {
             Ok(updated) if updated > 0 => {
                 log::info!("Usage maintenance backfilled costs ({context}): updated={updated}");
@@ -818,7 +840,7 @@ impl Database {
             }
         }
 
-        match self.rollup_and_prune(USAGE_ROLLUP_RETAIN_DAYS) {
+        match self.rollup_and_prune_with_session_guard(USAGE_ROLLUP_RETAIN_DAYS, guard) {
             Ok(deleted) if deleted > 0 => match self.conn.lock() {
                 Ok(conn) => {
                     if let Err(error) = conn.execute_batch("PRAGMA incremental_vacuum;") {

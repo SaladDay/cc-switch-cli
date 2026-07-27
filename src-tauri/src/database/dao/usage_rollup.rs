@@ -4,15 +4,18 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
+use crate::services::session_usage::{acquire_session_sync_guard, SessionSyncGuard};
 use crate::services::sql_helpers::{fresh_input_sql, INPUT_TOKEN_SEMANTICS_FRESH};
-use crate::services::usage_stats::effective_usage_log_filter;
-use chrono::{Duration, Local, TimeZone};
+use crate::services::usage_stats::{
+    effective_usage_log_filter, identified_matched_request_pairs_sql,
+};
+use chrono::{Days, Local};
 
 /// Compute the rollup/prune cutoff aligned to a local-day boundary.
 ///
 /// Anything strictly older than the returned timestamp will be aggregated into
 /// `usage_daily_rollups` and deleted from `proxy_request_logs`. Aligning to the
-/// next local midnight after `(now - retain_days)` guarantees that the youngest
+/// next local day after the calendar retention window guarantees that the youngest
 /// rollup row always represents a *complete* local day. Without this alignment
 /// the cutoff falls mid-day, leaving the day half-rolled-up and half-pruned —
 /// which would silently under-count any range query that touches that day
@@ -21,38 +24,23 @@ fn compute_local_midnight_cutoff(
     now: chrono::DateTime<Local>,
     retain_days: i64,
 ) -> Result<i64, AppError> {
-    let target_day = now
-        .checked_sub_signed(Duration::days(retain_days))
-        .ok_or_else(|| AppError::Database("rollup cutoff overflow".to_string()))?
-        .date_naive();
-
-    // Use the *next* day's midnight so anything before it has fully been bucketed.
+    let target_day = retention_target_day(now.date_naive(), retain_days)?;
     let next_day = target_day
         .succ_opt()
         .ok_or_else(|| AppError::Database("rollup cutoff next-day overflow".to_string()))?;
-    let naive_midnight = next_day
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| AppError::Database("rollup cutoff midnight overflow".to_string()))?;
+    crate::services::session_usage_query::local_day_start_timestamp(next_day)
+        .ok_or_else(|| AppError::Database("rollup cutoff day has no valid local time".to_string()))
+}
 
-    let local_dt = match Local.from_local_datetime(&naive_midnight) {
-        chrono::LocalResult::Single(dt) => dt,
-        chrono::LocalResult::Ambiguous(earliest, _) => earliest,
-        chrono::LocalResult::None => {
-            // DST gap: fall back to one hour later, which always exists.
-            let bumped = naive_midnight + Duration::hours(1);
-            match Local.from_local_datetime(&bumped) {
-                chrono::LocalResult::Single(dt) => dt,
-                chrono::LocalResult::Ambiguous(earliest, _) => earliest,
-                chrono::LocalResult::None => {
-                    return Err(AppError::Database(
-                        "rollup cutoff fell into DST gap".to_string(),
-                    ))
-                }
-            }
-        }
-    };
-
-    Ok(local_dt.timestamp())
+fn retention_target_day(
+    today: chrono::NaiveDate,
+    retain_days: i64,
+) -> Result<chrono::NaiveDate, AppError> {
+    let retain_days = u64::try_from(retain_days)
+        .map_err(|_| AppError::Database("rollup retention must be non-negative".to_string()))?;
+    today
+        .checked_sub_days(Days::new(retain_days))
+        .ok_or_else(|| AppError::Database("rollup cutoff overflow".to_string()))
 }
 
 impl Database {
@@ -60,6 +48,19 @@ impl Database {
     /// then delete the aggregated detail rows.
     /// Returns the number of deleted detail rows.
     pub fn rollup_and_prune(&self, retain_days: i64) -> Result<u64, AppError> {
+        let guard = acquire_session_sync_guard(self)?;
+        self.rollup_and_prune_with_session_guard(retain_days, &guard)
+    }
+
+    /// Roll up usage while the caller already owns the session-usage lock.
+    ///
+    /// Migration holds this lock across schema reset and startup maintenance,
+    /// so it must reuse the guard instead of recursively acquiring it.
+    pub(crate) fn rollup_and_prune_with_session_guard(
+        &self,
+        retain_days: i64,
+        _guard: &SessionSyncGuard,
+    ) -> Result<u64, AppError> {
         let cutoff = compute_local_midnight_cutoff(Local::now(), retain_days)?;
         let conn = lock_conn!(self.conn);
 
@@ -158,22 +159,50 @@ impl Database {
         conn.execute(&aggregation_sql, [cutoff])
             .map_err(|e| AppError::Database(format!("Rollup aggregation failed: {e}")))?;
 
+        // The effective filter above chooses proxy as the winner for each
+        // identified proxy/import pair. If the cutoff separates the pair, the
+        // winner is about to lose its request identity in the rollup while the
+        // excluded import would remain in detail and become effective later.
+        // Fold only those known cross-cutoff losers while both IDs are still
+        // available. Production retains one extra day beyond the 30-day
+        // Sessions window, so this cannot remove visible session detail.
+        let matched_pairs = identified_matched_request_pairs_sql(None);
+        let fold_cross_cutoff_imports_sql = format!(
+            "DELETE FROM proxy_request_logs
+             WHERE request_id IN (
+                 SELECT matched_pairs.excluded_request_id
+                 FROM ({matched_pairs}) matched_pairs
+                 JOIN proxy_request_logs winner_proxy
+                   ON winner_proxy.request_id = matched_pairs.proxy_request_id
+                 JOIN proxy_request_logs excluded_import
+                   ON excluded_import.request_id =
+                      matched_pairs.excluded_request_id
+                 WHERE winner_proxy.created_at < ?1
+                   AND excluded_import.created_at >= ?1
+             )"
+        );
+        let folded_imports = conn
+            .execute(&fold_cross_cutoff_imports_sql, [cutoff])
+            .map_err(|e| {
+                AppError::Database(format!("Folding cross-cutoff usage matches failed: {e}"))
+            })?;
+
         // INSERT uses the effective-log filter to exclude duplicate session rows.
         // DELETE intentionally prunes all old details so those duplicates are discarded.
-        let deleted = conn
+        let pruned = conn
             .execute(
                 "DELETE FROM proxy_request_logs WHERE created_at < ?1",
                 [cutoff],
             )
             .map_err(|e| AppError::Database(format!("Pruning old logs failed: {e}")))?;
 
-        Ok(deleted as u64)
+        Ok((folded_imports + pruned) as u64)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::compute_local_midnight_cutoff;
+    use super::{compute_local_midnight_cutoff, retention_target_day};
     use crate::database::Database;
     use crate::error::AppError;
     use crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH;
@@ -215,6 +244,85 @@ mod tests {
         // (2026-04-16 - 7d) = 2026-04-09; cutoff = 2026-04-10 00:00 local.
         let expected = local_dt(2026, 4, 10, 0, 0, 0);
         assert_eq!(cutoff_dt, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn retention_target_uses_calendar_days() -> Result<(), AppError> {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        assert_eq!(
+            retention_target_day(today, 31)?,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rollup_waits_for_the_session_sync_guard() -> Result<(), AppError> {
+        use crate::services::session_usage::acquire_session_sync_guard;
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let db = Arc::new(Database::memory()?);
+        let old_ts = chrono::Utc::now().timestamp() - 45 * 86_400;
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, total_cost_usd,
+                    latency_ms, status_code, created_at, data_source
+                 ) VALUES (
+                    'rollup-race-proxy', 'proxy-provider', 'codex', 'gpt',
+                    10, 2, '0.01', 10, 200, ?1, 'proxy'
+                 )",
+                [old_ts],
+            )
+            .expect("seed old Codex proxy detail");
+        }
+
+        let guard = acquire_session_sync_guard(&db).expect("hold session safety window");
+        db.ensure_codex_usage_rebuild_safe()
+            .expect("rebuild should be safe before rollup");
+
+        let contender = Arc::clone(&db);
+        let (attempted_tx, attempted_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            attempted_tx.send(()).expect("signal rollup attempt");
+            finished_tx
+                .send(contender.rollup_and_prune(31))
+                .expect("signal rollup completion");
+        });
+        attempted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("rollup thread did not start");
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(150))
+                .is_err(),
+            "rollup crossed the held rebuild safety window"
+        );
+        drop(guard);
+        assert_eq!(
+            finished_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("rollup did not resume")?,
+            1
+        );
+        thread.join().expect("join rollup thread");
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let counts: (i64, i64) = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM proxy_request_logs
+                 WHERE request_id = 'rollup-race-proxy'),
+                (SELECT COUNT(*) FROM usage_daily_rollups
+                 WHERE app_type = 'codex' AND provider_id = 'proxy-provider')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(counts, (0, 1));
         Ok(())
     }
 
@@ -273,8 +381,8 @@ mod tests {
     #[test]
     fn test_rollup_uses_effective_usage_logs() -> Result<(), AppError> {
         let db = Database::memory()?;
-        let now = chrono::Utc::now().timestamp();
-        let old_ts = now - 40 * 86400;
+        let old_ts = compute_local_midnight_cutoff(Local::now(), 40)?
+            - chrono::Duration::hours(12).num_seconds();
 
         {
             let conn = crate::database::lock_conn!(db.conn);
@@ -282,16 +390,16 @@ mod tests {
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model, request_model,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    total_cost_usd, latency_ms, status_code, created_at, data_source
-                ) VALUES (?1, 'openai', 'codex', 'gpt-5.4', 'gpt-5.4', 100, 20, 10, 0, '0.10', 100, 200, ?2, 'proxy')",
+                    total_cost_usd, latency_ms, status_code, session_id, created_at, data_source
+                ) VALUES (?1, 'openai', 'codex', 'gpt-5.4', 'gpt-5.4', 100, 20, 10, 0, '0.10', 100, 200, 'codex_thread-a', ?2, 'proxy')",
                 rusqlite::params!["codex-proxy-old", old_ts],
             )?;
             conn.execute(
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model, request_model,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    total_cost_usd, latency_ms, status_code, created_at, data_source
-                ) VALUES (?1, '_codex_session', 'codex', 'gpt-5.4', 'gpt-5.4', 100, 20, 10, 0, '0.10', 0, 200, ?2, 'codex_session')",
+                    total_cost_usd, latency_ms, status_code, session_id, created_at, data_source
+                ) VALUES (?1, '_codex_session', 'codex', 'gpt-5.4', 'gpt-5.4', 100, 20, 10, 0, '0.10', 0, 200, 'thread-a', ?2, 'codex_session')",
                 rusqlite::params!["codex-session-old-dup", old_ts + 60],
             )?;
         }
@@ -329,6 +437,94 @@ mod tests {
                 row.get(0)
             })?;
         assert_eq!(remaining, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rollup_folds_only_matched_import_across_cutoff() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let cutoff = compute_local_midnight_cutoff(Local::now(), 30)?;
+
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model, request_model,
+                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    total_cost_usd, latency_ms, status_code, session_id, created_at, data_source
+                ) VALUES (
+                    'straddle-proxy', 'openai', 'codex', 'openai/gpt-5.4',
+                    'gpt-5.4', 100, 20, 10, 7, '0.10', 100, 200,
+                    'codex_thread-straddle', ?1, 'proxy'
+                )",
+                [cutoff - 60],
+            )?;
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model, request_model,
+                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    total_cost_usd, latency_ms, status_code, session_id, created_at, data_source
+                ) VALUES (
+                    'straddle-import', '_codex_session', 'codex', 'gpt-5.4',
+                    'gpt-5.4', 100, 20, 10, 0, '0.10', 0, 200,
+                    'thread-straddle', ?1, 'codex_session'
+                )",
+                [cutoff + 60],
+            )?;
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model, request_model,
+                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    total_cost_usd, latency_ms, status_code, session_id, created_at, data_source
+                ) VALUES (
+                    'unmatched-import', '_codex_session', 'codex', 'gpt-5.4',
+                    'gpt-5.4', 33, 4, 3, 0, '0.03', 0, 200,
+                    'thread-straddle', ?1, 'codex_session'
+                )",
+                [cutoff + 120],
+            )?;
+        }
+
+        assert_eq!(
+            db.rollup_and_prune(30)?,
+            2,
+            "the old proxy and its retained duplicate are both removed"
+        );
+
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            let rolled_requests: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(request_count), 0)
+                 FROM usage_daily_rollups
+                 WHERE app_type = 'codex'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                rolled_requests, 1,
+                "the matched proxy/import pair must enter rollup exactly once"
+            );
+
+            let remaining_ids = conn
+                .prepare("SELECT request_id FROM proxy_request_logs ORDER BY request_id")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(
+                remaining_ids,
+                vec!["unmatched-import"],
+                "only the precisely matched retained import may be folded"
+            );
+        }
+
+        let summary = db.get_usage_summary(None, None, Some("codex"))?;
+        assert_eq!(
+            summary.total_requests, 2,
+            "one rolled match plus one legitimate unmatched import"
+        );
+        assert_eq!(summary.total_input_tokens, 120);
+        assert_eq!(summary.total_output_tokens, 24);
+        assert_eq!(summary.total_cache_read_tokens, 13);
 
         Ok(())
     }

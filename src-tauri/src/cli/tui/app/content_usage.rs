@@ -24,7 +24,8 @@ impl UsagePane {
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Models => Self::Providers,
-            Self::Providers => Self::Recent,
+            Self::Providers => Self::Sessions,
+            Self::Sessions => Self::Recent,
             Self::Recent => Self::Models,
         }
     }
@@ -33,7 +34,8 @@ impl UsagePane {
         match self {
             Self::Models => Self::Recent,
             Self::Providers => Self::Models,
-            Self::Recent => Self::Providers,
+            Self::Sessions => Self::Providers,
+            Self::Recent => Self::Sessions,
         }
     }
 }
@@ -187,6 +189,114 @@ impl App {
                 }
                 Action::None
             }
+            KeyCode::Enter if matches!(self.usage.pane, UsagePane::Sessions) => {
+                let Some(row) = data
+                    .usage
+                    .session_usage_for(self.usage.range)
+                    .get(self.usage.selected_idx)
+                else {
+                    return Action::None;
+                };
+                let chinese = matches!(current_language(), Language::Chinese);
+                let mut lines = vec![
+                    format!(
+                        "{}: {}",
+                        if chinese { "会话 ID" } else { "Session ID" },
+                        row.session_id
+                    ),
+                    format!("{}:", if chinese { "模型" } else { "Models" }),
+                ];
+                if row.models.is_empty() {
+                    lines.push(format!("  - {}", row.model));
+                } else {
+                    lines.extend(row.models.iter().map(|model| format!("  - {model}")));
+                    let omitted = row.model_count.saturating_sub(row.models.len() as u64);
+                    if omitted > 0 {
+                        lines.push(format!(
+                            "  {}",
+                            if chinese {
+                                format!("… 另有 {omitted} 个模型")
+                            } else {
+                                format!("… {omitted} more model(s)")
+                            }
+                        ));
+                    }
+                }
+                lines.extend([
+                    String::new(),
+                    format!(
+                        "{}: {}",
+                        if chinese { "请求" } else { "Requests" },
+                        row.request_count
+                    ),
+                    format!(
+                        "{}: {}",
+                        if chinese { "Token" } else { "Tokens" },
+                        row.total_tokens()
+                    ),
+                    format!(
+                        "{}: {}",
+                        if chinese {
+                            "输入 Token"
+                        } else {
+                            "Input Tokens"
+                        },
+                        row.input_tokens
+                    ),
+                    format!(
+                        "{}: {}",
+                        if chinese {
+                            "输出 Token"
+                        } else {
+                            "Output Tokens"
+                        },
+                        row.output_tokens
+                    ),
+                    format!(
+                        "{}: {}",
+                        if chinese {
+                            "缓存读取 Token"
+                        } else {
+                            "Cache Read Tokens"
+                        },
+                        row.cache_read_tokens
+                    ),
+                    format!(
+                        "{}: {}",
+                        if chinese {
+                            "缓存创建 Token"
+                        } else {
+                            "Cache Creation Tokens"
+                        },
+                        row.cache_creation_tokens
+                    ),
+                    format!(
+                        "{}: ${:.6}",
+                        if chinese { "费用" } else { "Cost" },
+                        row.total_cost_usd
+                    ),
+                    format!(
+                        "{}: {}",
+                        if chinese {
+                            "最近活动"
+                        } else {
+                            "Last Active"
+                        },
+                        format_usage_session_time(row.last_active_at)
+                    ),
+                ]);
+                self.overlay = Overlay::TextView(TextViewState {
+                    title: if chinese {
+                        "会话用量详情".to_string()
+                    } else {
+                        "Session Usage Detail".to_string()
+                    },
+                    lines,
+                    scroll: 0,
+                    action: None,
+                });
+                Action::None
+            }
             KeyCode::Enter if matches!(self.usage.pane, UsagePane::Recent) => {
                 let boundary = match self.usage.log_pager.gate.focus() {
                     PagedListFocus::Boundary(PageBoundary::Previous) => {
@@ -258,7 +368,7 @@ impl App {
                     .saturating_mul(crate::cli::tui::data::USAGE_LOG_PAGE_SIZE);
                 self.usage.log_pager.gate.select(page_start);
             }
-            UsagePane::Models | UsagePane::Providers => {
+            UsagePane::Models | UsagePane::Providers | UsagePane::Sessions => {
                 self.usage.selected_idx = 0;
             }
         }
@@ -271,7 +381,7 @@ impl App {
                 let len = data.usage.recent_logs_for(self.usage.range).len();
                 self.usage.logs_idx = move_index(self.usage.logs_idx, len, delta);
             }
-            UsagePane::Models | UsagePane::Providers => {
+            UsagePane::Models | UsagePane::Providers | UsagePane::Sessions => {
                 let len = usage_active_pane_len(&self.usage.pane, self.usage.range, data);
                 self.usage.selected_idx = move_index(self.usage.selected_idx, len, delta);
             }
@@ -411,6 +521,7 @@ pub(crate) fn usage_active_pane_len(
     match pane {
         UsagePane::Providers => data.usage.top_providers_for(range).len(),
         UsagePane::Models => data.usage.top_models_for(range).len(),
+        UsagePane::Sessions => data.usage.session_usage_for(range).len(),
         UsagePane::Recent => data.usage.recent_logs_for(range).len(),
     }
 }

@@ -17706,6 +17706,7 @@ mod tests {
 
         app.on_key(key(KeyCode::Tab), &data);
         app.on_key(key(KeyCode::Tab), &data);
+        app.on_key(key(KeyCode::Tab), &data);
         assert!(matches!(app.usage.pane, UsagePane::Recent));
 
         let action = app.on_key(key(KeyCode::Char('d')), &data);
@@ -17740,6 +17741,64 @@ mod tests {
         assert!(snapshot
             .row_for(&AppType::Claude, data::UsageRangePreset::Today, 101,)
             .is_none());
+    }
+
+    #[test]
+    fn usage_session_enter_opens_full_read_only_detail() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::UsageLogs;
+        app.focus = Focus::Content;
+        app.usage.pane = UsagePane::Sessions;
+        let mut data = UiData::default();
+        let session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string();
+        let models = vec![
+            "anthropic/claude-sonnet-4-20260726".to_string(),
+            "gateway/claude-opus-4-long-provider-suffix".to_string(),
+        ];
+        data.usage.session_usage_7d = vec![crate::services::session_usage_query::SessionUsageRow {
+            session_id: session_id.clone(),
+            model: models[0].clone(),
+            models: models.clone(),
+            model_count: 5,
+            request_count: 3,
+            input_tokens: 11,
+            output_tokens: 22,
+            cache_read_tokens: 33,
+            cache_creation_tokens: 44,
+            total_cost_usd: 0.123456,
+            last_active_at: 1_700_000_000,
+            ..crate::services::session_usage_query::SessionUsageRow::default()
+        }];
+
+        assert!(matches!(
+            app.on_usage_logs_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        let Overlay::TextView(view) = &app.overlay else {
+            panic!("expected session TextView overlay, got {:?}", app.overlay);
+        };
+        let detail = view.lines.join("\n");
+        assert!(detail.contains(&session_id), "{detail}");
+        for model in models {
+            assert!(detail.contains(&model), "{detail}");
+        }
+        assert!(detail.contains("… 3 more model(s)"), "{detail}");
+        assert!(detail.contains("Requests: 3"), "{detail}");
+        assert!(detail.contains("Tokens: 110"), "{detail}");
+        assert!(detail.contains("Input Tokens: 11"), "{detail}");
+        assert!(detail.contains("Output Tokens: 22"), "{detail}");
+        assert!(detail.contains("Cache Read Tokens: 33"), "{detail}");
+        assert!(detail.contains("Cache Creation Tokens: 44"), "{detail}");
+        assert!(detail.contains("Cost: $0.123456"), "{detail}");
+        assert!(
+            detail.contains(&format!(
+                "Last Active: {}",
+                format_usage_session_time(1_700_000_000)
+            )),
+            "{detail}"
+        );
+        assert!(view.action.is_none());
     }
 
     #[test]
@@ -18579,6 +18638,33 @@ mod tests {
         assert!(pager.page_error(1).is_none());
         assert!(pager.page_request(1).is_some());
         assert!(!pager.cancel_request(1, 7, data::UsageLogPageDirection::Older,));
+    }
+
+    #[test]
+    fn usage_errors_are_scoped_to_their_app_and_range() {
+        let mut usage = UsageState::default();
+        usage.set_usage_pricing_error(
+            &AppType::Claude,
+            data::UsageRangePreset::SevenDays,
+            Some("aggregate failed".to_string()),
+        );
+        assert_eq!(
+            usage.usage_pricing_error(&AppType::Claude, data::UsageRangePreset::Today),
+            Some("aggregate failed")
+        );
+        assert!(usage
+            .usage_pricing_error(&AppType::Codex, data::UsageRangePreset::SevenDays)
+            .is_none());
+
+        usage.set_session_sync_error_for(
+            &AppType::Codex,
+            Some("Codex import incomplete".to_string()),
+        );
+        assert!(usage.session_sync_error_for(&AppType::Claude).is_none());
+        assert_eq!(
+            usage.session_sync_error_for(&AppType::Codex),
+            Some("Codex import incomplete")
+        );
     }
 
     #[test]

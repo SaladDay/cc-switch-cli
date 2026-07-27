@@ -2169,17 +2169,6 @@ fn execute_session_usage_sync_request(
         SessionUsageSyncReq::Run { request_id } => {
             let result =
                 crate::services::session_usage::run_session_usage_sync_cycle(db, "tui-background")
-                    .and_then(|result| {
-                        if result.errors.is_empty() {
-                            Ok(())
-                        } else {
-                            Err(AppError::Message(format!(
-                                "{} session usage sync error(s); first: {}",
-                                result.errors.len(),
-                                result.errors[0]
-                            )))
-                        }
-                    })
                     .map_err(|error| error.to_string());
             SessionUsageSyncMsg::Finished { request_id, result }
         }

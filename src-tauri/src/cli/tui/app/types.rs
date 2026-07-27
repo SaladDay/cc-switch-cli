@@ -62,6 +62,7 @@ pub enum SessionsPane {
 pub enum UsagePane {
     Models,
     Providers,
+    Sessions,
     Recent,
 }
 
@@ -710,6 +711,9 @@ pub struct UsageState {
     refresh_log_page_after_aggregate: bool,
     manual_session_refreshing: bool,
     codex_usage_rebuilding: bool,
+    session_sync_error: Option<String>,
+    session_sync_errors: HashMap<AppType, String>,
+    usage_pricing_errors: HashMap<(AppType, crate::cli::tui::data::UsageRangePreset), String>,
     loading_ranges: HashSet<(AppType, crate::cli::tui::data::UsageRangePreset)>,
 }
 
@@ -727,6 +731,9 @@ impl Default for UsageState {
             refresh_log_page_after_aggregate: false,
             manual_session_refreshing: false,
             codex_usage_rebuilding: false,
+            session_sync_error: None,
+            session_sync_errors: HashMap::new(),
+            usage_pricing_errors: HashMap::new(),
             loading_ranges: HashSet::new(),
         }
     }
@@ -795,6 +802,56 @@ impl UsageState {
 
     pub(crate) fn manual_session_refreshing(&self) -> bool {
         self.manual_session_refreshing
+    }
+
+    pub(crate) fn set_session_sync_error(&mut self, error: Option<String>) {
+        self.session_sync_error = error;
+    }
+
+    pub(crate) fn set_session_sync_error_for(&mut self, app_type: &AppType, error: Option<String>) {
+        if let Some(error) = error {
+            self.session_sync_errors.insert(app_type.clone(), error);
+        } else {
+            self.session_sync_errors.remove(app_type);
+        }
+    }
+
+    pub(crate) fn session_sync_error(&self) -> Option<&str> {
+        self.session_sync_error.as_deref()
+    }
+
+    pub(crate) fn session_sync_error_for(&self, app_type: &AppType) -> Option<&str> {
+        self.session_sync_error()
+            .or_else(|| self.session_sync_errors.get(app_type).map(String::as_str))
+    }
+
+    pub(crate) fn set_usage_pricing_error(
+        &mut self,
+        app_type: &AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+        error: Option<String>,
+    ) {
+        self.usage_pricing_errors
+            .retain(|(error_app, error_range), _| {
+                error_app != app_type || !usage_loading_range_matches(*error_range, range)
+            });
+        if let Some(error) = error {
+            self.usage_pricing_errors
+                .insert((app_type.clone(), range), error);
+        }
+    }
+
+    pub(crate) fn usage_pricing_error(
+        &self,
+        app_type: &AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    ) -> Option<&str> {
+        self.usage_pricing_errors
+            .iter()
+            .find(|((error_app, error_range), _)| {
+                error_app == app_type && usage_loading_range_matches(*error_range, range)
+            })
+            .map(|(_, error)| error.as_str())
     }
 
     pub(crate) fn start_codex_usage_rebuild(&mut self) {

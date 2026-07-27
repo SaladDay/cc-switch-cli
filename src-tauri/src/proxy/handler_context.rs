@@ -5,12 +5,13 @@ use std::time::{Duration, Instant};
 
 use crate::app_config::AppType;
 use crate::provider::Provider;
+use crate::services::session_identity::ProxySessionIdEncoding;
 
 use super::{
     error::ProxyError,
     provider_router::ProviderRouter,
     server::ProxyServerState,
-    session::extract_session_id,
+    session::{extract_session_id, extract_session_id_with_encoding},
     types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
 };
 
@@ -27,6 +28,7 @@ pub struct HandlerContext {
     pub request_model: String,
     pub session_id: String,
     pub session_client_provided: bool,
+    pub(crate) session_id_encoding: ProxySessionIdEncoding,
     pub current_provider_id_at_start: String,
 }
 
@@ -67,7 +69,14 @@ impl HandlerContext {
             .and_then(|value| value.as_str())
             .unwrap_or("unknown")
             .to_string();
-        let session_result = extract_session_id(headers, body, app_type.as_str());
+        let (session_result, session_id_encoding) = if matches!(&app_type, AppType::Codex) {
+            extract_session_id_with_encoding(headers, body, app_type.as_str())
+        } else {
+            (
+                extract_session_id(headers, body, app_type.as_str()),
+                ProxySessionIdEncoding::Native,
+            )
+        };
 
         Ok(Self {
             start_time,
@@ -82,6 +91,7 @@ impl HandlerContext {
             request_model,
             session_id: session_result.session_id,
             session_client_provided: session_result.client_provided,
+            session_id_encoding,
             current_provider_id_at_start,
         })
     }

@@ -302,6 +302,7 @@ pub fn sync_all_session_usage(db: &Database) -> Result<SessionSyncResult, AppErr
 /// the reimport is empty or fails so it never keeps rendering stale rows.
 pub(crate) fn rebuild_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let _sync_guard = acquire_session_sync_guard(db)?;
+    db.ensure_codex_usage_rebuild_safe()?;
     db.backup_database_file()?;
     db.reset_codex_usage()?;
 
@@ -359,7 +360,12 @@ fn merge_sync_step(
     step: Result<SessionSyncResult, AppError>,
 ) {
     match step {
-        Ok(step_result) => result.merge(step_result),
+        Ok(mut step_result) => {
+            for error in &mut step_result.errors {
+                *error = format!("{name}: {error}");
+            }
+            result.merge(step_result);
+        }
         Err(error) => result.errors.push(format!("{name}: {error}")),
     }
 }
@@ -939,6 +945,17 @@ fn insert_session_log_entry(
                 .unwrap_or(0)
         });
 
+    if let Some(session_id) = msg.session_id.as_deref() {
+        if crate::services::session_identity::attach_imported_session_identity(
+            conn,
+            &crate::app_config::AppType::Claude,
+            request_id,
+            session_id,
+        )? {
+            return Ok(false);
+        }
+    }
+
     let dedup_key = DedupKey {
         app_type: "claude",
         model: &msg.model,
@@ -1062,6 +1079,11 @@ pub fn get_data_source_breakdown(db: &Database) -> Result<Vec<DataSourceSummary>
     Ok(summaries)
 }
 
+/// Preserve the upstream physical cleanup for best-effort importers.
+///
+/// Claude and Codex keep approximate matches so their one-to-one reconciliation
+/// remains reversible at read time. Other importers retain the original
+/// proxy-wins cleanup behavior.
 pub(crate) fn delete_session_logs_covered_by_proxy_log(
     conn: &rusqlite::Connection,
     app_type: &str,
@@ -1069,10 +1091,11 @@ pub(crate) fn delete_session_logs_covered_by_proxy_log(
     usage: &TokenUsage,
     created_at: i64,
 ) -> Result<usize, AppError> {
-    if usage.input_tokens == 0
-        && usage.output_tokens == 0
-        && usage.cache_read_tokens == 0
-        && usage.cache_creation_tokens == 0
+    if matches!(app_type, "claude" | "codex")
+        || (usage.input_tokens == 0
+            && usage.output_tokens == 0
+            && usage.cache_read_tokens == 0
+            && usage.cache_creation_tokens == 0)
     {
         return Ok(0);
     }
@@ -1119,6 +1142,65 @@ mod tests {
     use crate::session_manager::scan_cache_store::ScanCacheStore;
 
     #[test]
+    fn proxy_cleanup_stays_upstream_for_best_effort_importers_only() -> Result<(), AppError> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE proxy_request_logs (
+                request_id TEXT PRIMARY KEY,
+                app_type TEXT NOT NULL,
+                model TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                cache_read_tokens INTEGER NOT NULL,
+                cache_creation_tokens INTEGER NOT NULL,
+                status_code INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                data_source TEXT
+            );
+            INSERT INTO proxy_request_logs VALUES
+                ('gemini-import', 'gemini', 'gemini-2.5-pro',
+                 10, 2, 1, 0, 200, 100, 'gemini_session'),
+                ('claude-import', 'claude', 'claude-sonnet',
+                 10, 2, 1, 0, 200, 100, 'session_log');",
+        )?;
+        let usage = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_tokens: 1,
+            cache_creation_tokens: 0,
+            model: None,
+            message_id: None,
+        };
+
+        assert_eq!(
+            delete_session_logs_covered_by_proxy_log(
+                &conn,
+                "gemini",
+                "gemini-2.5-pro",
+                &usage,
+                100
+            )?,
+            1
+        );
+        assert_eq!(
+            delete_session_logs_covered_by_proxy_log(
+                &conn,
+                "claude",
+                "claude-sonnet",
+                &usage,
+                100
+            )?,
+            0
+        );
+        let remaining: String =
+            conn.query_row("SELECT request_id FROM proxy_request_logs", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(remaining, "claude-import");
+        Ok(())
+    }
+
+    #[test]
     fn memory_database_session_guard_does_not_create_a_lock_file() -> Result<(), AppError> {
         let home = tempfile::tempdir().expect("isolated test home");
         let _env = crate::test_support::TestEnvGuard::isolated(home.path());
@@ -1156,8 +1238,10 @@ mod tests {
         if let Some(home) = std::env::var_os(CHILD_ENV) {
             let home = PathBuf::from(home);
             let _env = crate::test_support::TestEnvGuard::isolated(&home);
-            let db = Database::init()?;
             fs::write(home.join("attempted"), b"1").expect("write attempted marker");
+            // Database startup maintenance now shares this same guard, so the
+            // child may block during initialization before the explicit acquire.
+            let db = Database::init()?;
             let _guard = acquire_session_sync_guard(&db)?;
             fs::write(home.join("acquired"), b"1").expect("write acquired marker");
             return Ok(());
@@ -1244,6 +1328,44 @@ mod tests {
         let remaining: i64 = conn.query_row(
             "SELECT COUNT(*) FROM proxy_request_logs
              WHERE request_id = 'codex-before-failed-backup'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(remaining, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn codex_rebuild_refuses_rolled_proxy_history_without_resetting_details() -> Result<(), AppError>
+    {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "INSERT INTO usage_daily_rollups
+                    (date, app_type, provider_id, model, request_count)
+                 VALUES ('2026-06-01', 'codex', 'proxy-provider', 'gpt', 1);
+                 INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model, input_tokens,
+                    output_tokens, cache_read_tokens, latency_ms, status_code,
+                    created_at, data_source
+                 ) VALUES
+                    ('codex-before-unsafe-rebuild', '_codex_session', 'codex', 'gpt',
+                     1, 1, 0, 0, 200, 1, 'codex_session');",
+            )?;
+        }
+
+        let error = rebuild_codex_usage(&db)
+            .expect_err("rolled proxy history must make a rebuild fail safely");
+        assert!(error
+            .to_string()
+            .contains("Cannot safely rebuild Codex usage"));
+        let conn = lock_conn!(db.conn);
+        let remaining: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs
+             WHERE request_id = 'codex-before-unsafe-rebuild'",
             [],
             |row| row.get(0),
         )?;
@@ -1379,7 +1501,8 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_claude_session_skips_matching_proxy_log() -> Result<(), AppError> {
+    fn test_insert_claude_session_keeps_approximate_match_for_read_time_dedup(
+    ) -> Result<(), AppError> {
         let db = Database::memory()?;
         {
             let conn = lock_conn!(db.conn);
@@ -1387,8 +1510,9 @@ mod tests {
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model, request_model,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    total_cost_usd, latency_ms, status_code, created_at, data_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    total_cost_usd, latency_ms, status_code, session_id, provider_type,
+                    created_at, data_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     "proxy-different-id",
                     "openai-compatible",
@@ -1402,6 +1526,8 @@ mod tests {
                     "0.10",
                     100,
                     200,
+                    "session-1",
+                    crate::services::session_identity::CLAUDE_STABLE_SESSION_PROVIDER_TYPE,
                     1000,
                     "proxy"
                 ],
@@ -1425,13 +1551,17 @@ mod tests {
             let conn = lock_conn!(db.conn);
             insert_session_log_entry(&conn, &mut pricing_cache, "session:msg_1", &msg)?
         };
-        assert!(!inserted);
+        assert!(inserted);
 
         let conn = lock_conn!(db.conn);
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
             row.get(0)
         })?;
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
+        drop(conn);
+
+        let summary = db.get_usage_summary(None, None, Some("claude"))?;
+        assert_eq!(summary.total_requests, 1);
 
         Ok(())
     }

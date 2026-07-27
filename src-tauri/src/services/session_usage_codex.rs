@@ -273,6 +273,39 @@ pub(crate) fn reset_codex_usage_on_conn(
 }
 
 impl Database {
+    /// Refuse a manual full-history rebuild once Codex proxy details have been
+    /// folded into rollups. Rollups intentionally do not retain request
+    /// identity, so re-importing the same rollout files could no longer dedupe
+    /// their usage and would double-count history.
+    pub(crate) fn ensure_codex_usage_rebuild_safe(&self) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        if !sqlite_table_exists(&conn, "usage_daily_rollups")? {
+            return Ok(());
+        }
+        let has_proxy_rollups: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM usage_daily_rollups
+                    WHERE app_type = 'codex'
+                      AND provider_id <> '_codex_session'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                AppError::Database(format!("检查 Codex 历史用量是否可安全重建失败: {error}"))
+            })?;
+        if has_proxy_rollups {
+            return Err(AppError::Message(
+                "Cannot safely rebuild Codex usage after proxy history has been rolled up; \
+                 keep the existing history and use normal session sync instead."
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn reset_codex_usage(&self) -> Result<(), AppError> {
         let codex_dir = get_codex_config_dir();
         let conn = lock_conn!(self.conn);
@@ -1397,6 +1430,16 @@ fn insert_codex_session_entry(
 ) -> Result<bool, AppError> {
     // created_at 由调用方在扫描入队处解析定死（见 resolve_codex_created_at），
     // 这里只消费固定值，不再回退 now()。
+    if let Some(session_id) = session_id {
+        if crate::services::session_identity::attach_imported_session_identity(
+            conn,
+            &crate::app_config::AppType::Codex,
+            request_id,
+            session_id,
+        )? {
+            return Ok(false);
+        }
+    }
     let dedup_key = DedupKey {
         app_type: "codex",
         model,
@@ -2223,7 +2266,8 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_codex_session_skips_matching_proxy_log() -> Result<(), AppError> {
+    fn test_insert_codex_session_keeps_approximate_match_for_read_time_dedup(
+    ) -> Result<(), AppError> {
         let db = Database::memory()?;
         {
             let conn = lock_conn!(db.conn);
@@ -2231,8 +2275,9 @@ mod tests {
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model, request_model,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    total_cost_usd, latency_ms, status_code, created_at, data_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    total_cost_usd, latency_ms, status_code, session_id,
+                    created_at, data_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     "codex-proxy",
                     "openai",
@@ -2246,6 +2291,7 @@ mod tests {
                     "0.01",
                     100,
                     200,
+                    "codex_session-1",
                     1000,
                     "proxy"
                 ],
@@ -2267,13 +2313,17 @@ mod tests {
             Some("1970-01-01T00:16:45Z"),
             &mut suspected_duplicates,
         )?;
-        assert!(!inserted);
+        assert!(inserted);
 
         let conn = lock_conn!(db.conn);
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
             row.get(0)
         })?;
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
+        drop(conn);
+
+        let summary = db.get_usage_summary(None, None, Some("codex"))?;
+        assert_eq!(summary.total_requests, 1);
 
         Ok(())
     }
@@ -2314,6 +2364,37 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn codex_rebuild_guard_only_rejects_codex_proxy_rollups() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "INSERT INTO usage_daily_rollups (date, app_type, provider_id, model)
+                 VALUES
+                    ('2026-07-10', 'codex', '_codex_session', 'gpt'),
+                    ('2026-07-10', 'gemini', 'gemini-provider', 'gemini');",
+            )?;
+        }
+        db.ensure_codex_usage_rebuild_safe()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO usage_daily_rollups (date, app_type, provider_id, model)
+                 VALUES ('2026-07-10', 'codex', 'proxy-provider', 'gpt')",
+                [],
+            )?;
+        }
+        let error = db
+            .ensure_codex_usage_rebuild_safe()
+            .expect_err("Codex proxy rollups make a full rebuild ambiguous");
+        assert!(error
+            .to_string()
+            .contains("Cannot safely rebuild Codex usage"));
         Ok(())
     }
 

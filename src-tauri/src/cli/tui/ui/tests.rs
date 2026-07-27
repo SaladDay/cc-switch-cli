@@ -39,7 +39,10 @@ use crate::{
     commands::workspace::{DailyMemoryFileInfo, ALLOWED_FILES},
     openclaw_config::write_openclaw_config_source,
     provider::Provider,
-    services::skill::{InstalledSkill, SkillApps, SkillRepo, SyncMethod, UnmanagedSkill},
+    services::{
+        session_usage_query::SessionUsageRow,
+        skill::{InstalledSkill, SkillApps, SkillRepo, SyncMethod, UnmanagedSkill},
+    },
     test_support::{lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock},
 };
 
@@ -1384,6 +1387,357 @@ fn tui_usage_details_tables_follow_selected_range() {
     let today = all_text(&render_with_size(&app, &data, 160, 40));
     assert!(today.contains("Today Provider"), "{today}");
     assert!(!today.contains("Week Provider"), "{today}");
+}
+
+#[test]
+fn tui_usage_request_logs_are_labeled_as_a_raw_audit() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Recent;
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(rendered.contains("Raw Request Logs"), "{rendered}");
+    assert!(rendered.contains("raw audit logs"), "{rendered}");
+    assert!(rendered.contains("all retained history"), "{rendered}");
+    assert!(
+        rendered.contains("may include cross-source duplicates"),
+        "{rendered}"
+    );
+
+    let narrow = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        70,
+        24,
+    ));
+    assert!(narrow.contains("all retained history"), "{narrow}");
+    assert!(narrow.contains("cross-src dupes"), "{narrow}");
+
+    app.usage.range =
+        UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange { start: 0, end: 1 });
+    let custom = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(custom.contains("selected custom range"), "{custom}");
+    assert!(!custom.contains("all retained history"), "{custom}");
+
+    let custom_narrow = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        70,
+        24,
+    ));
+    assert!(custom_narrow.contains("custom range"), "{custom_narrow}");
+    assert!(custom_narrow.contains("cross-src dupes"), "{custom_narrow}");
+}
+
+#[test]
+fn tui_usage_raw_audit_scope_is_explicit_in_chinese() {
+    let _lang = use_test_language(Language::Chinese);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Recent;
+    let data = minimal_data(&app.app_type);
+
+    let fixed = all_text(&render_with_size(&app, &data, 160, 40));
+    let fixed_compact = fixed.split_whitespace().collect::<String>();
+    assert!(fixed_compact.contains("全部保留历史"), "{fixed}");
+    assert!(fixed_compact.contains("可能含跨来源重复"), "{fixed}");
+
+    let fixed_narrow = all_text(&render_with_size(&app, &data, 70, 24));
+    let fixed_narrow_compact = fixed_narrow.split_whitespace().collect::<String>();
+    assert!(
+        fixed_narrow_compact.contains("全部保留历史"),
+        "{fixed_narrow}"
+    );
+    assert!(
+        fixed_narrow_compact.contains("跨来源重复"),
+        "{fixed_narrow}"
+    );
+
+    app.usage.range =
+        UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange { start: 0, end: 1 });
+    let custom = all_text(&render_with_size(&app, &data, 160, 40));
+    let custom_compact = custom.split_whitespace().collect::<String>();
+    assert!(custom_compact.contains("所选自定义范围"), "{custom}");
+    assert!(!custom_compact.contains("全部保留历史"), "{custom}");
+
+    let custom_narrow = all_text(&render_with_size(&app, &data, 70, 24));
+    let custom_narrow_compact = custom_narrow.split_whitespace().collect::<String>();
+    assert!(
+        custom_narrow_compact.contains("自定义范围"),
+        "{custom_narrow}"
+    );
+    assert!(
+        custom_narrow_compact.contains("跨来源重复"),
+        "{custom_narrow}"
+    );
+}
+
+#[test]
+fn tui_usage_sessions_show_retained_claude_detail() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Sessions;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage.session_usage_7d = vec![SessionUsageRow {
+        session_id: "session-123456789".to_string(),
+        model: "claude-sonnet-4".to_string(),
+        models: vec![
+            "claude-sonnet-4".to_string(),
+            "claude-opus-4-20260726".to_string(),
+        ],
+        model_count: 2,
+        request_count: 12,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 250,
+        cache_creation_tokens: 50,
+        total_cost_usd: 1.25,
+        last_active_at: 1_700_000_000,
+    }];
+    data.usage.session_usage_total_7d = 150;
+
+    let last_active = chrono::DateTime::from_timestamp(1_700_000_000, 0)
+        .expect("timestamp should be valid")
+        .with_timezone(&chrono::Local);
+    let full_last_active = last_active.format("%Y/%m/%d %H:%M").to_string();
+    let compact_last_active = last_active.format("%m/%d %H:%M").to_string();
+    let rendered = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(rendered.contains("Sessions"), "{rendered}");
+    assert!(
+        rendered.contains("retained + identified sessions only"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("showing 1 of 150 rows"), "{rendered}");
+    assert!(rendered.contains("session-123456789"), "{rendered}");
+    assert!(rendered.contains("claude-sonnet-4 +1"), "{rendered}");
+    assert!(rendered.contains("$1.250"), "{rendered}");
+    assert!(rendered.contains(&full_last_active), "{rendered}");
+
+    let compact = all_text(&render_with_size(&app, &data, 120, 24));
+    assert!(compact.contains("Last Active"), "{compact}");
+    assert!(compact.contains(&compact_last_active), "{compact}");
+    assert!(!compact.contains(&full_last_active), "{compact}");
+
+    let narrow = all_text(&render_with_size(&app, &data, 80, 24));
+    assert!(narrow.contains("Models"), "{narrow}");
+    assert!(narrow.contains("Logs"), "{narrow}");
+    assert!(narrow.contains("retained+identified 1/150"), "{narrow}");
+    assert!(narrow.contains("session…6789"), "{narrow}");
+    assert!(!narrow.contains("Last Active"), "{narrow}");
+
+    app.usage
+        .set_session_sync_error(Some("partial import".to_string()));
+    let incomplete = all_text(&render_with_size(&app, &data, 160, 40));
+    assert!(
+        incomplete.contains("Session import incomplete"),
+        "{incomplete}"
+    );
+    assert!(incomplete.contains("showing 1 of 150 rows"), "{incomplete}");
+
+    let narrow_incomplete = all_text(&render_with_size(&app, &data, 80, 24));
+    assert!(
+        narrow_incomplete.contains("⚠ session:r"),
+        "{narrow_incomplete}"
+    );
+    assert!(
+        narrow_incomplete.contains("retained+identified 1/150"),
+        "{narrow_incomplete}"
+    );
+}
+
+#[test]
+fn tui_usage_errors_are_visible_on_main_and_every_detail_pane() {
+    let _lang = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+    app.usage.set_usage_pricing_error(
+        &AppType::Claude,
+        UsageRangePreset::SevenDays,
+        Some("aggregate failed".to_string()),
+    );
+
+    app.route = Route::Usage;
+    let main = all_text(&render_with_size(&app, &data, 120, 30));
+    assert!(main.contains("Usage load failed"), "{main}");
+    assert!(main.contains("Press r to retry"), "{main}");
+
+    app.route = Route::UsageLogs;
+    let models = all_text(&render_with_size(&app, &data, 120, 30));
+    assert!(models.contains("Usage load failed"), "{models}");
+    app.usage
+        .set_usage_pricing_error(&AppType::Claude, UsageRangePreset::SevenDays, None);
+    app.usage
+        .set_session_sync_error(Some("partial import".to_string()));
+    for pane in [
+        UsagePane::Models,
+        UsagePane::Providers,
+        UsagePane::Sessions,
+        UsagePane::Recent,
+    ] {
+        app.usage.pane = pane;
+        let rendered = all_text(&render_with_size(&app, &data, 120, 30));
+        assert!(
+            rendered.contains("Session import incomplete"),
+            "{pane:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn tui_usage_extreme_width_keeps_all_detail_tabs_visible() {
+    let lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Sessions;
+    let data = minimal_data(&app.app_type);
+
+    let sessions = all_text(&render_with_size(&app, &data, 60, 24));
+    assert!(sessions.contains("M   P   S   L"), "{sessions}");
+
+    app.usage.pane = UsagePane::Recent;
+    let logs = all_text(&render_with_size(&app, &data, 60, 24));
+    assert!(logs.contains("M   P   S   L"), "{logs}");
+
+    drop(lang);
+    let _lang = use_test_language(Language::Chinese);
+    let chinese = all_text(&render_with_size(&app, &data, 60, 24));
+    assert!(
+        chinese.lines().any(|line| {
+            line.contains('模') && line.contains('供') && line.contains('会') && line.contains('志')
+        }),
+        "{chinese}"
+    );
+}
+
+#[test]
+fn tui_usage_sessions_summary_matches_unavailable_states() {
+    let _lang = use_test_language(Language::English);
+
+    let mut unsupported = App::new(Some(AppType::Gemini));
+    unsupported.route = Route::UsageLogs;
+    unsupported.focus = Focus::Content;
+    unsupported.usage.pane = UsagePane::Sessions;
+    let unsupported_data = minimal_data(&unsupported.app_type);
+    let rendered = all_text(&render_with_size(&unsupported, &unsupported_data, 160, 40));
+    assert!(
+        rendered.contains("session usage is available for Claude and Codex"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("0 rows"), "{rendered}");
+
+    let mut custom = App::new(Some(AppType::Claude));
+    custom.route = Route::UsageLogs;
+    custom.focus = Focus::Content;
+    custom.usage.pane = UsagePane::Sessions;
+    custom.usage.range =
+        UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange { start: 0, end: 1 });
+    let custom_data = minimal_data(&custom.app_type);
+    let rendered = all_text(&render_with_size(&custom, &custom_data, 160, 40));
+    assert!(
+        rendered.contains("session detail supports Today, 7d, and 30d"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("0 rows"), "{rendered}");
+
+    let mut retained_only = App::new(Some(AppType::Claude));
+    retained_only.route = Route::UsageLogs;
+    retained_only.focus = Focus::Content;
+    retained_only.usage.pane = UsagePane::Sessions;
+    let mut retained_only_data = minimal_data(&retained_only.app_type);
+    retained_only_data.usage.summary_7d.total_requests = 7;
+    let rendered = all_text(&render_with_size(
+        &retained_only,
+        &retained_only_data,
+        160,
+        40,
+    ));
+    assert!(
+        rendered.contains("The Sessions view only uses retained local logs"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Rows without an identifiable session are excluded"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("No data for the selected range"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn tui_usage_sessions_sync_failure_is_not_rendered_as_a_normal_empty_state() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Sessions;
+    app.usage
+        .set_session_sync_error(Some("synthetic import failure".to_string()));
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(rendered.contains("Session import failed"), "{rendered}");
+    assert!(rendered.contains("data may be incomplete"), "{rendered}");
+    assert!(rendered.contains("Press r to retry"), "{rendered}");
+    assert!(
+        !rendered.contains("only uses retained local logs"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn tui_usage_sessions_manual_retry_shows_loading_instead_of_retry_prompt() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Sessions;
+    app.usage
+        .set_session_sync_error(Some("synthetic import failure".to_string()));
+    app.usage.start_manual_session_refresh();
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(rendered.contains("Refreshing"), "{rendered}");
+    assert!(rendered.contains("Loading..."), "{rendered}");
+    assert!(!rendered.contains("Press r to retry"), "{rendered}");
 }
 
 #[test]

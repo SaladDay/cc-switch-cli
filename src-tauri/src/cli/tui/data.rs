@@ -24,6 +24,7 @@ use crate::prompt::Prompt;
 use crate::prompt_files::prompt_file_path;
 use crate::provider::Provider;
 use crate::services::config::BackupInfo;
+use crate::services::session_usage_query::SessionUsageRow;
 use crate::services::{ConfigService, McpService, PromptService, ProviderService, SkillService};
 use crate::store::AppState;
 
@@ -42,6 +43,11 @@ const EMPTY_USAGE_SUMMARY: UsageSummarySnapshot = UsageSummarySnapshot {
 const EMPTY_USAGE_TREND: [UsageTrendBucket; 0] = [];
 const EMPTY_USAGE_PROVIDER_ROWS: [UsageProviderStatsRow; 0] = [];
 const EMPTY_USAGE_MODEL_ROWS: [UsageModelStatsRow; 0] = [];
+const EMPTY_SESSION_USAGE_ROWS: [SessionUsageRow; 0] = [];
+/// Request Logs is a raw audit surface: every physical row remains visible,
+/// including possible cross-source duplicates. Aggregate Usage and Sessions
+/// continue to use the strict effective-log projection.
+const RAW_USAGE_LOG_FILTER: &str = "1 = 1";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct UiDataReloadToken(u64);
@@ -435,8 +441,10 @@ pub(crate) fn parse_usage_custom_range(raw: &str) -> Result<UsageCustomRange, St
         return Err("Custom range cannot exceed 3660 days".to_string());
     }
 
-    let start = local_midnight_timestamp(start_date);
-    let end = local_end_of_day_timestamp(end_date);
+    let start = crate::services::session_usage_query::local_day_start_timestamp(start_date)
+        .ok_or_else(|| "Start date has no valid local time".to_string())?;
+    let end = crate::services::session_usage_query::local_day_end_timestamp(end_date)
+        .ok_or_else(|| "End date has no valid local time".to_string())?;
 
     Ok(UsageCustomRange { start, end })
 }
@@ -676,6 +684,12 @@ pub struct UsageSnapshot {
     pub top_models_today: Vec<UsageModelStatsRow>,
     pub top_models_7d: Vec<UsageModelStatsRow>,
     pub top_models_30d: Vec<UsageModelStatsRow>,
+    pub session_usage_today: Vec<SessionUsageRow>,
+    pub session_usage_7d: Vec<SessionUsageRow>,
+    pub session_usage_30d: Vec<SessionUsageRow>,
+    pub session_usage_total_today: u64,
+    pub session_usage_total_7d: u64,
+    pub session_usage_total_30d: u64,
     pub custom_range: Option<UsageCustomRange>,
     pub summary_custom: UsageSummarySnapshot,
     pub trends_custom: Vec<UsageTrendBucket>,
@@ -781,7 +795,7 @@ impl UsageSnapshot {
     pub(crate) fn begin_custom_range(&mut self, range: UsageCustomRange) {
         self.custom_range = Some(range);
         self.summary_custom = UsageSummarySnapshot::default();
-        self.trends_custom = empty_usage_trend(UsageRangePreset::Custom(range));
+        self.trends_custom = empty_usage_custom_trend(range);
         self.top_providers_custom.clear();
         self.top_models_custom.clear();
         self.recent_logs_custom.clear();
@@ -929,6 +943,24 @@ impl UsageSnapshot {
         }
     }
 
+    pub fn session_usage_for(&self, range: UsageRangePreset) -> &[SessionUsageRow] {
+        match range {
+            UsageRangePreset::Today => &self.session_usage_today,
+            UsageRangePreset::SevenDays => &self.session_usage_7d,
+            UsageRangePreset::ThirtyDays => &self.session_usage_30d,
+            UsageRangePreset::Custom(_) => &EMPTY_SESSION_USAGE_ROWS,
+        }
+    }
+
+    pub fn session_usage_total_for(&self, range: UsageRangePreset) -> u64 {
+        match range {
+            UsageRangePreset::Today => self.session_usage_total_today,
+            UsageRangePreset::SevenDays => self.session_usage_total_7d,
+            UsageRangePreset::ThirtyDays => self.session_usage_total_30d,
+            UsageRangePreset::Custom(_) => 0,
+        }
+    }
+
     pub fn recent_logs_for(&self, range: UsageRangePreset) -> &[UsageLogRow] {
         match range {
             UsageRangePreset::Custom(custom_range) if self.custom_range == Some(custom_range) => {
@@ -965,7 +997,8 @@ impl UsageSnapshot {
                     || bucket.error_count > 0
             })
             || !self.top_providers_for(range).is_empty()
-            || !self.top_models_for(range).is_empty();
+            || !self.top_models_for(range).is_empty()
+            || !self.session_usage_for(range).is_empty();
         if has_stats {
             return true;
         }
@@ -1158,6 +1191,20 @@ pub(crate) fn load_usage_pricing_data_from_state_for_range(
         usage: load_usage_snapshot_for_range(state, app_type, range)?,
         pricing,
     })
+}
+
+fn materialize_usage_projection_for_app<'conn>(
+    conn: &'conn rusqlite::Connection,
+    app_type: &AppType,
+) -> Result<Option<crate::services::usage_stats::MaterializedUsageLogProjection<'conn>>, AppError> {
+    crate::services::session_usage_query::supports_session_usage(app_type)
+        .then(|| {
+            crate::services::usage_stats::materialize_usage_log_projection_for_app(
+                conn,
+                app_type.as_str(),
+            )
+        })
+        .transpose()
 }
 
 pub(crate) fn load_usage_log_page_from_state(
@@ -1872,20 +1919,31 @@ fn load_usage_fixed_snapshot(
     app_type: &AppType,
 ) -> Result<UsageSnapshot, AppError> {
     let app_key = app_type.as_str();
-    let now = Local::now().timestamp();
-    let today_start = usage_range_start(UsageRangePreset::Today);
-    let seven_start = usage_range_start(UsageRangePreset::SevenDays);
-    let thirty_start = usage_range_start(UsageRangePreset::ThirtyDays);
+    let now = Local::now();
+    let today = now.date_naive();
+    let now = now.timestamp();
+    let today_start = usage_range_start_on(UsageRangePreset::Today, today);
+    let seven_start = usage_range_start_on(UsageRangePreset::SevenDays, today);
+    let thirty_start = usage_range_start_on(UsageRangePreset::ThirtyDays, today);
 
     let conn = lock_conn!(state.db.conn);
+    let _usage_projection = materialize_usage_projection_for_app(&conn, app_type)?;
     let summary_today = load_usage_summary(&conn, app_key, today_start, now)?;
     let summary_7d = load_usage_summary(&conn, app_key, seven_start, now)?;
     let summary_30d = load_usage_summary(&conn, app_key, thirty_start, now)?;
-    let trends_today = load_usage_trend(&conn, app_key, UsageRangePreset::Today, today_start, now)?;
+    let trends_today = load_usage_trend(
+        &conn,
+        app_key,
+        UsageRangePreset::Today,
+        today,
+        today_start,
+        now,
+    )?;
     let trends_7d = load_usage_trend(
         &conn,
         app_key,
         UsageRangePreset::SevenDays,
+        today,
         seven_start,
         now,
     )?;
@@ -1893,6 +1951,7 @@ fn load_usage_fixed_snapshot(
         &conn,
         app_key,
         UsageRangePreset::ThirtyDays,
+        today,
         thirty_start,
         now,
     )?;
@@ -1902,6 +1961,26 @@ fn load_usage_fixed_snapshot(
     let top_models_today = load_usage_top_models(&conn, app_key, today_start, now)?;
     let top_models_7d = load_usage_top_models(&conn, app_key, seven_start, now)?;
     let top_models_30d = load_usage_top_models(&conn, app_key, thirty_start, now)?;
+    let (session_usage_today, session_usage_7d, session_usage_30d) =
+        if crate::services::session_usage_query::supports_session_usage(app_type) {
+            let mut results = crate::services::session_usage_query::query_session_usage_ranges(
+                &conn,
+                app_type,
+                &[(today_start, now), (seven_start, now), (thirty_start, now)],
+            )?
+            .into_iter();
+            (
+                results.next().unwrap_or_default(),
+                results.next().unwrap_or_default(),
+                results.next().unwrap_or_default(),
+            )
+        } else {
+            (
+                crate::services::session_usage_query::SessionUsageQueryResult::default(),
+                crate::services::session_usage_query::SessionUsageQueryResult::default(),
+                crate::services::session_usage_query::SessionUsageQueryResult::default(),
+            )
+        };
     let recent_logs = load_usage_recent_logs(&conn, app_key, None, 100)?;
     let logs_total = load_usage_logs_total(&conn, app_key, None)?;
 
@@ -1918,6 +1997,12 @@ fn load_usage_fixed_snapshot(
         top_models_today,
         top_models_7d,
         top_models_30d,
+        session_usage_total_today: session_usage_today.total_sessions,
+        session_usage_total_7d: session_usage_7d.total_sessions,
+        session_usage_total_30d: session_usage_30d.total_sessions,
+        session_usage_today: session_usage_today.rows,
+        session_usage_7d: session_usage_7d.rows,
+        session_usage_30d: session_usage_30d.rows,
         recent_logs,
         logs_total,
         ..UsageSnapshot::default()
@@ -1930,12 +2015,19 @@ fn load_usage_custom_snapshot(
     custom_range: UsageCustomRange,
 ) -> Result<UsageSnapshot, AppError> {
     let app_key = app_type.as_str();
+    let bucket_today = Local
+        .timestamp_opt(custom_range.start, 0)
+        .single()
+        .map(|datetime| datetime.date_naive())
+        .ok_or_else(|| AppError::InvalidInput("invalid custom usage range start".to_string()))?;
     let conn = lock_conn!(state.db.conn);
+    let _usage_projection = materialize_usage_projection_for_app(&conn, app_type)?;
     let summary_custom = load_usage_summary(&conn, app_key, custom_range.start, custom_range.end)?;
     let trends_custom = load_usage_trend(
         &conn,
         app_key,
         UsageRangePreset::Custom(custom_range),
+        bucket_today,
         custom_range.start,
         custom_range.end,
     )?;
@@ -2013,7 +2105,10 @@ fn load_model_pricing_snapshot_from_conn(
 
     let total_tokens_expr = usage_real_total_tokens_sql(Some("l"));
     let fresh_input_expr = crate::services::sql_helpers::fresh_input_sql("l");
-    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let effective_filter =
+        crate::services::usage_stats::effective_usage_log_filter_for_app_connection(
+            conn, "l", app_key,
+        )?;
     let mut recent_stmt = conn.prepare(&format!(
         "SELECT
             substr(CAST(COALESCE(NULLIF(TRIM(l.model), ''), 'unknown') AS TEXT), 1, {text_limit}) AS response_model,
@@ -2207,33 +2302,56 @@ fn unmatched_pricing_model_key(response_model: &str, request_model: Option<&str>
 }
 
 fn usage_range_start(range: UsageRangePreset) -> i64 {
-    let today = Local::now().date_naive();
+    usage_range_start_on(range, Local::now().date_naive())
+}
+
+fn usage_range_start_on(range: UsageRangePreset, today: NaiveDate) -> i64 {
     let start_date = today
         .checked_sub_days(Days::new(range.days().saturating_sub(1)))
         .unwrap_or(today);
-    local_midnight_timestamp(start_date)
+    crate::services::session_usage_query::local_day_start_timestamp(start_date)
+        .or_else(|| crate::services::session_usage_query::local_day_start_timestamp(today))
+        .unwrap_or_else(|| Local::now().timestamp())
 }
 
-fn local_midnight_timestamp(date: NaiveDate) -> i64 {
-    let Some(naive) = date.and_hms_opt(0, 0, 0) else {
-        return 0;
-    };
-    Local
-        .from_local_datetime(&naive)
-        .earliest()
-        .map(|datetime| datetime.timestamp())
-        .unwrap_or(0)
-}
+/// Daily rollups can be included only when the timestamp range covers the
+/// complete local day represented by each row.
+fn usage_rollup_date_bounds(
+    start: i64,
+    end: i64,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    let start = Local
+        .timestamp_opt(start, 0)
+        .single()
+        .ok_or_else(|| AppError::Database("invalid local usage range start".to_string()))?;
+    let end = Local
+        .timestamp_opt(end, 0)
+        .single()
+        .ok_or_else(|| AppError::Database("invalid local usage range end".to_string()))?;
 
-fn local_end_of_day_timestamp(date: NaiveDate) -> i64 {
-    let Some(naive) = date.and_hms_opt(23, 59, 59) else {
-        return 0;
+    let start_day =
+        if crate::services::session_usage_query::local_day_start_timestamp(start.date_naive())
+            == Some(start.timestamp())
+        {
+            Some(start.date_naive())
+        } else {
+            start.date_naive().succ_opt()
+        };
+    let end_day = if crate::services::session_usage_query::local_day_end_timestamp(end.date_naive())
+        == Some(end.timestamp())
+    {
+        Some(end.date_naive())
+    } else {
+        end.date_naive().pred_opt()
     };
-    Local
-        .from_local_datetime(&naive)
-        .latest()
-        .map(|datetime| datetime.timestamp())
-        .unwrap_or(0)
+
+    match (start_day, end_day) {
+        (Some(start_day), Some(end_day)) if start_day <= end_day => Ok((
+            Some(start_day.format("%Y-%m-%d").to_string()),
+            Some(end_day.format("%Y-%m-%d").to_string()),
+        )),
+        _ => Ok((None, None)),
+    }
 }
 
 fn load_usage_summary(
@@ -2242,37 +2360,78 @@ fn load_usage_summary(
     start: i64,
     end: i64,
 ) -> Result<UsageSummarySnapshot, AppError> {
-    let total_tokens_expr = usage_real_total_tokens_sql(Some("l"));
-    let fresh_input_expr = crate::services::sql_helpers::fresh_input_sql("l");
-    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let detail_total_tokens = usage_real_total_tokens_sql(Some("l"));
+    let rollup_total_tokens = usage_real_total_tokens_sql(Some("r"));
+    let detail_fresh_input = crate::services::sql_helpers::fresh_input_sql("l");
+    let rollup_fresh_input = crate::services::sql_helpers::fresh_input_sql("r");
+    let effective_filter =
+        crate::services::usage_stats::effective_usage_log_filter_for_app_connection(
+            conn, "l", app_key,
+        )?;
+    let (rollup_start, rollup_end) = usage_rollup_date_bounds(start, end)?;
     let sql = format!(
         "SELECT
-            COUNT(*),
-            COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM({total_tokens_expr}), 0),
-            COALESCE(SUM({fresh_input_expr}), 0),
-            COALESCE(SUM(l.output_tokens), 0),
-            COALESCE(SUM(l.cache_read_tokens), 0),
-            COALESCE(SUM(l.cache_creation_tokens), 0),
-            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
-            AVG(CASE WHEN l.latency_ms > 0 THEN l.latency_ms END)
-         FROM proxy_request_logs l
-         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
-           AND {effective_filter}"
+            COALESCE(SUM(request_count), 0),
+            COALESCE(SUM(success_count), 0),
+            COALESCE(SUM(total_tokens), 0),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cache_creation_tokens), 0),
+            COALESCE(SUM(total_cost), 0.0),
+            CASE WHEN SUM(latency_count) > 0
+                THEN CAST(SUM(latency_sum) AS REAL) / SUM(latency_count) END
+         FROM (
+            SELECT
+                COUNT(*) AS request_count,
+                COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) AS success_count,
+                COALESCE(SUM({detail_total_tokens}), 0) AS total_tokens,
+                COALESCE(SUM({detail_fresh_input}), 0) AS input_tokens,
+                COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(l.cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(l.cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) AS total_cost,
+                COALESCE(SUM(CASE WHEN l.latency_ms > 0 THEN l.latency_ms ELSE 0 END), 0) AS latency_sum,
+                COALESCE(SUM(CASE WHEN l.latency_ms > 0 THEN 1 ELSE 0 END), 0) AS latency_count
+            FROM proxy_request_logs l
+            WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+              AND {effective_filter}
+            UNION ALL
+            SELECT
+                COALESCE(SUM(r.request_count), 0),
+                COALESCE(SUM(r.success_count), 0),
+                COALESCE(SUM({rollup_total_tokens}), 0),
+                COALESCE(SUM({rollup_fresh_input}), 0),
+                COALESCE(SUM(r.output_tokens), 0),
+                COALESCE(SUM(r.cache_read_tokens), 0),
+                COALESCE(SUM(r.cache_creation_tokens), 0),
+                COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0.0),
+                COALESCE(SUM(CASE WHEN r.avg_latency_ms > 0
+                    THEN CAST(r.avg_latency_ms AS REAL) * r.request_count ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN r.avg_latency_ms > 0
+                    THEN r.request_count ELSE 0 END), 0)
+            FROM usage_daily_rollups r
+            WHERE r.app_type = ?1
+              AND ?4 IS NOT NULL AND r.date >= ?4 AND r.date <= ?5
+         )"
     );
-    conn.query_row(&sql, params![app_key, start, end], |row| {
-        Ok(UsageSummarySnapshot {
-            total_requests: non_negative_u64(row.get::<_, i64>(0)?),
-            success_count: non_negative_u64(row.get::<_, i64>(1)?),
-            total_tokens: non_negative_u64(row.get::<_, i64>(2)?),
-            input_tokens: non_negative_u64(row.get::<_, i64>(3)?),
-            output_tokens: non_negative_u64(row.get::<_, i64>(4)?),
-            cache_read_tokens: non_negative_u64(row.get::<_, i64>(5)?),
-            cache_creation_tokens: non_negative_u64(row.get::<_, i64>(6)?),
-            total_cost_usd: row.get::<_, f64>(7)?,
-            avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(8)?),
-        })
-    })
+    conn.query_row(
+        &sql,
+        params![app_key, start, end, rollup_start, rollup_end],
+        |row| {
+            Ok(UsageSummarySnapshot {
+                total_requests: non_negative_u64(row.get::<_, i64>(0)?),
+                success_count: non_negative_u64(row.get::<_, i64>(1)?),
+                total_tokens: non_negative_u64(row.get::<_, i64>(2)?),
+                input_tokens: non_negative_u64(row.get::<_, i64>(3)?),
+                output_tokens: non_negative_u64(row.get::<_, i64>(4)?),
+                cache_read_tokens: non_negative_u64(row.get::<_, i64>(5)?),
+                cache_creation_tokens: non_negative_u64(row.get::<_, i64>(6)?),
+                total_cost_usd: row.get::<_, f64>(7)?,
+                avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(8)?),
+            })
+        },
+    )
     .map_err(AppError::from)
 }
 
@@ -2280,17 +2439,39 @@ fn load_usage_trend(
     conn: &rusqlite::Connection,
     app_key: &str,
     range: UsageRangePreset,
+    bucket_today: NaiveDate,
     start: i64,
     end: i64,
 ) -> Result<Vec<UsageTrendBucket>, AppError> {
-    let mut buckets = empty_usage_trend(range);
+    let (rollup_start, rollup_end) = usage_rollup_date_bounds(start, end)?;
+    let has_rollups = if let (Some(rollup_start), Some(rollup_end)) =
+        (rollup_start.as_deref(), rollup_end.as_deref())
+    {
+        conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM usage_daily_rollups
+                WHERE app_type = ?1 AND date >= ?2 AND date <= ?3
+             )",
+            params![app_key, rollup_start, rollup_end],
+            |row| row.get::<_, bool>(0),
+        )?
+    } else {
+        false
+    };
+    let hourly = range.uses_hourly_trend(start, end)
+        && !(matches!(range, UsageRangePreset::Custom(_)) && has_rollups);
+    let mut buckets = match range {
+        UsageRangePreset::Custom(custom_range) if !hourly => {
+            empty_usage_custom_daily_trend(custom_range)
+        }
+        _ => empty_usage_trend(range, bucket_today),
+    };
     let positions = buckets
         .iter()
         .enumerate()
         .map(|(idx, bucket)| (bucket.key.clone(), idx))
         .collect::<HashMap<_, _>>();
 
-    let hourly = range.uses_hourly_trend(start, end);
     let bucket_expr = match range {
         UsageRangePreset::Today => "strftime('%H', l.created_at, 'unixepoch', 'localtime')",
         UsageRangePreset::Custom(_) if hourly => {
@@ -2301,31 +2482,59 @@ fn load_usage_trend(
         }
         UsageRangePreset::Custom(_) => "date(l.created_at, 'unixepoch', 'localtime')",
     };
-    let total_tokens_expr = usage_stats_total_tokens_sql(Some("l"));
-    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let detail_total_tokens = usage_stats_total_tokens_sql(Some("l"));
+    let rollup_total_tokens = usage_stats_total_tokens_sql(Some("r"));
+    let effective_filter =
+        crate::services::usage_stats::effective_usage_log_filter_for_app_connection(
+            conn, "l", app_key,
+        )?;
     let sql = format!(
         "SELECT
-            {bucket_expr} AS bucket,
-            COUNT(*),
-            COALESCE(SUM({total_tokens_expr}), 0),
-            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
-            COALESCE(SUM(CASE WHEN l.status_code < 200 OR l.status_code >= 300 THEN 1 ELSE 0 END), 0)
-         FROM proxy_request_logs l
-         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
-           AND {effective_filter}
+            bucket,
+            COALESCE(SUM(request_count), 0),
+            COALESCE(SUM(total_tokens), 0),
+            COALESCE(SUM(total_cost), 0.0),
+            COALESCE(SUM(error_count), 0)
+         FROM (
+            SELECT
+                {bucket_expr} AS bucket,
+                COUNT(*) AS request_count,
+                COALESCE(SUM({detail_total_tokens}), 0) AS total_tokens,
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) AS total_cost,
+                COALESCE(SUM(CASE WHEN l.status_code < 200 OR l.status_code >= 300 THEN 1 ELSE 0 END), 0) AS error_count
+            FROM proxy_request_logs l
+            WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+              AND {effective_filter}
+            GROUP BY bucket
+            UNION ALL
+            SELECT
+                r.date,
+                COALESCE(SUM(r.request_count), 0),
+                COALESCE(SUM({rollup_total_tokens}), 0),
+                COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0.0),
+                COALESCE(SUM(CASE WHEN r.request_count > r.success_count
+                    THEN r.request_count - r.success_count ELSE 0 END), 0)
+            FROM usage_daily_rollups r
+            WHERE r.app_type = ?1
+              AND ?4 IS NOT NULL AND r.date >= ?4 AND r.date <= ?5
+            GROUP BY r.date
+         )
          GROUP BY bucket
          ORDER BY bucket"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![app_key, start, end], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, f64>(3)?,
-            row.get::<_, i64>(4)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        params![app_key, start, end, rollup_start, rollup_end],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        },
+    )?;
 
     for row in rows {
         let (key, request_count, total_tokens, total_cost_usd, error_count) = row?;
@@ -2341,7 +2550,7 @@ fn load_usage_trend(
     Ok(buckets)
 }
 
-fn empty_usage_trend(range: UsageRangePreset) -> Vec<UsageTrendBucket> {
+fn empty_usage_trend(range: UsageRangePreset, today: NaiveDate) -> Vec<UsageTrendBucket> {
     match range {
         UsageRangePreset::Today => (0..24)
             .map(|hour| UsageTrendBucket {
@@ -2351,7 +2560,6 @@ fn empty_usage_trend(range: UsageRangePreset) -> Vec<UsageTrendBucket> {
             })
             .collect(),
         UsageRangePreset::SevenDays | UsageRangePreset::ThirtyDays => {
-            let today = Local::now().date_naive();
             let start = today
                 .checked_sub_days(Days::new(range.days().saturating_sub(1)))
                 .unwrap_or(today);
@@ -2399,6 +2607,13 @@ fn empty_usage_custom_trend(range: UsageCustomRange) -> Vec<UsageTrendBucket> {
         return buckets;
     }
 
+    empty_usage_custom_daily_trend(range)
+}
+
+fn empty_usage_custom_daily_trend(range: UsageCustomRange) -> Vec<UsageTrendBucket> {
+    let Some(start_datetime) = Local.timestamp_opt(range.start, 0).single() else {
+        return Vec::new();
+    };
     let start = start_datetime.date_naive();
     let days = range.days();
     (0..days)
@@ -2419,45 +2634,85 @@ fn load_usage_top_providers(
     start: i64,
     end: i64,
 ) -> Result<Vec<UsageProviderStatsRow>, AppError> {
-    let total_tokens_expr = usage_stats_total_tokens_sql(Some("l"));
-    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
-    let provider_name_expr = usage_provider_name_sql("l", "p");
+    let detail_total_tokens = usage_stats_total_tokens_sql(Some("l"));
+    let rollup_total_tokens = usage_stats_total_tokens_sql(Some("r"));
+    let effective_filter =
+        crate::services::usage_stats::effective_usage_log_filter_for_app_connection(
+            conn, "l", app_key,
+        )?;
+    let detail_provider_name = usage_provider_name_sql("l", "p");
+    let rollup_provider_name = usage_provider_name_sql("r", "p2");
+    let (rollup_start, rollup_end) = usage_rollup_date_bounds(start, end)?;
     let mut stmt = conn.prepare(&format!(
         "SELECT
-            CASE WHEN substr(CAST(l.provider_id AS TEXT), {text_probe}, 1) <> ''
-                THEN substr(CAST(l.provider_id AS TEXT), 1, {marked_limit}) || '…'
-                ELSE substr(CAST(l.provider_id AS TEXT), 1, {text_limit}) END,
-            CASE WHEN substr(CAST({provider_name_expr} AS TEXT), {text_probe}, 1) <> ''
-                THEN substr(CAST({provider_name_expr} AS TEXT), 1, {marked_limit}) || '…'
-                ELSE substr(CAST({provider_name_expr} AS TEXT), 1, {text_limit}) END,
-            COUNT(*),
-            COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM({total_tokens_expr}), 0),
-            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
-            AVG(CASE WHEN l.latency_ms > 0 THEN l.latency_ms END)
-         FROM proxy_request_logs l
-         LEFT JOIN providers p ON p.id = l.provider_id AND p.app_type = l.app_type
-         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
-           AND {effective_filter}
-         GROUP BY l.provider_id, p.name
-         ORDER BY COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) DESC, COUNT(*) DESC
+            CASE WHEN substr(u.provider_id, {text_probe}, 1) <> ''
+                THEN substr(u.provider_id, 1, {marked_limit}) || '…'
+                ELSE substr(u.provider_id, 1, {text_limit}) END,
+            CASE WHEN substr(u.provider_name, {text_probe}, 1) <> ''
+                THEN substr(u.provider_name, 1, {marked_limit}) || '…'
+                ELSE substr(u.provider_name, 1, {text_limit}) END,
+            COALESCE(SUM(u.request_count), 0),
+            COALESCE(SUM(u.success_count), 0),
+            COALESCE(SUM(u.total_tokens), 0),
+            COALESCE(SUM(u.total_cost), 0.0),
+            CASE WHEN SUM(u.latency_count) > 0
+                THEN CAST(SUM(u.latency_sum) AS REAL) / SUM(u.latency_count) END
+         FROM (
+            SELECT
+                CAST(l.provider_id AS TEXT) AS provider_id,
+                CAST({detail_provider_name} AS TEXT) AS provider_name,
+                COUNT(*) AS request_count,
+                COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) AS success_count,
+                COALESCE(SUM({detail_total_tokens}), 0) AS total_tokens,
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) AS total_cost,
+                COALESCE(SUM(CASE WHEN l.latency_ms > 0 THEN l.latency_ms ELSE 0 END), 0) AS latency_sum,
+                COALESCE(SUM(CASE WHEN l.latency_ms > 0 THEN 1 ELSE 0 END), 0) AS latency_count
+            FROM proxy_request_logs l
+            LEFT JOIN providers p ON p.id = l.provider_id AND p.app_type = l.app_type
+            WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+              AND {effective_filter}
+            GROUP BY l.provider_id, p.name
+            UNION ALL
+            SELECT
+                CAST(r.provider_id AS TEXT),
+                CAST({rollup_provider_name} AS TEXT),
+                COALESCE(SUM(r.request_count), 0),
+                COALESCE(SUM(r.success_count), 0),
+                COALESCE(SUM({rollup_total_tokens}), 0),
+                COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0.0),
+                COALESCE(SUM(CASE WHEN r.avg_latency_ms > 0
+                    THEN CAST(r.avg_latency_ms AS REAL) * r.request_count ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN r.avg_latency_ms > 0
+                    THEN r.request_count ELSE 0 END), 0)
+            FROM usage_daily_rollups r
+            LEFT JOIN providers p2 ON p2.id = r.provider_id AND p2.app_type = r.app_type
+            WHERE r.app_type = ?1
+              AND ?4 IS NOT NULL AND r.date >= ?4 AND r.date <= ?5
+            GROUP BY r.provider_id, p2.name
+         ) u
+         GROUP BY u.provider_id, u.provider_name
+         ORDER BY COALESCE(SUM(u.total_cost), 0.0) DESC,
+                  COALESCE(SUM(u.request_count), 0) DESC
         LIMIT 8",
         text_limit = USAGE_TEXT_MAX_CHARS,
         text_probe = USAGE_TEXT_MAX_CHARS.saturating_add(1),
         marked_limit = USAGE_TEXT_MAX_CHARS.saturating_sub(1),
     ))?;
 
-    let rows = stmt.query_map(params![app_key, start, end], |row| {
-        Ok(UsageProviderStatsRow {
-            provider_id: row.get(0)?,
-            provider_name: normalize_optional_string(row.get::<_, Option<String>>(1)?),
-            request_count: non_negative_u64(row.get::<_, i64>(2)?),
-            success_count: non_negative_u64(row.get::<_, i64>(3)?),
-            total_tokens: non_negative_u64(row.get::<_, i64>(4)?),
-            total_cost_usd: row.get::<_, f64>(5)?.max(0.0),
-            avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(6)?),
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![app_key, start, end, rollup_start, rollup_end],
+        |row| {
+            Ok(UsageProviderStatsRow {
+                provider_id: row.get(0)?,
+                provider_name: normalize_optional_string(row.get::<_, Option<String>>(1)?),
+                request_count: non_negative_u64(row.get::<_, i64>(2)?),
+                success_count: non_negative_u64(row.get::<_, i64>(3)?),
+                total_tokens: non_negative_u64(row.get::<_, i64>(4)?),
+                total_cost_usd: row.get::<_, f64>(5)?.max(0.0),
+                avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(6)?),
+            })
+        },
+    )?;
 
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
@@ -2468,41 +2723,77 @@ fn load_usage_top_models(
     start: i64,
     end: i64,
 ) -> Result<Vec<UsageModelStatsRow>, AppError> {
-    let total_tokens_expr = usage_stats_total_tokens_sql(Some("l"));
-    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let detail_total_tokens = usage_stats_total_tokens_sql(Some("l"));
+    let rollup_total_tokens = usage_stats_total_tokens_sql(Some("r"));
+    let effective_filter =
+        crate::services::usage_stats::effective_usage_log_filter_for_app_connection(
+            conn, "l", app_key,
+        )?;
+    let (rollup_start, rollup_end) = usage_rollup_date_bounds(start, end)?;
     let mut stmt = conn.prepare(&format!(
         "SELECT
             CASE
-                WHEN substr(CAST(COALESCE(NULLIF(TRIM(l.model), ''), 'unknown') AS TEXT), {text_probe}, 1) <> ''
-                THEN substr(CAST(COALESCE(NULLIF(TRIM(l.model), ''), 'unknown') AS TEXT), 1, {marked_limit}) || '…'
-                ELSE substr(CAST(COALESCE(NULLIF(TRIM(l.model), ''), 'unknown') AS TEXT), 1, {text_limit})
+                WHEN substr(u.model, {text_probe}, 1) <> ''
+                THEN substr(u.model, 1, {marked_limit}) || '…'
+                ELSE substr(u.model, 1, {text_limit})
             END AS model_name,
-            COUNT(*),
-            COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM({total_tokens_expr}), 0),
-            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
-            AVG(CASE WHEN l.latency_ms > 0 THEN l.latency_ms END)
-         FROM proxy_request_logs l
-         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
-           AND {effective_filter}
-         GROUP BY COALESCE(NULLIF(TRIM(l.model), ''), 'unknown')
-         ORDER BY COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) DESC, COUNT(*) DESC
+            COALESCE(SUM(u.request_count), 0),
+            COALESCE(SUM(u.success_count), 0),
+            COALESCE(SUM(u.total_tokens), 0),
+            COALESCE(SUM(u.total_cost), 0.0),
+            CASE WHEN SUM(u.latency_count) > 0
+                THEN CAST(SUM(u.latency_sum) AS REAL) / SUM(u.latency_count) END
+         FROM (
+            SELECT
+                CAST(COALESCE(NULLIF(TRIM(l.model), ''), 'unknown') AS TEXT) AS model,
+                COUNT(*) AS request_count,
+                COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) AS success_count,
+                COALESCE(SUM({detail_total_tokens}), 0) AS total_tokens,
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) AS total_cost,
+                COALESCE(SUM(CASE WHEN l.latency_ms > 0 THEN l.latency_ms ELSE 0 END), 0) AS latency_sum,
+                COALESCE(SUM(CASE WHEN l.latency_ms > 0 THEN 1 ELSE 0 END), 0) AS latency_count
+            FROM proxy_request_logs l
+            WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+              AND {effective_filter}
+            GROUP BY COALESCE(NULLIF(TRIM(l.model), ''), 'unknown')
+            UNION ALL
+            SELECT
+                CAST(COALESCE(NULLIF(TRIM(r.model), ''), 'unknown') AS TEXT),
+                COALESCE(SUM(r.request_count), 0),
+                COALESCE(SUM(r.success_count), 0),
+                COALESCE(SUM({rollup_total_tokens}), 0),
+                COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0.0),
+                COALESCE(SUM(CASE WHEN r.avg_latency_ms > 0
+                    THEN CAST(r.avg_latency_ms AS REAL) * r.request_count ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN r.avg_latency_ms > 0
+                    THEN r.request_count ELSE 0 END), 0)
+            FROM usage_daily_rollups r
+            WHERE r.app_type = ?1
+              AND ?4 IS NOT NULL AND r.date >= ?4 AND r.date <= ?5
+            GROUP BY COALESCE(NULLIF(TRIM(r.model), ''), 'unknown')
+         ) u
+         GROUP BY u.model
+         ORDER BY COALESCE(SUM(u.total_cost), 0.0) DESC,
+                  COALESCE(SUM(u.request_count), 0) DESC
         LIMIT 8",
         text_limit = USAGE_TEXT_MAX_CHARS,
         text_probe = USAGE_TEXT_MAX_CHARS.saturating_add(1),
         marked_limit = USAGE_TEXT_MAX_CHARS.saturating_sub(1),
     ))?;
 
-    let rows = stmt.query_map(params![app_key, start, end], |row| {
-        Ok(UsageModelStatsRow {
-            model: row.get(0)?,
-            request_count: non_negative_u64(row.get::<_, i64>(1)?),
-            success_count: non_negative_u64(row.get::<_, i64>(2)?),
-            total_tokens: non_negative_u64(row.get::<_, i64>(3)?),
-            total_cost_usd: row.get::<_, f64>(4)?.max(0.0),
-            avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(5)?),
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![app_key, start, end, rollup_start, rollup_end],
+        |row| {
+            Ok(UsageModelStatsRow {
+                model: row.get(0)?,
+                request_count: non_negative_u64(row.get::<_, i64>(1)?),
+                success_count: non_negative_u64(row.get::<_, i64>(2)?),
+                total_tokens: non_negative_u64(row.get::<_, i64>(3)?),
+                total_cost_usd: row.get::<_, f64>(4)?.max(0.0),
+                avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(5)?),
+            })
+        },
+    )?;
 
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
@@ -2537,37 +2828,40 @@ fn load_usage_log_page(
     let mut rows = Vec::with_capacity(query_limit);
     match cursor {
         Some(cursor) => {
-            let same_timestamp = build_usage_log_page_query(
+            let same_timestamp = build_usage_log_page_query_with_filter(
                 app_key,
                 range,
                 Some(cursor),
                 direction,
                 UsageLogSeekPart::SameTimestamp,
                 query_limit,
+                RAW_USAGE_LOG_FILTER,
             );
             append_usage_log_query_rows(conn, same_timestamp, &mut rows)?;
 
             let remaining = query_limit.saturating_sub(rows.len());
             if remaining > 0 {
-                let cross_timestamp = build_usage_log_page_query(
+                let cross_timestamp = build_usage_log_page_query_with_filter(
                     app_key,
                     range,
                     Some(cursor),
                     direction,
                     UsageLogSeekPart::CrossTimestamp,
                     remaining,
+                    RAW_USAGE_LOG_FILTER,
                 );
                 append_usage_log_query_rows(conn, cross_timestamp, &mut rows)?;
             }
         }
         None => {
-            let head = build_usage_log_page_query(
+            let head = build_usage_log_page_query_with_filter(
                 app_key,
                 range,
                 None,
                 direction,
                 UsageLogSeekPart::Head,
                 query_limit,
+                RAW_USAGE_LOG_FILTER,
             );
             append_usage_log_query_rows(conn, head, &mut rows)?;
         }
@@ -2613,6 +2907,7 @@ fn append_usage_log_query_rows(
     Ok(())
 }
 
+#[cfg(test)]
 fn build_usage_log_page_query(
     app_key: &str,
     range: Option<(i64, i64)>,
@@ -2621,7 +2916,27 @@ fn build_usage_log_page_query(
     part: UsageLogSeekPart,
     limit: usize,
 ) -> UsageLogSqlQuery {
-    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    build_usage_log_page_query_with_filter(
+        app_key,
+        range,
+        cursor,
+        direction,
+        part,
+        limit,
+        RAW_USAGE_LOG_FILTER,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_usage_log_page_query_with_filter(
+    app_key: &str,
+    range: Option<(i64, i64)>,
+    cursor: Option<&UsageLogCursor>,
+    direction: UsageLogPageDirection,
+    part: UsageLogSeekPart,
+    limit: usize,
+    effective_filter: &str,
+) -> UsageLogSqlQuery {
     let provider_name_expr = usage_provider_name_sql("l", "p");
     let mut filters = vec!["l.app_type = ?".to_string()];
     let mut values = vec![rusqlite::types::Value::Text(app_key.to_string())];
@@ -2652,7 +2967,7 @@ fn build_usage_log_page_query(
         }
         _ => unreachable!("usage log seek part must match cursor presence"),
     }
-    filters.push(effective_filter);
+    filters.push(effective_filter.to_string());
     let query_limit = limit.min(USAGE_LOG_PAGE_SIZE.saturating_add(1)) as i64;
     values.push(rusqlite::types::Value::Integer(query_limit));
 
@@ -2718,7 +3033,6 @@ fn load_usage_log_detail(
     range: Option<(i64, i64)>,
     rowid: i64,
 ) -> Result<Option<UsageLogRow>, AppError> {
-    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
     let provider_name_expr = usage_provider_name_sql("l", "p");
     let mut filters = vec!["l.rowid = ?".to_string(), "l.app_type = ?".to_string()];
     let mut values = vec![
@@ -2730,7 +3044,7 @@ fn load_usage_log_detail(
         values.push(rusqlite::types::Value::Integer(start));
         values.push(rusqlite::types::Value::Integer(end));
     }
-    filters.push(effective_filter);
+    filters.push(RAW_USAGE_LOG_FILTER.to_string());
 
     let sql = format!(
         "SELECT
@@ -2802,7 +3116,9 @@ fn usage_log_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLogR
         first_token_ms: row.get::<_, Option<i64>>(15)?.map(non_negative_u64),
         duration_ms: row.get::<_, Option<i64>>(16)?.map(non_negative_u64),
         session_id: normalize_optional_string(row.get::<_, Option<String>>(17)?),
-        provider_type: normalize_optional_string(row.get::<_, Option<String>>(18)?),
+        provider_type: normalize_optional_string(row.get::<_, Option<String>>(18)?).filter(
+            |value| !crate::services::session_identity::is_internal_session_provider_type(value),
+        ),
         is_streaming: row.get::<_, i64>(19)? != 0,
         error_message: normalize_optional_string(row.get::<_, Option<String>>(20)?),
         data_source: normalize_optional_string(row.get::<_, Option<String>>(21)?),
@@ -2842,27 +3158,20 @@ fn load_usage_logs_total(
     app_key: &str,
     range: Option<(i64, i64)>,
 ) -> Result<u64, AppError> {
-    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
     let count = match range {
         Some((start, end)) => conn.query_row(
-            &format!(
-                "SELECT COUNT(*)
-                 FROM proxy_request_logs l
-                 WHERE l.app_type = ?1
-                   AND l.created_at >= ?2
-                   AND l.created_at <= ?3
-                   AND {effective_filter}"
-            ),
+            "SELECT COUNT(*)
+             FROM proxy_request_logs l
+             WHERE l.app_type = ?1
+               AND l.created_at >= ?2
+               AND l.created_at <= ?3",
             params![app_key, start, end],
             |row| row.get::<_, i64>(0),
         )?,
         None => conn.query_row(
-            &format!(
-                "SELECT COUNT(*)
-                 FROM proxy_request_logs l
-                 WHERE l.app_type = ?1
-                   AND {effective_filter}"
-            ),
+            "SELECT COUNT(*)
+             FROM proxy_request_logs l
+             WHERE l.app_type = ?1",
             params![app_key],
             |row| row.get::<_, i64>(0),
         )?,
@@ -3454,7 +3763,14 @@ mod tests {
             (summary.cache_hit_rate().expect("cache hit rate") - expected_hit_rate).abs() < 1e-9
         );
 
-        let trends = load_usage_trend(&conn, "codex", UsageRangePreset::Today, start, now)?;
+        let trends = load_usage_trend(
+            &conn,
+            "codex",
+            UsageRangePreset::Today,
+            Local::now().date_naive(),
+            start,
+            now,
+        )?;
         let active_bucket = trends
             .iter()
             .find(|bucket| bucket.request_count == 1)
@@ -3483,6 +3799,104 @@ mod tests {
         );
         assert_eq!(recent_logs[0].total_tokens(), 1_250);
 
+        Ok(())
+    }
+
+    #[test]
+    fn custom_usage_panels_include_rollup_only_history() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+        let range = parse_usage_custom_range("2024-01-01..2024-01-03").expect("valid custom range");
+        conn.execute(
+            "INSERT INTO usage_daily_rollups (
+                date, app_type, provider_id, model,
+                request_count, success_count, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, input_token_semantics,
+                total_cost_usd, avg_latency_ms
+             ) VALUES (
+                '2024-01-02', 'codex', 'archived-provider', 'gpt-5.4',
+                3, 2, 100, 20, 30, 10, 2, '0.75', 50
+             )",
+            [],
+        )?;
+
+        let summary = load_usage_summary(&conn, "codex", range.start, range.end)?;
+        assert_eq!(summary.total_requests, 3);
+        assert_eq!(summary.success_count, 2);
+        assert_eq!(summary.input_tokens, 100);
+        assert_eq!(summary.total_tokens(), 160);
+        assert_eq!(summary.avg_latency_ms, Some(50));
+        assert!((summary.total_cost_usd - 0.75).abs() < f64::EPSILON);
+
+        let trend = load_usage_trend(
+            &conn,
+            "codex",
+            UsageRangePreset::Custom(range),
+            Local
+                .timestamp_opt(range.start, 0)
+                .single()
+                .expect("valid custom start")
+                .date_naive(),
+            range.start,
+            range.end,
+        )?;
+        let archived_day = trend
+            .iter()
+            .find(|bucket| bucket.key == "2024-01-02")
+            .expect("archived day bucket");
+        assert_eq!(archived_day.request_count, 3);
+        assert_eq!(archived_day.total_tokens, 120);
+        assert_eq!(archived_day.error_count, 1);
+        assert!((archived_day.total_cost_usd - 0.75).abs() < f64::EPSILON);
+
+        let providers = load_usage_top_providers(&conn, "codex", range.start, range.end)?;
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider_id, "archived-provider");
+        assert_eq!(providers[0].request_count, 3);
+        assert_eq!(providers[0].total_tokens, 120);
+        assert_eq!(providers[0].avg_latency_ms, Some(50));
+
+        let models = load_usage_top_models(&conn, "codex", range.start, range.end)?;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model, "gpt-5.4");
+        assert_eq!(models[0].request_count, 3);
+        assert_eq!(models[0].total_tokens, 120);
+        assert_eq!(models[0].avg_latency_ms, Some(50));
+
+        assert!(
+            load_usage_recent_logs(&conn, "codex", Some((range.start, range.end)), 10)?.is_empty()
+        );
+        assert_eq!(
+            load_usage_logs_total(&conn, "codex", Some((range.start, range.end)))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn usage_rollup_bounds_include_only_complete_local_days() -> Result<(), AppError> {
+        let timestamp = |day, hour, minute, second| {
+            Local
+                .with_ymd_and_hms(2024, 1, day, hour, minute, second)
+                .earliest()
+                .expect("valid local test time")
+                .timestamp()
+        };
+
+        assert_eq!(
+            usage_rollup_date_bounds(timestamp(1, 12, 0, 0), timestamp(3, 12, 0, 0))?,
+            (
+                Some("2024-01-02".to_string()),
+                Some("2024-01-02".to_string())
+            )
+        );
+        assert_eq!(
+            usage_rollup_date_bounds(timestamp(1, 0, 0, 0), timestamp(3, 23, 59, 59))?,
+            (
+                Some("2024-01-01".to_string()),
+                Some("2024-01-03".to_string())
+            )
+        );
         Ok(())
     }
 
@@ -3803,6 +4217,9 @@ mod tests {
             0,
             0,
         )?;
+        let _projection = crate::services::usage_stats::materialize_usage_log_projection(&conn)?;
+        let effective_filter =
+            crate::services::usage_stats::effective_usage_log_filter_for_connection(&conn, "l")?;
 
         for direction in [UsageLogPageDirection::Older, UsageLogPageDirection::Newer] {
             let cursor = UsageLogCursor {
@@ -3813,13 +4230,14 @@ mod tests {
                 UsageLogSeekPart::SameTimestamp,
                 UsageLogSeekPart::CrossTimestamp,
             ] {
-                let (sql, values) = build_usage_log_page_query(
+                let (sql, values) = build_usage_log_page_query_with_filter(
                     "codex",
                     None,
                     Some(&cursor),
                     direction,
                     part,
                     USAGE_LOG_PAGE_SIZE + 1,
+                    &effective_filter,
                 );
                 assert!(
                     !sql.contains("l.created_at < ? OR") && !sql.contains("l.created_at > ? OR"),
@@ -3843,13 +4261,14 @@ mod tests {
             }
         }
 
-        let (_, values) = build_usage_log_page_query(
+        let (_, values) = build_usage_log_page_query_with_filter(
             "codex",
             None,
             None,
             UsageLogPageDirection::Older,
             UsageLogSeekPart::Head,
             usize::MAX,
+            &effective_filter,
         );
         assert_eq!(
             values.last(),
@@ -3942,6 +4361,73 @@ mod tests {
             Some(USAGE_LOG_ERROR_MESSAGE_MAX_CHARS),
         );
         assert!(!exact_multibyte.error_message_truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn usage_log_paging_is_an_unfiltered_raw_audit_query() {
+        let (sql, _) = build_usage_log_page_query(
+            "codex",
+            None,
+            None,
+            UsageLogPageDirection::Older,
+            UsageLogSeekPart::Head,
+            USAGE_LOG_PAGE_SIZE,
+        );
+
+        assert!(sql.contains("1 = 1"));
+        assert!(!sql.contains("EXISTS"));
+        assert!(!sql.contains("WITH RECURSIVE"));
+        assert!(!sql.contains("cc_switch_matched_usage_request_ids"));
+    }
+
+    #[test]
+    fn raw_usage_log_audit_keeps_one_proxy_to_many_import_duplicates() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+        for (request_id, created_at) in [
+            ("proxy-request", 100),
+            ("import-request-a", 99),
+            ("import-request-b", 98),
+        ] {
+            insert_usage_log(
+                &conn, request_id, "codex", "provider", "gpt-5.4", created_at, 100, 20, 5, 0,
+            )?;
+        }
+        conn.execute(
+            "UPDATE proxy_request_logs
+             SET provider_id = '_codex_session',
+                 data_source = 'codex_session',
+                 session_id = 'codex_same-session'
+             WHERE request_id IN ('import-request-a', 'import-request-b')",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE proxy_request_logs
+             SET data_source = 'proxy',
+                 session_id = 'codex_same-session'
+             WHERE request_id = 'proxy-request'",
+            [],
+        )?;
+
+        let page =
+            load_usage_log_page(&conn, "codex", None, None, UsageLogPageDirection::Older, 10)?;
+        assert_eq!(page.rows.len(), 3);
+        assert_eq!(load_usage_logs_total(&conn, "codex", None)?, 3);
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|row| row.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["proxy-request", "import-request-a", "import-request-b"],
+        );
+        for row in &page.rows {
+            assert!(
+                load_usage_log_detail(&conn, "codex", None, row.cursor_rowid)?.is_some(),
+                "raw detail should retain {}",
+                row.request_id,
+            );
+        }
         Ok(())
     }
 
@@ -4095,6 +4581,47 @@ mod tests {
     }
 
     #[test]
+    fn internal_session_identity_marker_is_not_presented_as_provider_type() -> Result<(), AppError>
+    {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+        insert_usage_log(
+            &conn,
+            "claude-session-marker",
+            "claude",
+            "provider",
+            "claude-sonnet",
+            100,
+            10,
+            0,
+            0,
+            0,
+        )?;
+        conn.execute(
+            "UPDATE proxy_request_logs
+             SET provider_type = ?1
+             WHERE request_id = 'claude-session-marker'",
+            params![crate::services::session_identity::CLAUDE_STABLE_SESSION_PROVIDER_TYPE],
+        )?;
+
+        let page = load_usage_log_page(
+            &conn,
+            "claude",
+            None,
+            None,
+            UsageLogPageDirection::Older,
+            100,
+        )?;
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].provider_type, None);
+
+        let detail = load_usage_log_detail(&conn, "claude", None, page.rows[0].cursor_rowid)?
+            .expect("detail row");
+        assert_eq!(detail.provider_type, None);
+        Ok(())
+    }
+
+    #[test]
     fn parse_usage_custom_range_accepts_common_separators() {
         for input in [
             "2026-06-01..2026-06-05",
@@ -4107,6 +4634,48 @@ mod tests {
             let range = parse_usage_custom_range(input).expect("range should parse");
             assert_eq!(range.label(), "2026-06-01..2026-06-05");
         }
+    }
+
+    #[test]
+    fn fixed_usage_range_starts_share_one_captured_local_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 26).expect("valid date");
+        let seven_days_ago = today
+            .checked_sub_days(Days::new(6))
+            .expect("seven-day range");
+        let thirty_days_ago = today
+            .checked_sub_days(Days::new(29))
+            .expect("thirty-day range");
+
+        assert_eq!(
+            usage_range_start_on(UsageRangePreset::Today, today),
+            crate::services::session_usage_query::local_day_start_timestamp(today)
+                .expect("today has a local start")
+        );
+        assert_eq!(
+            usage_range_start_on(UsageRangePreset::SevenDays, today),
+            crate::services::session_usage_query::local_day_start_timestamp(seven_days_ago)
+                .expect("seven-day start has a local time")
+        );
+        assert_eq!(
+            usage_range_start_on(UsageRangePreset::ThirtyDays, today),
+            crate::services::session_usage_query::local_day_start_timestamp(thirty_days_ago)
+                .expect("thirty-day start has a local time")
+        );
+    }
+
+    #[test]
+    fn fixed_usage_trend_uses_the_captured_local_date() {
+        let captured_today = NaiveDate::from_ymd_opt(2026, 7, 26).expect("valid date");
+        let buckets = empty_usage_trend(UsageRangePreset::SevenDays, captured_today);
+
+        assert_eq!(
+            buckets.first().map(|bucket| bucket.key.as_str()),
+            Some("2026-07-20")
+        );
+        assert_eq!(
+            buckets.last().map(|bucket| bucket.key.as_str()),
+            Some("2026-07-26")
+        );
     }
 
     #[test]

@@ -1,5 +1,7 @@
-use chrono::{Local, TimeZone};
+use chrono::{Days, Local, TimeZone};
 use clap::Subcommand;
+use comfy_table::{ColumnConstraint, ContentArrangement, Width};
+use crossterm::terminal;
 use serde::ser::SerializeSeq;
 use serde::Serialize;
 use serde::Serializer as _;
@@ -9,9 +11,12 @@ use std::str::FromStr;
 
 use crate::app_config::AppType;
 use crate::cli::ui::{create_table, info, success, to_json, warning};
-use crate::database::Database;
+use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
+use crate::services::session_usage_query::{
+    query_session_usage, supports_session_usage, SessionUsageRow,
+};
 use crate::session_manager::{self, SessionMessage, SessionMessageBatch, SessionMeta};
 
 #[derive(Subcommand, Debug, Clone)]
@@ -104,6 +109,54 @@ pub enum SessionsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show retained local usage grouped by session
+    Usage {
+        /// Query Claude or Codex instead of --app
+        #[arg(long, value_parser = parse_session_usage_provider)]
+        provider: Option<AppType>,
+        /// Time range for retained session detail
+        #[arg(long, value_enum, default_value = "7d")]
+        range: SessionUsageRange,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionUsageRange {
+    #[value(name = "today")]
+    Today,
+    #[value(name = "7d")]
+    SevenDays,
+    #[value(name = "30d")]
+    ThirtyDays,
+}
+
+impl SessionUsageRange {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::SevenDays => "7d",
+            Self::ThirtyDays => "30d",
+        }
+    }
+
+    fn value(self) -> &'static str {
+        match self {
+            Self::Today => "today",
+            Self::SevenDays => "7d",
+            Self::ThirtyDays => "30d",
+        }
+    }
+
+    fn days(self) -> u64 {
+        match self {
+            Self::Today => 1,
+            Self::SevenDays => 7,
+            Self::ThirtyDays => 30,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -122,6 +175,66 @@ struct SessionDetail {
 struct SessionMessagesOutput<'a> {
     messages: &'a [SessionMessage],
     messages_truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionUsageOutput<'a> {
+    provider: &'a str,
+    range: &'static str,
+    retained_detail_only: bool,
+    identified_sessions_only: bool,
+    total_sessions: u64,
+    truncated: bool,
+    sessions: &'a [SessionUsageRow],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionUsageTableKind {
+    Tiny,
+    Compact,
+    Wide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionUsageTableLayout {
+    kind: SessionUsageTableKind,
+    model_max_chars: usize,
+    session_id_max_chars: usize,
+}
+
+impl SessionUsageTableLayout {
+    fn for_terminal_width(width: Option<u16>) -> Self {
+        match width {
+            Some(width) if width < 60 => Self {
+                kind: SessionUsageTableKind::Tiny,
+                model_max_chars: 0,
+                session_id_max_chars: usize::from(width).saturating_sub(17).clamp(5, 12),
+            },
+            Some(width) if width < 104 => Self {
+                kind: SessionUsageTableKind::Compact,
+                model_max_chars: usize::from(width).saturating_sub(50).clamp(8, 24),
+                session_id_max_chars: 12,
+            },
+            Some(width) => Self {
+                kind: SessionUsageTableKind::Wide,
+                model_max_chars: usize::from(width).saturating_sub(70).clamp(16, 48),
+                session_id_max_chars: 12,
+            },
+            None => Self {
+                kind: SessionUsageTableKind::Wide,
+                model_max_chars: 32,
+                session_id_max_chars: 12,
+            },
+        }
+    }
+}
+
+fn session_usage_sync_hint(app_type: &AppType) -> String {
+    format!(
+        "Run `cc-switch sessions sync-usage --provider {}` to import local usage, then retry.",
+        app_type.as_str()
+    )
 }
 
 pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppError> {
@@ -161,7 +274,194 @@ pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppErro
             all,
             json,
         } => sync_usage(app, provider, all, json),
+        SessionsCommand::Usage {
+            provider,
+            range,
+            json,
+        } => show_session_usage(app, provider, range, json),
     }
+}
+
+fn show_session_usage(
+    app: Option<AppType>,
+    provider: Option<AppType>,
+    range: SessionUsageRange,
+    json: bool,
+) -> Result<(), AppError> {
+    let app_type = provider.or(app).unwrap_or(AppType::Claude);
+    if !supports_session_usage(&app_type) {
+        return Err(AppError::InvalidInput(format!(
+            "session usage is only available for claude and codex; got {}",
+            app_type.as_str()
+        )));
+    }
+
+    let db = Database::init()?;
+    let now = Local::now();
+    let start_date = now
+        .date_naive()
+        .checked_sub_days(Days::new(range.days().saturating_sub(1)))
+        .unwrap_or_else(|| now.date_naive());
+    let start = crate::services::session_usage_query::local_day_start_timestamp(start_date)
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "{} has no valid local time",
+                start_date.format("%Y-%m-%d")
+            ))
+        })?;
+
+    let result = {
+        let conn = lock_conn!(db.conn);
+        query_session_usage(&conn, &app_type, start, now.timestamp())?
+    };
+
+    if json {
+        let output = SessionUsageOutput {
+            provider: app_type.as_str(),
+            range: range.value(),
+            retained_detail_only: true,
+            identified_sessions_only: true,
+            total_sessions: result.total_sessions,
+            truncated: result.truncated(),
+            sessions: &result.rows,
+        };
+        println!(
+            "{}",
+            to_json(&output).map_err(|source| AppError::JsonSerialize { source })?
+        );
+        return Ok(());
+    }
+
+    if result.rows.is_empty() {
+        println!(
+            "{}",
+            info(&format!(
+                "No identified retained {} session usage found for {}.",
+                app_type.as_str(),
+                range.label()
+            ))
+        );
+        println!("{}", info(&session_usage_sync_hint(&app_type)));
+        return Ok(());
+    }
+
+    let terminal_width = session_usage_terminal_width();
+    let layout = SessionUsageTableLayout::for_terminal_width(terminal_width);
+    let mut table = create_session_usage_table(layout, terminal_width);
+    let session_ids_abbreviated = result
+        .rows
+        .iter()
+        .any(|row| row.session_id.chars().count() > layout.session_id_max_chars);
+    for row in &result.rows {
+        match layout.kind {
+            SessionUsageTableKind::Tiny => {
+                table.add_row(vec![
+                    row.display_session_id(layout.session_id_max_chars),
+                    row.request_count.to_string(),
+                    format!("${:.6}", row.total_cost_usd),
+                ]);
+            }
+            SessionUsageTableKind::Compact => {
+                table.add_row(vec![
+                    row.display_session_id(layout.session_id_max_chars),
+                    row.display_model_label(layout.model_max_chars),
+                    row.request_count.to_string(),
+                    row.total_tokens().to_string(),
+                    format!("${:.6}", row.total_cost_usd),
+                ]);
+            }
+            SessionUsageTableKind::Wide => {
+                table.add_row(vec![
+                    row.display_session_id(layout.session_id_max_chars),
+                    row.display_model_label(layout.model_max_chars),
+                    row.request_count.to_string(),
+                    row.total_tokens().to_string(),
+                    format!("${:.6}", row.total_cost_usd),
+                    format_usage_time(row.last_active_at),
+                ]);
+            }
+        }
+    }
+    println!("{table}");
+    if result.truncated() {
+        println!(
+            "{}",
+            info(&format!(
+                "Showing the {} most recent of {} retained sessions.",
+                result.rows.len(),
+                result.total_sessions
+            ))
+        );
+    }
+    if session_ids_abbreviated {
+        println!(
+            "{}",
+            info("Session IDs are abbreviated; use --json for complete values.")
+        );
+    }
+    println!(
+        "{}",
+        info(
+            "Based on identified retained local detail; rolled-up history and unassigned requests are not included.",
+        )
+    );
+    Ok(())
+}
+
+fn create_session_usage_table(
+    layout: SessionUsageTableLayout,
+    terminal_width: Option<u16>,
+) -> comfy_table::Table {
+    let mut table = create_table();
+    if let Some(width) = terminal_width {
+        table
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_width(width);
+    }
+    match layout.kind {
+        SessionUsageTableKind::Tiny => {
+            table.set_header(vec!["Session", "Req", "Cost"]);
+            for column in table.column_iter_mut() {
+                column.set_padding((0, 0));
+            }
+            table.set_constraints([
+                ColumnConstraint::UpperBoundary(Width::Fixed(layout.session_id_max_chars as u16)),
+                ColumnConstraint::ContentWidth,
+                ColumnConstraint::ContentWidth,
+            ]);
+        }
+        SessionUsageTableKind::Compact => {
+            table.set_header(vec!["Session", "Model(s)", "Requests", "Tokens", "Cost"]);
+        }
+        SessionUsageTableKind::Wide => {
+            table.set_header(vec![
+                "Session",
+                "Model(s)",
+                "Requests",
+                "Tokens",
+                "Cost",
+                "Last Active",
+            ]);
+        }
+    }
+    table
+}
+
+fn session_usage_terminal_width() -> Option<u16> {
+    terminal::size()
+        .ok()
+        .map(|(width, _)| width)
+        .filter(|width| *width > 0)
+        .or_else(|| {
+            let columns = std::env::var("COLUMNS").ok();
+            parse_terminal_columns(columns.as_deref())
+        })
+}
+
+fn parse_terminal_columns(value: Option<&str>) -> Option<u16> {
+    value
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|width| *width > 0)
 }
 
 fn list_sessions(
@@ -773,6 +1073,13 @@ fn parse_session_provider(value: &str) -> Result<AppType, String> {
     })
 }
 
+fn parse_session_usage_provider(value: &str) -> Result<AppType, String> {
+    let app_type = parse_session_provider(value)?;
+    supports_session_usage(&app_type)
+        .then_some(app_type)
+        .ok_or_else(|| "session usage provider must be claude or codex".to_string())
+}
+
 fn app_type_from_provider_id(provider_id: &str) -> Option<AppType> {
     let normalized = provider_id.trim().to_lowercase().replace('-', "");
     AppType::from_str(&normalized).ok()
@@ -913,6 +1220,14 @@ fn path_basename(path: &str) -> String {
 fn format_session_time(timestamp_ms: Option<i64>) -> String {
     timestamp_ms
         .and_then(|timestamp| Local.timestamp_millis_opt(timestamp).single())
+        .map(|dt| dt.format("%Y/%m/%d %H:%M").to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_usage_time(timestamp: i64) -> String {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
         .map(|dt| dt.format("%Y/%m/%d %H:%M").to_string())
         .unwrap_or_else(|| "-".to_string())
 }
@@ -1099,6 +1414,130 @@ mod tests {
         assert_eq!(parse_session_provider("openclaw"), Ok(AppType::OpenClaw));
         assert_eq!(parse_session_provider("open-claw"), Ok(AppType::OpenClaw));
         assert!(parse_session_provider("unknown").is_err());
+    }
+
+    #[test]
+    fn session_usage_json_reports_bounded_results_and_decimal_cost() {
+        let sessions = vec![SessionUsageRow {
+            session_id: "session-1".to_string(),
+            model: "anthropic/claude-sonnet-4-20260726".to_string(),
+            models: vec![
+                "anthropic/claude-sonnet-4-20260726".to_string(),
+                "gateway/claude-opus-4".to_string(),
+            ],
+            model_count: 2,
+            total_cost_usd: 0.1 + 0.2,
+            last_active_at: 123,
+            ..SessionUsageRow::default()
+        }];
+        let output = SessionUsageOutput {
+            provider: "claude",
+            range: "7d",
+            retained_detail_only: true,
+            identified_sessions_only: true,
+            total_sessions: 101,
+            truncated: true,
+            sessions: &sessions,
+        };
+
+        let json = serde_json::to_value(output).expect("serialize session usage output");
+
+        assert_eq!(json["totalSessions"], 101);
+        assert_eq!(json["truncated"], true);
+        assert_eq!(json["identifiedSessionsOnly"], true);
+        assert_eq!(json["sessions"][0]["totalCostUsd"], "0.300000");
+        assert_eq!(json["sessions"][0]["lastActiveAt"], 123_000);
+        assert_eq!(
+            json["sessions"][0]["models"],
+            serde_json::json!([
+                "anthropic/claude-sonnet-4-20260726",
+                "gateway/claude-opus-4"
+            ])
+        );
+    }
+
+    #[test]
+    fn session_usage_machine_ranges_are_cli_round_trippable() {
+        assert_eq!(SessionUsageRange::Today.value(), "today");
+        assert_eq!(SessionUsageRange::SevenDays.value(), "7d");
+        assert_eq!(SessionUsageRange::ThirtyDays.value(), "30d");
+    }
+
+    #[test]
+    fn session_usage_table_layout_reduces_columns_on_narrow_terminals() {
+        let extreme = SessionUsageTableLayout::for_terminal_width(Some(24));
+        let tiny = SessionUsageTableLayout::for_terminal_width(Some(50));
+        let compact = SessionUsageTableLayout::for_terminal_width(Some(80));
+        let wide = SessionUsageTableLayout::for_terminal_width(Some(120));
+        let unknown = SessionUsageTableLayout::for_terminal_width(None);
+
+        assert_eq!(extreme.kind, SessionUsageTableKind::Tiny);
+        assert_eq!(tiny.kind, SessionUsageTableKind::Tiny);
+        assert_eq!(compact.kind, SessionUsageTableKind::Compact);
+        assert_eq!(wide.kind, SessionUsageTableKind::Wide);
+        assert_eq!(unknown.kind, SessionUsageTableKind::Wide);
+        assert_eq!(extreme.session_id_max_chars, 7);
+        assert_eq!(tiny.session_id_max_chars, 12);
+        assert_eq!(tiny.model_max_chars, 0);
+        assert!((8..=24).contains(&compact.model_max_chars));
+        assert!((16..=48).contains(&wide.model_max_chars));
+        assert_eq!(unknown.model_max_chars, 32);
+    }
+
+    #[test]
+    fn session_usage_tiny_table_keeps_cost_on_one_line_at_extreme_widths() {
+        let row = SessionUsageRow {
+            session_id: "session-abcdefghijklmnopqrstuvwxyz-0123456789".to_string(),
+            request_count: 1,
+            total_cost_usd: 0.123456,
+            ..SessionUsageRow::default()
+        };
+
+        for width in [24, 40] {
+            let layout = SessionUsageTableLayout::for_terminal_width(Some(width));
+            let mut table = create_session_usage_table(layout, Some(width));
+            table.add_row(vec![
+                row.display_session_id(layout.session_id_max_chars),
+                row.request_count.to_string(),
+                format!("${:.6}", row.total_cost_usd),
+            ]);
+            let rendered = table.to_string();
+
+            assert!(
+                rendered.lines().any(|line| line.contains("Session")
+                    && line.contains("Req")
+                    && line.contains("Cost")),
+                "headers wrapped at {width} columns:\n{rendered}"
+            );
+            assert!(
+                rendered.lines().any(|line| line.contains("$0.123456")),
+                "cost wrapped at {width} columns:\n{rendered}"
+            );
+            assert!(
+                rendered
+                    .lines()
+                    .all(|line| line.chars().count() <= usize::from(width)),
+                "table exceeded {width} columns:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_usage_empty_hint_names_the_selected_provider() {
+        let claude = session_usage_sync_hint(&AppType::Claude);
+        let codex = session_usage_sync_hint(&AppType::Codex);
+        assert!(claude.contains("sync-usage --provider claude"));
+        assert!(codex.contains("sync-usage --provider codex"));
+        assert!(!codex.contains("--provider claude"));
+    }
+
+    #[test]
+    fn terminal_columns_fallback_parser_is_pure_and_rejects_invalid_widths() {
+        assert_eq!(parse_terminal_columns(Some(" 80 ")), Some(80));
+        assert_eq!(parse_terminal_columns(Some("0")), None);
+        assert_eq!(parse_terminal_columns(Some("-1")), None);
+        assert_eq!(parse_terminal_columns(Some("wide")), None);
+        assert_eq!(parse_terminal_columns(None), None);
     }
 
     #[test]

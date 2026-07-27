@@ -7676,6 +7676,30 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_session_usage_sync_failed(error: &str) -> String {
+        if is_chinese() {
+            format!("会话用量同步未完整完成：{error}")
+        } else {
+            format!("Session usage sync was incomplete: {error}")
+        }
+    }
+
+    pub fn tui_error_session_usage_sync_worker_unavailable() -> &'static str {
+        if is_chinese() {
+            "会话用量同步工作线程不可用。"
+        } else {
+            "Session usage sync worker is unavailable."
+        }
+    }
+
+    pub fn tui_error_session_usage_sync_queue_failed(error: &str) -> String {
+        if is_chinese() {
+            format!("无法排队会话用量同步：{error}")
+        } else {
+            format!("Failed to queue session usage sync: {error}")
+        }
+    }
+
     pub fn tui_speedtest_line_url(url: &str) -> String {
         format!("URL: {}", url)
     }

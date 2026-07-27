@@ -3,6 +3,7 @@ use crate::cli::tui::data::{
     UsageLogRow, UsageLogTextField, UsageModelStatsRow, UsageProviderStatsRow,
     UsageSummarySnapshot, UsageTrendBucket,
 };
+use crate::services::session_usage_query::SessionUsageRow;
 
 use super::*;
 
@@ -86,7 +87,7 @@ pub(super) fn render_usage_logs(
         frame,
         chunks[2],
         theme,
-        usage_detail_summary_line(app, data),
+        usage_detail_summary_line(app, data, chunks[2].width),
     );
     render_usage_detail_table(frame, app, data, chunks[3], theme);
 }
@@ -106,7 +107,7 @@ pub(super) fn render_usage_log_detail(
         .title(breadcrumb_title(&[
             usage_text("Usage Statistics", "使用统计"),
             usage_text("Details", "详情"),
-            usage_text("Log", "日志"),
+            usage_text("Raw Log", "原始日志"),
         ]));
     frame.render_widget(outer.clone(), area);
 
@@ -793,14 +794,34 @@ fn render_usage_detail_tabs(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let items = [
-        (UsagePane::Models, usage_text("Model Stats", "模型统计")),
-        (
-            UsagePane::Providers,
-            usage_text("Provider Stats", "Provider 统计"),
-        ),
-        (UsagePane::Recent, usage_text("Request Logs", "请求日志")),
-    ];
+    let items = if area.width < 44 {
+        [
+            (UsagePane::Models, usage_text("M", "模")),
+            (UsagePane::Providers, usage_text("P", "供")),
+            (UsagePane::Sessions, usage_text("S", "会")),
+            (UsagePane::Recent, usage_text("L", "志")),
+        ]
+    } else if area.width < 72 {
+        [
+            (UsagePane::Models, usage_text("Models", "模型")),
+            (UsagePane::Providers, usage_text("Providers", "Provider")),
+            (UsagePane::Sessions, usage_text("Sessions", "会话")),
+            (UsagePane::Recent, usage_text("Raw Logs", "原始日志")),
+        ]
+    } else {
+        [
+            (UsagePane::Models, usage_text("Model Stats", "模型统计")),
+            (
+                UsagePane::Providers,
+                usage_text("Provider Stats", "Provider 统计"),
+            ),
+            (UsagePane::Sessions, usage_text("Sessions", "会话")),
+            (
+                UsagePane::Recent,
+                usage_text("Raw Request Logs", "原始审计日志"),
+            ),
+        ]
+    };
     let mut spans = Vec::new();
     for (idx, (pane, label)) in items.into_iter().enumerate() {
         if idx > 0 {
@@ -856,6 +877,14 @@ fn render_usage_detail_table(
             inner,
             theme,
             loading,
+        ),
+        UsagePane::Sessions => render_session_usage_table(
+            frame,
+            app,
+            data.usage.session_usage_for(app.usage.range),
+            inner,
+            theme,
+            loading || app.usage.manual_session_refreshing(),
         ),
         UsagePane::Recent => render_usage_logs_table(frame, app, data, inner, theme),
     }
@@ -961,6 +990,194 @@ fn render_usage_models_table(
         ],
     )
     .header(header)
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+    let mut state = TableState::default();
+    state.select(Some(app.usage.selected_idx));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn render_session_usage_table(
+    frame: &mut Frame<'_>,
+    app: &App,
+    rows: &[SessionUsageRow],
+    area: Rect,
+    theme: &super::theme::Theme,
+    loading: bool,
+) {
+    if !crate::services::session_usage_query::supports_session_usage(&app.app_type) {
+        render_centered_usage_lines(
+            frame,
+            area,
+            vec![Line::styled(
+                usage_text(
+                    "Session usage is available for Claude and Codex.",
+                    "会话用量目前支持 Claude 和 Codex。",
+                ),
+                Style::default().fg(theme.comment),
+            )],
+        );
+        return;
+    }
+    if matches!(
+        app.usage.range,
+        crate::cli::tui::data::UsageRangePreset::Custom(_)
+    ) {
+        render_centered_usage_lines(
+            frame,
+            area,
+            vec![Line::styled(
+                usage_text(
+                    "Session detail supports Today, 7d, and 30d.",
+                    "会话明细支持今天、7 天和 30 天。",
+                ),
+                Style::default().fg(theme.comment),
+            )],
+        );
+        return;
+    }
+    if rows.is_empty() {
+        if loading {
+            render_usage_loading(frame, area, theme);
+        } else if app.usage.session_sync_error_for(&app.app_type).is_some() {
+            render_centered_usage_lines(
+                frame,
+                area,
+                vec![
+                    Line::styled(
+                        usage_text(
+                            "Session import failed; data may be incomplete.",
+                            "会话导入失败，数据可能不完整。",
+                        ),
+                        Style::default().fg(theme.err),
+                    ),
+                    Line::styled(
+                        usage_text("Press r to retry the local import.", "按 r 重试本地导入。"),
+                        Style::default().fg(theme.comment),
+                    ),
+                ],
+            );
+        } else {
+            render_centered_usage_lines(
+                frame,
+                area,
+                vec![
+                    Line::styled(
+                        usage_text(
+                            "The Sessions view only uses retained local logs.",
+                            "会话仅使用仍保留的本地日志。",
+                        ),
+                        Style::default().fg(theme.comment),
+                    ),
+                    Line::styled(
+                        usage_text(
+                            "Rows without an identifiable session are excluded.",
+                            "无法识别会话的记录不会列出。",
+                        ),
+                        Style::default().fg(theme.dim),
+                    ),
+                ],
+            );
+        }
+        return;
+    }
+
+    let tiny = area.width < 60;
+    let compact = area.width < 120;
+    let header = if tiny {
+        Row::new(vec![
+            Cell::from(usage_text("Session", "会话")),
+            Cell::from(usage_text("Req", "请求")),
+            Cell::from(usage_text("Tokens", "Token")),
+            Cell::from(usage_text("Cost", "费用")),
+        ])
+    } else if compact {
+        Row::new(vec![
+            Cell::from(usage_text("Session", "会话")),
+            Cell::from(usage_text("Req", "请求")),
+            Cell::from(usage_text("Tokens", "Token")),
+            Cell::from(usage_text("Cost", "费用")),
+            Cell::from(usage_text("Last Active", "最近活动")),
+        ])
+    } else {
+        Row::new(vec![
+            Cell::from(usage_text("Session", "会话")),
+            Cell::from(usage_text("Model(s)", "模型")),
+            Cell::from(usage_text("Req", "请求")),
+            Cell::from(usage_text("Input", "输入")),
+            Cell::from(usage_text("Output", "输出")),
+            Cell::from(usage_text("Cache", "缓存")),
+            Cell::from(usage_text("Cost", "费用")),
+            Cell::from(usage_text("Last Active", "最近活动")),
+        ])
+    }
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+    let table = if tiny {
+        Table::new(
+            rows.iter().map(|row| {
+                Row::new(vec![
+                    Cell::from(row.compact_session_id()),
+                    Cell::from(row.request_count.to_string()),
+                    Cell::from(format_token_compact(row.total_tokens())),
+                    Cell::from(format_money(row.total_cost_usd)),
+                ])
+            }),
+            [
+                Constraint::Min(12),
+                Constraint::Length(5),
+                Constraint::Length(9),
+                Constraint::Length(9),
+            ],
+        )
+        .header(header)
+    } else if compact {
+        Table::new(
+            rows.iter().map(|row| {
+                Row::new(vec![
+                    Cell::from(row.compact_session_id()),
+                    Cell::from(row.request_count.to_string()),
+                    Cell::from(format_token_compact(row.total_tokens())),
+                    Cell::from(format_money(row.total_cost_usd)),
+                    Cell::from(format_log_time(row.last_active_at, false)),
+                ])
+            }),
+            [
+                Constraint::Min(18),
+                Constraint::Length(5),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Length(11),
+            ],
+        )
+        .header(header)
+    } else {
+        Table::new(
+            rows.iter().map(|row| {
+                Row::new(vec![
+                    Cell::from(row.display_session_id(28)),
+                    Cell::from(row.display_model_label(24)),
+                    Cell::from(row.request_count.to_string()),
+                    Cell::from(format_token_compact(row.input_tokens)),
+                    Cell::from(format_token_compact(row.output_tokens)),
+                    Cell::from(format_token_compact(row.cache_tokens())),
+                    Cell::from(format_money(row.total_cost_usd)),
+                    Cell::from(format_log_time(row.last_active_at, true)),
+                ])
+            }),
+            [
+                Constraint::Percentage(23),
+                Constraint::Percentage(19),
+                Constraint::Length(5),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Length(17),
+            ],
+        )
+        .header(header)
+    }
     .row_highlight_style(selection_style(theme))
     .highlight_symbol(highlight_symbol(theme));
     let mut state = TableState::default();
@@ -1327,7 +1544,8 @@ fn usage_detail_pane_title(pane: UsagePane) -> &'static str {
     match pane {
         UsagePane::Models => usage_text("Model Stats", "模型统计"),
         UsagePane::Providers => usage_text("Provider Stats", "Provider 统计"),
-        UsagePane::Recent => usage_text("Request Logs", "请求日志"),
+        UsagePane::Sessions => usage_text("Sessions", "会话"),
+        UsagePane::Recent => usage_text("Raw Request Logs", "原始审计日志"),
     }
 }
 
@@ -1403,18 +1621,33 @@ fn usage_sync_progress_suffix() -> String {
 
 fn usage_summary_line(app: &App, data: &UiData) -> String {
     let sync_suffix = usage_sync_progress_suffix();
+    let error_prefix = usage_error_prefix(app);
     if current_usage_is_loading(app, data) {
         if i18n::is_chinese() {
-            return format!("{} · 正在加载中...{sync_suffix}", app.usage.range.label());
+            return format!(
+                "{error_prefix}{} · 正在加载中...{sync_suffix}",
+                app.usage.range.label()
+            );
         }
-        return format!("{} · Loading...{sync_suffix}", app.usage.range.label());
+        return format!(
+            "{error_prefix}{} · Loading...{sync_suffix}",
+            app.usage.range.label()
+        );
+    }
+    if app
+        .usage
+        .usage_pricing_error(&app.app_type, app.usage.range)
+        .is_some()
+        && !data.usage.has_data_for(app.usage.range)
+    {
+        return format!("{error_prefix}{}", app.usage.range.label());
     }
 
     let summary = data.usage.summary_for(app.usage.range);
     let refresh_prefix = usage_refresh_prefix(app);
     if i18n::is_chinese() {
         format!(
-            "{refresh_prefix}{} · {} 请求 · {} tokens · {} · 平均延迟 {}{sync_suffix}",
+            "{error_prefix}{refresh_prefix}{} · {} 请求 · {} tokens · {} · 平均延迟 {}{sync_suffix}",
             app.usage.range.label(),
             summary.total_requests,
             format_token_compact(summary.total_tokens()),
@@ -1423,7 +1656,7 @@ fn usage_summary_line(app: &App, data: &UiData) -> String {
         )
     } else {
         format!(
-            "{refresh_prefix}{} · {} requests · {} tokens · {} · {} avg latency{sync_suffix}",
+            "{error_prefix}{refresh_prefix}{} · {} requests · {} tokens · {} · {} avg latency{sync_suffix}",
             app.usage.range.label(),
             summary.total_requests,
             format_token_compact(summary.total_tokens()),
@@ -1438,8 +1671,8 @@ fn current_usage_is_loading(app: &App, data: &UiData) -> bool {
         && !data.usage.has_data_for(app.usage.range)
 }
 
-fn usage_detail_summary_line(app: &App, data: &UiData) -> String {
-    let mut line = match app.usage.pane {
+fn usage_detail_summary_line(app: &App, data: &UiData, width: u16) -> String {
+    let line = match app.usage.pane {
         UsagePane::Models => {
             let count = data.usage.top_models_for(app.usage.range).len();
             if i18n::is_chinese() {
@@ -1460,22 +1693,139 @@ fn usage_detail_summary_line(app: &App, data: &UiData) -> String {
                 )
             }
         }
+        UsagePane::Sessions => {
+            if !crate::services::session_usage_query::supports_session_usage(&app.app_type) {
+                if width < 72 {
+                    if i18n::is_chinese() {
+                        format!("{} · 仅 Claude/Codex 会话", app.usage.range.label())
+                    } else {
+                        format!("{} · Claude/Codex sessions only", app.usage.range.label())
+                    }
+                } else if i18n::is_chinese() {
+                    format!(
+                        "{} · 会话用量仅支持 Claude 和 Codex",
+                        app.usage.range.label()
+                    )
+                } else {
+                    format!(
+                        "{} · session usage is available for Claude and Codex",
+                        app.usage.range.label()
+                    )
+                }
+            } else if matches!(
+                app.usage.range,
+                crate::cli::tui::data::UsageRangePreset::Custom(_)
+            ) {
+                if width < 72 {
+                    if i18n::is_chinese() {
+                        format!("{} · 会话仅支持今天/7天/30天", app.usage.range.label())
+                    } else {
+                        format!("{} · sessions: Today/7d/30d only", app.usage.range.label())
+                    }
+                } else if i18n::is_chinese() {
+                    format!(
+                        "{} · 会话明细支持今天、7 天和 30 天",
+                        app.usage.range.label()
+                    )
+                } else {
+                    format!(
+                        "{} · session detail supports Today, 7d, and 30d",
+                        app.usage.range.label()
+                    )
+                }
+            } else {
+                let shown = data.usage.session_usage_for(app.usage.range).len();
+                let total = data
+                    .usage
+                    .session_usage_total_for(app.usage.range)
+                    .max(shown as u64);
+                if width < 72 && i18n::is_chinese() {
+                    format!(
+                        "{} · 保留+识别 {}/{}",
+                        app.usage.range.label(),
+                        shown,
+                        total
+                    )
+                } else if width < 72 {
+                    format!(
+                        "{} · retained+identified {}/{}",
+                        app.usage.range.label(),
+                        shown,
+                        total
+                    )
+                } else if i18n::is_chinese() && total > shown as u64 {
+                    format!(
+                        "{} · 仅本地保留且可识别会话 · 显示 {} / {} 条",
+                        app.usage.range.label(),
+                        shown,
+                        total
+                    )
+                } else if i18n::is_chinese() {
+                    format!(
+                        "{} · 仅本地保留且可识别会话 · {} 条",
+                        app.usage.range.label(),
+                        shown
+                    )
+                } else if total > shown as u64 {
+                    format!(
+                        "{} · retained + identified sessions only · showing {} of {} rows",
+                        app.usage.range.label(),
+                        shown,
+                        total
+                    )
+                } else {
+                    format!(
+                        "{} · retained + identified sessions only · {} rows",
+                        app.usage.range.label(),
+                        shown
+                    )
+                }
+            }
+        }
         UsagePane::Recent => {
             let logs = app
                 .usage
                 .log_pager
                 .current_rows(data.usage.recent_logs_for(app.usage.range));
             let total = effective_usage_logs_total(app, data);
-            if i18n::is_chinese() {
+            let custom_range = matches!(
+                app.usage.range,
+                crate::cli::tui::data::UsageRangePreset::Custom(_)
+            );
+            if width < 72 && i18n::is_chinese() {
+                let scope = if custom_range {
+                    "自定义范围"
+                } else {
+                    "全部保留历史"
+                };
+                format!("{scope}·跨来源重复")
+            } else if width < 72 {
+                let scope = if custom_range {
+                    "custom range"
+                } else {
+                    "all retained history"
+                };
+                format!("{scope}·cross-src dupes")
+            } else if i18n::is_chinese() {
+                let scope = if custom_range {
+                    "所选自定义范围"
+                } else {
+                    "全部保留历史"
+                };
                 format!(
-                    "请求日志 · 第 {} 页 · 本页 {} 条 · 共 {} 条",
+                    "原始审计日志 · {scope} · 第 {} 页 · 本页 {} 条 · 共 {} 条 · 可能含跨来源重复",
                     app.usage.log_pager.current_page() + 1,
                     logs.len(),
                     total
                 )
             } else {
+                let scope = if custom_range {
+                    "selected custom range"
+                } else {
+                    "all retained history"
+                };
                 format!(
-                    "request logs · page {} · {} rows · {} total rows",
+                    "raw audit logs · {scope} · page {} · {} rows · {} total rows · may include cross-source duplicates",
                     app.usage.log_pager.current_page() + 1,
                     logs.len(),
                     total
@@ -1483,8 +1833,86 @@ fn usage_detail_summary_line(app: &App, data: &UiData) -> String {
             }
         }
     };
-    line.insert_str(0, &usage_refresh_prefix(app));
-    line.push_str(&usage_sync_progress_suffix());
+    decorate_usage_detail_summary(
+        line,
+        &format!(
+            "{}{}",
+            usage_detail_error_prefix(app, width),
+            usage_refresh_prefix(app)
+        ),
+        &usage_sync_progress_suffix(),
+    )
+}
+
+fn usage_detail_error_prefix(app: &App, width: u16) -> String {
+    if width >= 72 {
+        return usage_error_prefix(app);
+    }
+
+    let aggregate = app
+        .usage
+        .usage_pricing_error(&app.app_type, app.usage.range)
+        .is_some();
+    let sessions = app.usage.session_sync_error_for(&app.app_type).is_some();
+    if !aggregate && !sessions {
+        return String::new();
+    }
+
+    let problem = match (i18n::is_chinese(), aggregate, sessions) {
+        (true, true, true) => "全部",
+        (true, true, false) => "用量",
+        (true, false, true) => "会话",
+        (false, true, true) => "all",
+        (false, true, false) => "usage",
+        (false, false, true) => "session",
+        _ => unreachable!(),
+    };
+    let action = if app.usage.manual_session_refreshing()
+        || app.usage.is_loading_for(&app.app_type, app.usage.range)
+    {
+        "…"
+    } else {
+        "r"
+    };
+    format!("⚠ {problem}:{action} · ")
+}
+
+fn usage_error_prefix(app: &App) -> String {
+    let aggregate = app
+        .usage
+        .usage_pricing_error(&app.app_type, app.usage.range)
+        .is_some();
+    let sessions = app.usage.session_sync_error_for(&app.app_type).is_some();
+    if !aggregate && !sessions {
+        return String::new();
+    }
+    let retrying = app.usage.manual_session_refreshing()
+        || app.usage.is_loading_for(&app.app_type, app.usage.range);
+    let problem = match (i18n::is_chinese(), aggregate, sessions) {
+        (true, true, true) => "用量加载和会话导入不完整",
+        (true, true, false) => "用量加载失败",
+        (true, false, true) => "会话导入不完整",
+        (false, true, true) => "Usage load and session import incomplete",
+        (false, true, false) => "Usage load failed",
+        (false, false, true) => "Session import incomplete",
+        _ => unreachable!(),
+    };
+    let action = match (i18n::is_chinese(), retrying) {
+        (true, true) => "正在重试",
+        (true, false) => "按 r 重试",
+        (false, true) => "retrying",
+        (false, false) => "Press r to retry",
+    };
+    format!("⚠ {problem} · {action} · ")
+}
+
+fn decorate_usage_detail_summary(
+    mut line: String,
+    refresh_prefix: &str,
+    sync_progress_suffix: &str,
+) -> String {
+    line.insert_str(0, refresh_prefix);
+    line.push_str(sync_progress_suffix);
     line
 }
 
@@ -1658,7 +2086,7 @@ fn format_log_time(timestamp: i64, full: bool) -> String {
             if full {
                 datetime.format("%Y/%m/%d %H:%M").to_string()
             } else {
-                datetime.format("%H:%M").to_string()
+                datetime.format("%m/%d %H:%M").to_string()
             }
         })
         .unwrap_or_else(|| "-".to_string())
@@ -1686,5 +2114,24 @@ fn display_provider_name(
         bounded_display(name, name_truncated)
     } else {
         bounded_display(fallback, fallback_truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decorate_usage_detail_summary;
+
+    #[test]
+    fn detail_summary_keeps_refresh_prefix_and_sync_progress() {
+        let line = decorate_usage_detail_summary(
+            "7d · Claude/Codex sessions only".to_string(),
+            "⠋ Refreshing · ",
+            " · importing local usage 2/4",
+        );
+
+        assert_eq!(
+            line,
+            "⠋ Refreshing · 7d · Claude/Codex sessions only · importing local usage 2/4"
+        );
     }
 }
