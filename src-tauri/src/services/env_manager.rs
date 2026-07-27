@@ -1,8 +1,5 @@
 use super::env_checker::EnvConflict;
-use crate::config::{
-    create_managed_config_dir_all, get_app_config_dir, restrict_dir_permissions,
-    restrict_file_permissions, write_json_file,
-};
+use crate::config::{create_managed_config_dir_all, get_app_config_dir, write_json_file};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -48,7 +45,6 @@ fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
     // Get backup directory
     let backup_dir = get_backup_dir()?;
     create_managed_config_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
-    restrict_dir_permissions(&backup_dir).map_err(|e| format!("设置备份目录权限失败: {e}"))?;
 
     // Generate backup file name with timestamp
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -62,7 +58,6 @@ fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
     };
 
     write_json_file(&backup_file, &backup_info).map_err(|e| format!("写入备份文件失败: {e}"))?;
-    restrict_file_permissions(&backup_file).map_err(|e| format!("设置备份文件权限失败: {e}"))?;
 
     Ok(backup_info)
 }
@@ -247,6 +242,10 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("create temp dir");
         let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let backup_dir = get_backup_dir().expect("get backup dir");
+        std::fs::create_dir_all(&backup_dir).expect("create existing backup dir");
+        std::fs::set_permissions(&backup_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("set existing backup dir permissions");
 
         let backup = create_backup(&[]).expect("create backup");
         let backup_path = PathBuf::from(&backup.backup_path);
@@ -256,9 +255,14 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
-        assert!(
-            crate::config::check_permissions().is_empty(),
-            "fresh env backup should not be reported as insecure"
+        let dir_mode = std::fs::metadata(&backup_dir)
+            .expect("metadata backup dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o755,
+            "backup creation must not chmod an existing directory"
         );
     }
 

@@ -1,7 +1,6 @@
 use cc_switch_lib::{
-    check_permissions, get_app_config_dir, get_s3_sync_settings, get_webdav_sync_settings,
-    set_s3_sync_settings, set_webdav_sync_settings, S3SyncSettings, WebDavSyncSettings,
-    WebDavSyncStatus,
+    get_app_config_dir, get_s3_sync_settings, get_webdav_sync_settings, set_s3_sync_settings,
+    set_webdav_sync_settings, S3SyncSettings, WebDavSyncSettings, WebDavSyncStatus,
 };
 
 #[path = "support.rs"]
@@ -128,7 +127,6 @@ fn s3_credentials_are_written_to_owner_only_settings_file() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600);
-    assert!(check_permissions().is_empty());
 }
 
 #[test]

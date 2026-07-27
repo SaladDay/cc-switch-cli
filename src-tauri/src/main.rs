@@ -42,11 +42,8 @@ fn command_uses_own_logger(command: &Option<Commands>) -> bool {
 
 fn run(cli: Cli) -> Result<(), AppError> {
     if database_access_required(&cli.command) {
-        // 在打开数据库前检查已有配置目录、数据库文件和备份目录权限。
-        // This ensures the chmod happens before database initialization,
-        // and also ensures that the user is only queried once.
+        // Reject dangerous config roots before any command can initialize state.
         cc_switch_lib::validate_config_dir()?;
-        cc_switch_lib::prompt_fix_permissions()?;
     }
     initialize_startup_state_if_needed(&cli.command)?;
 

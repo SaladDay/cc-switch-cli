@@ -548,7 +548,9 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        create_secure_dir_all(&backup_dir)?;
+        crate::config::create_managed_config_dir_all(
+            &crate::config::get_app_config_dir().join("backups"),
+        )?;
 
         let backup_path = {
             let conn = lock_conn!(self.conn);
@@ -1364,6 +1366,41 @@ mod tests {
         assert_ne!(first, second, "backup paths should not collide");
         assert!(first.exists(), "first backup should exist");
         assert!(second.exists(), "second backup should exist");
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_database_backup_rejects_other_user_writable_backup_dir() -> Result<(), AppError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let db = Database::init()?;
+        let backup_dir = crate::config::get_app_config_dir().join("backups");
+        std::fs::create_dir(&backup_dir).expect("create backup dir");
+        std::fs::set_permissions(&backup_dir, std::fs::Permissions::from_mode(0o777))
+            .expect("set backup dir permissions");
+
+        let err = db
+            .backup_database_file()
+            .expect_err("other-user-writable backup dir must be rejected");
+
+        assert!(err.to_string().contains("不能允许组或其他用户写入"));
+        assert!(
+            std::fs::read_dir(&backup_dir)
+                .expect("read backup dir")
+                .next()
+                .is_none(),
+            "rejected backup must not create artifacts"
+        );
+        let mode = std::fs::metadata(&backup_dir)
+            .expect("metadata backup dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o777, "validation must not chmod the directory");
 
         Ok(())
     }

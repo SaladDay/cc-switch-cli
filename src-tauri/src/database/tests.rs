@@ -2965,6 +2965,128 @@ fn init_does_not_silently_fix_existing_dir_permissions() {
         "init should not silently change existing dir permissions"
     );
 }
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_rejects_other_user_writable_config_dir_without_changing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o777))
+        .expect("set config dir perms");
+
+    let err = match Database::init() {
+        Ok(_) => panic!("other-user-writable config dir must be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains("不能允许组或其他用户写入"));
+    assert!(
+        !temp.path().join("cc-switch.db").exists(),
+        "rejected initialization must not create the database"
+    );
+    let mode = std::fs::metadata(temp.path())
+        .expect("metadata config dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o777, "validation must not chmod the directory");
+}
+
+#[test]
+fn readonly_database_error_has_actionable_context() {
+    let path = Path::new("/example/cc-switch.db");
+    for sqlite_message in [
+        "attempt to write a readonly database",
+        "unable to open database file",
+        "permission denied",
+    ] {
+        let error =
+            with_database_write_context(AppError::Database(sqlite_message.to_string()), Some(path));
+        let message = error.to_string();
+
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains("数据库不可写"));
+        assert!(message.contains("Database is not writable"));
+        assert!(message.contains("不会自动修改"));
+        assert!(message.contains("does not automatically change"));
+        assert!(message.contains(sqlite_message));
+    }
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_reports_readonly_database_without_changing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY: geteuid has no preconditions and does not modify process state.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+
+    drop(Database::init().expect("initialize database"));
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o400))
+        .expect("make database readonly");
+
+    let error = match Database::init() {
+        Ok(_) => panic!("readonly database should fail initialization"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains(&db_path.display().to_string()));
+    assert!(
+        message.contains("Database is not writable"),
+        "unexpected error: {message}"
+    );
+
+    let mode = std::fs::metadata(&db_path)
+        .expect("database metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o400,
+        "initialization must not change existing database permissions"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_preserves_existing_writable_database_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+
+    drop(Database::init().expect("initialize database"));
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644))
+        .expect("set existing database permissions");
+
+    drop(Database::init().expect("reopen writable database"));
+
+    let mode = std::fs::metadata(&db_path)
+        .expect("database metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o644,
+        "initialization must leave existing database permissions unchanged"
+    );
+}
+
 #[test]
 fn model_pricing_delete_survives_reseed_until_user_upserts() {
     let db = Database::memory().expect("create memory db");
