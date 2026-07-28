@@ -6,6 +6,9 @@
 use super::subscription::{CredentialStatus, QuotaTier, SubscriptionQuota};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const TIER_FIVE_HOUR: &str = "five_hour";
+const TIER_WEEKLY_LIMIT: &str = "weekly_limit";
+
 // ── 供应商检测 ──────────────────────────────────────────────
 
 enum CodingPlanProvider {
@@ -181,6 +184,75 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
 
 // ── 智谱 GLM ────────────────────────────────────────────────
 
+enum ZhipuWindow {
+    FiveHour,
+    Weekly,
+}
+
+fn classify_zhipu_window(item: &serde_json::Value) -> Option<ZhipuWindow> {
+    match item.get("unit").and_then(|value| value.as_i64()) {
+        Some(3) => Some(ZhipuWindow::FiveHour),
+        Some(6) => Some(ZhipuWindow::Weekly),
+        _ => None,
+    }
+}
+
+/// Parse Zhipu token limits into their 5-hour and weekly windows.
+///
+/// Zhipu identifies the windows with `unit` (`3` for hours and `6` for
+/// weeks). When that field is absent or unknown, fall back to reset times;
+/// entries without a reset are considered first because an idle 5-hour
+/// window may omit `nextResetTime`.
+fn parse_zhipu_token_tiers(data: &serde_json::Value) -> Vec<QuotaTier> {
+    type Entry = (Option<i64>, f64, Option<String>);
+
+    let mut five_hour: Option<Entry> = None;
+    let mut weekly: Option<Entry> = None;
+    let mut unclassified = Vec::<Entry>::new();
+
+    if let Some(limits) = data.get("limits").and_then(|value| value.as_array()) {
+        for item in limits {
+            let limit_type = item.get("type").and_then(|value| value.as_str());
+            if !limit_type.is_some_and(|value| value.eq_ignore_ascii_case("TOKENS_LIMIT")) {
+                continue;
+            }
+
+            let percentage = item
+                .get("percentage")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            let reset_ms = item.get("nextResetTime").and_then(|value| value.as_i64());
+            let entry = (reset_ms, percentage, reset_ms.and_then(millis_to_iso8601));
+
+            match classify_zhipu_window(item) {
+                Some(ZhipuWindow::FiveHour) if five_hour.is_none() => five_hour = Some(entry),
+                Some(ZhipuWindow::Weekly) if weekly.is_none() => weekly = Some(entry),
+                _ => unclassified.push(entry),
+            }
+        }
+    }
+
+    unclassified.sort_by_key(|(reset, _, _)| (reset.is_some(), reset.unwrap_or(i64::MIN)));
+    for entry in unclassified {
+        if five_hour.is_none() {
+            five_hour = Some(entry);
+        } else if weekly.is_none() {
+            weekly = Some(entry);
+        }
+    }
+
+    [(TIER_FIVE_HOUR, five_hour), (TIER_WEEKLY_LIMIT, weekly)]
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            entry.map(|(_, utilization, resets_at)| QuotaTier {
+                name: name.to_string(),
+                utilization,
+                resets_at,
+            })
+        })
+        .collect()
+}
+
 async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
@@ -237,34 +309,7 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
         None => return make_error("Missing 'data' field in response".to_string()),
     };
 
-    let mut tiers = Vec::new();
-
-    if let Some(limits) = data.get("limits").and_then(|v| v.as_array()) {
-        for limit_item in limits {
-            let limit_type = limit_item
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let percentage = limit_item
-                .get("percentage")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let next_reset = limit_item
-                .get("nextResetTime")
-                .and_then(|v| v.as_i64())
-                .and_then(millis_to_iso8601);
-
-            if limit_type != "TOKENS_LIMIT" {
-                continue;
-            }
-
-            tiers.push(QuotaTier {
-                name: "five_hour".to_string(),
-                utilization: percentage,
-                resets_at: next_reset,
-            });
-        }
-    }
+    let tiers = parse_zhipu_token_tiers(data);
 
     // 套餐等级存入 credential_message
     let level = data
@@ -448,4 +493,145 @@ pub async fn get_coding_plan_quota(
     };
 
     Ok(quota)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_zhipu_token_tiers, TIER_FIVE_HOUR, TIER_WEEKLY_LIMIT};
+    use serde_json::json;
+
+    #[test]
+    fn zhipu_classifies_windows_by_unit_even_when_weekly_resets_first() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 6,
+                    "number": 7,
+                    "percentage": 42.0,
+                    "nextResetTime": 1_000_003_600_000_i64
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 3,
+                    "number": 5,
+                    "percentage": 1.0,
+                    "nextResetTime": 1_000_018_000_000_i64
+                }
+            ]
+        });
+
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 1.0);
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 42.0);
+    }
+
+    #[test]
+    fn zhipu_accepts_weekly_unit_six_number_one() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 6,
+                    "number": 1,
+                    "percentage": 30.0
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 3,
+                    "number": 5,
+                    "percentage": 10.0
+                }
+            ]
+        });
+
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 10.0);
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 30.0);
+    }
+
+    #[test]
+    fn zhipu_missing_reset_fallback_keeps_idle_window_first() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "percentage": 25.0,
+                    "nextResetTime": 2_000_000_000_000_i64
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "percentage": 0.0
+                }
+            ]
+        });
+
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert!(tiers[0].resets_at.is_none());
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 25.0);
+    }
+
+    #[test]
+    fn zhipu_legacy_single_window_remains_five_hour() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "percentage": 2.0,
+                    "nextResetTime": 1_774_967_594_803_i64
+                },
+                {
+                    "type": "TIME_LIMIT",
+                    "percentage": 50.0
+                }
+            ]
+        });
+
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 2.0);
+    }
+
+    #[test]
+    fn zhipu_unknown_units_fall_back_to_reset_order() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "tokens_limit",
+                    "unit": 9,
+                    "percentage": 53.0,
+                    "nextResetTime": 2_000_000_000_000_i64
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 9,
+                    "percentage": 44.0,
+                    "nextResetTime": 1_000_000_000_000_i64
+                }
+            ]
+        });
+
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 44.0);
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 53.0);
+    }
 }

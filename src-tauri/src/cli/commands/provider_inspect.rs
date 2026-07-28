@@ -688,8 +688,13 @@ fn push_script_usage_lines(lines: &mut Vec<String>, result: &UsageResult) {
         texts::tui_quota_ok()
     ));
     for (idx, item) in items.iter().enumerate() {
-        let label = display_usage_plan_name(item)
-            .map_or_else(|| format!("Usage {}", idx + 1), str::to_string);
+        let label = display_usage_plan_name(item).map_or_else(
+            || format!("Usage {}", idx + 1),
+            |name| match name.trim() {
+                "five_hour" | "weekly_limit" => quota_tier_label(name.trim()),
+                other => other.to_string(),
+            },
+        );
         lines.push(format!("{label}: {}", script_usage_item_text(item)));
     }
 }
@@ -1187,6 +1192,26 @@ base_url = "https://current.example.com/v1"
         )));
         assert!(joined.contains("Usage 1: 2 USD"));
         assert!(joined.contains("Usage 2: 3 USD"));
+    }
+
+    #[test]
+    fn provider_quota_text_localizes_token_plan_tier_names() {
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        let output = quota_output(ProviderUsageQuota::Script(UsageResult {
+            success: true,
+            data: Some(vec![
+                usage_item(Some("five_hour"), Some(100.0)),
+                usage_item(Some("weekly_limit"), Some(0.0)),
+            ]),
+            error: None,
+        }));
+
+        let joined = provider_quota_text_lines(&output).join("\n");
+
+        assert!(joined.contains("5h: 100 USD"), "{joined}");
+        assert!(joined.contains("weekly: 0 USD"), "{joined}");
+        assert!(!joined.contains("five_hour"), "{joined}");
+        assert!(!joined.contains("weekly_limit"), "{joined}");
     }
 
     #[test]

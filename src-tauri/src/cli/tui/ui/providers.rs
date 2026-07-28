@@ -370,6 +370,42 @@ mod tests {
         data
     }
 
+    fn coding_plan_usage_data() -> UiData {
+        let mut data = usage_script_data();
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota.finish(
+            target,
+            ProviderUsageQuota::Script(UsageResult {
+                success: true,
+                data: Some(vec![
+                    UsageData {
+                        plan_name: Some("five_hour".to_string()),
+                        extra: None,
+                        is_valid: Some(true),
+                        invalid_message: None,
+                        total: Some(100.0),
+                        used: Some(0.0),
+                        remaining: Some(100.0),
+                        unit: Some("%".to_string()),
+                    },
+                    UsageData {
+                        plan_name: Some("weekly_limit".to_string()),
+                        extra: None,
+                        is_valid: Some(true),
+                        invalid_message: None,
+                        total: Some(100.0),
+                        used: Some(100.0),
+                        remaining: Some(0.0),
+                        unit: Some("%".to_string()),
+                    },
+                ]),
+                error: None,
+            }),
+        );
+        data
+    }
+
     fn claude_openai_chat_data() -> UiData {
         let mut data = super::super::tests::minimal_data(&AppType::Claude);
         data.providers.rows[0].provider = Provider::with_id(
@@ -563,6 +599,24 @@ mod tests {
         assert!(all.contains("12 USD"), "{all}");
         assert!(all.contains("second ago"), "{all}");
         assert!(!all.contains("default"), "{all}");
+    }
+
+    #[test]
+    fn coding_plan_quota_uses_localized_window_labels() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = coding_plan_usage_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 240, 40));
+
+        assert!(all.contains("5h 100 / 100 % left, 0 used"), "{all}");
+        assert!(all.contains("weekly 0 / 100 % left, 100 used"), "{all}");
+        assert!(!all.contains("five_hour"), "{all}");
+        assert!(!all.contains("weekly_limit"), "{all}");
     }
 
     #[cfg(not(unix))]

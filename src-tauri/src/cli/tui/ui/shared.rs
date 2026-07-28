@@ -739,8 +739,12 @@ fn script_usage_compact_line(
             spans.push(Span::raw("  "));
         }
         if let Some(name) = display_usage_plan_name(item) {
+            let name = match name.trim() {
+                "five_hour" | "weekly_limit" => quota_tier_label(name.trim()),
+                other => other.to_string(),
+            };
             spans.push(Span::styled(
-                format!("{} ", name.trim()),
+                format!("{name} "),
                 Style::default().fg(theme.comment),
             ));
         }
