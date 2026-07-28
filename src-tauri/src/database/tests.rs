@@ -2637,6 +2637,27 @@ fn schema_model_pricing_is_seeded_on_init() {
         ("0.28".to_string(), "1.11".to_string(), "0.028".to_string()),
         "新建数据库也应使用修正后的 DeepSeek 定价"
     );
+
+    // MiniMax-M3 定价应随种子数据一起写入
+    let minimax_m3: (String, String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million, cache_read_cost_per_million,
+                    cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'minimax-m3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("check minimax-m3 pricing");
+    assert_eq!(
+        minimax_m3,
+        (
+            "0.6".to_string(),
+            "2.4".to_string(),
+            "0.12".to_string(),
+            "0".to_string()
+        ),
+        "MiniMax M3 定价应与内置定价表一致"
+    );
 }
 
 #[test]
