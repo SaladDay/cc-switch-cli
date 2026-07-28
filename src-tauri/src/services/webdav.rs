@@ -49,7 +49,7 @@ pub fn auth_from_credentials(username: &str, password: &str) -> WebDavAuth {
 // ---------------------------------------------------------------------------
 
 pub fn parse_base_url(raw: &str) -> Result<Url, AppError> {
-    let trimmed = raw.trim().trim_end_matches('/');
+    let trimmed = raw.trim();
     let url = Url::parse(trimmed)
         .map_err(|e| AppError::InvalidInput(format!("WebDAV base_url 不是合法 URL: {e}")))?;
     let scheme = url.scheme();
@@ -158,6 +158,17 @@ pub fn path_segments(raw: &str) -> impl Iterator<Item = &str> {
     raw.trim_matches('/')
         .split('/')
         .filter(|segment| !segment.is_empty())
+}
+
+fn collection_url(raw: String) -> Result<String, AppError> {
+    let mut url = Url::parse(&raw)
+        .map_err(|e| AppError::InvalidInput(format!("WebDAV 目录 URL 不是合法 URL: {e}")))?;
+    if !url.path().ends_with('/') {
+        url.path_segments_mut()
+            .map_err(|_| AppError::InvalidInput("WebDAV 目录 URL 必须是分层地址".to_string()))?
+            .push("");
+    }
+    Ok(url.to_string())
 }
 
 #[cfg(test)]
@@ -485,7 +496,8 @@ pub async fn ensure_remote_directories(
     for segment in segments {
         current.push(segment.clone());
         let url = build_remote_url(base_url, &current)?;
-        ensure_single_dir(&url, auth, base_url).await?;
+        let dir_url = collection_url(url)?;
+        ensure_single_dir(&dir_url, auth, base_url).await?;
     }
     Ok(())
 }
@@ -521,7 +533,6 @@ mod tests {
 
     #[test]
     fn build_remote_url_encodes_path_segments() {
-        let base = "https://dav.example.com/remote.php/dav/files/demo";
         let segments = vec![
             "cc switch-sync".to_string(),
             "team a".to_string(),
@@ -529,11 +540,16 @@ mod tests {
             "default profile".to_string(),
             "manifest.json".to_string(),
         ];
-        let url = build_remote_url(base, &segments).expect("build remote url");
-        assert_eq!(
-            url,
-            "https://dav.example.com/remote.php/dav/files/demo/cc%20switch-sync/team%20a/v2/default%20profile/manifest.json"
-        );
+        for base in [
+            "https://dav.example.com/remote.php/dav/files/demo",
+            "https://dav.example.com/remote.php/dav/files/demo/",
+        ] {
+            let url = build_remote_url(base, &segments).expect("build remote url");
+            assert_eq!(
+                url,
+                "https://dav.example.com/remote.php/dav/files/demo/cc%20switch-sync/team%20a/v2/default%20profile/manifest.json"
+            );
+        }
     }
 
     #[test]
@@ -546,6 +562,25 @@ mod tests {
 
         let segs: Vec<&str> = path_segments("").collect();
         assert!(segs.is_empty());
+    }
+
+    #[test]
+    fn collection_url_adds_missing_trailing_slash() {
+        assert_eq!(
+            collection_url("https://dav.example.com/dav/team".to_string())
+                .expect("build collection URL"),
+            "https://dav.example.com/dav/team/"
+        );
+        assert_eq!(
+            collection_url("https://dav.example.com/dav/team/".to_string())
+                .expect("keep collection URL"),
+            "https://dav.example.com/dav/team/"
+        );
+        assert_eq!(
+            collection_url("https://dav.example.com/dav/team%20a?token=secret#section".to_string())
+                .expect("preserve URL components"),
+            "https://dav.example.com/dav/team%20a/?token=secret#section"
+        );
     }
 
     #[test]
@@ -610,6 +645,7 @@ mod tests {
     fn parse_base_url_accepts_https() {
         let url = parse_base_url("https://example.com/dav/").unwrap();
         assert_eq!(url.scheme(), "https");
+        assert_eq!(url.path(), "/dav/");
     }
 
     #[test]
