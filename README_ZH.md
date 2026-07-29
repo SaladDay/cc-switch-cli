@@ -405,6 +405,28 @@ cc-switch skills repos enable <repo> # 启用仓库但保留当前分支
 cc-switch skills repos disable <repo> # 禁用仓库但保留当前分支
 ```
 
+
+**私有 GitHub Skill 仓库：** 仓库配置只保存 `owner/name/branch/enabled`，不会持久化 token。下载 GitHub ZIP 时会按以下优先级读取环境变量：
+
+```text
+CC_SWITCH_SKILLS_GITHUB_TOKEN_OWNER_REPO
+CC_SWITCH_SKILLS_GITHUB_TOKEN_OWNER
+CC_SWITCH_SKILLS_GITHUB_TOKEN
+GITHUB_TOKEN
+GH_TOKEN
+```
+
+`OWNER` 和 `REPO` 会转为大写，非字母数字字符会转为 `_`。例如 `acme/private-skills` 可使用：
+
+```bash
+export CC_SWITCH_SKILLS_GITHUB_TOKEN_ACME_PRIVATE_SKILLS="ghp_xxx"
+cc-switch skills repos add acme/private-skills@main
+cc-switch skills discover
+```
+
+token 至少需要仓库内容读取权限；不要把 token 写入配置文件或提交到仓库。
+
+
 ### 🕘 历史会话与用量统计
 
 查看历史会话，一键 resume，删除旧会话，并将本地会话日志导入 token / cost 统计，方便管理用量。
