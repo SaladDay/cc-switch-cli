@@ -231,10 +231,7 @@ mod tests {
             "MCP Server Management"
         );
         // Leading indent spaces before the emoji (the centred home title).
-        assert_eq!(
-            strip_leading_emoji("    🎯 CC-Switch 交互模式"),
-            "CC-Switch 交互模式"
-        );
+        assert_eq!(strip_leading_emoji("    🎯 CC-Switch"), "CC-Switch");
         // No emoji prefix → unchanged, even with a leading indent or CJK text.
         assert_eq!(strip_leading_emoji("供应商管理"), "供应商管理");
         assert_eq!(strip_leading_emoji("Custom Provider"), "Custom Provider");

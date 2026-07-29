@@ -160,15 +160,14 @@ pub(super) fn render_main(
             vec![Span::styled(api_url, value_style)],
         ),
     ];
-    let quota_line_index = current_quota_line.map(|quota| {
+    if let Some(quota) = current_quota_line {
         connection_lines.push(kv_line(
             theme,
             texts::tui_label_quota(),
             label_width,
             quota.spans,
         ));
-        connection_lines.len() - 1
-    });
+    }
 
     let webdav = data.config.webdav_sync.as_ref();
     let is_config_value_set = |value: &str| !value.trim().is_empty();
@@ -249,24 +248,15 @@ pub(super) fn render_main(
         Span::styled(webdav_last_sync_text.clone(), webdav_last_sync_style),
     ];
 
-    if let Some(quota_index) = quota_line_index {
-        let mut spans = std::mem::take(&mut connection_lines[quota_index].spans);
-        spans.push(Span::styled(
-            format!("{}{} ", home_separator(), texts::tui_home_section_webdav()),
-            Style::default()
-                .fg(theme.comment)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.extend(webdav_spans);
-        connection_lines[quota_index] = Line::from(spans);
-    } else {
-        connection_lines.push(kv_line(
-            theme,
-            texts::tui_home_section_webdav(),
-            label_width,
-            webdav_spans,
-        ));
-    }
+    // Keep WebDAV on its own connection-card row. Quota text is provider
+    // controlled and can be wider than the terminal; appending WebDAV after it
+    // made sync errors disappear entirely when the row was clipped.
+    connection_lines.push(kv_line(
+        theme,
+        texts::tui_home_section_webdav(),
+        label_width,
+        webdav_spans,
+    ));
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -301,7 +291,6 @@ pub(super) fn render_main(
     let top_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Length(connection_card_height),
             Constraint::Length(8),
             Constraint::Min(0),
@@ -309,9 +298,9 @@ pub(super) fn render_main(
         .split(chunks[0]);
 
     let card_border = Style::default().fg(theme.dim);
-    render_connection_card(frame, top_chunks[1], theme, &connection_lines, card_border);
-    render_local_env_check_card(frame, app, top_chunks[2], theme, card_border);
-    render_home_usage_chart(frame, app, data, top_chunks[3], theme, card_border);
+    render_connection_card(frame, top_chunks[0], theme, &connection_lines, card_border);
+    render_local_env_check_card(frame, app, top_chunks[1], theme, card_border);
+    render_home_usage_chart(frame, app, data, top_chunks[2], theme, card_border);
 
     if current_app_routed {
         render_proxy_activity_dashboard(

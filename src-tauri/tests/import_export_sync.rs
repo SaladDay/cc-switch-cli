@@ -114,9 +114,15 @@ fn sync_codex_provider_writes_auth_and_config() {
     let config_path = cc_switch_lib::get_codex_config_path();
 
     assert!(
-        !auth_path.exists(),
-        "auth.json should not be created by third-party provider sync at {}",
+        auth_path.exists(),
+        "auth.json should be refreshed by third-party provider sync at {}",
         auth_path.display()
+    );
+    let auth: serde_json::Value = read_json_file(&auth_path).expect("read auth.json");
+    assert_eq!(
+        auth.get("OPENAI_API_KEY").and_then(|value| value.as_str()),
+        Some("codex-key"),
+        "forced sync should write the current provider API key"
     );
     assert!(
         config_path.exists(),
@@ -130,8 +136,8 @@ fn sync_codex_provider_writes_auth_and_config() {
         "config.toml should contain serialized enabled MCP server"
     );
     assert!(
-        toml_text.contains("experimental_bearer_token"),
-        "config.toml should contain provider-scoped bearer token"
+        !toml_text.contains("experimental_bearer_token"),
+        "preserve disabled should keep the provider key in auth.json"
     );
 
     // 当前供应商应同步最新 config 文本

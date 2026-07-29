@@ -224,36 +224,6 @@ pub fn get_app_config_path() -> PathBuf {
     get_app_config_dir().join("config.json")
 }
 
-/// 将目录权限收紧为仅所有者可访问（Unix: 0o700）
-#[cfg(unix)]
-pub(crate) fn restrict_dir_permissions(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path is a symlink",
-        ));
-    }
-    if !meta.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path is not a directory",
-        ));
-    }
-    let mut perms = meta.permissions();
-    if perms.mode() & 0o777 != 0o700 {
-        perms.set_mode(0o700);
-        fs::set_permissions(path, perms)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn restrict_dir_permissions(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
 /// 将文件权限收紧为仅所有者可读写（Unix: 0o600）
 #[cfg(unix)]
 pub(crate) fn restrict_file_permissions(path: &Path) -> std::io::Result<()> {
@@ -281,255 +251,6 @@ pub(crate) fn restrict_file_permissions(path: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 pub(crate) fn restrict_file_permissions(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
-/// 检查配置目录、敏感配置/数据文件和备份目录的权限是否安全（Unix only）
-///
-/// 返回不安全的路径列表：`(路径, 当前权限, 期望权限)`
-#[cfg(unix)]
-pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
-    let mut issues = Vec::new();
-    let config_dir = get_app_config_dir();
-    if let Err(err) = resolve_config_dir_without_following_user_symlinks(&config_dir) {
-        log::warn!("跳过配置目录权限扫描：配置目录校验失败: {err}");
-        return issues;
-    }
-    let backup_dir = config_dir.join("backups");
-
-    collect_dir_permission_issue(&config_dir, &mut issues);
-    collect_dir_permission_issue(&backup_dir, &mut issues);
-
-    collect_root_sensitive_file_permission_issues(&config_dir, &mut issues);
-    collect_sensitive_file_permission_issues(&backup_dir, &mut issues);
-
-    issues
-}
-
-#[cfg(not(unix))]
-pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
-    Vec::new()
-}
-
-#[cfg(unix)]
-fn collect_dir_permission_issue(dir: &Path, issues: &mut Vec<(PathBuf, u32, u32)>) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let Ok(meta) = fs::symlink_metadata(dir) else {
-        return;
-    };
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return;
-    }
-
-    let mode = meta.permissions().mode() & 0o777;
-    if mode != 0o700 {
-        issues.push((dir.to_path_buf(), mode, 0o700));
-    }
-}
-
-#[cfg(unix)]
-fn collect_root_sensitive_file_permission_issues(
-    dir: &Path,
-    issues: &mut Vec<(PathBuf, u32, u32)>,
-) {
-    let Ok(meta) = fs::symlink_metadata(dir) else {
-        return;
-    };
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return;
-    }
-
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_file() && is_sensitive_config_file(&path) {
-            collect_sensitive_file_permission_issue(&path, issues);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn collect_sensitive_file_permission_issues(dir: &Path, issues: &mut Vec<(PathBuf, u32, u32)>) {
-    let Ok(meta) = fs::symlink_metadata(dir) else {
-        return;
-    };
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return;
-    }
-
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-
-        if file_type.is_dir() {
-            collect_sensitive_file_permission_issues(&path, issues);
-        } else if file_type.is_file() && is_sensitive_config_file(&path) {
-            collect_sensitive_file_permission_issue(&path, issues);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn collect_sensitive_file_permission_issue(path: &Path, issues: &mut Vec<(PathBuf, u32, u32)>) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return;
-    };
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return;
-    }
-
-    let mode = meta.permissions().mode() & 0o777;
-    if is_insecure_sensitive_file_mode(mode) {
-        issues.push((path.to_path_buf(), mode, 0o600));
-    }
-}
-
-#[cfg(unix)]
-fn is_sensitive_config_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "db" | "json" | "sql"))
-        .unwrap_or(false)
-}
-
-#[cfg(unix)]
-fn is_insecure_sensitive_file_mode(mode: u32) -> bool {
-    mode & !0o600 != 0
-}
-
-trait PermissionPrompter {
-    fn confirm_custom_dir(&mut self, path: &Path) -> Result<bool, AppError>;
-    fn confirm_fix(&mut self) -> Result<bool, AppError>;
-}
-
-struct InquirePermissionPrompter;
-
-impl PermissionPrompter for InquirePermissionPrompter {
-    fn confirm_custom_dir(&mut self, _path: &Path) -> Result<bool, AppError> {
-        inquire::Confirm::new(texts::config_permissions_confirm_custom_dir())
-            .with_default(false)
-            .prompt()
-            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))
-    }
-
-    fn confirm_fix(&mut self) -> Result<bool, AppError> {
-        inquire::Confirm::new(texts::config_permissions_fix_prompt())
-            .with_default(true)
-            .prompt()
-            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))
-    }
-}
-
-fn prompt_fix_permissions_interactive(
-    issues: &[(PathBuf, u32, u32)],
-    custom_dir: Option<PathBuf>,
-    prompter: &mut dyn PermissionPrompter,
-) -> Result<(), AppError> {
-    eprintln!("{}", texts::config_permissions_insecure_header());
-    for (path, current, expected) in issues {
-        eprintln!(
-            "{}",
-            texts::config_permissions_detail(&path.display().to_string(), *current, *expected,)
-        );
-    }
-
-    if let Some(custom_path) = custom_dir {
-        if !custom_path.as_os_str().is_empty() {
-            eprintln!(
-                "{}",
-                texts::config_permissions_custom_dir_notice(&custom_path.display().to_string())
-            );
-            if !prompter.confirm_custom_dir(&custom_path)? {
-                eprintln!("{}", texts::config_permissions_custom_dir_skipped());
-                return Ok(());
-            }
-        }
-    }
-
-    if prompter.confirm_fix()? {
-        for (path, _, _) in issues {
-            if path.is_dir() {
-                restrict_dir_permissions(path).map_err(|e| AppError::io(path, e))?;
-            } else {
-                restrict_file_permissions(path).map_err(|e| AppError::io(path, e))?;
-            }
-        }
-        eprintln!("{}", texts::config_permissions_fixed());
-    } else {
-        eprintln!("{}", texts::config_permissions_fix_warn_interactive());
-    }
-
-    Ok(())
-}
-
-fn write_permissions_noninteractive_warning<W: Write>(
-    mut output: W,
-    issues: &[(PathBuf, u32, u32)],
-) -> std::io::Result<()> {
-    writeln!(
-        output,
-        "{}",
-        texts::config_permissions_fix_warn_noninteractive()
-    )?;
-    for (path, current, expected) in issues {
-        writeln!(
-            output,
-            "{}",
-            texts::config_permissions_detail(&path.display().to_string(), *current, *expected,)
-        )?;
-    }
-    Ok(())
-}
-
-/// 访问数据库前检查权限，若不安全则提示用户是否修复
-///
-/// - 交互终端：使用 inquire 提示用户，确认后修复，拒绝则警告
-/// - 非交互终端（Docker/管道）：仅打印警告到 stderr
-pub fn prompt_fix_permissions() -> Result<(), AppError> {
-    validate_config_dir()?;
-
-    let issues = check_permissions();
-    if issues.is_empty() {
-        return Ok(());
-    }
-
-    let is_terminal = !cfg!(test)
-        && std::io::IsTerminal::is_terminal(&std::io::stdin())
-        && std::io::IsTerminal::is_terminal(&std::io::stdout())
-        && std::io::IsTerminal::is_terminal(&std::io::stderr());
-
-    if is_terminal {
-        let custom_dir = env::var_os("CC_SWITCH_CONFIG_DIR").map(PathBuf::from);
-        let mut prompter = InquirePermissionPrompter;
-        prompt_fix_permissions_interactive(&issues, custom_dir, &mut prompter)?;
-    } else {
-        let stderr = std::io::stderr();
-        let mut stderr = stderr.lock();
-        write_permissions_noninteractive_warning(&mut stderr, &issues)
-            .map_err(|e| AppError::Message(format!("Failed to write permission warning: {e}")))?;
-    }
-
     Ok(())
 }
 
@@ -687,6 +408,14 @@ fn should_restrict_sensitive_config_file(path: &Path) -> Result<bool, AppError> 
         let _ = path;
         Ok(false)
     }
+}
+
+#[cfg(unix)]
+fn is_sensitive_config_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "db" | "json" | "sql"))
+        .unwrap_or(false)
 }
 
 pub(crate) fn resolve_managed_storage_path(path: &Path) -> Result<Option<PathBuf>, AppError> {
@@ -851,8 +580,7 @@ fn create_secure_config_dir_all_no_symlink(
                     }
                     Ok(meta) if meta.is_dir() => {
                         if managed_component {
-                            restrict_dir_permissions(&current)
-                                .map_err(|e| AppError::io(&current, e))?;
+                            validate_existing_managed_config_dir(&current)?;
                         }
                     }
                     Ok(_) => {
@@ -870,16 +598,15 @@ fn create_secure_config_dir_all_no_symlink(
                                 source: err,
                             });
                         }
-                        fs::DirBuilder::new()
-                            .mode(0o700)
-                            .create(&current)
-                            .or_else(|create_err| {
-                                if create_err.kind() != std::io::ErrorKind::AlreadyExists {
-                                    return Err(create_err);
-                                }
-                                ensure_existing_secure_config_dir(&current)
-                            })
-                            .map_err(|e| AppError::io(&current, e))?;
+                        match fs::DirBuilder::new().mode(0o700).create(&current) {
+                            Ok(()) => {}
+                            Err(create_err)
+                                if create_err.kind() == std::io::ErrorKind::AlreadyExists =>
+                            {
+                                validate_existing_managed_config_dir(&current)?;
+                            }
+                            Err(create_err) => return Err(AppError::io(&current, create_err)),
+                        }
                     }
                     Err(err) => return Err(AppError::io(&current, err)),
                 }
@@ -891,19 +618,32 @@ fn create_secure_config_dir_all_no_symlink(
 }
 
 #[cfg(unix)]
-fn ensure_existing_secure_config_dir(path: &Path) -> std::io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "path is a symlink",
-        )),
-        Ok(meta) if meta.is_dir() => restrict_dir_permissions(path),
-        Ok(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "path exists and is not a directory",
-        )),
-        Err(err) => Err(err),
+fn validate_existing_managed_config_dir(path: &Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = fs::symlink_metadata(path).map_err(|e| AppError::io(path, e))?;
+    if meta.file_type().is_symlink() {
+        return Err(AppError::InvalidInput(format!(
+            "受管配置目录不能是符号链接: {}",
+            path.display()
+        )));
     }
+    if !meta.is_dir() {
+        return Err(AppError::InvalidInput(format!(
+            "受管配置路径不是目录: {}",
+            path.display()
+        )));
+    }
+
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o022 != 0 {
+        return Err(AppError::InvalidInput(format!(
+            "受管配置目录不能允许组或其他用户写入: {} ({mode:04o})",
+            path.display()
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1028,36 +768,6 @@ mod tests {
     impl Drop for SettingsGuard {
         fn drop(&mut self) {
             let _ = crate::settings::update_settings(self.original.clone());
-        }
-    }
-
-    struct FakePermissionPrompter {
-        custom_dir_response: bool,
-        fix_response: bool,
-        custom_dir_calls: usize,
-        fix_calls: usize,
-    }
-
-    impl FakePermissionPrompter {
-        fn new(custom_dir_response: bool, fix_response: bool) -> Self {
-            Self {
-                custom_dir_response,
-                fix_response,
-                custom_dir_calls: 0,
-                fix_calls: 0,
-            }
-        }
-    }
-
-    impl PermissionPrompter for FakePermissionPrompter {
-        fn confirm_custom_dir(&mut self, _path: &Path) -> Result<bool, AppError> {
-            self.custom_dir_calls += 1;
-            Ok(self.custom_dir_response)
-        }
-
-        fn confirm_fix(&mut self) -> Result<bool, AppError> {
-            self.fix_calls += 1;
-            Ok(self.fix_response)
         }
     }
 
@@ -1292,7 +1002,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn validate_and_permission_checks_reject_symlink_parent_without_touching_target() {
+    fn validate_config_dir_rejects_symlink_parent_without_touching_target() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let _guard = lock_test_home_and_settings();
@@ -1314,433 +1024,24 @@ mod tests {
             validate_config_dir().is_err(),
             "validation should reject the symlink parent component"
         );
-        assert!(
-            check_permissions().is_empty(),
-            "permission scan should not follow rejected symlink parents"
-        );
-
-        let err = prompt_fix_permissions().expect_err("prompt should fail before chmod");
-        assert!(
-            err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
-            "unexpected error: {err}"
-        );
         let mode = std::fs::metadata(&external_config)
             .expect("metadata external config")
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(
-            mode, 0o755,
-            "prompt must not chmod the symlink target before DB init rejects it"
-        );
+        assert_eq!(mode, 0o755, "validation must not chmod the symlink target");
     }
 
     #[cfg(unix)]
     #[test]
-    fn check_permissions_returns_empty_for_secure_permissions() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        // Ensure dir has 0o700
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("set dir perms");
-
-        // Create a db file with 0o600
-        let db_path = temp.path().join("cc-switch.db");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&db_path)
-            .expect("create db file");
-
-        let issues = check_permissions();
-        assert!(issues.is_empty(), "expected no issues, got: {:?}", issues);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_permissions_detects_insecure_dir() {
+    fn write_json_file_restricts_sensitive_file_without_changing_existing_config_dir() {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = lock_test_home_and_settings();
         let temp = tempfile::tempdir().expect("create temp dir");
         let _env =
             ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        // Set dir to permissive
         std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
-            .expect("set dir perms");
-
-        let issues = check_permissions();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].0, temp.path());
-        assert_eq!(issues[0].1, 0o755);
-        assert_eq!(issues[0].2, 0o700);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_permissions_detects_insecure_db_file() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        // Ensure dir has 0o700 so only the db file is flagged
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("set dir perms");
-
-        // Create db file with permissive mode
-        let db_path = temp.path().join("cc-switch.db");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .open(&db_path)
-            .expect("create db file");
-
-        let issues = check_permissions();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].0, db_path);
-        assert_eq!(issues[0].1, 0o644);
-        assert_eq!(issues[0].2, 0o600);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_permissions_detects_both_insecure() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        // Set dir to permissive
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
-            .expect("set dir perms");
-
-        // Create db file with permissive mode
-        let db_path = temp.path().join("cc-switch.db");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .open(&db_path)
-            .expect("create db file");
-
-        let issues = check_permissions();
-        assert_eq!(issues.len(), 2);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_permissions_detects_insecure_backup_dir() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("set config dir perms");
-        let backup_dir = temp.path().join("backups");
-        std::fs::create_dir(&backup_dir).expect("create backup dir");
-        std::fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o755))
-            .expect("set backup dir perms");
-
-        let issues = check_permissions();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].0, backup_dir);
-        assert_eq!(issues[0].1, 0o755);
-        assert_eq!(issues[0].2, 0o700);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_permissions_detects_insecure_sensitive_files_recursively() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("set config dir perms");
-        let backup_dir = temp.path().join("backups");
-        let nested = backup_dir.join("nested");
-        std::fs::create_dir_all(&nested).expect("create nested dir");
-        std::fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o700))
-            .expect("set backup dir perms");
-
-        let root_json = temp.path().join("config.json");
-        let nested_sql = nested.join("backup.sql");
-        let nested_db = nested.join("snapshot.db");
-        for path in [&root_json, &nested_sql, &nested_db] {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o644)
-                .open(path)
-                .expect("create sensitive file");
-        }
-
-        let issues = check_permissions();
-        let issue_paths = issues
-            .iter()
-            .map(|(path, current, expected)| (path.clone(), *current, *expected))
-            .collect::<Vec<_>>();
-
-        assert_eq!(issues.len(), 3);
-        assert!(issue_paths.contains(&(root_json, 0o644, 0o600)));
-        assert!(issue_paths.contains(&(nested_sql, 0o644, 0o600)));
-        assert!(issue_paths.contains(&(nested_db, 0o644, 0o600)));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_permissions_ignores_skill_json_metadata() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("set config dir perms");
-        let skill_dir = temp.path().join("skills").join("demo-skill");
-        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-        let plugin_json = skill_dir.join("plugin.json");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .open(&plugin_json)
-            .expect("create skill metadata");
-
-        assert!(
-            check_permissions().is_empty(),
-            "skill metadata JSON should not be treated as cc-switch secret state"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_permissions_allows_more_restrictive_sensitive_file_permissions() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("set config dir perms");
-
-        let read_only = temp.path().join("read-only.json");
-        let write_only = temp.path().join("write-only.sql");
-        for (path, mode) in [(&read_only, 0o400), (&write_only, 0o200)] {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .mode(mode)
-                .open(path)
-                .expect("create sensitive file");
-            std::fs::set_permissions(path, fs::Permissions::from_mode(mode))
-                .expect("set sensitive file perms");
-        }
-
-        let issues = check_permissions();
-        assert!(issues.is_empty(), "expected no issues, got: {:?}", issues);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn interactive_permission_prompt_fixes_recursive_sensitive_files_when_confirmed() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let nested = temp.path().join("nested");
-        std::fs::create_dir(&nested).expect("create nested dir");
-        let json_path = nested.join("settings.json");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .open(&json_path)
-            .expect("create json file");
-        let issues = vec![(json_path.clone(), 0o644, 0o600)];
-        let mut prompter = FakePermissionPrompter::new(true, true);
-
-        prompt_fix_permissions_interactive(&issues, None, &mut prompter)
-            .expect("interactive recursive file fix should succeed");
-
-        let mode = std::fs::metadata(&json_path)
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(prompter.custom_dir_calls, 0);
-        assert_eq!(prompter.fix_calls, 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn prompt_fix_permissions_does_not_fix_in_test_build() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
-            .expect("set dir perms");
-
-        prompt_fix_permissions().expect("test build should only warn");
-
-        // Permissions should remain unchanged because cfg!(test) skips the fix logic
-        let mode = std::fs::metadata(temp.path())
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o755,
-            "test build should not modify directory permissions"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn interactive_permission_prompt_fixes_permissions_when_confirmed() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("create temp dir");
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
-            .expect("set dir perms");
-        let issues = vec![(temp.path().to_path_buf(), 0o755, 0o700)];
-        let mut prompter = FakePermissionPrompter::new(true, true);
-
-        prompt_fix_permissions_interactive(&issues, None, &mut prompter)
-            .expect("interactive fix should succeed");
-
-        let mode = std::fs::metadata(temp.path())
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o700);
-        assert_eq!(prompter.custom_dir_calls, 0);
-        assert_eq!(prompter.fix_calls, 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn interactive_permission_prompt_fixes_file_permissions_when_confirmed() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let db_path = temp.path().join("cc-switch.db");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .open(&db_path)
-            .expect("create db file");
-        let issues = vec![(db_path.clone(), 0o644, 0o600)];
-        let mut prompter = FakePermissionPrompter::new(true, true);
-
-        prompt_fix_permissions_interactive(&issues, None, &mut prompter)
-            .expect("interactive file fix should succeed");
-
-        let mode = std::fs::metadata(&db_path)
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(prompter.custom_dir_calls, 0);
-        assert_eq!(prompter.fix_calls, 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn interactive_permission_prompt_leaves_permissions_when_fix_declined() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("create temp dir");
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
-            .expect("set dir perms");
-        let issues = vec![(temp.path().to_path_buf(), 0o755, 0o700)];
-        let mut prompter = FakePermissionPrompter::new(true, false);
-
-        prompt_fix_permissions_interactive(&issues, None, &mut prompter)
-            .expect("interactive prompt should succeed");
-
-        let mode = std::fs::metadata(temp.path())
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o755);
-        assert_eq!(prompter.custom_dir_calls, 0);
-        assert_eq!(prompter.fix_calls, 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn interactive_permission_prompt_skips_custom_dir_when_not_confirmed() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("create temp dir");
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
-            .expect("set dir perms");
-        let custom_dir = temp.path().to_path_buf();
-        let issues = vec![(custom_dir.clone(), 0o755, 0o700)];
-        let mut prompter = FakePermissionPrompter::new(false, true);
-
-        prompt_fix_permissions_interactive(&issues, Some(custom_dir), &mut prompter)
-            .expect("interactive prompt should succeed");
-
-        let mode = std::fs::metadata(temp.path())
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o755);
-        assert_eq!(prompter.custom_dir_calls, 1);
-        assert_eq!(prompter.fix_calls, 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_json_file_restricts_sensitive_files_under_cc_switch_config_dir() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env =
-            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
-        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
             .expect("set config dir perms");
 
         let path = temp.path().join("config.json");
@@ -1758,13 +1059,12 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
-        assert_eq!(dir_mode, 0o700);
-        assert!(check_permissions().is_empty());
+        assert_eq!(dir_mode, 0o755);
     }
 
     #[cfg(unix)]
     #[test]
-    fn existing_secure_config_dir_recheck_restricts_directory_permissions() {
+    fn existing_config_dir_validation_preserves_directory_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("create temp dir");
@@ -1772,19 +1072,19 @@ mod tests {
         std::fs::create_dir(&dir).expect("create dir");
         std::fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("set dir perms");
 
-        ensure_existing_secure_config_dir(&dir).expect("existing directory should be accepted");
+        validate_existing_managed_config_dir(&dir).expect("existing directory should be accepted");
 
         let mode = std::fs::metadata(&dir)
             .expect("metadata dir")
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o700);
+        assert_eq!(mode, 0o755);
     }
 
     #[cfg(unix)]
     #[test]
-    fn existing_secure_config_dir_recheck_rejects_symlink() {
+    fn existing_config_dir_validation_rejects_symlink() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().expect("create temp dir");
@@ -1793,9 +1093,35 @@ mod tests {
         std::fs::create_dir(&target).expect("create target");
         symlink(&target, &link).expect("create symlink");
 
-        let err = ensure_existing_secure_config_dir(&link)
+        let err = validate_existing_managed_config_dir(&link)
             .expect_err("existing symlink must not be accepted");
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(err.to_string().contains("符号链接"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_json_file_rejects_other_user_writable_config_dir_without_changing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o777))
+            .expect("set config dir perms");
+
+        let path = temp.path().join("config.json");
+        let err = write_json_file(&path, &serde_json::json!({ "token": "secret" }))
+            .expect_err("other-user-writable config dir must be rejected");
+
+        assert!(err.to_string().contains("不能允许组或其他用户写入"));
+        assert!(!path.exists(), "rejected write must not create the target");
+        let mode = std::fs::metadata(temp.path())
+            .expect("metadata config dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o777, "validation must not chmod the directory");
     }
 
     #[cfg(target_os = "macos")]

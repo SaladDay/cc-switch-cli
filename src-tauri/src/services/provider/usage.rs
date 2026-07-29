@@ -1,6 +1,5 @@
 use std::sync::OnceLock;
 
-use regex::Regex;
 use tokio::sync::RwLock;
 
 use crate::app_config::AppType;
@@ -470,24 +469,13 @@ impl ProviderService {
                     ));
                 }
 
-                let re = Regex::new(r#"base_url\s*=\s*["']([^"']+)["']"#).map_err(|e| {
+                crate::codex_config::extract_codex_base_url(config_toml).ok_or_else(|| {
                     AppError::localized(
-                        "provider.regex_init_failed",
-                        format!("正则初始化失败: {e}"),
-                        format!("Failed to initialize regex: {e}"),
+                        "provider.codex.base_url.invalid",
+                        "config.toml 中 base_url 格式错误",
+                        "base_url in config.toml has invalid format",
                     )
-                })?;
-
-                re.captures(config_toml)
-                    .and_then(|caps| caps.get(1))
-                    .map(|m| m.as_str().to_string())
-                    .ok_or_else(|| {
-                        AppError::localized(
-                            "provider.codex.base_url.invalid",
-                            "config.toml 中 base_url 格式错误",
-                            "base_url in config.toml has invalid format",
-                        )
-                    })
+                })
             }
             AppType::Gemini => {
                 use crate::gemini_config::json_to_env;
@@ -644,7 +632,12 @@ mod tests {
                 "auth": {
                     "OPENAI_API_KEY": "sk-codex"
                 },
-                "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://codex.example/v1\"\n"
+                "config": "model_provider = \"custom\"\n\
+                           # base_url = \"https://stale.example/v1\"\n\
+                           [model_providers.inactive]\n\
+                           base_url = \"https://inactive.example/v1\"\n\
+                           [model_providers.custom]\n\
+                           base_url = \"https://codex.example/v1\"\n"
             }),
             None,
         );

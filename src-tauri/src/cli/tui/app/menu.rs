@@ -73,6 +73,8 @@ impl App {
             quota_auto_target_key: None,
             quota_last_auto_tick: None,
             usage_last_auto_sync_tick: None,
+            usage_proxy_activity_dirty: false,
+            usage_last_proxy_refresh_tick: None,
             usage_sync_round_started_tick: None,
             prompt_import_prompted_apps: HashSet::new(),
             common_config_notice_confirmed: true,
@@ -405,6 +407,8 @@ impl App {
         self.proxy_output_activity_samples.clear();
         self.proxy_activity_last_input_tokens = Some(input_tokens);
         self.proxy_activity_last_output_tokens = Some(output_tokens);
+        self.usage_proxy_activity_dirty = false;
+        self.usage_last_proxy_refresh_tick = Some(self.tick);
     }
 
     pub(crate) fn observe_proxy_token_activity(&mut self, input_tokens: u64, output_tokens: u64) {
@@ -419,20 +423,25 @@ impl App {
             return;
         };
 
-        let (input_delta, output_delta) =
-            if input_tokens < previous_input || output_tokens < previous_output {
-                self.proxy_input_activity_samples.clear();
-                self.proxy_output_activity_samples.clear();
-                (0, 0)
-            } else {
-                (
-                    input_tokens.saturating_sub(previous_input),
-                    output_tokens.saturating_sub(previous_output),
-                )
-            };
+        let counters_reset = input_tokens < previous_input || output_tokens < previous_output;
+        let (input_delta, output_delta) = if counters_reset {
+            self.proxy_input_activity_samples.clear();
+            self.proxy_output_activity_samples.clear();
+            (0, 0)
+        } else {
+            (
+                input_tokens.saturating_sub(previous_input),
+                output_tokens.saturating_sub(previous_output),
+            )
+        };
 
         self.proxy_input_activity_samples.push(input_delta);
         self.proxy_output_activity_samples.push(output_delta);
+        // A proxy restart can reset its in-memory counters after it has already
+        // persisted usage that the current aggregate has not seen. Treat the
+        // rollback as activity: one conservative refresh is cheaper than
+        // leaving the home snapshot stale until another request arrives.
+        self.usage_proxy_activity_dirty |= counters_reset || input_delta > 0 || output_delta > 0;
 
         if self.proxy_input_activity_samples.len() > PROXY_ACTIVITY_WINDOW {
             let overflow = self.proxy_input_activity_samples.len() - PROXY_ACTIVITY_WINDOW;
@@ -442,6 +451,22 @@ impl App {
             let overflow = self.proxy_output_activity_samples.len() - PROXY_ACTIVITY_WINDOW;
             self.proxy_output_activity_samples.drain(0..overflow);
         }
+    }
+
+    /// Consume proxy usage activity once its aggregate refresh interval has
+    /// elapsed. Further traffic sets the bit again while a query is running,
+    /// which collapses a busy stream into at most one follow-up query.
+    pub(crate) fn take_proxy_usage_refresh_due(&mut self, interval_ticks: u64) -> bool {
+        if !self.usage_proxy_activity_dirty {
+            return false;
+        }
+        let last_tick = *self.usage_last_proxy_refresh_tick.get_or_insert(self.tick);
+        if self.tick.saturating_sub(last_tick) < interval_ticks {
+            return false;
+        }
+        self.usage_proxy_activity_dirty = false;
+        self.usage_last_proxy_refresh_tick = Some(self.tick);
+        true
     }
 
     pub fn push_toast(&mut self, message: impl Into<String>, kind: ToastKind) {

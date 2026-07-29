@@ -1,5 +1,5 @@
 use cc_switch_lib::{
-    check_permissions, get_app_config_dir, get_webdav_sync_settings, set_webdav_sync_settings,
+    get_app_config_dir, get_webdav_sync_settings, set_webdav_sync_settings,
     webdav_jianguoyun_preset, WebDavSyncSettings, WebDavSyncStatus,
 };
 
@@ -74,10 +74,6 @@ fn set_webdav_sync_settings_writes_sensitive_settings_json_as_owner_only() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600);
-    assert!(
-        check_permissions().is_empty(),
-        "fresh settings write should not be reported as insecure"
-    );
 }
 
 #[cfg(unix)]

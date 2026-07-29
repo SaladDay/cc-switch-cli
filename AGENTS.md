@@ -92,6 +92,16 @@ The proxy command surface is in `src/cli/commands/proxy.rs`, orchestration lives
 
 Request handling flows through `HandlerContext`, `ProviderRouter`, `RequestForwarder`, provider adapters in `src/proxy/providers/`, and response builders/handlers in `src/proxy/response*.rs`. Claude `/v1/messages` traffic may be transformed between Anthropic and OpenAI-compatible formats; Codex/OpenAI, Gemini, Copilot, and streaming-response routes are handled by provider-specific adapters. Proxy tests are split across focused integration targets such as `proxy_claude_streaming`, `proxy_claude_openai_chat`, `proxy_claude_response_parity`, `proxy_claude_forwarder_alignment`, `proxy_multi_app_passthrough`, `proxy_takeover`, `proxy_service`, and `proxy_daemon`.
 
+## Blind review protocol
+
+- After implementation and local validation are complete, send the full change set to two independent subagents for blind review.
+- Give reviewers no description of the intended change, implementation approach, fixes already made, or prior review findings. Ask each reviewer only to inspect all current modifications and report correctness, regression, security, performance, UX, and test-coverage issues.
+- Keep the two reviews independent. Reviewers must not receive or infer the other reviewer's findings before producing their own report.
+- Validate every finding against the code. Fix confirmed issues, then start a fresh two-reviewer blind round with new subagents and no context from earlier rounds.
+- When the findings have clearly converged and remaining work is only small, local patch refinement, reduce subsequent rounds to one fresh blind reviewer.
+- If review and repair keep cycling without convergence, stop patching and reconsider the design as a whole: re-check boundaries, invariants, state flow, ownership, and whether the current abstraction is the real source of the repeated defects.
+- If a design-level reconsideration still cannot produce a sound resolution, stop changing code and report the unresolved issues, tradeoffs, and evidence to the user.
+
 ## Testing requirements
 
 All test cases should be executed under `src-tauri/`.

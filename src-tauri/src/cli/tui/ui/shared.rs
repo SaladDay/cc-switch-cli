@@ -849,8 +849,12 @@ fn script_usage_compact_line(
             spans.push(Span::raw("  "));
         }
         if let Some(name) = display_usage_plan_name(item) {
+            let name = match name.trim() {
+                "five_hour" | "weekly_limit" => quota_tier_label(name.trim()),
+                other => other.to_string(),
+            };
             spans.push(Span::styled(
-                format!("{} ", name.trim()),
+                format!("{name} "),
                 Style::default().fg(theme.comment),
             ));
         }
@@ -1571,6 +1575,64 @@ pub(super) fn refresh_indicator_spans(
     percent: Option<u8>,
 ) -> Vec<Span<'static>> {
     labelled_spinner_spans(tick, theme, texts::tui_refreshing(), percent)
+}
+
+const INLINE_REFRESH_SEPARATOR: &str = " · ";
+
+/// Width consumed when the shared refresh indicator follows inline summary
+/// text, including the separator between them.
+pub(super) fn inline_refresh_indicator_width(
+    tick: u64,
+    theme: &super::theme::Theme,
+    percent: Option<u8>,
+) -> u16 {
+    let width = UnicodeWidthStr::width(INLINE_REFRESH_SEPARATOR).saturating_add(
+        spans_display_width(&refresh_indicator_spans(tick, theme, percent)),
+    );
+    u16::try_from(width).unwrap_or(u16::MAX)
+}
+
+/// Render summary text followed immediately by the shared refresh indicator.
+///
+/// The summary is shortened first when space is tight, so the complete
+/// `spinner + Refreshing` widget stays visible at the end of the actual text
+/// instead of being pushed to a right-aligned slot or clipped off-screen.
+pub(super) fn summary_with_refresh_indicator(
+    summary: String,
+    refreshing: bool,
+    tick: u64,
+    theme: &super::theme::Theme,
+    percent: Option<u8>,
+    available_width: u16,
+) -> Vec<Span<'static>> {
+    if !refreshing {
+        return vec![Span::raw(truncate_to_display_width(
+            &summary,
+            available_width,
+        ))];
+    }
+
+    let indicator = refresh_indicator_spans(tick, theme, percent);
+    let indicator_width = spans_display_width(&indicator);
+    let available = available_width as usize;
+    if available <= indicator_width {
+        return truncate_spans_to_width(indicator, available_width);
+    }
+
+    let separator_width = UnicodeWidthStr::width(INLINE_REFRESH_SEPARATOR);
+    let summary_width = available
+        .saturating_sub(indicator_width)
+        .saturating_sub(separator_width);
+    let summary_width = u16::try_from(summary_width).unwrap_or(u16::MAX);
+    let summary = truncate_to_display_width(&summary, summary_width);
+
+    let mut spans = Vec::with_capacity(indicator.len().saturating_add(2));
+    if !summary.is_empty() {
+        spans.push(Span::raw(summary));
+        spans.push(Span::raw(INLINE_REFRESH_SEPARATOR));
+    }
+    spans.extend(indicator);
+    spans
 }
 
 /// The indicator on its own row, for a body that has nothing else to show yet.

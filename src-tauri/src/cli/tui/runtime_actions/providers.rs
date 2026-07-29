@@ -202,7 +202,13 @@ fn provider_switch_proxy_notice_overlay(
     proxy_ready: bool,
 ) -> Option<Overlay> {
     let message = provider_switch_proxy_notice_api_format(app_type, provider, proxy_ready)
-        .map(texts::tui_claude_api_format_requires_proxy_message)
+        .map(|api_format| {
+            if matches!(app_type, crate::app_config::AppType::Codex) {
+                texts::tui_codex_api_format_requires_proxy_message(api_format)
+            } else {
+                texts::tui_claude_api_format_requires_proxy_message(api_format)
+            }
+        })
         .or_else(|| {
             provider_switch_full_url_requires_proxy(app_type, provider, proxy_ready)
                 .then(|| texts::tui_full_url_requires_proxy_message().to_string())
@@ -246,14 +252,26 @@ fn provider_requires_local_proxy(
     app_type: &crate::app_config::AppType,
     provider: &crate::provider::Provider,
 ) -> Option<&'static str> {
-    if !matches!(app_type, crate::app_config::AppType::Claude) {
-        return None;
+    match app_type {
+        crate::app_config::AppType::Claude => {
+            let api_format = get_claude_api_format(provider);
+            ClaudeApiFormat::from_raw(api_format)
+                .requires_proxy()
+                .then_some(api_format)
+        }
+        crate::app_config::AppType::Codex if provider.is_codex_official() => None,
+        crate::app_config::AppType::Codex
+            if crate::proxy::providers::codex_provider_uses_anthropic(provider) =>
+        {
+            Some("anthropic")
+        }
+        crate::app_config::AppType::Codex
+            if crate::proxy::providers::codex_provider_uses_chat_completions(provider) =>
+        {
+            Some("openai_chat")
+        }
+        _ => None,
     }
-
-    let api_format = get_claude_api_format(provider);
-    ClaudeApiFormat::from_raw(api_format)
-        .requires_proxy()
-        .then_some(api_format)
 }
 
 fn provider_switch_proxy_notice_api_format(
@@ -1865,6 +1883,34 @@ mod tests {
         let notice = provider_switch_proxy_notice_api_format(&AppType::Claude, &provider, false);
 
         assert_eq!(notice, Some("openai_responses"));
+    }
+
+    #[test]
+    fn provider_switch_notice_covers_codex_anthropic_when_proxy_is_not_ready() {
+        let mut provider = Provider::with_id(
+            "anthropic".to_string(),
+            "Anthropic Gateway".to_string(),
+            json!({}),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            provider_switch_proxy_notice_api_format(&AppType::Codex, &provider, false),
+            Some("anthropic")
+        );
+        assert!(matches!(
+            provider_switch_proxy_notice_overlay(&AppType::Codex, &provider, false),
+            Some(Overlay::Confirm(ConfirmOverlay { message, .. }))
+                if message == texts::tui_codex_api_format_requires_proxy_message("anthropic")
+        ));
+        assert_eq!(
+            provider_switch_proxy_notice_api_format(&AppType::Codex, &provider, true),
+            None
+        );
     }
 
     #[test]

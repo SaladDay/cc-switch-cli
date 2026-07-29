@@ -12,13 +12,15 @@ use crate::cli::tui::data::{
 use super::*;
 
 /// Models drawn individually before the rest collapses into "Other".
-pub(super) const HOME_CHART_MAX_MODELS: usize = 4;
-/// Columns reserved for the y-axis label plus its `│` separator.
-const Y_LABEL_WIDTH: u16 = 7;
-/// Mirrors the Usage page: below this the trend degrades to a sparkline.
+pub(super) const HOME_CHART_MAX_MODELS: usize = crate::cli::tui::data::USAGE_DAILY_MODEL_LIMIT;
+/// Minimum columns reserved for the y-axis label plus its `│` separator.
+/// Larger compact values (for example `1494.9M`) expand this dynamically.
+const MIN_Y_AXIS_WIDTH: u16 = 7;
+/// Narrowest chart column that can still host the full 30-day bars.
 const MIN_BAR_CHART_WIDTH: u16 = 44;
-/// Narrowest strip that can still show a readable sparkline.
-const MIN_STRIP_WIDTH: u16 = 24;
+/// Below the split-chart threshold the model list owns the card. At widths
+/// below this floor even its compact name/share/cost row is no longer useful.
+const MIN_LIST_ONLY_WIDTH: u16 = 24;
 /// Rows a bar chart needs besides the bars: the axis and the date labels.
 const BAR_CHART_FIXED_ROWS: u16 = 2;
 /// Blank columns kept between each card rail and the content.
@@ -72,8 +74,9 @@ const SERIES_PALETTE: [(u8, u8, u8); 4] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HomeChartMode {
     Hidden,
-    /// Single-row sparkline plus a one-line summary.
-    Strip,
+    /// Responsive fallback: preserve the actionable model list and drop the
+    /// chart entirely.
+    ListOnly,
     /// Full stacked bar chart.
     Bars,
 }
@@ -85,12 +88,10 @@ pub(super) struct HomeChartGeometry {
     pub bar_rows: u16,
     /// Columns owned by the chart column, y-axis labels included.
     pub chart_width: u16,
-    /// Columns owned by the model list; 0 when the card is too narrow for it.
+    /// Columns owned by the model list: the full card in list-only mode.
     pub list_width: u16,
-    /// True when the legend owns a row beneath the chart.
-    pub legend_row: bool,
-    /// True when the legend is folded into the card's bottom rail instead.
-    pub legend_inline: bool,
+    /// Columns reserved for the maximum-value label plus its axis separator.
+    pub y_axis_width: u16,
 }
 
 impl HomeChartGeometry {
@@ -99,15 +100,14 @@ impl HomeChartGeometry {
         bar_rows: 0,
         chart_width: 0,
         list_width: 0,
-        legend_row: false,
-        legend_inline: false,
+        y_axis_width: 0,
     };
 }
 
 /// Content rows left inside a card body of `inner_height` rows.
 ///
 /// The top pad is the first thing to go: a body of a single row spends it on
-/// the sparkline rather than on breathing space.
+/// content rather than on breathing space.
 pub(super) fn card_content_height(inner_height: u16) -> u16 {
     inner_height.saturating_sub(CARD_PAD_TOP.min(inner_height.saturating_sub(1)))
 }
@@ -129,58 +129,76 @@ fn card_content_area(inner: Rect) -> Rect {
     }
 }
 
-/// Pick the richest chart that fits the card's padded `width` x `height`
-/// content area for `days` columns.
+/// Width of the maximum-value label plus the axis separator. The previous
+/// fixed six-character label slot made `1494.9M│` one column wider than every
+/// other row, visibly shifting only the top bar line.
+pub(super) fn y_axis_width(max_total: u64) -> u16 {
+    let label = format_token_compact(max_total);
+    let required = UnicodeWidthStr::width(label.as_str()).saturating_add(1);
+    u16::try_from(required)
+        .unwrap_or(u16::MAX)
+        .max(MIN_Y_AXIS_WIDTH)
+}
+
+/// Pick the richest presentation that fits the card's padded `width` x
+/// `height` content area for `days` columns and `model_rows` named/residual
+/// series.
 ///
-/// Height ladder (content rows, i.e. the card's inner rows minus
-/// [`CARD_PAD_TOP`]): `>=4` rows draw the bars plus their own legend row, `3`
-/// rows drop the legend onto the card's bottom rail, `1..=2` fall back to a
-/// sparkline, and anything shorter renders nothing.
+/// The model list is the responsive invariant: shrinking either dimension
+/// removes the chart first. A split view is used only when the complete list
+/// and the full multi-series bar chart both fit; all smaller useful areas
+/// render the list alone. There is deliberately no single-color sparkline
+/// fallback because it discards the model comparison the card exists to show.
 ///
 /// Width ladder: from [`LIST_MIN_CONTENT_WIDTH`] on, the card splits into a
-/// chart column and a model list; below that the chart owns the full width, and
-/// below [`MIN_BAR_CHART_WIDTH`] it degrades to the sparkline. The list replaces
-/// the legend rather than joining it, so a split card spends every row on bars.
-pub(super) fn home_chart_geometry(width: u16, height: u16, days: usize) -> HomeChartGeometry {
-    if height == 0 || width < MIN_STRIP_WIDTH || days == 0 {
+/// chart column and a model list when its header plus every model name row also
+/// fit vertically. Below either threshold the list owns the full width.
+pub(super) fn home_chart_geometry(
+    width: u16,
+    height: u16,
+    days: usize,
+    model_rows: usize,
+    max_total: u64,
+) -> HomeChartGeometry {
+    if height == 0 || width < MIN_LIST_ONLY_WIDTH || days == 0 {
         return HomeChartGeometry::HIDDEN;
     }
 
-    let strip = HomeChartGeometry {
-        mode: HomeChartMode::Strip,
-        chart_width: width,
+    let y_axis_width = y_axis_width(max_total);
+    let list_only = HomeChartGeometry {
+        mode: HomeChartMode::ListOnly,
+        list_width: width,
+        y_axis_width,
         ..HomeChartGeometry::HIDDEN
     };
 
-    // The list only earns its columns next to a real bar chart.
-    let list_width = if width >= LIST_MIN_CONTENT_WIDTH {
-        (width.saturating_mul(LIST_WIDTH_PERCENT) / 100).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH)
-    } else {
-        0
-    };
-    let chart_width = if list_width > 0 {
-        width
-            .saturating_sub(list_width)
-            .saturating_sub(LIST_RULE_WIDTH)
-    } else {
-        width
-    };
-
-    if height < 3 || chart_width < MIN_BAR_CHART_WIDTH {
-        return strip;
+    // A split view only earns chart columns when its list can keep every model
+    // name (one header + one row per series). Otherwise the list takes the card
+    // and marks any vertically hidden rows in its header.
+    let list_rows_fit = model_rows > 0 && usize::from(height).saturating_sub(1) >= model_rows;
+    if width < LIST_MIN_CONTENT_WIDTH || height < 3 || !list_rows_fit {
+        return list_only;
     }
 
-    // With the list in place the dots live in the list rows, so the legend
-    // would only repeat them; give the row back to the bars instead.
-    let legend_row = list_width == 0 && height >= 4;
-    let reserved = BAR_CHART_FIXED_ROWS + u16::from(legend_row);
-    let Some(bar_rows) = height.checked_sub(reserved).filter(|rows| *rows > 0) else {
-        return strip;
+    let list_width =
+        (width.saturating_mul(LIST_WIDTH_PERCENT) / 100).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
+    let chart_width = width
+        .saturating_sub(list_width)
+        .saturating_sub(LIST_RULE_WIDTH);
+    if chart_width < MIN_BAR_CHART_WIDTH {
+        return list_only;
+    }
+
+    let Some(bar_rows) = height
+        .checked_sub(BAR_CHART_FIXED_ROWS)
+        .filter(|rows| *rows > 0)
+    else {
+        return list_only;
     };
 
-    let body_width = chart_width.saturating_sub(Y_LABEL_WIDTH);
+    let body_width = chart_width.saturating_sub(y_axis_width);
     if body_width == 0 || (body_width as usize) < days {
-        return strip;
+        return list_only;
     }
 
     HomeChartGeometry {
@@ -188,8 +206,7 @@ pub(super) fn home_chart_geometry(width: u16, height: u16, days: usize) -> HomeC
         bar_rows,
         chart_width,
         list_width,
-        legend_row,
-        legend_inline: list_width == 0 && !legend_row,
+        y_axis_width,
     }
 }
 
@@ -331,6 +348,8 @@ pub(super) fn render_home_usage_chart(
         card_content_width(area.width.saturating_sub(2)),
         card_content_height(area.height.saturating_sub(2)),
         series.days.len().max(1),
+        series.models.len(),
+        series.max_total,
     );
 
     let title = card_title();
@@ -359,24 +378,12 @@ pub(super) fn render_home_usage_chart(
         data,
         theme,
         body_owns_indicator,
+        loading,
         area.width.saturating_sub(title_width),
     );
     let status_width = spans_display_width(&status) as u16;
     if status_width > 0 && title_width.saturating_add(status_width) <= area.width {
         block = block.title_top(Line::from(status).alignment(Alignment::Right));
-    }
-
-    if geometry.legend_inline && series.has_data() {
-        let legend = legend_line(
-            theme,
-            series,
-            slots,
-            area.width.saturating_sub(4),
-            Some(" "),
-        );
-        if !legend.spans.is_empty() {
-            block = block.title_bottom(legend.alignment(Alignment::Left));
-        }
     }
 
     let content = card_content_area(block.inner(area));
@@ -387,11 +394,7 @@ pub(super) fn render_home_usage_chart(
 
     if !series.has_data() {
         if loading {
-            render_centered_line(
-                frame,
-                content,
-                shared_loading_line(app, theme, texts::tui_home_chart_loading()),
-            );
+            render_centered_line(frame, content, shared_loading_line(app, theme));
         } else {
             render_centered_line(
                 frame,
@@ -407,35 +410,15 @@ pub(super) fn render_home_usage_chart(
 
     match geometry.mode {
         HomeChartMode::Hidden => {}
-        HomeChartMode::Strip => render_sparkline_strip(frame, content, theme, series),
+        HomeChartMode::ListOnly => {
+            render_model_cost_list(frame, content, theme, series, &projection.rows);
+        }
         HomeChartMode::Bars => {
             let chart_area = Rect {
                 width: geometry.chart_width.min(content.width),
                 ..content
             };
-            let legend_rows = u16::from(geometry.legend_row);
-            let bars_area = Rect {
-                height: chart_area.height.saturating_sub(legend_rows),
-                ..chart_area
-            };
-            render_bars(frame, bars_area, theme, series, slots, &geometry);
-            if legend_rows > 0 && chart_area.height > bars_area.height {
-                let legend_area = Rect {
-                    y: chart_area.y + bars_area.height,
-                    height: 1,
-                    ..chart_area
-                };
-                frame.render_widget(
-                    Paragraph::new(legend_line(
-                        theme,
-                        series,
-                        slots,
-                        legend_area.width,
-                        Some(" "),
-                    )),
-                    legend_area,
-                );
-            }
+            render_bars(frame, chart_area, theme, series, slots, &geometry);
 
             if geometry.list_width > 0 && content.width > geometry.chart_width {
                 render_list_rule(
@@ -477,8 +460,13 @@ fn card_title() -> String {
     )
 }
 
-fn shared_loading_line(app: &App, theme: &super::theme::Theme, label: &str) -> Line<'static> {
-    loading_indicator_line(app.tick, theme, label, sync_escalation(app))
+fn shared_loading_line(app: &App, theme: &super::theme::Theme) -> Line<'static> {
+    loading_indicator_line(
+        app.tick,
+        theme,
+        texts::tui_refreshing(),
+        sync_escalation(app),
+    )
 }
 
 fn render_centered_line(frame: &mut Frame<'_>, area: Rect, line: Line<'static>) {
@@ -503,11 +491,16 @@ fn title_status_spans(
     data: &UiData,
     theme: &super::theme::Theme,
     body_owns_indicator: bool,
+    usage_refreshing: bool,
     available: u16,
 ) -> Vec<Span<'static>> {
     // The two pad spaces below come out of the same budget.
     let indicator = (!body_owns_indicator)
-        .then(|| session_sync_indicator_spans(app, theme))
+        .then(|| {
+            session_sync_indicator_spans(app, theme).or_else(|| {
+                usage_refreshing.then(|| refresh_indicator_spans(app.tick, theme, None))
+            })
+        })
         .flatten()
         .map(|spans| {
             if spans_display_width(&spans).saturating_add(2) <= available as usize {
@@ -638,7 +631,7 @@ fn blocks() -> &'static [&'static str; 9] {
 
 /// Palette slot per model, parallel to [`UsageDailyChartSeries::models`] — the
 /// cost-ranked top-N plus the residual bucket, i.e. the one entity set the
-/// bars, the legend, and the list all draw from.
+/// bars and the list both draw from.
 ///
 /// Slots follow the *entity*, not the rank: they are handed out along the
 /// alphabetically sorted list of top-model names, so a model keeps its color
@@ -684,6 +677,28 @@ fn series_style(theme: &super::theme::Theme, slot: Option<usize>) -> Style {
     Style::default().fg(color)
 }
 
+/// Glyph for one occupied bar cell.
+///
+/// Color mode uses the eight-level block ramp so the top row keeps its
+/// sub-cell precision. With color disabled, height is already encoded by the
+/// occupied rows; using the same per-series glyph as the model list preserves
+/// the model identity that color would otherwise carry.
+fn bar_cell_glyph(
+    theme: &super::theme::Theme,
+    level: usize,
+    palette_slot: Option<usize>,
+) -> &'static str {
+    let ramp = blocks();
+    let level = level.min(ramp.len() - 1);
+    if level == 0 {
+        ramp[0]
+    } else if theme.no_color {
+        legend_dot(theme, palette_slot)
+    } else {
+        ramp[level]
+    }
+}
+
 fn slot_at(slots: &[Option<usize>], index: usize) -> Option<usize> {
     slots.get(index).copied().flatten()
 }
@@ -697,94 +712,6 @@ fn truncate_label(text: &str, width: u16) -> String {
     } else {
         label.replace('…', "~")
     }
-}
-
-/// One legend chip per series. Only the dot carries the series color; the model
-/// name stays secondary ink.
-fn legend_line(
-    theme: &super::theme::Theme,
-    series: &UsageDailyChartSeries,
-    slots: &[Option<usize>],
-    max_width: u16,
-    pad: Option<&'static str>,
-) -> Line<'static> {
-    let name_budget = if max_width < 60 { 12 } else { 18 };
-    let name_style = Style::default().fg(theme.comment);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut used = pad.map(UnicodeWidthStr::width).unwrap_or(0) * 2;
-
-    for (index, model) in series.models.iter().enumerate() {
-        let slot = slot_at(slots, index);
-        let dot = legend_dot(theme, slot);
-        let label = truncate_label(model, name_budget);
-        let lead = if spans.is_empty() {
-            String::new()
-        } else {
-            separator().to_string()
-        };
-        let chunk_width = UnicodeWidthStr::width(lead.as_str())
-            + UnicodeWidthStr::width(dot)
-            + 1
-            + UnicodeWidthStr::width(label.as_str());
-        if used + chunk_width > max_width as usize {
-            break;
-        }
-        used += chunk_width;
-        if !lead.is_empty() {
-            spans.push(Span::styled(lead, name_style));
-        }
-        spans.push(Span::styled(format!("{dot} "), series_style(theme, slot)));
-        spans.push(Span::styled(label, name_style));
-    }
-
-    if let (Some(pad), false) = (pad, spans.is_empty()) {
-        spans.insert(0, Span::raw(pad));
-        spans.push(Span::raw(pad));
-    }
-    Line::from(spans)
-}
-
-fn render_sparkline_strip(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    theme: &super::theme::Theme,
-    series: &UsageDailyChartSeries,
-) {
-    let ramp = blocks();
-    let max = series.max_total.max(1);
-    let text = series
-        .days
-        .iter()
-        .map(|day| {
-            let level =
-                ((day.total as f64 / max as f64) * (ramp.len() - 1) as f64).round() as usize;
-            ramp[level.min(ramp.len() - 1)]
-        })
-        .collect::<String>();
-
-    let style = if theme.no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.shade(SERIES_PALETTE[0]))
-    };
-    let summary = format!(
-        "{}{}{}",
-        format_token_compact(series.total_tokens),
-        separator(),
-        series
-            .days
-            .last()
-            .map(|day| day.label.clone())
-            .unwrap_or_default()
-    );
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled(text, style),
-            Line::styled(summary, Style::default().fg(theme.comment)),
-        ])
-        .wrap(Wrap { trim: false }),
-        area,
-    );
 }
 
 fn render_bars(
@@ -803,9 +730,8 @@ fn render_bars(
     }
 
     let day_count = series.days.len();
-    let body_width = area.width.saturating_sub(Y_LABEL_WIDTH) as usize;
+    let body_width = area.width.saturating_sub(geometry.y_axis_width) as usize;
     let gutter = use_bar_gutter(day_count, body_width);
-    let ramp = blocks();
     let axis_style = Style::default().fg(theme.dim);
     let label_style = Style::default().fg(theme.comment);
     let max_value = series.max_total.max(1) as f64;
@@ -822,7 +748,10 @@ fn render_bars(
         };
         let mut spans = vec![
             Span::styled(
-                format!("{label:>width$}", width = (Y_LABEL_WIDTH - 1) as usize),
+                format!(
+                    "{label:>width$}",
+                    width = geometry.y_axis_width.saturating_sub(1) as usize
+                ),
                 label_style,
             ),
             Span::styled(axis_vertical().to_string(), axis_style),
@@ -837,10 +766,11 @@ fn render_bars(
             }
             let fill = bar_fill_width(span, gutter);
             let (level, slot) = stacked_cell(day, row_bottom, row_top);
-            let glyph = ramp[level.min(ramp.len() - 1)];
+            let palette_slot = slot.and_then(|slot| slot_at(slots, slot));
+            let glyph = bar_cell_glyph(theme, level, palette_slot);
             spans.push(Span::styled(
                 glyph.repeat(fill),
-                series_style(theme, slot.and_then(|slot| slot_at(slots, slot))),
+                series_style(theme, palette_slot),
             ));
             if span > fill {
                 spans.push(Span::raw(" ".repeat(span - fill)));
@@ -855,12 +785,12 @@ fn render_bars(
             "0",
             axis_corner(),
             axis_horizontal().repeat(body_width),
-            width = (Y_LABEL_WIDTH - 1) as usize
+            width = geometry.y_axis_width.saturating_sub(1) as usize
         ),
         axis_style,
     ));
     lines.push(Line::styled(
-        date_label_row(series, body_width),
+        date_label_row(series, geometry.y_axis_width, body_width),
         label_style,
     ));
 
@@ -1000,15 +930,27 @@ fn render_model_cost_list(
         .max(UnicodeWidthStr::width(total_cost.as_str()));
     let width = area.width as usize;
     let show_detail = list_shows_detail(area, rows.len());
+    let visible_rows = if show_detail {
+        rows.len()
+    } else {
+        rows.len().min(usize::from(area.height.saturating_sub(1)))
+    };
+    let hidden_rows = rows.len().saturating_sub(visible_rows);
 
     // ` ● ` + name + share + gap + cost, with the name column absorbing the rest.
     let share_width = LIST_SHARE_WIDTH;
     let fixed = 1 + legend_dot_width() + 1 + share_width + 1 + cost_width;
     let name_width = width.saturating_sub(fixed);
 
-    let mut lines = vec![list_header_line(theme, width, &total_cost, cost_width)];
+    let mut lines = vec![list_header_line(
+        theme,
+        width,
+        &total_cost,
+        cost_width,
+        hidden_rows,
+    )];
     if name_width > 0 {
-        for row in rows.iter() {
+        for row in rows.iter().take(visible_rows) {
             let dot = legend_dot(theme, row.slot);
             let name = truncate_label(&row.name, name_width as u16);
             let share = format_share(row.share_percent);
@@ -1046,9 +988,15 @@ fn list_header_line(
     width: usize,
     total_cost: &str,
     cost_width: usize,
+    hidden_rows: usize,
 ) -> Line<'static> {
     let title_budget = width.saturating_sub(cost_width + 2);
-    let title = truncate_label(texts::tui_home_chart_list_title(), title_budget as u16);
+    let title = if hidden_rows > 0 {
+        format!("{} (+{hidden_rows})", texts::tui_home_chart_list_title())
+    } else {
+        texts::tui_home_chart_list_title().to_string()
+    };
+    let title = truncate_label(&title, title_budget as u16);
     let gap = width
         .saturating_sub(1)
         .saturating_sub(UnicodeWidthStr::width(title.as_str()))
@@ -1133,8 +1081,12 @@ fn stacked_cell(day: &UsageDailyChartDay, row_bottom: f64, row_top: f64) -> (usi
 ///
 /// The trailing label is right-aligned to the chart edge so the newest day is
 /// always named; labels that would collide with an earlier one are dropped.
-pub(super) fn date_label_row(series: &UsageDailyChartSeries, body_width: usize) -> String {
-    let total_width = Y_LABEL_WIDTH as usize + body_width;
+pub(super) fn date_label_row(
+    series: &UsageDailyChartSeries,
+    y_axis_width: u16,
+    body_width: usize,
+) -> String {
+    let total_width = y_axis_width as usize + body_width;
     let mut row = vec![b' '; total_width];
     let day_count = series.days.len();
     if day_count == 0 {
@@ -1156,7 +1108,7 @@ pub(super) fn date_label_row(series: &UsageDailyChartSeries, body_width: usize) 
         let ideal = if index == last_index {
             total_width.saturating_sub(width)
         } else {
-            Y_LABEL_WIDTH as usize + bar_span(index, day_count, body_width).0
+            y_axis_width as usize + bar_span(index, day_count, body_width).0
         };
         if ideal < next_free || ideal + width > total_width {
             continue;
@@ -1172,6 +1124,7 @@ pub(super) fn date_label_row(series: &UsageDailyChartSeries, body_width: usize) 
 mod tests {
     use super::*;
     use crate::cli::tui::data::UsageDailyModelBucket;
+    use crate::cli::tui::ui::tests::{lock_env, EnvGuard};
 
     fn day(total: u64, segments: Vec<u64>) -> UsageDailyChartDay {
         UsageDailyChartDay {
@@ -1186,48 +1139,62 @@ mod tests {
     fn geometry_ladder_matches_documented_thresholds() {
         // Heights are the card's inner rows: the border owns two more.
         assert_eq!(
-            home_chart_geometry(120, 0, 30).mode,
+            home_chart_geometry(120, 0, 30, 5, 1_000).mode,
             HomeChartMode::Hidden,
             "an empty card body renders nothing"
         );
-        assert_eq!(home_chart_geometry(120, 1, 30).mode, HomeChartMode::Strip);
-        assert_eq!(home_chart_geometry(120, 2, 30).mode, HomeChartMode::Strip);
+        assert_eq!(
+            home_chart_geometry(120, 1, 30, 5, 1_000).mode,
+            HomeChartMode::ListOnly
+        );
+        assert_eq!(
+            home_chart_geometry(120, 2, 30, 5, 1_000).mode,
+            HomeChartMode::ListOnly
+        );
 
-        // Wide cards spend the legend row on the list instead.
-        let wide = home_chart_geometry(120, 3, 30);
-        assert_eq!(wide.mode, HomeChartMode::Bars);
-        assert!(!wide.legend_row && !wide.legend_inline);
-        assert_eq!(wide.bar_rows, 1);
-        assert_eq!(home_chart_geometry(120, 8, 30).bar_rows, 6);
+        // A wide but short card keeps the list and drops the graph.
+        let wide = home_chart_geometry(120, 3, 30, 5, 1_000);
+        assert_eq!(wide.mode, HomeChartMode::ListOnly);
+        assert_eq!(wide.chart_width, 0);
+        assert_eq!(wide.list_width, 120);
 
-        // Narrow cards keep a legend; the tightest one folds it into the rail.
-        let compact = home_chart_geometry(70, 3, 30);
-        assert_eq!(compact.mode, HomeChartMode::Bars);
-        assert!(compact.legend_inline);
-        assert!(!compact.legend_row);
-        assert_eq!(compact.bar_rows, 1);
+        // Once the header plus all five names fit, the graph earns its column.
+        let wide_with_list = home_chart_geometry(120, 8, 30, 5, 1_000);
+        assert_eq!(wide_with_list.mode, HomeChartMode::Bars);
+        assert!(wide_with_list.list_width > 0);
+        assert_eq!(wide_with_list.bar_rows, 6);
 
-        let full = home_chart_geometry(70, 8, 30);
-        assert_eq!(full.mode, HomeChartMode::Bars);
-        assert!(full.legend_row);
-        assert!(!full.legend_inline);
-        assert_eq!(full.bar_rows, 5);
+        // Narrow cards never fall back to a monochrome graph: the list owns
+        // every useful row regardless of height.
+        let compact = home_chart_geometry(70, 3, 30, 5, 1_000);
+        assert_eq!(compact.mode, HomeChartMode::ListOnly);
+        assert_eq!(compact.list_width, 70);
+        let tall_narrow = home_chart_geometry(70, 20, 30, 5, 1_000);
+        assert_eq!(tall_narrow.mode, HomeChartMode::ListOnly);
+        assert_eq!(tall_narrow.list_width, 70);
+
+        // Small entity sets can use the list at the same compact height
+        // and leave the remaining columns to the full graph.
+        let one_model = home_chart_geometry(120, 3, 30, 1, 1_000);
+        assert_eq!(one_model.mode, HomeChartMode::Bars);
+        assert!(one_model.list_width > 0);
     }
 
     #[test]
     fn geometry_splits_off_the_model_list_only_on_wide_cards() {
-        // One column below the threshold the chart still owns everything.
-        let narrow = home_chart_geometry(LIST_MIN_CONTENT_WIDTH - 1, 10, 30);
-        assert_eq!(narrow.list_width, 0);
-        assert_eq!(narrow.chart_width, LIST_MIN_CONTENT_WIDTH - 1);
+        // One column below the threshold the list owns everything.
+        let narrow = home_chart_geometry(LIST_MIN_CONTENT_WIDTH - 1, 10, 30, 5, 1_000);
+        assert_eq!(narrow.mode, HomeChartMode::ListOnly);
+        assert_eq!(narrow.list_width, LIST_MIN_CONTENT_WIDTH - 1);
+        assert_eq!(narrow.chart_width, 0);
 
         // At the threshold the chart keeps exactly the bar-chart minimum.
-        let edge = home_chart_geometry(LIST_MIN_CONTENT_WIDTH, 10, 30);
+        let edge = home_chart_geometry(LIST_MIN_CONTENT_WIDTH, 10, 30, 5, 1_000);
         assert_eq!(edge.list_width, 37);
         assert_eq!(edge.chart_width, MIN_BAR_CHART_WIDTH);
 
         // 87 columns is what a 120-column terminal leaves as card content.
-        let split = home_chart_geometry(87, 10, 30);
+        let split = home_chart_geometry(87, 10, 30, 5, 1_000);
         assert_eq!(split.list_width, 40);
         assert_eq!(split.chart_width, 46);
         assert!(
@@ -1237,7 +1204,7 @@ mod tests {
 
         // 127 columns is what a 160-column terminal leaves: the list caps out
         // and is wide enough for the In/Out/CR/CW detail line.
-        let wide = home_chart_geometry(127, 10, 30);
+        let wide = home_chart_geometry(127, 10, 30, 5, 1_000);
         assert_eq!(wide.list_width, LIST_MAX_WIDTH);
         assert_eq!(wide.chart_width, 127 - LIST_MAX_WIDTH - 1);
         assert!(wide.list_width >= LIST_DETAIL_MIN_WIDTH);
@@ -1246,7 +1213,7 @@ mod tests {
     #[test]
     fn geometry_never_starves_the_chart_to_feed_the_list() {
         for width in LIST_MIN_CONTENT_WIDTH..400 {
-            let geometry = home_chart_geometry(width, 10, 30);
+            let geometry = home_chart_geometry(width, 10, 30, 5, 1_000);
             assert!(
                 geometry.chart_width >= MIN_BAR_CHART_WIDTH,
                 "content width {width} left the chart {} columns",
@@ -1299,6 +1266,59 @@ mod tests {
     }
 
     #[test]
+    fn short_list_marks_how_many_model_rows_are_hidden() {
+        let _lock = lock_env();
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let theme = crate::cli::tui::theme::theme_for_mode(
+            &AppType::Claude,
+            crate::cli::tui::theme::ThemeMode::Dark,
+        );
+        let rows = (0..5)
+            .map(|index| ModelCostRow {
+                name: format!("model-{index}"),
+                tokens: 100,
+                cost_usd: (index + 1) as f64,
+                share_percent: 20.0,
+                slot: Some(index),
+                breakdown: UsageModelTokenBreakdown::default(),
+            })
+            .collect::<Vec<_>>();
+        let series = UsageDailyChartSeries {
+            total_cost_usd: 15.0,
+            ..UsageDailyChartSeries::default()
+        };
+        let backend = ratatui::backend::TestBackend::new(50, 3);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_model_cost_list(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 50,
+                        height: 3,
+                    },
+                    &theme,
+                    &series,
+                    &rows,
+                )
+            })
+            .expect("render compact list");
+
+        let buffer = terminal.backend().buffer();
+        let line = |y| {
+            (0..50)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        assert!(line(0).contains("(+3)"), "{:?}", line(0));
+        assert!(line(1).contains("model-0"), "{:?}", line(1));
+        assert!(line(2).contains("model-1"), "{:?}", line(2));
+    }
+
+    #[test]
     fn model_detail_text_labels_the_four_counters() {
         let breakdown = UsageModelTokenBreakdown {
             input_tokens: 2_500_000,
@@ -1332,19 +1352,101 @@ mod tests {
     }
 
     #[test]
-    fn geometry_falls_back_when_columns_do_not_fit() {
-        // 44 wide: 37 body columns for 30 days still fits one column each.
-        assert_eq!(home_chart_geometry(44, 12, 30).mode, HomeChartMode::Bars);
-        // Narrower than the Usage-page bar-chart threshold: sparkline.
-        assert_eq!(home_chart_geometry(43, 12, 30).mode, HomeChartMode::Strip);
-        assert_eq!(home_chart_geometry(23, 12, 30).mode, HomeChartMode::Hidden);
-        // A 37-column body cannot host 200 days.
-        assert_eq!(home_chart_geometry(44, 12, 200).mode, HomeChartMode::Strip);
+    fn geometry_prioritizes_the_list_when_columns_do_not_fit() {
+        // Even when 44 columns could draw 30 tiny bars, the list wins because
+        // there is no room to show both views.
+        assert_eq!(
+            home_chart_geometry(44, 12, 30, 5, 1_000).mode,
+            HomeChartMode::ListOnly
+        );
+        assert_eq!(
+            home_chart_geometry(43, 12, 30, 5, 1_000).mode,
+            HomeChartMode::ListOnly
+        );
+        assert_eq!(
+            home_chart_geometry(23, 12, 30, 5, 1_000).mode,
+            HomeChartMode::Hidden
+        );
+        // A split wide enough in total still falls back to the list if its
+        // chart column cannot host every day.
+        assert_eq!(
+            home_chart_geometry(82, 12, 200, 5, 1_000).mode,
+            HomeChartMode::ListOnly
+        );
     }
 
     #[test]
     fn geometry_hides_when_there_are_no_days() {
-        assert_eq!(home_chart_geometry(120, 40, 0).mode, HomeChartMode::Hidden);
+        assert_eq!(
+            home_chart_geometry(120, 40, 0, 5, 1_000).mode,
+            HomeChartMode::Hidden
+        );
+    }
+
+    #[test]
+    fn y_axis_expands_for_a_seven_character_maximum() {
+        assert_eq!(format_token_compact(1_494_900_000), "1494.9M");
+        assert_eq!(y_axis_width(999_900_000), MIN_Y_AXIS_WIDTH);
+        assert_eq!(y_axis_width(1_494_900_000), 8);
+    }
+
+    #[test]
+    fn large_maximum_keeps_the_top_and_zero_axes_aligned() {
+        let _lock = lock_env();
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let theme = crate::cli::tui::theme::theme_for_mode(
+            &AppType::Claude,
+            crate::cli::tui::theme::ThemeMode::Dark,
+        );
+        let max_total = 1_494_900_000;
+        let days = (1..=30)
+            .map(|index| UsageDailyChartDay {
+                date_key: format!("2026-07-{index:02}"),
+                label: format!("07/{index:02}"),
+                segments: vec![max_total],
+                total: max_total,
+            })
+            .collect::<Vec<_>>();
+        let series = UsageDailyChartSeries {
+            days,
+            max_total,
+            total_tokens: max_total,
+            ..UsageDailyChartSeries::default()
+        };
+        let geometry = home_chart_geometry(120, 8, 30, 1, max_total);
+        assert_eq!(geometry.mode, HomeChartMode::Bars);
+        assert_eq!(geometry.y_axis_width, 8);
+
+        let backend =
+            ratatui::backend::TestBackend::new(geometry.chart_width, geometry.bar_rows + 2);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_bars(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: geometry.chart_width,
+                        height: geometry.bar_rows + 2,
+                    },
+                    &theme,
+                    &series,
+                    &[Some(0)],
+                    &geometry,
+                )
+            })
+            .expect("render bars");
+
+        let buffer = terminal.backend().buffer();
+        let top_axis = (0..geometry.chart_width)
+            .find(|x| buffer[(*x, 0)].symbol() == axis_vertical())
+            .expect("top-row axis");
+        let zero_axis = (0..geometry.chart_width)
+            .find(|x| buffer[(*x, geometry.bar_rows)].symbol() == axis_corner())
+            .expect("zero-row axis");
+        assert_eq!(top_axis, 7);
+        assert_eq!(zero_axis, top_axis, "every axis row starts in one column");
     }
 
     #[test]
@@ -1414,6 +1516,9 @@ mod tests {
 
     #[test]
     fn series_palette_stays_clear_of_the_status_colors() {
+        let _lock = lock_env();
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "truecolor");
         let theme = crate::cli::tui::theme::theme_for_mode(
             &AppType::Claude,
             crate::cli::tui::theme::ThemeMode::Dark,
@@ -1459,7 +1564,40 @@ mod tests {
     }
 
     #[test]
+    fn no_color_bar_cells_match_the_model_list_glyphs() {
+        let mut mono = crate::cli::tui::theme::theme_for_mode(
+            &AppType::Claude,
+            crate::cli::tui::theme::ThemeMode::Dark,
+        );
+        mono.no_color = true;
+
+        assert_eq!(bar_cell_glyph(&mono, 0, Some(0)), " ");
+        for slot in 0..HOME_CHART_MAX_MODELS {
+            assert_eq!(
+                bar_cell_glyph(&mono, 8, Some(slot)),
+                legend_dot(&mono, Some(slot)),
+                "slot {slot} must use one glyph in the chart and list"
+            );
+        }
+        assert_eq!(
+            bar_cell_glyph(&mono, 3, None),
+            legend_dot(&mono, None),
+            "the residual bucket must keep its own pattern"
+        );
+
+        mono.no_color = false;
+        assert_eq!(
+            bar_cell_glyph(&mono, 3, Some(0)),
+            blocks()[3],
+            "color mode keeps the fractional-height ramp"
+        );
+    }
+
+    #[test]
     fn series_glyphs_stay_round_when_color_can_tell_them_apart() {
+        let _lock = lock_env();
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "truecolor");
         let theme = crate::cli::tui::theme::theme_for_mode(
             &AppType::Claude,
             crate::cli::tui::theme::ThemeMode::Dark,
@@ -1634,6 +1772,7 @@ mod tests {
         let cell = |model: &str, cost: f64, factor: u64| UsageDailyModelBucket {
             date_key: "2026-07-01".to_string(),
             model: model.to_string(),
+            is_other: false,
             total_tokens: factor * 3,
             total_cost_usd: cost,
             input_tokens: factor,
@@ -1682,6 +1821,7 @@ mod tests {
         let cell = |model: &str| UsageDailyModelBucket {
             date_key: "2026-07-01".to_string(),
             model: model.to_string(),
+            is_other: false,
             total_tokens: 1,
             total_cost_usd: 0.0,
             input_tokens: u64::MAX,
@@ -1773,9 +1913,9 @@ mod tests {
             ..UsageDailyChartSeries::default()
         };
 
-        let row = date_label_row(&series, 60);
+        let row = date_label_row(&series, MIN_Y_AXIS_WIDTH, 60);
 
-        assert_eq!(row.len(), Y_LABEL_WIDTH as usize + 60);
+        assert_eq!(row.len(), MIN_Y_AXIS_WIDTH as usize + 60);
         assert!(row.starts_with("       07/01"), "{row:?}");
         assert!(row.contains("07/16"), "{row:?}");
         assert!(row.ends_with("07/30"), "{row:?}");
@@ -1797,8 +1937,8 @@ mod tests {
         };
 
         // Three one-column days cannot host three five-column labels.
-        let row = date_label_row(&series, 3);
-        assert_eq!(row.len(), Y_LABEL_WIDTH as usize + 3);
+        let row = date_label_row(&series, MIN_Y_AXIS_WIDTH, 3);
+        assert_eq!(row.len(), MIN_Y_AXIS_WIDTH as usize + 3);
         assert_eq!(row.matches("07/").count(), 1, "{row:?}");
     }
 

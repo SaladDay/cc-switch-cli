@@ -551,6 +551,15 @@ fn detect_balance_provider(base_url: &str) -> bool {
 }
 
 fn provider_base_url(provider: &Provider) -> Option<String> {
+    if provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .is_some()
+    {
+        return provider_codex_base_url(provider);
+    }
+
     provider
         .settings_config
         .get("env")
@@ -618,7 +627,7 @@ fn provider_comment_credentials<'a>(
             )
         }
         AppType::Codex => (
-            provider_codex_model_provider_base_url(provider),
+            provider_codex_base_url(provider),
             settings
                 .get("auth")
                 .and_then(|value| value.get("OPENAI_API_KEY"))
@@ -676,43 +685,7 @@ fn provider_codex_base_url(provider: &Provider) -> Option<String> {
         .settings_config
         .get("config")
         .and_then(|value| value.as_str())?;
-    let table = toml::from_str::<toml::Table>(config_toml).ok()?;
-    table
-        .get("base_url")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
-        .or_else(|| {
-            let provider_key = table
-                .get("model_provider")
-                .and_then(|value| value.as_str())?;
-            table
-                .get("model_providers")
-                .and_then(|value| value.as_table())
-                .and_then(|providers| providers.get(provider_key))
-                .and_then(|value| value.as_table())
-                .and_then(|provider_table| provider_table.get("base_url"))
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string())
-        })
-}
-
-fn provider_codex_model_provider_base_url(provider: &Provider) -> Option<String> {
-    let config_toml = provider
-        .settings_config
-        .get("config")
-        .and_then(|value| value.as_str())?;
-    let table = toml::from_str::<toml::Table>(config_toml).ok()?;
-    let provider_key = table
-        .get("model_provider")
-        .and_then(|value| value.as_str())?;
-    table
-        .get("model_providers")
-        .and_then(|value| value.as_table())
-        .and_then(|providers| providers.get(provider_key))
-        .and_then(|value| value.as_table())
-        .and_then(|provider_table| provider_table.get("base_url"))
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
+    crate::codex_config::extract_codex_base_url(config_toml)
 }
 
 #[cfg(test)]
@@ -934,6 +907,45 @@ mod tests {
             "// 支持的变量\n// {{baseUrl}}\n// =\n// https://usage.example.com/v1\n// {{apiKey}}\n// =\n// sk-demo secret\n\n"
         ));
         assert!(script.code.contains(DEFAULT_USAGE_CUSTOM_PRESET));
+    }
+
+    #[test]
+    fn provider_codex_base_url_supports_legacy_flat_config() {
+        let provider = Provider::with_id(
+            "codex".to_string(),
+            "Codex".to_string(),
+            serde_json::json!({
+                "config": "base_url = \"https://legacy.example.com/v1\"\n"
+            }),
+            None,
+        );
+
+        assert_eq!(
+            provider_codex_base_url(&provider).as_deref(),
+            Some("https://legacy.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn codex_default_usage_template_uses_active_config_over_legacy_alias() {
+        let provider = Provider::with_id(
+            "codex".to_string(),
+            "Codex".to_string(),
+            serde_json::json!({
+                "base_url": "https://stale.example.com/v1",
+                "config": r#"model_provider = "current"
+
+[model_providers.current]
+base_url = "https://api.deepseek.com"
+"#
+            }),
+            None,
+        );
+
+        assert_eq!(
+            default_usage_template_for_provider(&provider),
+            UsageQueryTemplate::Balance
+        );
     }
 
     #[test]

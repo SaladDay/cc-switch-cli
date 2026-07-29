@@ -174,6 +174,12 @@ impl RequestForwarder {
         })
     }
 
+    pub(super) fn prewarm_provider_clients(&self, app_type: &AppType, providers: &[Provider]) {
+        for provider in providers {
+            let _ = self.client_for_provider(app_type, provider);
+        }
+    }
+
     pub fn with_optimizer_config(mut self, optimizer_config: OptimizerConfig) -> Self {
         self.optimizer_config = optimizer_config;
         self
@@ -707,6 +713,9 @@ impl RequestForwarder {
         options: ForwardOptions,
         rectifier_config: &RectifierConfig,
     ) -> Result<StreamingAttemptOutcome, StreamingRequestError> {
+        // Provider-specific clients may need to load native roots. Build and
+        // retain this one before the upstream request timeout starts.
+        let client = self.client_for_provider(app_type, provider);
         let started_at = Instant::now();
         let allow_transport_retry = uses_internal_transport_retry(app_type);
         let mut request_body = body.clone();
@@ -714,9 +723,10 @@ impl RequestForwarder {
 
         'request_loop: loop {
             let base_request = self
-                .prepare_request(
+                .prepare_request_with_client(
                     app_type,
                     provider,
+                    &client,
                     endpoint,
                     &request_body,
                     headers,
@@ -762,6 +772,29 @@ impl RequestForwarder {
                 } {
                     Ok(Ok(response)) => {
                         if response.status().is_success() {
+                            if uses_codex_anthropic_protocol(app_type, provider, endpoint)
+                                && response_is_json(&response)
+                            {
+                                let buffered_response = read_streaming_error_response(
+                                    response,
+                                    attempt_started_at,
+                                    options.request_timeout,
+                                )
+                                .await
+                                .map_err(StreamingRequestError::AfterResponse)?;
+                                validate_codex_anthropic_success_body(&buffered_response.body)
+                                    .map_err(|error| {
+                                        if rectifier_retried {
+                                            StreamingRequestError::AfterResponse(error)
+                                        } else {
+                                            StreamingRequestError::BeforeResponse(error)
+                                        }
+                                    })?;
+                                return Ok(StreamingAttemptOutcome {
+                                    response: StreamingResponse::Buffered(buffered_response),
+                                    attempt_decision: AttemptDecision::FatalStop,
+                                });
+                            }
                             let response = prepare_success_streaming_response(
                                 response,
                                 attempt_started_at,
@@ -877,6 +910,9 @@ impl RequestForwarder {
         options: ForwardOptions,
         rectifier_config: &RectifierConfig,
     ) -> Result<BufferedAttemptOutcome, BufferedRequestError> {
+        // Keep provider proxy client construction outside the shared request
+        // timeout and retain it for rectifier retries.
+        let client = self.client_for_provider(app_type, provider);
         let mut request_body = body.clone();
         let mut rectifier_retried = false;
         let request_started_at = Instant::now();
@@ -884,9 +920,10 @@ impl RequestForwarder {
 
         'request_loop: loop {
             let base_request = self
-                .prepare_request(
+                .prepare_request_with_client(
                     app_type,
                     provider,
+                    &client,
                     endpoint,
                     &request_body,
                     headers,
@@ -972,6 +1009,17 @@ impl RequestForwarder {
                         };
 
                         if buffered_response.status.is_success()
+                            && uses_codex_anthropic_protocol(app_type, provider, endpoint)
+                        {
+                            validate_codex_anthropic_success_body(&buffered_response.body)
+                                .map_err(|error| {
+                                    if rectifier_retried {
+                                        BufferedRequestError::AfterResponse(error)
+                                    } else {
+                                        BufferedRequestError::BeforeResponse(error)
+                                    }
+                                })?;
+                        } else if buffered_response.status.is_success()
                             && uses_responses_protocol(app_type, provider, endpoint)
                         {
                             validate_responses_success_body(&buffered_response.body).map_err(
@@ -1135,6 +1183,28 @@ fn uses_responses_protocol(app_type: &AppType, provider: &Provider, endpoint: &s
         path,
         "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
     ) && !super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+        && !super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
+}
+
+fn uses_codex_anthropic_protocol(app_type: &AppType, provider: &Provider, endpoint: &str) -> bool {
+    matches!(app_type, AppType::Codex)
+        && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
+}
+
+fn response_is_json(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| {
+            let media_type = content_type
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            media_type == "application/json" || media_type.ends_with("+json")
+        })
 }
 
 async fn prepare_success_streaming_response(
@@ -1267,6 +1337,31 @@ fn validate_responses_success_body(body: &[u8]) -> Result<(), ProxyError> {
         )));
     }
     Ok(())
+}
+
+fn validate_codex_anthropic_success_body(body: &[u8]) -> Result<(), ProxyError> {
+    if let Some(message) = codex_anthropic_error_envelope_message(body) {
+        return Err(ProxyError::TransformError(format!(
+            "Anthropic upstream returned a 2xx error envelope: {message}"
+        )));
+    }
+    Ok(())
+}
+
+fn codex_anthropic_error_envelope_message(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("error") && value.get("error").is_none() {
+        return None;
+    }
+    let error = value.get("error").unwrap_or(&value);
+    let error_type = error.get("type").and_then(Value::as_str).unwrap_or("error");
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string());
+    Some(format!("{error_type}: {message}"))
 }
 
 fn responses_error_envelope_message(body: &[u8]) -> Option<String> {

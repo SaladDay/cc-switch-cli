@@ -2596,6 +2596,92 @@ fn usage_sync_finish_does_not_cancel_running_aggregate_and_forces_final_follow_u
 }
 
 #[test]
+fn usage_sync_marks_in_flight_aggregates_for_every_app_dirty() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+    let fixed = data::UsageRangePreset::SevenDays;
+
+    cache.queue_usage_pricing_load(&mut app, Some(&tx), &AppType::Claude, fixed);
+    assert!(matches!(
+        rx.recv().expect("Claude aggregate should start"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+
+    let mut tracker = RequestTracker::default();
+    let sync_request_id = tracker.start();
+    handle_session_usage_sync_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut tracker,
+        Some(&tx),
+        SessionUsageSyncMsg::Finished {
+            request_id: sync_request_id,
+            result: Ok(()),
+        },
+    );
+    assert!(cache
+        .usage_pricing_dirty_by_key
+        .contains(&(AppType::Claude, fixed)));
+    assert!(cache
+        .usage_pricing_dirty_by_key
+        .contains(&(AppType::Codex, fixed)));
+    assert!(rx.try_recv().is_err(), "the in-flight query owns the lane");
+
+    assert!(handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: fixed,
+            result: Box::new(Ok(data::UsagePricingData::default())),
+        },
+    ));
+    assert!(cache.flush_dirty_usage_pricing(&mut app, Some(&tx)));
+    let UsagePricingReq::Load {
+        request_id: codex_request_id,
+        app_type: AppType::Codex,
+        ..
+    } = rx.recv().expect("the active app refreshes first")
+    else {
+        panic!("expected the active Codex aggregate");
+    };
+
+    assert!(handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: codex_request_id,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            range: fixed,
+            result: Box::new(Ok(data::UsagePricingData::default())),
+        },
+    ));
+    assert!(cache.flush_dirty_usage_pricing(&mut app, Some(&tx)));
+    assert!(matches!(
+        rx.recv()
+            .expect("the pre-sync Claude result must get a successor"),
+        UsagePricingReq::Load {
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn usage_dirty_refresh_keeps_log_page_and_detail_tokens_valid() {
     let mut app = App::new(Some(AppType::Claude));
     let mut data = UiData::default();
@@ -4431,18 +4517,18 @@ fn home_route_defers_the_first_session_sync_past_the_opening_frames() {
     let mut tracker = RequestTracker::default();
     let mut started = false;
 
-    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started);
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started, true);
     assert!(!started, "the first frames must not trigger the scan");
     assert!(rx.try_recv().is_err());
 
     app.tick = USAGE_SESSION_SYNC_HOME_DELAY_TICKS;
-    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started);
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started, true);
     assert!(started);
     assert!(matches!(rx.try_recv(), Ok(SessionUsageSyncReq::Run { .. })));
 
     // Once-per-process: staying on the home page does not re-queue.
     app.tick += 1;
-    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started);
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started, true);
     assert!(rx.try_recv().is_err());
 }
 
@@ -4455,10 +4541,62 @@ fn usage_routes_still_queue_the_session_sync_immediately() {
     let mut tracker = RequestTracker::default();
     let mut started = false;
 
-    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started);
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started, true);
 
     assert!(started);
     assert!(matches!(rx.try_recv(), Ok(SessionUsageSyncReq::Run { .. })));
+}
+
+#[test]
+fn initial_usage_session_sync_honors_the_auto_sync_opt_out() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Main;
+    app.tick = USAGE_SESSION_SYNC_HOME_DELAY_TICKS;
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+    let mut started = false;
+
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started, false);
+
+    assert!(!started);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(tracker.active, None);
+}
+
+#[test]
+fn proxy_activity_refreshes_home_usage_on_its_own_throttled_cadence() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Main;
+    app.tick = 0;
+    app.reset_proxy_activity(10, 20);
+    let mut cache = UiDataByAppCache::default();
+    cache.usage_pricing_by_key.insert(
+        (AppType::Claude, data::UsageRangePreset::SevenDays),
+        data::UsagePricingData::default(),
+    );
+    let (tx, rx) = mpsc::channel();
+
+    app.observe_proxy_token_activity(15, 27);
+    app.tick = USAGE_PROXY_REFRESH_INTERVAL_TICKS.saturating_sub(1);
+    queue_usage_proxy_refresh_if_due(&mut app, &mut cache, Some(&tx));
+    assert!(rx.try_recv().is_err(), "activity is throttled");
+    assert!(!cache.usage_pricing_by_key.is_empty());
+
+    app.tick = USAGE_PROXY_REFRESH_INTERVAL_TICKS;
+    queue_usage_proxy_refresh_if_due(&mut app, &mut cache, Some(&tx));
+
+    assert!(cache.usage_pricing_by_key.is_empty());
+    assert!(matches!(
+        rx.recv().expect("proxy activity should refresh usage"),
+        UsagePricingReq::Load {
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            ..
+        }
+    ));
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::ThirtyDays));
 }
 
 #[test]

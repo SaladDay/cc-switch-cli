@@ -570,6 +570,26 @@ impl UiDataByAppCache {
     /// stale-while-revalidate refresh completes.
     fn invalidate_usage_pricing_cache_after_external_usage_sync(&mut self) {
         self.usage_pricing_by_key.clear();
+        // Every aggregate that was already running crossed the import's commit
+        // boundary, including requests for apps that are not currently
+        // visible. Keep their tokens valid, but require one fresh successor so
+        // a late result cannot repopulate the cache with a pre-sync snapshot.
+        self.usage_pricing_dirty_by_key
+            .extend(self.pending_usage_pricing_by_key.keys().cloned());
+    }
+
+    /// Invalidate one app after the proxy persisted new usage. As with an
+    /// external import, in-flight requests finish normally and earn exactly
+    /// one follow-up instead of being cancelled.
+    fn invalidate_usage_pricing_cache_for_app(&mut self, app_type: &AppType) {
+        self.usage_pricing_by_key
+            .retain(|(cached_app_type, _), _| cached_app_type != app_type);
+        self.usage_pricing_dirty_by_key.extend(
+            self.pending_usage_pricing_by_key
+                .keys()
+                .filter(|(pending_app_type, _)| pending_app_type == app_type)
+                .cloned(),
+        );
     }
 
     fn remove_app_snapshot(&mut self, app_type: &AppType) {
@@ -1331,6 +1351,10 @@ fn queue_codex_usage_rebuild(
 const USAGE_SESSION_SYNC_HOME_DELAY_TICKS: u64 = 10;
 /// Cadence of the background session-usage refresh (60s at [`TUI_TICK_RATE`]).
 const USAGE_AUTO_SYNC_INTERVAL_TICKS: u64 = 60 * 1000 / 200;
+/// Proxy traffic already writes usage rows to SQLite; only the aggregate view
+/// needs refreshing. Keep that query independent from the much heavier local
+/// session scan and throttle it to once every ten seconds.
+const USAGE_PROXY_REFRESH_INTERVAL_TICKS: u64 = 10 * 1000 / 200;
 
 /// Lazily kick off the session-usage sync the first time a Usage route — or,
 /// after a short delay, the home page — is shown this run. The sync scans the
@@ -1341,8 +1365,9 @@ fn maybe_queue_usage_session_sync(
     sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
     sync_tracker: &mut RequestTracker,
     started: &mut bool,
+    auto_sync_enabled: bool,
 ) {
-    if *started {
+    if *started || !auto_sync_enabled {
         return;
     }
     let on_usage_route = matches!(
@@ -1393,6 +1418,29 @@ fn queue_usage_session_sync_if_due(
         app.tick
     );
     queue_background_session_usage_sync(sync_req_tx, sync_tracker);
+}
+
+/// Refresh the current app's fixed usage projection after proxy activity
+/// without tying it to `usageAutoSync`, which controls local session-log I/O.
+fn queue_usage_proxy_refresh_if_due(
+    app: &mut App,
+    data_cache: &mut UiDataByAppCache,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+) {
+    if !matches!(app.route, route::Route::Main) {
+        return;
+    }
+    let Some(tx) = usage_pricing_req_tx else {
+        return;
+    };
+    if !app.take_proxy_usage_refresh_due(USAGE_PROXY_REFRESH_INTERVAL_TICKS) {
+        return;
+    }
+
+    let app_type = app.app_type.clone();
+    data_cache.invalidate_usage_pricing_cache_for_app(&app_type);
+    data_cache.mark_usage_pricing_dirty(&app_type, data::UsageRangePreset::ThirtyDays);
+    data_cache.flush_dirty_usage_pricing(app, Some(tx));
 }
 
 /// Lazily load the active app's usage/pricing when a Usage or Pricing view is
@@ -3350,6 +3398,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             session_usage.as_ref().map(|s| &s.req_tx),
             &mut session_usage_sync,
             &mut session_usage_sync_started,
+            crate::settings::usage_auto_sync_enabled(),
         );
         // Lazily aggregate usage/pricing (deferred off the startup full-load)
         // once the user is actually on a Usage route.
@@ -3389,6 +3438,11 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 &mut app,
                 session_usage.as_ref().map(|s| &s.req_tx),
                 &mut session_usage_sync,
+            );
+            queue_usage_proxy_refresh_if_due(
+                &mut app,
+                &mut data_cache,
+                usage_pricing.as_ref().map(|s| &s.req_tx),
             );
             last_tick = Instant::now();
             frame_scheduler.mark_dirty();

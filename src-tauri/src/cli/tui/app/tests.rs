@@ -1280,6 +1280,10 @@ mod tests {
         assert_eq!(app.proxy_output_activity_samples, vec![0]);
         assert_eq!(app.proxy_activity_last_input_tokens, Some(3));
         assert_eq!(app.proxy_activity_last_output_tokens, Some(8));
+        assert!(
+            app.usage_proxy_activity_dirty,
+            "a counter rollback conservatively refreshes persisted proxy usage"
+        );
     }
 
     #[test]
@@ -11998,6 +12002,46 @@ mod tests {
     }
 
     #[test]
+    fn provider_add_form_codex_rejects_invalid_anthropic_max_output_tokens() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.name.set("Anthropic Gateway");
+            form.codex_base_url.set("https://gateway.example/v1");
+            form.claude_api_format = super::super::form::ClaudeApiFormat::Anthropic;
+            form.codex_max_output_tokens.set("not-a-number");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(submit, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Warning,
+                message,
+                ..
+            }) if message == texts::tui_codex_max_output_tokens_invalid()
+        ));
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if form.fields().get(form.field_idx)
+                    == Some(&ProviderAddField::CodexMaxOutputTokens)
+                    && form
+                        .main_field_error(ProviderAddField::CodexMaxOutputTokens)
+                        .is_some()
+        ));
+    }
+
+    #[test]
     fn provider_add_form_ctrl_s_rejects_name_that_cannot_generate_id() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -15014,7 +15058,10 @@ mod tests {
         app.on_key(key(KeyCode::Char('?')), &UiData::default());
         let text = help_text(&app);
         assert!(text.contains("Upstream format"), "{text}");
-        assert!(text.contains("natively Responses API"), "{text}");
+        assert!(
+            text.contains("Anthropic Messages require local routing conversion"),
+            "{text}"
+        );
         assert!(!text.contains("上游格式"), "{text}");
     }
 

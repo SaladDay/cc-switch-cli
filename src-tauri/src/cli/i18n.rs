@@ -3,7 +3,7 @@
     reason = "generated i18n accessors may share text across locales"
 )]
 
-use crate::settings::{get_settings, update_settings};
+use crate::settings::{get_settings, update_settings, AppSettings};
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
@@ -54,7 +54,11 @@ fn language_store() -> &'static RwLock<Language> {
             // Keep unit tests deterministic and avoid reading real user settings.
             Language::English
         } else {
-            let settings = get_settings();
+            // Read the persisted settings directly while initializing the language
+            // store. Localized validation errors can be constructed while the
+            // in-memory settings store is write-locked, so re-entering
+            // `get_settings()` here would deadlock on first use.
+            let settings = AppSettings::load();
             settings
                 .language
                 .as_deref()
@@ -265,9 +269,9 @@ pub mod texts {
     // Welcome & Headers
     pub fn welcome_title() -> &'static str {
         if is_chinese() {
-            "🎯 CC-Switch 交互模式"
+            "🎯 CC-Switch"
         } else {
-            "🎯 CC-Switch Interactive Mode"
+            "🎯 CC-Switch"
         }
     }
 
@@ -883,14 +887,6 @@ pub mod texts {
             "其他"
         } else {
             "Other"
-        }
-    }
-
-    pub fn tui_home_chart_loading() -> &'static str {
-        if is_chinese() {
-            "正在加载用量..."
-        } else {
-            "Loading usage..."
         }
     }
 
@@ -2037,6 +2033,13 @@ pub mod texts {
                     "OpenAI Chat Completions (Local routing)"
                 }
             }
+            "anthropic" => {
+                if is_chinese() {
+                    "Anthropic Messages (需本地路由)"
+                } else {
+                    "Anthropic Messages (Local routing)"
+                }
+            }
             _ => {
                 if is_chinese() {
                     "OpenAI Responses API (原生)"
@@ -2044,6 +2047,46 @@ pub mod texts {
                     "OpenAI Responses API (Native)"
                 }
             }
+        }
+    }
+
+    pub fn tui_label_codex_anthropic_auth_field() -> &'static str {
+        if is_chinese() {
+            "认证字段"
+        } else {
+            "Auth field"
+        }
+    }
+
+    pub fn tui_codex_anthropic_auth_field_value(api_key_field: &str) -> &'static str {
+        if api_key_field == "ANTHROPIC_API_KEY" {
+            "ANTHROPIC_API_KEY (x-api-key)"
+        } else {
+            "ANTHROPIC_AUTH_TOKEN (Authorization)"
+        }
+    }
+
+    pub fn tui_label_codex_impersonate_claude_code() -> &'static str {
+        if is_chinese() {
+            "模拟 Claude Code 客户端"
+        } else {
+            "Emulate Claude Code client"
+        }
+    }
+
+    pub fn tui_label_codex_max_output_tokens() -> &'static str {
+        if is_chinese() {
+            "最大输出 tokens"
+        } else {
+            "Max output tokens"
+        }
+    }
+
+    pub fn tui_codex_max_output_tokens_invalid() -> &'static str {
+        if is_chinese() {
+            "最大输出 tokens 必须留空或填写大于 0 的整数"
+        } else {
+            "Max output tokens must be empty or an integer greater than 0"
         }
     }
 
@@ -12814,7 +12857,7 @@ pub mod texts {
     }
 
     // -----------------------------------------------------------------
-    // config.rs - validate_config_dir & prompt_fix_permissions
+    // config.rs - validate_config_dir
     // -----------------------------------------------------------------
 
     pub fn config_dir_is_system_dir(dir: &str, resolved: &str) -> String {
@@ -12842,78 +12885,6 @@ pub mod texts {
             format!("Invalid config directory path; only the final directory component may be missing: {path}")
         }
     }
-
-    pub fn config_permissions_insecure_header() -> &'static str {
-        if is_chinese() {
-            "⚠ 检测到以下文件/目录权限不安全："
-        } else {
-            "⚠ Insecure file/directory permissions detected:"
-        }
-    }
-
-    pub fn config_permissions_detail(path: &str, current: u32, expected: u32) -> String {
-        if is_chinese() {
-            format!("  {path}  当前 {current:04o}，期望 {expected:04o}")
-        } else {
-            format!("  {path}  current {current:04o}, expected {expected:04o}")
-        }
-    }
-
-    pub fn config_permissions_fix_prompt() -> &'static str {
-        if is_chinese() {
-            "是否现在修复权限？（仅所有者可访问）"
-        } else {
-            "Fix permissions now? (owner-only access)"
-        }
-    }
-
-    pub fn config_permissions_fixed() -> &'static str {
-        if is_chinese() {
-            "✓ 权限已修复"
-        } else {
-            "✓ Permissions fixed"
-        }
-    }
-
-    pub fn config_permissions_fix_warn_interactive() -> &'static str {
-        if is_chinese() {
-            "⚠ 未来版本将拒绝在权限不安全的情况下启动，请尽快修复。"
-        } else {
-            "⚠ Future versions will refuse to start with insecure permissions. Please fix soon."
-        }
-    }
-
-    pub fn config_permissions_fix_warn_noninteractive() -> &'static str {
-        if is_chinese() {
-            "⚠ 检测到配置文件权限不安全（非交互模式），跳过修复。未来版本将拒绝启动。"
-        } else {
-            "⚠ Insecure config permissions detected (non-interactive). Skipped. Future versions will refuse to start."
-        }
-    }
-
-    pub fn config_permissions_custom_dir_notice(path: &str) -> String {
-        if is_chinese() {
-            format!("检测到自定义配置目录: {path}，请核实此目录不是关键系统目录")
-        } else {
-            format!("Custom config directory detected: {path}, please verify this is not a critical system directory")
-        }
-    }
-
-    pub fn config_permissions_confirm_custom_dir() -> &'static str {
-        if is_chinese() {
-            "确认要修改此目录的权限吗？"
-        } else {
-            "Confirm modifying permissions on this directory?"
-        }
-    }
-
-    pub fn config_permissions_custom_dir_skipped() -> &'static str {
-        if is_chinese() {
-            "已跳过权限修复。"
-        } else {
-            "Skipped permission fix."
-        }
-    }
 }
 
 #[cfg(test)]
@@ -12938,6 +12909,7 @@ mod tests {
             texts::provider_duplicated_success("source", "source-copy"),
             "✓ 已复制供应商 'source' 为 'source-copy'"
         );
+        assert_eq!(texts::welcome_title(), "🎯 CC-Switch");
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
         assert_eq!(texts::tui_home_status_offline(), "离线");

@@ -68,11 +68,11 @@ static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 8] = [
         id: "claudeapi",
         provider_name: "ClaudeAPI",
         chip_label: "* ClaudeAPI",
-        website_url: "https://console.claudeapi.com",
-        register_url: "https://console.claudeapi.com/register?source=cc-switch-cli",
+        website_url: "https://www.apito.ai",
+        register_url: "https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii",
         promo_code: "",
         partner_promotion_key: "claudeapi",
-        claude_base_url: "https://gw.claudeapi.com",
+        claude_base_url: "https://gw.apito.ai",
         codex_base_url: "",
         gemini_base_url: "",
         opencode_base_url: "",
@@ -547,6 +547,8 @@ impl ProviderAddFormState {
                     self.claude_disable_auto_upgrade = defaults.claude_disable_auto_upgrade;
                     self.codex_oauth_account_id = defaults.codex_oauth_account_id;
                     self.codex_fast_mode = defaults.codex_fast_mode;
+                    self.codex_impersonate_claude_code = defaults.codex_impersonate_claude_code;
+                    self.codex_max_output_tokens = defaults.codex_max_output_tokens;
                     self.codex_base_url = defaults.codex_base_url;
                     self.codex_model = defaults.codex_model;
                     self.codex_wire_api = defaults.codex_wire_api;
@@ -587,6 +589,8 @@ impl ProviderAddFormState {
 
             self.extra = json!({});
             self.notes.set("");
+            self.codex_impersonate_claude_code = false;
+            self.codex_max_output_tokens.set("");
             match template_id {
                 ProviderTemplateId::Custom => {}
                 ProviderTemplateId::ClaudeOfficial => {
@@ -801,6 +805,9 @@ impl ProviderAddFormState {
                 self.claude_base_url.set(preset.claude_base_url);
             }
             AppType::Codex => {
+                self.claude_api_key_field = ClaudeApiKeyField::AuthToken;
+                self.codex_impersonate_claude_code = false;
+                self.codex_max_output_tokens.set("");
                 self.codex_base_url.set(preset.codex_base_url);
                 self.codex_model
                     .set(if preset.id == "qiniu" || preset.id == "fenno" {
@@ -1001,6 +1008,9 @@ impl ProviderAddFormState {
 
     fn reset_codex_local_routing_state(&mut self) {
         self.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+        self.claude_api_key_field = ClaudeApiKeyField::AuthToken;
+        self.codex_impersonate_claude_code = false;
+        self.codex_max_output_tokens.set("");
         self.codex_chat_reasoning = CodexChatReasoningConfig::default();
         self.codex_prompt_cache_routing = PromptCacheRoutingMode::Auto;
         self.codex_model_catalog.clear();

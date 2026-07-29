@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use chrono::{Days, Local, NaiveDate, NaiveTime, TimeZone, Timelike};
+use chrono::{Days, Local, NaiveDate, TimeZone};
 use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension};
 use rust_decimal::{prelude::ToPrimitive, Decimal};
@@ -548,6 +548,9 @@ pub struct UsageDailyModelBucket {
     /// Local calendar day, `YYYY-MM-DD` — matches `UsageTrendBucket::key`.
     pub date_key: String,
     pub model: String,
+    /// This cell is the SQL-bounded residual rather than a named model. The
+    /// renderer supplies the localized "Other" label.
+    pub is_other: bool,
     /// Billable tokens (`fresh input + output`), matching the trend query.
     /// The home chart stacks [`Self::real_total_tokens`] instead.
     pub total_tokens: u64,
@@ -712,6 +715,9 @@ pub struct UsageLogRow {
 pub(crate) const USAGE_LOG_PAGE_SIZE: usize = 100;
 pub(crate) const USAGE_LOG_ERROR_MESSAGE_MAX_CHARS: usize = 4_096;
 pub(crate) const USAGE_TEXT_MAX_CHARS: usize = 256;
+/// The home chart exposes four named model series; every remaining model is
+/// folded into one residual bucket by the SQL projection.
+pub(crate) const USAGE_DAILY_MODEL_LIMIT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -1606,22 +1612,10 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .get("ANTHROPIC_BASE_URL")?
             .as_str()
             .map(|s| s.to_string()),
-        AppType::Codex => {
-            if let Some(config_str) = settings_config.get("config")?.as_str() {
-                for line in config_str.lines() {
-                    let line = line.trim();
-                    if line.starts_with("base_url") {
-                        if let Some(url_part) = line.split('=').nth(1) {
-                            let url = url_part.trim().trim_matches('"').trim_matches('\'');
-                            if !url.is_empty() {
-                                return Some(url.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        }
+        AppType::Codex => settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(crate::codex_config::extract_codex_base_url),
         AppType::Gemini => settings_config
             .get("env")
             .and_then(|env| {
@@ -2552,184 +2546,130 @@ fn empty_usage_custom_trend(range: UsageCustomRange) -> Vec<UsageTrendBucket> {
         .collect()
 }
 
-/// Local-day bounds (`YYYY-MM-DD`) of the rollup rows fully covered by
-/// `[start, end]`.
-///
-/// Rollup rows aggregate a whole local day, so a window that starts after
-/// midnight or ends before 23:59 must drop that boundary day: its detail rows
-/// are still in `proxy_request_logs` and adding the rollup would double-count.
-/// Mirrors `usage_stats::compute_rollup_date_bounds`.
-fn rollup_date_bounds(start: i64, end: i64) -> Option<(String, String)> {
-    let start_local = Local.timestamp_opt(start, 0).single()?;
-    let end_local = Local.timestamp_opt(end, 0).single()?;
-
-    let start_day = if start_local.time() == NaiveTime::MIN {
-        start_local.date_naive()
-    } else {
-        start_local.date_naive().succ_opt()?
-    };
-    let end_time = end_local.time();
-    let end_day = if end_time.hour() == 23 && end_time.minute() == 59 {
-        end_local.date_naive()
-    } else {
-        end_local.date_naive().pred_opt()?
-    };
-
-    if start_day > end_day {
-        return None;
-    }
-    Some((
-        start_day.format("%Y-%m-%d").to_string(),
-        end_day.format("%Y-%m-%d").to_string(),
-    ))
-}
-
-/// One `(day, model)` accumulator shared by the detail and rollup queries.
-#[derive(Debug, Clone, Copy, Default)]
-struct DailyModelCell {
-    total_tokens: u64,
-    cost_usd: f64,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_creation_tokens: u64,
-}
-
-/// Row shape both queries in [`load_usage_daily_models`] return.
-type DailyModelQueryRow = (String, String, i64, f64, i64, i64, i64, i64);
+/// Bounded row shape returned by [`load_usage_daily_models`].
+type DailyModelQueryRow = (String, String, bool, i64, f64, i64, i64, i64, i64);
 
 /// Per-day/per-model token+cost cells for the home chart.
 ///
-/// Merges unpruned `proxy_request_logs` (cross-source deduplicated through
-/// `effective_usage_log_filter`) with `usage_daily_rollups` for the days the
-/// pruner already archived, mirroring `usage_stats::get_daily_trends`.
+/// Reads the same unpruned `proxy_request_logs` projection as the Usage page,
+/// cross-source deduplicated through `effective_usage_log_filter`. The normal
+/// 30-day window is retained in detail form by database maintenance, so using
+/// the same source keeps the two pages numerically consistent and avoids
+/// double-counting when a restore or re-import temporarily leaves both detail
+/// and rollup rows for one day.
 ///
-/// Both sources route `input_tokens` through
+/// The query routes `input_tokens` through
 /// [`crate::services::sql_helpers::fresh_input_sql`], so "In" here means the
 /// same thing as the Usage page's "Input" tile: fresh (non-cached) input.
 /// `total_tokens` stays `fresh input + output`, matching the trend query; the
 /// home chart stacks the *real* total (that plus the two cache counters), which
 /// [`UsageDailyModelBucket::real_total_tokens`] derives from the same cells.
 ///
-/// KNOWN DIVERGENCE: the home card merges rollups here, while the Usage page's
-/// own TUI queries ([`load_usage_summary`], [`load_usage_trend`],
-/// [`load_usage_top_models`]) read `proxy_request_logs` alone. On a database
-/// whose old days have been pruned into rollups — a restored backup, a
-/// re-import — the home card can report more than the Usage page for the same
-/// window. Unifying the Usage page onto this merged source is follow-up work,
-/// deliberately out of scope here because it would move numbers on a page users
-/// already read.
+/// The SQL returns at most [`USAGE_DAILY_MODEL_LIMIT`] named models plus one
+/// residual cell per day. Model text is bounded before grouping so arbitrary
+/// upstream identifiers cannot make this automatic home-page query materialize
+/// an unbounded number of large strings in the TUI process.
 fn load_usage_daily_models(
     conn: &rusqlite::Connection,
     app_key: &str,
     start: i64,
     end: i64,
 ) -> Result<Vec<UsageDailyModelBucket>, AppError> {
-    let mut totals: HashMap<(String, String), DailyModelCell> = HashMap::new();
-    let mut accumulate = |row: DailyModelQueryRow| {
-        let (date_key, model, tokens, cost, input, output, cache_read, cache_creation) = row;
-        let entry = totals.entry((date_key, model)).or_default();
-        entry.total_tokens = entry.total_tokens.saturating_add(non_negative_u64(tokens));
-        entry.cost_usd += cost.max(0.0);
-        entry.input_tokens = entry.input_tokens.saturating_add(non_negative_u64(input));
-        entry.output_tokens = entry.output_tokens.saturating_add(non_negative_u64(output));
-        entry.cache_read_tokens = entry
-            .cache_read_tokens
-            .saturating_add(non_negative_u64(cache_read));
-        entry.cache_creation_tokens = entry
-            .cache_creation_tokens
-            .saturating_add(non_negative_u64(cache_creation));
-    };
-
-    let read_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<DailyModelQueryRow> {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, f64>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, i64>(6)?,
-            row.get::<_, i64>(7)?,
-        ))
-    };
-
     let total_tokens_expr = usage_stats_total_tokens_sql(Some("l"));
     let fresh_input_expr = crate::services::sql_helpers::fresh_input_sql("l");
     let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
     let model_expr = usage_model_group_sql("l.");
-    let detail_sql = format!(
-        "SELECT
-            date(l.created_at, 'unixepoch', 'localtime') AS bucket_date,
-            {model_expr} AS model_name,
-            COALESCE(SUM({total_tokens_expr}), 0),
-            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
-            COALESCE(SUM({fresh_input_expr}), 0),
-            COALESCE(SUM(l.output_tokens), 0),
-            COALESCE(SUM(l.cache_read_tokens), 0),
-            COALESCE(SUM(l.cache_creation_tokens), 0)
-         FROM proxy_request_logs l
-         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
-           AND {effective_filter}
-         GROUP BY bucket_date, model_name"
+    let sql = format!(
+        "WITH raw AS (
+            SELECT
+                date(l.created_at, 'unixepoch', 'localtime') AS bucket_date,
+                {model_expr} AS model_name,
+                COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) AS total_cost,
+                COALESCE(SUM({fresh_input_expr}), 0) AS input_tokens,
+                COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(l.cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(l.cache_creation_tokens), 0) AS cache_creation_tokens
+            FROM proxy_request_logs l
+            WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+              AND {effective_filter}
+            GROUP BY bucket_date, model_name
+        ),
+        ranked_models AS (
+            SELECT
+                model_name,
+                SUM(total_cost) AS ranked_cost,
+                SUM(input_tokens + output_tokens
+                    + cache_read_tokens + cache_creation_tokens) AS ranked_tokens
+            FROM raw
+            GROUP BY model_name
+            ORDER BY ranked_cost DESC, ranked_tokens DESC, model_name ASC
+            LIMIT {USAGE_DAILY_MODEL_LIMIT}
+        ),
+        projected AS (
+            SELECT
+                raw.bucket_date,
+                CASE WHEN ranked_models.model_name IS NULL
+                    THEN '' ELSE raw.model_name END AS model_name,
+                CASE WHEN ranked_models.model_name IS NULL
+                    THEN 1 ELSE 0 END AS is_other,
+                raw.total_tokens,
+                raw.total_cost,
+                raw.input_tokens,
+                raw.output_tokens,
+                raw.cache_read_tokens,
+                raw.cache_creation_tokens
+            FROM raw
+            LEFT JOIN ranked_models ON ranked_models.model_name = raw.model_name
+        )
+        SELECT
+            bucket_date,
+            model_name,
+            is_other,
+            COALESCE(SUM(total_tokens), 0),
+            COALESCE(SUM(total_cost), 0.0),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cache_creation_tokens), 0)
+        FROM projected
+        GROUP BY bucket_date, model_name, is_other
+        ORDER BY bucket_date ASC, is_other ASC, model_name ASC"
     );
-    let mut detail_stmt = conn.prepare(&detail_sql)?;
-    let detail_rows = detail_stmt.query_map(params![app_key, start, end], read_row)?;
-    let mut detail_count = 0usize;
-    for row in detail_rows {
-        detail_count += 1;
-        accumulate(row?);
-    }
-
-    let mut rollup_count = 0usize;
-    if let Some((rollup_start, rollup_end)) = rollup_date_bounds(start, end) {
-        let rollup_input_expr = crate::services::sql_helpers::fresh_input_sql("");
-        let rollup_tokens_expr = format!("{rollup_input_expr} + output_tokens");
-        let rollup_model_expr = usage_model_group_sql("");
-        let rollup_sql = format!(
-            "SELECT
-                date,
-                {rollup_model_expr} AS model_name,
-                COALESCE(SUM({rollup_tokens_expr}), 0),
-                COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0.0),
-                COALESCE(SUM({rollup_input_expr}), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cache_creation_tokens), 0)
-             FROM usage_daily_rollups
-             WHERE app_type = ?1 AND date >= ?2 AND date <= ?3
-             GROUP BY date, model_name"
-        );
-        let mut rollup_stmt = conn.prepare(&rollup_sql)?;
-        let rollup_rows =
-            rollup_stmt.query_map(params![app_key, rollup_start, rollup_end], read_row)?;
-        for row in rollup_rows {
-            rollup_count += 1;
-            accumulate(row?);
-        }
-    }
-
-    let mut buckets = totals
-        .into_iter()
-        .map(|((date_key, model), cell)| UsageDailyModelBucket {
+    let read_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<DailyModelQueryRow> {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+        ))
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![app_key, start, end], read_row)?;
+    let mut buckets = Vec::new();
+    for row in rows {
+        let (date_key, model, is_other, tokens, cost, input, output, cache_read, cache_creation) =
+            row?;
+        buckets.push(UsageDailyModelBucket {
             date_key,
             model,
-            total_tokens: cell.total_tokens,
-            total_cost_usd: cell.cost_usd,
-            input_tokens: cell.input_tokens,
-            output_tokens: cell.output_tokens,
-            cache_read_tokens: cell.cache_read_tokens,
-            cache_creation_tokens: cell.cache_creation_tokens,
-        })
-        .collect::<Vec<_>>();
-    buckets.sort_by(|a, b| {
-        a.date_key
-            .cmp(&b.date_key)
-            .then_with(|| a.model.cmp(&b.model))
-    });
+            is_other,
+            total_tokens: non_negative_u64(tokens),
+            total_cost_usd: cost.max(0.0),
+            input_tokens: non_negative_u64(input),
+            output_tokens: non_negative_u64(output),
+            cache_read_tokens: non_negative_u64(cache_read),
+            cache_creation_tokens: non_negative_u64(cache_creation),
+        });
+    }
 
     log::debug!(
-        "home-usage: daily model query app={app_key} detail_rows={detail_count} rollup_rows={rollup_count} merged={}",
+        "home-usage: bounded daily model query app={app_key} rows={}",
         buckets.len()
     );
     Ok(buckets)
@@ -2757,14 +2697,13 @@ fn load_session_last_synced_at(conn: &rusqlite::Connection) -> Option<i64> {
     }
 }
 
-/// SQL fragment producing a non-empty *raw* model name, for grouping.
-///
-/// Deliberately untruncated: two 300-character model ids that share a
-/// 255-character prefix are different models and must stay different buckets.
-/// Display truncation happens at render time (`truncate_to_display_width`), the
-/// same split the Usage page's own top-models query already uses.
+/// SQL fragment producing a non-empty, bounded model name for the automatic
+/// home-page projection. Full identifiers remain stored in SQLite and are
+/// available in the Usage log detail; the chart never needs more text than its
+/// bounded TUI projection can display.
 fn usage_model_group_sql(prefix: &str) -> String {
-    format!("COALESCE(NULLIF(TRIM({prefix}model), ''), 'unknown')")
+    let raw = format!("COALESCE(NULLIF(TRIM({prefix}model), ''), 'unknown')");
+    format!("SUBSTR({raw}, 1, {USAGE_TEXT_MAX_CHARS})")
 }
 
 /// Fold raw per-day/per-model cells onto a fixed day axis, keeping the
@@ -2819,8 +2758,13 @@ pub fn build_usage_daily_chart_series(
     // Cost", and a cheap model that moves a lot of cache tokens must not push
     // the expensive one the user is actually paying for into "Other".
     let mut model_ranks: HashMap<&str, (f64, u64)> = HashMap::new();
+    let mut has_other = false;
     for bucket in buckets {
         if !in_window.contains(bucket.date_key.as_str()) {
+            continue;
+        }
+        if bucket.is_other {
+            has_other = true;
             continue;
         }
         let entry = model_ranks
@@ -2851,7 +2795,7 @@ pub fn build_usage_daily_chart_series(
         .iter()
         .map(|(model, _)| (*model).to_string())
         .collect::<Vec<_>>();
-    let other_index = if ranked.len() > kept {
+    let other_index = if has_other || ranked.len() > kept {
         models.push(other_label.to_string());
         Some(models.len() - 1)
     } else {
@@ -2887,11 +2831,15 @@ pub fn build_usage_daily_chart_series(
         let Some(&idx) = day_index.get(bucket.date_key.as_str()) else {
             continue;
         };
-        let Some(slot) = slot_by_model
-            .get(bucket.model.as_str())
-            .copied()
-            .or(other_index)
-        else {
+        let slot = if bucket.is_other {
+            other_index
+        } else {
+            slot_by_model
+                .get(bucket.model.as_str())
+                .copied()
+                .or(other_index)
+        };
+        let Some(slot) = slot else {
             continue;
         };
         // Real tokens, cache included: a day that only replayed a cached
@@ -3886,7 +3834,7 @@ mod tests {
     }
 
     #[test]
-    fn daily_model_buckets_merge_unpruned_logs_with_rollups() -> Result<(), AppError> {
+    fn daily_model_buckets_match_usage_detail_source_and_ignore_rollups() -> Result<(), AppError> {
         let db = crate::Database::memory()?;
         let conn = db.conn.lock().expect("lock memory db");
 
@@ -3944,7 +3892,9 @@ mod tests {
             "proxy",
         )?;
 
-        // Archived day only exists as a rollup.
+        // Rollups deliberately do not feed this projection: the Usage page
+        // reads detail rows, and restored/re-imported databases can briefly
+        // contain both sources for the same day.
         insert_daily_rollup(
             &conn,
             &archived_day.format("%Y-%m-%d").to_string(),
@@ -3954,8 +3904,7 @@ mod tests {
             20,
             "0.30",
         )?;
-        // A rollup dated today is only partially covered by the window and must
-        // be trimmed, otherwise it would double-count the detail rows above.
+        // A same-day rollup must not double-count the detail rows above.
         insert_daily_rollup(
             &conn,
             &today.format("%Y-%m-%d").to_string(),
@@ -3975,7 +3924,7 @@ mod tests {
         assert_eq!(bucket_tokens(&buckets, &today_key, "claude-opus"), 150);
         assert_eq!(bucket_tokens(&buckets, &today_key, "claude-haiku"), 15);
         assert_eq!(bucket_tokens(&buckets, &yesterday_key, "claude-opus"), 10);
-        assert_eq!(bucket_tokens(&buckets, &archived_key, "claude-opus"), 60);
+        assert_eq!(bucket_tokens(&buckets, &archived_key, "claude-opus"), 0);
         assert!(
             buckets.iter().all(|bucket| bucket.model != "gpt-5.4"),
             "another app's rows must not appear: {buckets:?}"
@@ -4105,7 +4054,7 @@ mod tests {
     }
 
     #[test]
-    fn daily_model_buckets_sum_the_detail_counters_from_both_sources() -> Result<(), AppError> {
+    fn daily_model_buckets_sum_detail_counters_without_rollup_overlap() -> Result<(), AppError> {
         let db = crate::Database::memory()?;
         let conn = db.conn.lock().expect("lock memory db");
 
@@ -4139,7 +4088,8 @@ mod tests {
             1,
             crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH,
         )?;
-        // Archived day: only the rollup carries it.
+        // An archived rollup is outside the Usage page's detail-backed
+        // projection and must not alter this chart.
         insert_detailed_daily_rollup(
             &conn,
             &archived_day.format("%Y-%m-%d").to_string(),
@@ -4172,12 +4122,12 @@ mod tests {
             "the stacked total stays input + output"
         );
 
-        let rollup = cell(&archived_day.format("%Y-%m-%d").to_string());
-        assert_eq!(rollup.input_tokens, 400);
-        assert_eq!(rollup.output_tokens, 200);
-        assert_eq!(rollup.cache_read_tokens, 60);
-        assert_eq!(rollup.cache_creation_tokens, 40);
-        assert_eq!(rollup.total_tokens, 600);
+        assert!(
+            buckets
+                .iter()
+                .all(|bucket| bucket.date_key != archived_day.format("%Y-%m-%d").to_string()),
+            "rollup-only days stay out of the detail-backed projection: {buckets:?}"
+        );
         Ok(())
     }
 
@@ -4243,11 +4193,10 @@ mod tests {
         Ok(())
     }
 
-    /// Grouping must see the raw model id. Two 300-character ids that share a
-    /// 255-character prefix are different models; truncating inside the SQL
-    /// would merge their tokens and their cost into one bucket.
+    /// The automatic projection bounds model text before it reaches Rust, but
+    /// still distinguishes long ids that differ inside that bound.
     #[test]
-    fn daily_model_buckets_group_by_the_raw_model_id() -> Result<(), AppError> {
+    fn daily_model_buckets_bound_long_model_ids() -> Result<(), AppError> {
         let db = crate::Database::memory()?;
         let conn = db.conn.lock().expect("lock memory db");
 
@@ -4284,19 +4233,82 @@ mod tests {
 
         let buckets = load_usage_daily_models(&conn, "claude", start, now)?;
         let today_key = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let bounded_first = first.chars().take(USAGE_TEXT_MAX_CHARS).collect::<String>();
+        let bounded_second = second
+            .chars()
+            .take(USAGE_TEXT_MAX_CHARS)
+            .collect::<String>();
 
-        assert_eq!(bucket_tokens(&buckets, &today_key, &first), 150);
-        assert_eq!(bucket_tokens(&buckets, &today_key, &second), 10);
+        assert_eq!(bucket_tokens(&buckets, &today_key, &bounded_first), 150);
+        assert_eq!(bucket_tokens(&buckets, &today_key, &bounded_second), 10);
         assert_eq!(
             buckets.len(),
             2,
             "the two ids must stay separate buckets: {buckets:?}"
         );
         assert!(
-            buckets.iter().all(|bucket| bucket.model.len() == 300),
-            "model ids reach the render layer untruncated: {:?}",
-            buckets.iter().map(|b| b.model.len()).collect::<Vec<_>>()
+            buckets
+                .iter()
+                .all(|bucket| bucket.model.chars().count() <= USAGE_TEXT_MAX_CHARS),
+            "model ids are bounded before reaching the TUI: {:?}",
+            buckets
+                .iter()
+                .map(|bucket| bucket.model.chars().count())
+                .collect::<Vec<_>>()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn daily_model_query_folds_high_cardinality_into_one_residual() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+        let start = usage_range_start(UsageRangePreset::ThirtyDays);
+        let now = Local::now().timestamp();
+
+        for index in 0..32u64 {
+            insert_usage_log_with_source(
+                &conn,
+                &format!("many-{index}"),
+                "claude",
+                &format!("model-{index:02}-{}", "x".repeat(400)),
+                now - index as i64,
+                index + 1,
+                1,
+                &format!("{:.2}", index as f64 / 100.0),
+                "proxy",
+            )?;
+        }
+
+        let buckets = load_usage_daily_models(&conn, "claude", start, now)?;
+        assert_eq!(
+            buckets.iter().filter(|bucket| !bucket.is_other).count(),
+            USAGE_DAILY_MODEL_LIMIT
+        );
+        assert_eq!(buckets.iter().filter(|bucket| bucket.is_other).count(), 1);
+        assert!(buckets.len() <= USAGE_DAILY_MODEL_LIMIT + 1);
+        assert!(buckets
+            .iter()
+            .all(|bucket| bucket.model.chars().count() <= USAGE_TEXT_MAX_CHARS));
+
+        let summary = load_usage_summary(&conn, "claude", start, now)?;
+        let projected_total = buckets.iter().fold(0u64, |total, bucket| {
+            total.saturating_add(bucket.real_total_tokens())
+        });
+        assert_eq!(projected_total, summary.total_tokens);
+
+        let trends = load_usage_trend(&conn, "claude", UsageRangePreset::ThirtyDays, start, now)?;
+        let series =
+            build_usage_daily_chart_series(&trends, &buckets, USAGE_DAILY_MODEL_LIMIT, "Other");
+        assert_eq!(series.other_index, Some(USAGE_DAILY_MODEL_LIMIT));
+        assert_eq!(
+            series
+                .models
+                .get(USAGE_DAILY_MODEL_LIMIT)
+                .map(String::as_str),
+            Some("Other")
+        );
+        assert_eq!(series.total_tokens, summary.total_tokens);
         Ok(())
     }
 
@@ -4363,30 +4375,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn rollup_bounds_trim_partial_boundary_days() {
-        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).expect("date");
-        let midnight = local_midnight_timestamp(day(2026, 7, 1));
-        let end_of_day = local_end_of_day_timestamp(day(2026, 7, 10));
-
-        // Whole-day window: both ends are fully covered.
-        assert_eq!(
-            rollup_date_bounds(midnight, end_of_day),
-            Some(("2026-07-01".to_string(), "2026-07-10".to_string()))
-        );
-
-        // Mid-day start and mid-day end: both boundary days drop out.
-        let mid_start = midnight + 6 * 3600;
-        let mid_end = local_midnight_timestamp(day(2026, 7, 10)) + 6 * 3600;
-        assert_eq!(
-            rollup_date_bounds(mid_start, mid_end),
-            Some(("2026-07-02".to_string(), "2026-07-09".to_string()))
-        );
-
-        // A window entirely inside one day covers no complete rollup day.
-        assert_eq!(rollup_date_bounds(mid_start, mid_start + 3600), None);
-    }
-
     /// Fixed day axis for the chart-series unit tests.
     fn chart_axis(keys: &[&str]) -> Vec<UsageTrendBucket> {
         keys.iter()
@@ -4409,6 +4397,7 @@ mod tests {
         UsageDailyModelBucket {
             date_key: date_key.to_string(),
             model: model.to_string(),
+            is_other: false,
             total_tokens: input_tokens.saturating_add(output_tokens),
             total_cost_usd: cost,
             input_tokens,
@@ -4555,6 +4544,7 @@ mod tests {
             .map(|day| UsageDailyModelBucket {
                 date_key: format!("2026-07-0{day}"),
                 model: "corrupt".to_string(),
+                is_other: false,
                 total_tokens: u64::MAX,
                 total_cost_usd: f64::NAN,
                 input_tokens: u64::MAX,
@@ -5741,6 +5731,27 @@ mod tests {
         assert_eq!(
             extract_api_url(&settings, &AppType::Gemini),
             Some("https://legacy.example".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_api_url_codex_uses_active_provider_section() {
+        let settings = json!({
+            "config": r#"model_provider = "current"
+
+# base_url = "https://commented.example.com/v1"
+
+[model_providers.inactive]
+base_url = "https://inactive.example.com/v1"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+"#
+        });
+
+        assert_eq!(
+            extract_api_url(&settings, &AppType::Codex),
+            Some("https://current.example.com/v1".to_string())
         );
     }
 

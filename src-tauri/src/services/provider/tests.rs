@@ -638,15 +638,22 @@ fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
 
 #[test]
 #[serial]
-fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
+fn codex_switch_preserves_existing_oauth_for_empty_openai_official_provider() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
     let auth_path = crate::codex_config::get_codex_auth_path();
-    crate::config::write_json_file(&auth_path, &json!({ "OPENAI_API_KEY": "sk-existing" }))
-        .expect("write auth.json");
+    let existing_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "oauth-access-token",
+            "account_id": "account-1"
+        }
+    });
+    crate::config::write_json_file(&auth_path, &existing_auth).expect("write auth.json");
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -692,9 +699,11 @@ fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
     ProviderService::switch(&state, AppType::Codex, "codex-official")
         .expect("switch to official should succeed without saved auth");
 
-    assert!(
-        !auth_path.exists(),
-        "empty official auth snapshot should remove live auth.json so Codex can prompt login"
+    let auth_after: Value =
+        crate::config::read_json_file(&auth_path).expect("read preserved auth.json");
+    assert_eq!(
+        auth_after, existing_auth,
+        "empty official auth snapshot must preserve the live OAuth login"
     );
 }
 
@@ -3173,6 +3182,117 @@ async fn provider_update_keeps_running_claude_takeover_and_refreshes_restore_bac
             .and_then(Value::as_str),
         Some("Read")
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn provider_update_refreshes_codex_catalog_during_takeover() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+
+    let original = Provider::with_id(
+        "p1".to_string(),
+        "Codex A".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": "token-a" },
+            "config": r#"model_provider = "custom"
+model = "old-model"
+
+[model_providers.custom]
+name = "Codex A"
+base_url = "https://api.a.example/v1"
+wire_api = "anthropic"
+requires_openai_auth = true
+"#,
+            "modelCatalog": {
+                "models": [{ "model": "old-model" }]
+            }
+        }),
+        None,
+    );
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), original.clone());
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "p1")
+        .expect("set db current provider");
+    crate::settings::set_current_provider(&AppType::Codex, Some("p1"))
+        .expect("set local current provider");
+    ProviderService::write_live_snapshot(&AppType::Codex, &original, None, true)
+        .expect("seed live Codex config");
+    state
+        .db
+        .set_app_proxy_preferred_port(AppType::Codex.as_str(), 0)
+        .expect("use an ephemeral proxy port");
+    state
+        .proxy_service
+        .set_takeover_for_app(AppType::Codex.as_str(), true)
+        .await
+        .expect("enable Codex takeover");
+
+    let mut updated = original.clone();
+    updated.settings_config["config"] = json!(
+        r#"model_provider = "custom"
+model = "gpt-5.4"
+
+[model_providers.custom]
+name = "Codex A"
+base_url = "https://api.updated.example/v1"
+wire_api = "anthropic"
+requires_openai_auth = true
+"#
+    );
+    updated.settings_config["modelCatalog"] = json!({
+        "models": [{ "model": "gpt-5.4", "displayName": "GPT 5.4" }]
+    });
+
+    ProviderService::update(&state, AppType::Codex, updated.clone())
+        .expect("update current Codex provider mapping");
+
+    let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+        .expect("read generated catalog");
+    assert_eq!(catalog["models"][0]["slug"], "gpt-5.4");
+    assert_eq!(
+        catalog["models"][0]["input_modalities"],
+        json!(["text", "image"]),
+        "unknown and GPT models must fail open to image input"
+    );
+    let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+        .expect("read Codex config.toml");
+    assert!(live_config.contains("model_catalog_json"));
+    let live_toml: toml::Value = toml::from_str(&live_config).expect("parse live Codex config");
+    assert_eq!(
+        live_toml["model_providers"]["custom"]["wire_api"].as_str(),
+        Some("responses"),
+        "Codex must speak Responses to the local proxy even for an Anthropic upstream"
+    );
+
+    updated.settings_config["modelCatalog"] = json!({ "models": [] });
+    ProviderService::update(&state, AppType::Codex, updated)
+        .expect("remove current Codex provider mapping");
+
+    let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+        .expect("read Codex config.toml after mapping removal");
+    assert!(
+        !live_config.contains("model_catalog_json"),
+        "removing mappings during takeover must clear the stale catalog pointer"
+    );
+
+    state
+        .proxy_service
+        .set_takeover_for_app(AppType::Codex.as_str(), false)
+        .await
+        .expect("disable Codex takeover");
 }
 
 #[tokio::test]

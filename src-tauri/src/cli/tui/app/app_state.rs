@@ -690,6 +690,10 @@ pub struct App {
     /// Tick of the last periodic session-usage sync, seeded on the first check
     /// so the interval is measured from TUI start rather than firing at once.
     pub usage_last_auto_sync_tick: Option<u64>,
+    /// Proxy snapshots mark this when the current app persisted new token
+    /// activity. The main loop consumes it on a throttled aggregate refresh.
+    pub usage_proxy_activity_dirty: bool,
+    pub usage_last_proxy_refresh_tick: Option<u64>,
     /// Tick the currently running session-usage sync round started at, or
     /// `None` while no round is in flight. Refresh indicators stay numberless
     /// until a round outlives the escalation threshold; see

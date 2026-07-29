@@ -17,9 +17,11 @@ use super::{
     metrics::estimate_tokens_from_value,
     providers::{ClaudeAdapter, ProviderAdapter},
     response::{
-        build_anthropic_stream_response, build_buffered_codex_chat_response,
-        build_buffered_codex_chat_response_with_context, build_buffered_json_response,
-        build_buffered_passthrough_response, build_codex_chat_error_response,
+        build_anthropic_stream_response, build_buffered_codex_anthropic_response_with_context,
+        build_buffered_codex_chat_response, build_buffered_codex_chat_response_with_context,
+        build_buffered_json_response, build_buffered_passthrough_response,
+        build_codex_anthropic_response_with_context,
+        build_codex_anthropic_stream_response_with_context, build_codex_chat_error_response,
         build_codex_chat_response_with_context, build_codex_chat_stream_response_with_context,
         build_json_response, build_passthrough_response, is_sse_response, PreparedResponse,
     },
@@ -175,6 +177,7 @@ async fn handle_claude_request(
             return proxy_error_response(error);
         }
     };
+    forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = body
         .get("stream")
@@ -517,6 +520,7 @@ async fn handle_passthrough_request(
             return proxy_error_response(error);
         }
     };
+    forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = request_is_streaming(&context.app_type, &endpoint, &body);
     let codex_tool_context = matches!(context.app_type, AppType::Codex).then(|| {
@@ -584,12 +588,38 @@ async fn handle_passthrough_request(
             &forward_result.provider,
             &endpoint,
         );
+        let converts_codex_anthropic =
+            super::providers::should_convert_codex_responses_to_anthropic(
+                &forward_result.provider,
+                &endpoint,
+            );
         let success_sync = status.is_success().then(|| SuccessSyncInfo {
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
         });
         let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response)
+                if converts_codex_anthropic
+                    && status.is_success()
+                    && !is_json_response(&response) =>
+            {
+                build_codex_anthropic_stream_response_with_context(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    context.streaming_idle_timeout(),
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+            }
+            super::forwarder::StreamingResponse::Live(response) if converts_codex_anthropic => {
+                build_codex_anthropic_response_with_context(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    true,
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+                .await
+            }
             super::forwarder::StreamingResponse::Live(response)
                 if converts_codex_chat && status.is_success() =>
             {
@@ -617,6 +647,15 @@ async fn handle_passthrough_request(
                 )
                 .await
             }
+            super::forwarder::StreamingResponse::Buffered(response) if converts_codex_anthropic => {
+                build_buffered_codex_anthropic_response_with_context(
+                    status,
+                    &response.headers,
+                    response.body,
+                    true,
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+            }
             super::forwarder::StreamingResponse::Buffered(response) if converts_codex_chat => {
                 build_buffered_codex_chat_response_with_context(
                     status,
@@ -635,7 +674,7 @@ async fn handle_passthrough_request(
             &context,
             forward_result.provider.clone(),
             true,
-            if converts_codex_chat {
+            if converts_codex_chat || converts_codex_anthropic {
                 UsageLogPolicy::Transformed
             } else {
                 UsageLogPolicy::Passthrough
@@ -970,6 +1009,43 @@ async fn finish_codex_live_aware_response(
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
     });
 
+    if super::providers::should_convert_codex_responses_to_anthropic(&provider, endpoint) {
+        let request_log = Some(RequestLogContext::from_handler(
+            context,
+            provider.clone(),
+            false,
+            UsageLogPolicy::Transformed,
+        ));
+        let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response) => {
+                build_codex_anthropic_response_with_context(
+                    response,
+                    remaining_timeout(non_streaming_timeout, request_started_at),
+                    false,
+                    tool_context,
+                )
+                .await
+            }
+            super::forwarder::StreamingResponse::Buffered(response) => {
+                build_buffered_codex_anthropic_response_with_context(
+                    response.status,
+                    &response.headers,
+                    response.body,
+                    false,
+                    tool_context,
+                )
+            }
+        };
+        return ResponseHandler::finish_buffered(
+            &context.state,
+            response_result,
+            status,
+            success_sync,
+            request_log,
+        )
+        .await;
+    }
+
     if super::providers::should_convert_codex_responses_to_chat(&provider, endpoint) {
         return match response {
             super::forwarder::StreamingResponse::Live(response)
@@ -1145,12 +1221,29 @@ fn passthrough_usage_log_policy(
     endpoint: &str,
 ) -> UsageLogPolicy {
     if matches!(app_type, AppType::Codex)
-        && super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+        && (super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+            || super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint))
     {
         UsageLogPolicy::Transformed
     } else {
         UsageLogPolicy::Passthrough
     }
+}
+
+fn is_json_response(response: &super::forwarder::LiveResponse) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| {
+            let media_type = content_type
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            media_type == "application/json" || media_type.ends_with("+json")
+        })
 }
 
 fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<Duration> {

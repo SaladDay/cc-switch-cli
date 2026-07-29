@@ -1,14 +1,23 @@
 use crate::provider::ProviderProxyConfig;
 use once_cell::sync::OnceCell;
 use reqwest::Client;
+use std::collections::HashMap;
 use std::env;
 use std::net::IpAddr;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 static GLOBAL_CLIENT: OnceCell<RwLock<Client>> = OnceCell::new();
 static CURRENT_PROXY_URL: OnceCell<RwLock<Option<String>>> = OnceCell::new();
 static CC_SWITCH_PROXY_PORT: OnceCell<RwLock<u16>> = OnceCell::new();
+type ProviderClientSlot = Arc<Mutex<Option<ProviderClientCacheEntry>>>;
+static PROVIDER_CLIENTS: OnceCell<Mutex<HashMap<(String, String), ProviderClientSlot>>> =
+    OnceCell::new();
+
+struct ProviderClientCacheEntry {
+    proxy_url: String,
+    client: Client,
+}
 
 pub fn set_proxy_port(port: u16) {
     if let Some(lock) = CC_SWITCH_PROXY_PORT.get() {
@@ -130,13 +139,15 @@ pub fn update_proxy(proxy_url: Option<&str>) -> Result<(), String> {
 
 pub fn get() -> Client {
     GLOBAL_CLIENT
-        .get()
-        .and_then(|lock| lock.read().ok())
-        .map(|client| client.clone())
-        .unwrap_or_else(|| {
-            log::warn!("[GlobalProxy] [GP-004] Client not initialized, using fallback");
-            build_client(None).unwrap_or_default()
+        .get_or_init(|| {
+            log::warn!("[GlobalProxy] [GP-004] Client not initialized, initializing fallback");
+            let client = build_client(None).unwrap_or_default();
+            let _ = CURRENT_PROXY_URL.set(RwLock::new(None));
+            RwLock::new(client)
         })
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 pub fn get_current_proxy_url() -> Option<String> {
@@ -271,18 +282,21 @@ fn build_proxy_url_from_config(config: &ProviderProxyConfig) -> Option<String> {
 pub fn build_client_for_provider(proxy_config: Option<&ProviderProxyConfig>) -> Option<Client> {
     let config = proxy_config.filter(|config| config.enabled)?;
     let proxy_url = build_proxy_url_from_config(config)?;
+    build_provider_proxy_client(&proxy_url)
+}
 
+fn build_provider_proxy_client(proxy_url: &str) -> Option<Client> {
     log::debug!(
         "[ProviderProxy] Building client with proxy: {}",
-        mask_url(&proxy_url)
+        mask_url(proxy_url)
     );
 
-    let proxy = match reqwest::Proxy::all(&proxy_url) {
+    let proxy = match reqwest::Proxy::all(proxy_url) {
         Ok(proxy) => proxy,
         Err(error) => {
             log::error!(
                 "[ProviderProxy] Failed to create proxy from '{}': {}",
-                mask_url(&proxy_url),
+                mask_url(proxy_url),
                 error
             );
             return None;
@@ -300,7 +314,7 @@ pub fn build_client_for_provider(proxy_config: Option<&ProviderProxyConfig>) -> 
         Ok(client) => {
             log::info!(
                 "[ProviderProxy] Client built with proxy: {}",
-                mask_url(&proxy_url)
+                mask_url(proxy_url)
             );
             Some(client)
         }
@@ -311,12 +325,45 @@ pub fn build_client_for_provider(proxy_config: Option<&ProviderProxyConfig>) -> 
     }
 }
 
-pub fn get_for_provider(proxy_config: Option<&ProviderProxyConfig>) -> Client {
-    if let Some(client) = build_client_for_provider(proxy_config) {
-        return client;
+pub fn get_for_provider(
+    app_type: &str,
+    provider_id: &str,
+    proxy_config: Option<&ProviderProxyConfig>,
+) -> Client {
+    let Some(config) = proxy_config.filter(|config| config.enabled) else {
+        return get();
+    };
+    let Some(proxy_url) = build_proxy_url_from_config(config) else {
+        return get();
+    };
+
+    let key = (app_type.to_string(), provider_id.to_string());
+    let slot = {
+        let clients = PROVIDER_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut clients = clients
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        clients
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
+    };
+    let mut entry = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if let Some(entry) = entry.as_ref() {
+        if entry.proxy_url == proxy_url {
+            return entry.client.clone();
+        }
     }
 
-    get()
+    let Some(client) = build_provider_proxy_client(&proxy_url) else {
+        return get();
+    };
+    *entry = Some(ProviderClientCacheEntry {
+        proxy_url,
+        client: client.clone(),
+    });
+    client
 }
 
 #[cfg(test)]
@@ -353,6 +400,42 @@ mod tests {
     #[test]
     fn test_build_client_direct() {
         assert!(build_client(None).is_ok());
+    }
+
+    #[test]
+    fn reqwest_enables_webpki_and_native_root_stores() {
+        Client::builder()
+            .tls_built_in_webpki_certs(true)
+            .tls_built_in_native_certs(true)
+            .build()
+            .expect("build reqwest client with WebPKI and native root stores");
+    }
+
+    #[test]
+    fn provider_proxy_cache_replaces_changed_config() {
+        let mut config = ProviderProxyConfig {
+            enabled: true,
+            proxy_type: Some("http".to_string()),
+            proxy_host: Some("127.0.0.1".to_string()),
+            proxy_port: Some(7890),
+            ..ProviderProxyConfig::default()
+        };
+        let _ = get_for_provider("cache-test", "replace-config", Some(&config));
+
+        config.proxy_port = Some(7891);
+        let _ = get_for_provider("cache-test", "replace-config", Some(&config));
+
+        let clients = PROVIDER_CLIENTS
+            .get()
+            .expect("provider cache initialized")
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = clients
+            .get(&("cache-test".to_string(), "replace-config".to_string()))
+            .expect("provider cache entry");
+        let entry = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = entry.as_ref().expect("initialized provider client");
+        assert_eq!(entry.proxy_url, "http://127.0.0.1:7891");
     }
 
     #[test]

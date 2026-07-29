@@ -46,7 +46,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // DAO 方法通过 impl Database 提供，无需额外导出
@@ -55,8 +55,6 @@ use std::time::Duration;
 const DB_BACKUP_RETAIN: usize = 10;
 const USAGE_ROLLUP_RETAIN_DAYS: i64 = 30;
 const USAGE_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
-
-static DATABASE_PERMISSION_CHECK: Once = Once::new();
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
@@ -83,6 +81,40 @@ pub(crate) fn database_path() -> Result<PathBuf, AppError> {
     Ok(
         resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?
             .join("cc-switch.db"),
+    )
+}
+
+fn with_database_write_context(error: AppError, db_path: Option<&Path>) -> AppError {
+    let AppError::Database(message) = error else {
+        return error;
+    };
+    let normalized = message.to_ascii_lowercase();
+    const NOT_WRITABLE_MARKERS: &[&str] = &[
+        "readonly",
+        "read-only",
+        "unable to open database file",
+        "permission denied",
+        "access is denied",
+        "operation not permitted",
+    ];
+    if !NOT_WRITABLE_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return AppError::Database(message);
+    }
+
+    let path = db_path
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "cc-switch.db".to_string());
+    AppError::localized(
+        "database_not_writable",
+        format!(
+            "数据库不可写: {path}。请检查当前用户是否对数据库文件及其配置目录拥有写权限，并确认文件所有者正确。CC-Switch 不会自动修改现有数据库的所有权或权限。SQLite: {message}"
+        ),
+        format!(
+            "Database is not writable: {path}. Check that the current user can write to the database file and its config directory, and verify file ownership. CC-Switch does not automatically change ownership or permissions of an existing database. SQLite: {message}"
+        ),
     )
 }
 
@@ -190,8 +222,8 @@ pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError
 }
 
 // Create folders with 0o700 permissions.
-// Leave existing folders untouched. We fix permissions elsewhere, so this helper
-// must not chmod arbitrary existing parents or follow symlinked config paths.
+// Leave existing folders untouched so this helper never changes user-managed
+// permissions or follows symlinked config paths.
 pub(crate) fn create_secure_dir_all(path: &Path) -> Result<bool, AppError> {
     let path = resolve_create_dir_path(path)?;
 
@@ -467,12 +499,23 @@ impl Database {
 
     #[cfg_attr(not(unix), allow(unused_variables))]
     fn init_impl(quiesce_daemon: bool) -> Result<Self, AppError> {
+        let result = Self::init_impl_inner(quiesce_daemon);
+        match result {
+            Ok(database) => Ok(database),
+            Err(error) => {
+                let db_path = database_path().ok();
+                Err(with_database_write_context(error, db_path.as_deref()))
+            }
+        }
+    }
+
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn init_impl_inner(quiesce_daemon: bool) -> Result<Self, AppError> {
         if let Err(err) = crate::config::validate_config_dir() {
             log::warn!("拒绝初始化数据库：配置目录校验失败: {err}");
             return Err(err);
         }
-        warn_insecure_permissions_once();
-
+        crate::config::create_managed_config_dir_all(&get_app_config_dir())?;
         let db_path = database_path()?;
         let migration_probe = Self::existing_database_needs_migration(&db_path)?;
 
@@ -502,11 +545,6 @@ impl Database {
             false
         };
 
-        // 确保父目录存在
-        if let Some(parent) = db_path.parent() {
-            create_secure_dir_all(parent)?;
-        }
-
         #[cfg(unix)]
         let init_lock = db_path
             .parent()
@@ -530,7 +568,7 @@ impl Database {
             }
         }
 
-        // 新建数据库文件时以 0o600 原子创建，已有文件的权限由 prompt_fix_permissions 处理
+        // 新建数据库文件时以 0o600 原子创建；已有文件保持原样。
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -839,25 +877,6 @@ impl Database {
             }
         }
     }
-}
-
-fn warn_insecure_permissions_once() {
-    DATABASE_PERMISSION_CHECK.call_once(|| {
-        let issues = crate::config::check_permissions();
-        if issues.is_empty() {
-            return;
-        }
-
-        log::warn!("检测到不安全的 cc-switch 配置权限，请收紧后再继续使用");
-        for (path, current, expected) in issues {
-            log::warn!(
-                "不安全权限: path={} current={:03o} expected={:03o}",
-                path.display(),
-                current,
-                expected
-            );
-        }
-    });
 }
 
 /// 批量导入耐久性守卫：持有期间本连接 `synchronous=NORMAL`（WAL 下 COMMIT

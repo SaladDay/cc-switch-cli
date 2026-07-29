@@ -671,14 +671,48 @@ impl ProviderAddFormState {
         if matches!(self.app_type, AppType::Codex) {
             if self.is_codex_official_provider() {
                 meta_obj.remove("apiFormat");
+                meta_obj.remove("apiKeyField");
+                meta_obj.remove("impersonateClaudeCode");
+                meta_obj.remove("maxOutputTokens");
                 meta_obj.remove("codexChatReasoning");
                 meta_obj.remove("promptCacheRouting");
             } else {
                 let api_format = match self.claude_api_format {
                     ClaudeApiFormat::OpenAiChat => "openai_chat",
+                    ClaudeApiFormat::Anthropic => "anthropic",
                     _ => "openai_responses",
                 };
                 meta_obj.insert("apiFormat".to_string(), json!(api_format));
+                if matches!(self.claude_api_format, ClaudeApiFormat::Anthropic) {
+                    if self.claude_api_key_field == ClaudeApiKeyField::ApiKey {
+                        meta_obj.insert(
+                            "apiKeyField".to_string(),
+                            json!(self.claude_api_key_field.as_env_key()),
+                        );
+                    } else {
+                        meta_obj.remove("apiKeyField");
+                    }
+                    if self.codex_impersonate_claude_code {
+                        meta_obj.insert("impersonateClaudeCode".to_string(), json!(true));
+                    } else {
+                        meta_obj.remove("impersonateClaudeCode");
+                    }
+                    let max_output_tokens = self
+                        .codex_max_output_tokens
+                        .value
+                        .trim()
+                        .parse::<u64>()
+                        .ok();
+                    if let Some(value) = max_output_tokens.filter(|value| *value > 0) {
+                        meta_obj.insert("maxOutputTokens".to_string(), json!(value));
+                    } else {
+                        meta_obj.remove("maxOutputTokens");
+                    }
+                } else {
+                    meta_obj.remove("apiKeyField");
+                    meta_obj.remove("impersonateClaudeCode");
+                    meta_obj.remove("maxOutputTokens");
+                }
                 // Reasoning capability is persisted only when routing is enabled
                 // AND the upstream format is Chat (reasoning is Chat-only).
                 if self.codex_local_routing_enabled() && self.codex_is_chat_format() {

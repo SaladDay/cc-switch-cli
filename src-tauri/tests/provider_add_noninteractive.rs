@@ -32,6 +32,8 @@ struct AddOpts {
     sort_index: Option<usize>,
     api_key_field: Option<ClaudeApiKeyFieldArg>,
     api_format: Option<String>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
     common_config: bool,
     account_id: Option<String>,
     fast_mode: bool,
@@ -52,6 +54,8 @@ fn add_command(name: Option<&str>, opts: AddOpts) -> ProviderCommand {
         sort_index: opts.sort_index,
         api_key_field: opts.api_key_field,
         api_format: opts.api_format,
+        impersonate_claude_code: opts.impersonate_claude_code,
+        max_output_tokens: opts.max_output_tokens,
         common_config: opts.common_config,
         account_id: opts.account_id,
         fast_mode: opts.fast_mode,
@@ -302,6 +306,95 @@ fn add_codex_api_format_override_is_applied() {
             .and_then(|meta| meta.api_format.as_deref()),
         Some("openai_chat")
     );
+}
+
+#[test]
+#[serial]
+fn add_codex_anthropic_options_are_persisted() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    run_add(
+        Some("Anthropic Gateway"),
+        AppType::Codex,
+        AddOpts {
+            base_url: Some("https://gateway.example/v1".to_string()),
+            api_key: Some("sk-anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            api_format: Some("anthropic".to_string()),
+            api_key_field: Some(ClaudeApiKeyFieldArg::ApiKey),
+            impersonate_claude_code: true,
+            max_output_tokens: Some(16_384),
+            ..Default::default()
+        },
+    )
+    .expect("codex Anthropic add should succeed");
+
+    let provider = saved_provider(AppType::Codex, "anthropic-gateway");
+    let meta = provider.meta.as_ref().expect("Codex provider metadata");
+    assert_eq!(meta.api_format.as_deref(), Some("anthropic"));
+    assert_eq!(meta.api_key_field.as_deref(), Some("ANTHROPIC_API_KEY"));
+    assert_eq!(meta.impersonate_claude_code, Some(true));
+    assert_eq!(meta.max_output_tokens, Some(16_384));
+    assert_eq!(
+        provider
+            .settings_config
+            .get("auth")
+            .and_then(|auth| auth.get("OPENAI_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("sk-anthropic")
+    );
+    let config = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .expect("Codex config");
+    assert!(config.contains("wire_api = \"responses\""));
+}
+
+#[test]
+#[serial]
+fn add_codex_raw_anthropic_config_preserves_upstream_format() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    run_add(
+        Some("Legacy Anthropic"),
+        AppType::Codex,
+        AddOpts {
+            config: Some(
+                serde_json::json!({
+                    "auth": {"OPENAI_API_KEY": "sk-anthropic"},
+                    "config": r#"model_provider = "vendor"
+model = "claude-sonnet-4-6"
+
+[model_providers.vendor]
+base_url = "https://gateway.example/v1"
+wire_api = "anthropic"
+requires_openai_auth = true
+"#
+                })
+                .to_string(),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("raw Codex Anthropic config should succeed");
+
+    let provider = saved_provider(AppType::Codex, "legacy-anthropic");
+    assert_eq!(
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.api_format.as_deref()),
+        Some("anthropic")
+    );
+    let config = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .expect("Codex config");
+    assert!(config.contains("wire_api = \"responses\""));
 }
 
 #[test]

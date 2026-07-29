@@ -586,11 +586,32 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
             HelpContent::new(
                 texts::tui_label_codex_upstream_format(),
                 help_lines(
-                    "选择上游供应商的 API 格式。供应商原生是 Responses API 就选 Responses（直连，不转换）；使用 Chat Completions 协议就选 Chat（需通过本地路由转换为 Chat Completions）。",
-                    "Select the upstream provider's API format. Choose Responses when the provider is natively Responses API (direct, no conversion); choose Chat when it uses Chat Completions (converted via local routing).",
+                    "选择上游供应商的 API 格式。原生 Responses 直连；Chat Completions 和 Anthropic Messages 均需本地路由转换。",
+                    "Select the upstream provider's API format. Native Responses is direct; Chat Completions and Anthropic Messages require local routing conversion.",
                 ),
             )
         }
+        ProviderAddField::CodexAnthropicApiKeyField => HelpContent::new(
+            texts::tui_label_codex_anthropic_auth_field(),
+            help_lines(
+                "选择网关接收 API Key 的请求头：ANTHROPIC_AUTH_TOKEN 发送 Authorization: Bearer；ANTHROPIC_API_KEY 发送 x-api-key。两者只发其一。",
+                "Choose which header carries the API key: ANTHROPIC_AUTH_TOKEN sends Authorization: Bearer; ANTHROPIC_API_KEY sends x-api-key. Only one is sent.",
+            ),
+        ),
+        ProviderAddField::CodexImpersonateClaudeCode => HelpContent::new(
+            texts::tui_label_codex_impersonate_claude_code(),
+            help_lines(
+                "仅在网关限制只能通过 Claude Code 使用时开启。它会模拟 User-Agent、anthropic-beta、x-app，并在系统提示首行注入 Claude Code 身份。",
+                "Enable only when the gateway restricts access to Claude Code. It emulates User-Agent, anthropic-beta, x-app, and injects the Claude Code identity as the first system-prompt line.",
+            ),
+        ),
+        ProviderAddField::CodexMaxOutputTokens => HelpContent::new(
+            texts::tui_label_codex_max_output_tokens(),
+            help_lines(
+                "覆盖 Anthropic 路径的 max_tokens。留空使用默认 8192；不要超过模型或网关的真实输出上限，否则上游可能返回 400。",
+                "Overrides max_tokens on the Anthropic path. Leave empty for the default 8192; do not exceed the model or gateway output ceiling, or the upstream may return 400.",
+            ),
+        ),
         ProviderAddField::ClaudeApiFormat => HelpContent::new(
             texts::tui_label_claude_api_format(),
             help_lines(

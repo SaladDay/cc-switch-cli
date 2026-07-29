@@ -103,9 +103,10 @@ impl ClaudeApiFormat {
         ClaudeApiFormat::OpenAiResponses,
         ClaudeApiFormat::GeminiNative,
     ];
-    pub const CODEX: [Self; 2] = [
+    pub const CODEX: [Self; 3] = [
         ClaudeApiFormat::OpenAiResponses,
         ClaudeApiFormat::OpenAiChat,
+        ClaudeApiFormat::Anthropic,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -155,7 +156,12 @@ impl ClaudeApiFormat {
 
     pub fn requires_proxy_for_app(self, app_type: &AppType) -> bool {
         match app_type {
-            AppType::Codex => matches!(self, ClaudeApiFormat::OpenAiChat),
+            AppType::Codex => {
+                matches!(
+                    self,
+                    ClaudeApiFormat::OpenAiChat | ClaudeApiFormat::Anthropic
+                )
+            }
             _ => self.requires_proxy(),
         }
     }
@@ -254,6 +260,9 @@ pub enum ProviderAddField {
     CodexOAuthAccount,
     CodexFastMode,
     CodexBaseUrl,
+    CodexAnthropicApiKeyField,
+    CodexImpersonateClaudeCode,
+    CodexMaxOutputTokens,
     // Retired from the form (matches upstream): the model is configured via the
     // catalog / config, not a standalone row. Match arms + `codex_model` state
     // (loaded from config, used as the serialization fallback) are kept.
@@ -550,6 +559,8 @@ pub struct ProviderAddFormState {
     pub codex_quick_config_idx: usize,
     pub codex_oauth_account_id: Option<String>,
     pub codex_fast_mode: bool,
+    pub codex_impersonate_claude_code: bool,
+    pub codex_max_output_tokens: TextInput,
 
     pub codex_base_url: TextInput,
     pub codex_model: TextInput,

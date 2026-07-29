@@ -2489,6 +2489,31 @@ impl ProxyService {
         self.write_claude_live(&effective_settings)
     }
 
+    pub async fn sync_codex_live_from_provider_while_proxy_active(
+        &self,
+        provider: &Provider,
+    ) -> Result<(), String> {
+        let existing_live = self.read_codex_live().ok();
+        let mut effective_settings =
+            self.build_live_snapshot_from_provider(&AppType::Codex, provider)?;
+        if let Some(existing_live) = existing_live.as_ref() {
+            Self::preserve_toml_mcp_servers_from_existing_config(
+                &mut effective_settings,
+                existing_live,
+            )?;
+        }
+        let (proxy_url, proxy_codex_base_url) =
+            self.build_proxy_urls_for_app(&AppType::Codex).await?;
+        self.rewrite_live_for_proxy(
+            &AppType::Codex,
+            &mut effective_settings,
+            &proxy_url,
+            &proxy_codex_base_url,
+            Some(provider),
+        )?;
+        self.write_codex_takeover_live_for_provider(&effective_settings, Some(provider))
+    }
+
     pub async fn switch_proxy_target(
         &self,
         app_type: &str,

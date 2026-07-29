@@ -140,6 +140,14 @@ impl App {
                     ProviderValidationTarget::Main(ProviderAddField::CodexBaseUrl),
                     texts::base_url_empty_error().to_string(),
                 ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Codex)
+                && matches!(provider.claude_api_format, form::ClaudeApiFormat::Anthropic)
+                && !is_valid_codex_max_output_tokens(&provider.codex_max_output_tokens.value)
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::CodexMaxOutputTokens),
+                    texts::tui_codex_max_output_tokens_invalid().to_string(),
+                ))
             } else if let Some(message) = validate_usage_query_form(provider) {
                 Some((ProviderValidationTarget::UsageScript, message.to_string()))
             } else if !provider.ensure_generated_id(&data.existing_provider_ids()) {
@@ -372,6 +380,30 @@ impl App {
                         .claude_api_format
                         .picker_index_for_app(&provider.app_type),
                 };
+                Action::None
+            }
+            ProviderAddField::CodexAnthropicApiKeyField => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.claude_api_key_field = match provider.claude_api_key_field {
+                    crate::provider::ClaudeApiKeyField::AuthToken => {
+                        crate::provider::ClaudeApiKeyField::ApiKey
+                    }
+                    crate::provider::ClaudeApiKeyField::ApiKey => {
+                        crate::provider::ClaudeApiKeyField::AuthToken
+                    }
+                };
+                Action::None
+            }
+            ProviderAddField::CodexImpersonateClaudeCode => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.codex_impersonate_claude_code = !provider.codex_impersonate_claude_code;
                 Action::None
             }
             ProviderAddField::CodexPromptCacheRouting => {
@@ -1806,6 +1838,11 @@ pub(super) fn validate_provider_inline_field(
         {
             Some(texts::base_url_empty_error().to_string())
         }
+        ProviderAddField::CodexMaxOutputTokens
+            if !is_valid_codex_max_output_tokens(&provider.codex_max_output_tokens.value) =>
+        {
+            Some(texts::tui_codex_max_output_tokens_invalid().to_string())
+        }
         _ => None,
     }
 }
@@ -1837,6 +1874,10 @@ fn sanitize_number_char(ch: char) -> Option<char> {
     (ch.is_ascii_digit() || ch == '.').then_some(ch)
 }
 
+fn sanitize_integer_char(ch: char) -> Option<char> {
+    ch.is_ascii_digit().then_some(ch)
+}
+
 fn provider_field_sanitize_fn(
     app_type: &AppType,
     selected: ProviderAddField,
@@ -1846,8 +1887,14 @@ fn provider_field_sanitize_fn(
             Some(sanitize_provider_key_char)
         }
         (&AppType::Hermes, ProviderAddField::HermesRateLimitDelay) => Some(sanitize_number_char),
+        (&AppType::Codex, ProviderAddField::CodexMaxOutputTokens) => Some(sanitize_integer_char),
         _ => None,
     }
+}
+
+fn is_valid_codex_max_output_tokens(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed.parse::<u64>().is_ok_and(|value| value > 0)
 }
 
 fn is_valid_hermes_rate_limit_delay(value: &str) -> bool {

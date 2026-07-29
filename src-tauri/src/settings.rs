@@ -295,7 +295,7 @@ impl WebDavSyncSettings {
     }
 
     pub fn normalize(&mut self) {
-        self.base_url = self.base_url.trim().trim_end_matches('/').to_string();
+        self.base_url = self.base_url.trim().to_string();
         self.remote_root = sanitize_path_segment(&self.remote_root);
         self.profile = sanitize_path_segment(&self.profile);
         self.username = self.username.trim().to_string();
@@ -1550,5 +1550,36 @@ mod tests {
         assert_eq!(webdav.password, "webdav-secret");
         assert!(s3.enabled);
         assert_eq!(s3.secret_access_key, "s3-secret");
+    }
+
+    #[test]
+    fn webdav_settings_preserve_trailing_collection_slash() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        update_settings(AppSettings::default()).expect("reset isolated settings");
+
+        set_webdav_sync_settings(Some(WebDavSyncSettings {
+            enabled: true,
+            base_url: "  https://dav.example.com/dav/  ".to_string(),
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            ..WebDavSyncSettings::default()
+        }))
+        .expect("save WebDAV settings");
+
+        assert_eq!(
+            get_webdav_sync_settings()
+                .expect("read saved WebDAV settings")
+                .base_url,
+            "https://dav.example.com/dav/"
+        );
+
+        super::reload_test_settings();
+        assert_eq!(
+            get_webdav_sync_settings()
+                .expect("reload persisted WebDAV settings")
+                .base_url,
+            "https://dav.example.com/dav/"
+        );
     }
 }

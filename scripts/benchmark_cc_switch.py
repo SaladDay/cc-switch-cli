@@ -28,10 +28,11 @@ import tempfile
 import termios
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 
 BENCH = "ccswitch-bench"
@@ -59,7 +60,6 @@ CI_TUI_OPERATIONS = {
     "provider_switch_a_to_b",
 }
 PROVIDER_SWITCH_CONFLICT_INPUT = b"\x1b[B\n" * 32
-TUI_PROVIDER_SWITCH_CONFLICT_INPUT = b"c" * 32
 
 
 class BenchmarkAbort(RuntimeError):
@@ -330,14 +330,19 @@ def snapshot_paths(paths: Paths) -> Snapshot:
     return snap
 
 
-def connect_db(paths: Paths) -> sqlite3.Connection:
+@contextmanager
+def connect_db(paths: Paths) -> Iterator[sqlite3.Connection]:
     paths.cc_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(paths.db_path)
     conn.execute("PRAGMA busy_timeout = 5000")
     # cc-switch checks that .db files have 0600 permissions on Unix.
     if sys.platform != "win32":
         paths.db_path.chmod(0o600)
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def checkpoint_db(paths: Paths) -> None:
@@ -1587,18 +1592,6 @@ def tui_filter_mode_active(screen: str) -> bool:
     )
 
 
-def tui_provider_action_marker(screen: str) -> bool:
-    compact = screen.replace(" ", "")
-    return (
-        "Space=switch" in screen
-        or "Space=切换" in screen
-        or "Spaceswitch" in compact
-        or "Space切换" in compact
-        or "Space=add/remove" in screen
-        or "Spaceadd/remove" in compact
-    )
-
-
 def tui_provider_row_marker(screen: str, provider_id: str, marker_text: str | None) -> bool:
     if marker_text is not None and screen_contains_compact(screen, marker_text):
         return True
@@ -1617,12 +1610,14 @@ def tui_select_provider(
     marker_text: str | None = None,
     query: str | None = None,
 ) -> float:
+    filter_query = query or provider_id
     session.send(b"\x1b[C")
     time.sleep(0.08)
     return tui_filter(
         session,
-        query or provider_id,
-        lambda s: tui_provider_row_marker(s, provider_id, marker_text) and tui_provider_action_marker(s),
+        filter_query,
+        lambda s: screen_contains_compact(s, filter_query)
+        and tui_provider_row_marker(s, provider_id, marker_text),
     )
 
 
@@ -1637,13 +1632,10 @@ def tui_providers_marker(screen: str, app: str | None = None) -> bool:
     def has_provider_pair(target_app: str) -> bool:
         compact_screen = screen.replace(" ", "")
         app_title = target_app.title()
-        current_url = f"https://bench-{target_app}-a." in screen
-        alternate_provider = (
-            f"bench-{target_app}-b." in screen
-            or f"Bench{app_title}B" in compact_screen
-            or f"{BENCH}-{target_app}-b" in screen
+        return (
+            f"Bench{app_title}A" in compact_screen
+            and f"Bench{app_title}B" in compact_screen
         )
-        return current_url and alternate_provider
 
     if app is not None:
         return has_provider_pair(app)
@@ -1842,8 +1834,6 @@ def benchmark_tui(
                 session.clear()
                 start_switch = time.perf_counter()
                 session.send(b" ")
-                time.sleep(0.15)
-                session.send(TUI_PROVIDER_SWITCH_CONFLICT_INPUT)
                 wait_until_tui(session, lambda: effective_current_provider(paths, app) == b, timeout=8)
                 return (time.perf_counter() - start_switch) * 1000
 

@@ -4,6 +4,18 @@ use tempfile::TempDir;
 
 use crate::test_support::TestEnvGuard;
 
+fn third_party_codex_provider(api_key: &str) -> Provider {
+    Provider::with_id(
+        "thirdparty".to_string(),
+        "Third Party".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": api_key },
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.custom]\nbase_url = \"https://api.custom.example/v1\"\nwire_api = \"responses\"\n"
+        }),
+        Some("custom".to_string()),
+    )
+}
+
 #[test]
 #[serial]
 fn switch_codex_provider_writes_stored_config_directly() {
@@ -192,6 +204,82 @@ fn switch_codex_overwrites_config_toml_respecting_auth_mode() {
         auth.pointer("/tokens/access_token").and_then(Value::as_str),
         Some("oauth-access-token"),
         "preserve-on-switch must not clobber the OAuth auth.json"
+    );
+}
+
+#[test]
+#[serial]
+fn force_sync_codex_third_party_refreshes_auth_when_preserve_is_disabled() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+    crate::settings::set_preserve_codex_official_auth_on_switch(false)
+        .expect("disable preserve-on-switch");
+
+    crate::config::write_json_file(
+        &get_codex_auth_path(),
+        &json!({ "OPENAI_API_KEY": "sk-stale-provider" }),
+    )
+    .expect("seed stale auth.json");
+
+    let provider = third_party_codex_provider("sk-current-provider");
+    ProviderService::write_codex_live_force(&provider, None, false)
+        .expect("force sync should succeed");
+
+    let auth: Value =
+        crate::config::read_json_file(&get_codex_auth_path()).expect("read auth.json");
+    assert_eq!(
+        auth.get("OPENAI_API_KEY").and_then(Value::as_str),
+        Some("sk-current-provider"),
+        "force sync must replace a stale third-party API key"
+    );
+
+    let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
+    assert_eq!(
+        crate::codex_config::extract_codex_experimental_bearer_token(&config_text),
+        None,
+        "preserve disabled must keep the provider API key in auth.json"
+    );
+}
+
+#[test]
+#[serial]
+fn force_sync_codex_third_party_preserves_oauth_when_preserve_is_enabled() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+    crate::settings::set_preserve_codex_official_auth_on_switch(true)
+        .expect("enable preserve-on-switch");
+
+    let preserved_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "oauth-access-token",
+            "account_id": "account-1"
+        }
+    });
+    crate::config::write_json_file(&get_codex_auth_path(), &preserved_auth)
+        .expect("seed OAuth auth.json");
+
+    let provider = third_party_codex_provider("sk-current-provider");
+    ProviderService::write_codex_live_force(&provider, None, false)
+        .expect("force sync should succeed");
+
+    let auth: Value =
+        crate::config::read_json_file(&get_codex_auth_path()).expect("read auth.json");
+    assert_eq!(
+        auth, preserved_auth,
+        "force sync must preserve the official OAuth login"
+    );
+
+    let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
+    assert_eq!(
+        crate::codex_config::extract_codex_experimental_bearer_token(&config_text).as_deref(),
+        Some("sk-current-provider"),
+        "preserve enabled must carry the provider API key in config.toml"
     );
 }
 

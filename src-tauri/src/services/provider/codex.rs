@@ -552,11 +552,14 @@ impl ProviderService {
             clean_config_text
         };
 
-        // Official providers own auth.json; third-party providers write auth.json
-        // unless preserve_codex_official_auth_on_switch is set (then auth.json is
-        // preserved and the API key rides in config.toml's bearer token).
-        let should_write_auth = is_official
-            || (!force_sync && !crate::settings::preserve_codex_official_auth_on_switch());
+        // `force_sync` only bypasses the live-sync policy above. Authentication
+        // placement must remain identical to the upstream provider write: an
+        // official snapshot writes auth.json only when it contains login
+        // material, while a third-party provider writes unless preservation is
+        // enabled.
+        let should_write_auth = (is_official
+            && crate::codex_config::codex_auth_has_login_material(auth))
+            || (!is_official && !crate::settings::preserve_codex_official_auth_on_switch());
 
         // A third-party provider must authenticate with its API key, never with a
         // stray ChatGPT OAuth login that leaked into auth.json (e.g. from running

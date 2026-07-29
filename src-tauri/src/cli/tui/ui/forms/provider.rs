@@ -1882,6 +1882,15 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::CodexOAuthAccount => texts::tui_label_chatgpt_account().to_string(),
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
+        ProviderAddField::CodexAnthropicApiKeyField => {
+            texts::tui_label_codex_anthropic_auth_field().to_string()
+        }
+        ProviderAddField::CodexImpersonateClaudeCode => {
+            texts::tui_label_codex_impersonate_claude_code().to_string()
+        }
+        ProviderAddField::CodexMaxOutputTokens => {
+            texts::tui_label_codex_max_output_tokens().to_string()
+        }
         ProviderAddField::CodexModel => texts::model_label().to_string(),
         ProviderAddField::CodexPromptCacheRouting => {
             texts::tui_label_codex_prompt_cache_routing().to_string()
@@ -1939,6 +1948,17 @@ pub(crate) fn provider_field_label_and_value(
 
     let value = match field {
         ProviderAddField::ClaudeApiFormat => provider_api_format_label(provider),
+        ProviderAddField::CodexAnthropicApiKeyField => {
+            texts::tui_codex_anthropic_auth_field_value(provider.claude_api_key_field.as_env_key())
+                .to_string()
+        }
+        ProviderAddField::CodexImpersonateClaudeCode => {
+            if provider.codex_impersonate_claude_code {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
         ProviderAddField::CodexWireApi => provider.codex_wire_api.as_str().to_string(),
         ProviderAddField::CodexRequiresOpenaiAuth => {
             if provider.codex_requires_openai_auth {

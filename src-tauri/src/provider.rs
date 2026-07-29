@@ -417,6 +417,22 @@ pub struct ProviderMeta {
     /// Codex Responses -> Chat Completions reasoning 能力描述。
     #[serde(rename = "codexChatReasoning", skip_serializing_if = "Option::is_none")]
     pub codex_chat_reasoning: Option<CodexChatReasoningConfig>,
+    /// Codex → Anthropic path: whether to emulate the Claude Code client
+    /// (User-Agent / anthropic-beta / x-app + injecting the Claude Code system
+    /// prompt first line). Disabled by default; only an explicit `true` enables it.
+    #[serde(
+        rename = "impersonateClaudeCode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub impersonate_claude_code: Option<bool>,
+    /// Codex → Anthropic path: override the Anthropic `max_tokens` output ceiling.
+    ///
+    /// Codex does not forward `model_max_output_tokens` in the Responses request,
+    /// so this per-provider value takes precedence over the request and the bridge
+    /// fallback. Keeping it per provider avoids hard failures on lower-ceiling
+    /// models and gateways.
+    #[serde(rename = "maxOutputTokens", skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     /// OpenAI 兼容端点使用的 prompt cache key。
     #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
@@ -642,6 +658,25 @@ mod tests {
         assert_eq!(meta.is_full_url, Some(true));
         let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
         assert_eq!(serialized["isFullUrl"], true);
+    }
+
+    #[test]
+    fn provider_meta_round_trips_codex_anthropic_options() {
+        let meta = ProviderMeta {
+            impersonate_claude_code: Some(true),
+            max_output_tokens: Some(64_000),
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
+        assert_eq!(serialized["impersonateClaudeCode"], true);
+        assert_eq!(serialized["maxOutputTokens"], 64_000);
+        assert!(serialized.get("max_output_tokens").is_none());
+
+        let parsed: ProviderMeta =
+            serde_json::from_value(serialized).expect("deserialize provider meta");
+        assert_eq!(parsed.impersonate_claude_code, Some(true));
+        assert_eq!(parsed.max_output_tokens, Some(64_000));
     }
 
     #[test]

@@ -200,6 +200,8 @@ impl ProviderAddFormState {
             codex_quick_config_idx: 0,
             codex_oauth_account_id: None,
             codex_fast_mode: false,
+            codex_impersonate_claude_code: false,
+            codex_max_output_tokens: TextInput::new(""),
             codex_base_url: TextInput::new(codex_defaults.0),
             codex_model: TextInput::new(codex_defaults.1),
             codex_wire_api: codex_defaults.2,
@@ -434,6 +436,11 @@ impl ProviderAddFormState {
                     // Upstream format is an independent picker; local routing /
                     // model mapping is decoupled from it.
                     fields.push(ProviderAddField::ClaudeApiFormat);
+                    if matches!(self.claude_api_format, ClaudeApiFormat::Anthropic) {
+                        fields.push(ProviderAddField::CodexAnthropicApiKeyField);
+                        fields.push(ProviderAddField::CodexImpersonateClaudeCode);
+                        fields.push(ProviderAddField::CodexMaxOutputTokens);
+                    }
                     if self.codex_is_chat_format() {
                         fields.push(ProviderAddField::CodexPromptCacheRouting);
                     }
@@ -592,6 +599,7 @@ impl ProviderAddFormState {
             ProviderAddField::ClaudeApiKey => Some(&self.claude_api_key),
             ProviderAddField::ClaudeFallbackModel => Some(&self.claude_model),
             ProviderAddField::CodexBaseUrl => Some(&self.codex_base_url),
+            ProviderAddField::CodexMaxOutputTokens => Some(&self.codex_max_output_tokens),
             ProviderAddField::CodexModel => Some(&self.codex_model),
             ProviderAddField::CodexEnvKey => Some(&self.codex_env_key),
             ProviderAddField::CodexApiKey => Some(&self.codex_api_key),
@@ -610,6 +618,8 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexAnthropicApiKeyField
+            | ProviderAddField::CodexImpersonateClaudeCode
             | ProviderAddField::CodexPromptCacheRouting
             | ProviderAddField::CodexLocalRouting
             | ProviderAddField::LocalProxySettings
@@ -652,6 +662,7 @@ impl ProviderAddFormState {
             ProviderAddField::ClaudeApiKey => Some(&mut self.claude_api_key),
             ProviderAddField::ClaudeFallbackModel => Some(&mut self.claude_model),
             ProviderAddField::CodexBaseUrl => Some(&mut self.codex_base_url),
+            ProviderAddField::CodexMaxOutputTokens => Some(&mut self.codex_max_output_tokens),
             ProviderAddField::CodexModel => Some(&mut self.codex_model),
             ProviderAddField::CodexEnvKey => Some(&mut self.codex_env_key),
             ProviderAddField::CodexApiKey => Some(&mut self.codex_api_key),
@@ -674,6 +685,8 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexAnthropicApiKeyField
+            | ProviderAddField::CodexImpersonateClaudeCode
             | ProviderAddField::CodexPromptCacheRouting
             | ProviderAddField::CodexLocalRouting
             | ProviderAddField::LocalProxySettings

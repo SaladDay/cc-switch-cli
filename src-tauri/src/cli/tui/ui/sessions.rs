@@ -35,10 +35,8 @@ pub(super) fn render_sessions(
         ("←→", texts::tui_key_pane()),
     ];
     keys.extend(crate::cli::tui::keymap::sessions::key_bar_items(app, data));
-    // One indicator for the whole line: the scope text already names what the
-    // scan is doing ("Searching foo", "Loading sessions"), so this takes the
-    // glyph-only size of the shared indicator instead of repeating a label.
-    // The scan reports liveness only — no file counts — so no number escalates.
+    // One shared, labelled indicator for the whole line. The scan reports
+    // liveness only — no file counts — so no number escalates.
     let scanning = app.sessions.loading || app.sessions.deep_search_active.is_some();
     let status = if app.sessions.loading && !app.sessions.loaded_once {
         texts::tui_sessions_loading_summary().to_string()
@@ -64,17 +62,13 @@ pub(super) fn render_sessions(
             display_path, ..
         } => display_path.as_str(),
     };
-    let spinner = scanning.then(|| refresh_spinner_span(app.tick, theme));
-    // The glyph and its leading space come out of the text's width budget.
-    let spinner_width = spinner
-        .as_ref()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()).saturating_add(1) as u16)
-        .unwrap_or(0);
-    let summary_width = area
-        .width
-        .saturating_sub(8)
-        .saturating_sub(spinner_width)
-        .max(1);
+    let summary_bar_width = area.width.saturating_sub(8).max(1);
+    let indicator_width = if scanning {
+        inline_refresh_indicator_width(app.tick, theme, None)
+    } else {
+        0
+    };
+    let summary_width = summary_bar_width.saturating_sub(indicator_width).max(1);
     let fixed = texts::tui_sessions_scope_summary(provider, "", &status);
     let project_width = summary_width
         .saturating_sub(UnicodeWidthStr::width(fixed.as_str()) as u16)
@@ -85,11 +79,8 @@ pub(super) fn render_sessions(
         &texts::tui_sessions_scope_summary(provider, &project, &status),
         summary_width,
     );
-    let mut summary_spans = vec![Span::raw(summary)];
-    if let Some(spinner) = spinner {
-        summary_spans.push(Span::raw(" "));
-        summary_spans.push(spinner);
-    }
+    let summary_spans =
+        summary_with_refresh_indicator(summary, scanning, app.tick, theme, None, summary_bar_width);
     let frame_body = render_page_frame_spans(
         frame,
         area,
@@ -228,7 +219,7 @@ fn render_session_list(
 
     let header = Row::new(vec![
         Cell::from(texts::tui_sessions_header_title()),
-        Cell::from(texts::tui_sessions_header_time()),
+        Cell::from(Text::from(texts::tui_sessions_header_time()).alignment(Alignment::Right)),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -273,10 +264,13 @@ fn render_session_list(
                 ]),
                 None => Line::raw(title),
             };
-            Row::new(vec![Cell::from(title_line), Cell::from(time)])
+            Row::new(vec![
+                Cell::from(title_line),
+                Cell::from(Text::from(time).alignment(Alignment::Right)),
+            ])
         });
 
-    let table = Table::new(rows, [Constraint::Percentage(72), Constraint::Length(12)])
+    let table = Table::new(rows, [Constraint::Min(0), Constraint::Length(12)])
         .header(header)
         .block(Block::default().borders(Borders::NONE))
         .row_highlight_style(selection_style(theme))
@@ -288,7 +282,11 @@ fn render_session_list(
     if app.sessions.pagination.is_row_focused() {
         state.select(Some(selected - start));
     }
-    frame.render_stateful_widget(table, inset_left(inner, CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(
+        table,
+        inset_horizontal(inner, CONTENT_INSET_LEFT),
+        &mut state,
+    );
 }
 
 fn render_session_detail(

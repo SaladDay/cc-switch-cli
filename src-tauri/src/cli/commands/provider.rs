@@ -20,7 +20,7 @@ use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provide
 use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
 use indexmap::IndexMap;
-use inquire::{Confirm, Select};
+use inquire::{Confirm, Select, Text};
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 const CLAUDE_API_FORMAT_ANTHROPIC: &str = "anthropic";
@@ -33,9 +33,10 @@ const CLAUDE_API_FORMAT_CHOICES: [&str; 4] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_GEMINI_NATIVE,
 ];
-const CODEX_API_FORMAT_CHOICES: [&str; 2] = [
+const CODEX_API_FORMAT_CHOICES: [&str; 3] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_OPENAI_CHAT,
+    CLAUDE_API_FORMAT_ANTHROPIC,
 ];
 
 fn is_claude_official_provider(provider: &Provider) -> bool {
@@ -70,6 +71,7 @@ fn normalize_codex_api_format(raw: &str) -> &'static str {
         | CLAUDE_API_FORMAT_OPENAI_CHAT
         | "openai-chat"
         | "openai_chat_completions" => CLAUDE_API_FORMAT_OPENAI_CHAT,
+        "anthropic" | "anthropic_messages" | "anthropic-messages" => CLAUDE_API_FORMAT_ANTHROPIC,
         _ => CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     }
 }
@@ -135,7 +137,9 @@ fn effective_codex_api_format(provider: &Provider) -> &'static str {
         return normalize_codex_api_format(api_format);
     }
 
-    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+    if crate::proxy::providers::codex_provider_uses_anthropic(provider) {
+        CLAUDE_API_FORMAT_ANTHROPIC
+    } else if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
         CLAUDE_API_FORMAT_OPENAI_CHAT
     } else {
         CLAUDE_API_FORMAT_OPENAI_RESPONSES
@@ -244,12 +248,43 @@ fn apply_claude_api_format(provider: &mut Provider, api_format: &str) {
 
 fn apply_codex_api_format(provider: &mut Provider, api_format: &str) {
     let api_format = normalize_codex_api_format(api_format);
-    provider
-        .meta
-        .get_or_insert_with(ProviderMeta::default)
-        .api_format = Some(api_format.to_string());
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.api_format = Some(api_format.to_string());
+    if api_format != CLAUDE_API_FORMAT_ANTHROPIC {
+        meta.api_key_field = None;
+        meta.impersonate_claude_code = None;
+        meta.max_output_tokens = None;
+    }
     strip_codex_api_format_legacy_settings(provider);
     normalize_codex_settings_wire_api(provider);
+}
+
+fn apply_add_codex_anthropic_options(
+    app_type: &AppType,
+    provider: &mut Provider,
+    api_key_field: Option<ClaudeApiKeyField>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
+) {
+    if !matches!(app_type, AppType::Codex)
+        || effective_codex_api_format(provider) != CLAUDE_API_FORMAT_ANTHROPIC
+    {
+        return;
+    }
+
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    if let Some(api_key_field) = api_key_field {
+        meta.api_key_field = match api_key_field {
+            ClaudeApiKeyField::AuthToken => None,
+            ClaudeApiKeyField::ApiKey => Some(api_key_field.as_env_key().to_string()),
+        };
+    }
+    if impersonate_claude_code {
+        meta.impersonate_claude_code = Some(true);
+    }
+    if let Some(max_output_tokens) = max_output_tokens.filter(|value| *value > 0) {
+        meta.max_output_tokens = Some(max_output_tokens);
+    }
 }
 
 fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
@@ -278,6 +313,9 @@ fn apply_fixed_codex_api_format_if_needed(app_type: &AppType, provider: &mut Pro
     if provider.is_codex_official() {
         if let Some(meta) = provider.meta.as_mut() {
             meta.api_format = None;
+            meta.api_key_field = None;
+            meta.impersonate_claude_code = None;
+            meta.max_output_tokens = None;
             meta.codex_chat_reasoning = None;
         }
         if let Some(settings_obj) = provider.settings_config.as_object_mut() {
@@ -360,6 +398,94 @@ fn prompt_and_apply_codex_api_format(
 
     let api_format = prompt_codex_api_format(provider)?;
     apply_codex_api_format(provider, api_format);
+    if api_format == CLAUDE_API_FORMAT_ANTHROPIC {
+        prompt_and_apply_codex_anthropic_options(provider)?;
+    }
+    Ok(())
+}
+
+fn prompt_and_apply_codex_anthropic_options(provider: &mut Provider) -> Result<(), AppError> {
+    let current_api_key_field = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_key_field.as_deref())
+        .filter(|field| *field == "ANTHROPIC_API_KEY")
+        .map(|_| ClaudeApiKeyField::ApiKey)
+        .unwrap_or(ClaudeApiKeyField::AuthToken);
+    let fields = [ClaudeApiKeyField::AuthToken, ClaudeApiKeyField::ApiKey];
+    let labels = fields
+        .iter()
+        .map(|field| texts::tui_codex_anthropic_auth_field_value(field.as_env_key()).to_string())
+        .collect::<Vec<_>>();
+    let default_index = fields
+        .iter()
+        .position(|field| *field == current_api_key_field)
+        .unwrap_or(0);
+    let selected = Select::new(
+        texts::tui_label_codex_anthropic_auth_field(),
+        labels.clone(),
+    )
+    .with_starting_cursor(default_index)
+    .prompt()
+    .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+    let selected_field = fields
+        .get(
+            labels
+                .iter()
+                .position(|label| label == &selected)
+                .unwrap_or(default_index),
+        )
+        .copied()
+        .unwrap_or(ClaudeApiKeyField::AuthToken);
+
+    let impersonate_claude_code = Confirm::new(texts::tui_label_codex_impersonate_claude_code())
+        .with_default(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.impersonate_claude_code)
+                == Some(true),
+        )
+        .prompt()
+        .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+
+    let current_max_output_tokens = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.max_output_tokens)
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let max_output_tokens = if current_max_output_tokens.is_empty() {
+        Text::new(texts::tui_label_codex_max_output_tokens())
+            .with_placeholder("8192")
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_codex_max_output_tokens())
+            .with_initial_value(&current_max_output_tokens)
+            .prompt()
+    }
+    .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+    let max_output_tokens = if max_output_tokens.trim().is_empty() {
+        None
+    } else {
+        Some(max_output_tokens.trim().parse::<u64>().map_err(|_| {
+            AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
+                "最大输出 tokens 必须是正整数".to_string()
+            } else {
+                "max output tokens must be a positive integer".to_string()
+            })
+        })?)
+        .filter(|value| *value > 0)
+    };
+
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.api_key_field = match selected_field {
+        ClaudeApiKeyField::AuthToken => None,
+        ClaudeApiKeyField::ApiKey => Some(selected_field.as_env_key().to_string()),
+    };
+    meta.impersonate_claude_code = impersonate_claude_code.then_some(true);
+    meta.max_output_tokens = max_output_tokens;
     Ok(())
 }
 
@@ -587,12 +713,18 @@ pub enum ProviderCommand {
         /// Sort index (optional)
         #[arg(long)]
         sort_index: Option<usize>,
-        /// Claude API-key field to populate (default: auth-token)
+        /// Claude API-key field, or Codex Anthropic upstream auth field
         #[arg(long, value_enum)]
         api_key_field: Option<ClaudeApiKeyFieldArg>,
-        /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: responses|chat)
+        /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: responses|chat|anthropic)
         #[arg(long)]
         api_format: Option<String>,
+        /// Emulate the Claude Code client for a Codex Anthropic upstream
+        #[arg(long)]
+        impersonate_claude_code: bool,
+        /// Override max_tokens for a Codex Anthropic upstream
+        #[arg(long)]
+        max_output_tokens: Option<u64>,
         /// Attach the app-level common config snippet (Claude/Codex/Gemini)
         #[arg(long)]
         common_config: bool,
@@ -704,6 +836,8 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
             sort_index,
             api_key_field,
             api_format,
+            impersonate_claude_code,
+            max_output_tokens,
             common_config,
             account_id,
             fast_mode,
@@ -723,6 +857,8 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                 sort_index,
                 api_key_field: api_key_field.map(ClaudeApiKeyField::from),
                 api_format,
+                impersonate_claude_code,
+                max_output_tokens,
                 common_config,
                 account_id,
                 fast_mode,
@@ -914,6 +1050,8 @@ struct AddProviderArgs {
     sort_index: Option<usize>,
     api_key_field: Option<ClaudeApiKeyField>,
     api_format: Option<String>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
     common_config: bool,
     account_id: Option<String>,
     fast_mode: bool,
@@ -1193,7 +1331,13 @@ fn validate_codex_api_format(raw: &str) -> Result<&'static str, AppError> {
         "responses" | "openai_responses" | "openai-responses" => {
             Ok(CLAUDE_API_FORMAT_OPENAI_RESPONSES)
         }
-        other => Err(add_invalid_api_format_error(other, "responses, chat")),
+        "anthropic" | "anthropic_messages" | "anthropic-messages" => {
+            Ok(CLAUDE_API_FORMAT_ANTHROPIC)
+        }
+        other => Err(add_invalid_api_format_error(
+            other,
+            "responses, chat, anthropic",
+        )),
     }
 }
 
@@ -1346,6 +1490,13 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
         &mut provider,
         non_empty(args.api_format.clone()).as_deref(),
     )?;
+    apply_add_codex_anthropic_options(
+        &app_type,
+        &mut provider,
+        args.api_key_field,
+        args.impersonate_claude_code,
+        args.max_output_tokens,
+    );
     apply_add_codex_oauth_options(
         &app_type,
         &mut provider,
@@ -2119,6 +2270,23 @@ wire_api = "chat"
         assert_eq!(
             effective_codex_api_format(&provider),
             CLAUDE_API_FORMAT_OPENAI_CHAT
+        );
+    }
+
+    #[test]
+    fn codex_api_format_effective_value_reads_legacy_anthropic_wire_api() {
+        let provider = codex_provider(json!({
+            "config": r#"model_provider = "vendor"
+
+[model_providers.vendor]
+base_url = "https://vendor.example/v1"
+wire_api = "anthropic"
+"#
+        }));
+
+        assert_eq!(
+            effective_codex_api_format(&provider),
+            CLAUDE_API_FORMAT_ANTHROPIC
         );
     }
 

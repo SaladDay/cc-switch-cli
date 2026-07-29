@@ -1,4 +1,11 @@
-use crate::proxy::{error::ProxyError, json_canonical::canonical_json_string};
+use crate::proxy::{
+    error::ProxyError,
+    json_canonical::canonical_json_string,
+    tool_media::{
+        chat_media_part_from_tool_part, flush_pending_chat_tool_media, plan_chat_tool_output_media,
+        queue_chat_tool_output_media, ToolMediaScope,
+    },
+};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 
@@ -328,6 +335,7 @@ fn convert_message_to_openai(
     if let Some(blocks) = content.as_array() {
         let mut content_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut pending_tool_media = Vec::new();
         let mut reasoning_parts = Vec::new();
 
         for block in blocks {
@@ -339,16 +347,10 @@ fn convert_message_to_openai(
                     }
                 }
                 "image" => {
-                    if let Some(source) = block.get("source") {
-                        let media_type = source
-                            .get("media_type")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("image/png");
-                        let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
-                        content_parts.push(json!({
-                            "type": "image_url",
-                            "image_url": {"url": format!("data:{};base64,{}", media_type, data)}
-                        }));
+                    if let Some(image) =
+                        chat_media_part_from_tool_part(block, ToolMediaScope::ImagesOnly)
+                    {
+                        content_parts.push(image);
                     }
                 }
                 "tool_use" => {
@@ -370,10 +372,22 @@ fn convert_message_to_openai(
                         .and_then(|i| i.as_str())
                         .unwrap_or("");
                     let content_val = block.get("content");
-                    let content_str = match content_val {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(v) => canonical_json_string(v),
-                        None => String::new(),
+                    let media_plan = content_val.cloned().and_then(plan_chat_tool_output_media);
+                    let content_str = if let Some(media_plan) = media_plan {
+                        queue_chat_tool_output_media(
+                            &mut pending_tool_media,
+                            tool_use_id,
+                            media_plan.media_parts,
+                        );
+                        media_plan.tool_content
+                    } else {
+                        // Keep the no-media representation exactly equal to
+                        // the legacy converter for prompt-cache stability.
+                        match content_val {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(v) => canonical_json_string(v),
+                            None => String::new(),
+                        }
                     };
                     result.push(json!({
                         "role": "tool",
@@ -394,6 +408,11 @@ fn convert_message_to_openai(
                 _ => {}
             }
         }
+
+        // Chat tool messages cannot carry image parts. Keep parallel tool
+        // results adjacent, then present all extracted media in one user turn
+        // before any ordinary message content from the same Anthropic turn.
+        flush_pending_chat_tool_media(&mut result, &mut pending_tool_media);
 
         if !content_parts.is_empty() || !tool_calls.is_empty() {
             let mut msg = json!({"role": role});
@@ -432,20 +451,32 @@ fn convert_message_to_openai(
     Ok(result)
 }
 
-pub(crate) fn clean_schema(mut schema: Value) -> Value {
+pub(crate) fn clean_schema(schema: Value) -> Value {
+    clean_schema_inner(schema, true)
+}
+
+fn clean_schema_inner(mut schema: Value, is_root: bool) -> Value {
     if let Some(obj) = schema.as_object_mut() {
+        let missing_type = is_root && !obj.contains_key("type");
+        if missing_type {
+            obj.insert("type".to_string(), json!("object"));
+        }
+        if missing_type && !obj.contains_key("properties") {
+            obj.insert("properties".to_string(), json!({}));
+        }
+
         if obj.get("format").and_then(|v| v.as_str()) == Some("uri") {
             obj.remove("format");
         }
 
         if let Some(properties) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
             for (_, value) in properties.iter_mut() {
-                *value = clean_schema(value.clone());
+                *value = clean_schema_inner(value.clone(), false);
             }
         }
 
         if let Some(items) = obj.get_mut("items") {
-            *items = clean_schema(items.clone());
+            *items = clean_schema_inner(items.clone(), false);
         }
     }
     schema
@@ -901,6 +932,70 @@ mod tests {
         assert!(result["tools"][0].get("cache_control").is_none());
     }
 
+    #[test]
+    fn anthropic_to_openai_defaults_missing_tool_schema_type() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "What's the weather?"}],
+            "tools": [{
+                "name": "get_weather",
+                "description": "Get weather info",
+                "input_schema": {"properties": {"location": {"type": "string"}}}
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let parameters = &result["tools"][0]["function"]["parameters"];
+
+        assert_eq!(parameters["type"], json!("object"));
+        assert_eq!(
+            parameters["properties"]["location"]["type"],
+            json!("string")
+        );
+    }
+
+    #[test]
+    fn anthropic_to_openai_defaults_empty_tool_schema() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Do work"}],
+            "tools": [{"name": "do_work", "input_schema": {}}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let parameters = &result["tools"][0]["function"]["parameters"];
+
+        assert_eq!(parameters, &json!({"type": "object", "properties": {}}));
+    }
+
+    #[test]
+    fn clean_schema_only_defaults_root_to_object() {
+        let schema = json!({
+            "properties": {
+                "nullable_value": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "list": {
+                    "items": {"type": "string"}
+                }
+            }
+        });
+
+        let result = clean_schema(schema);
+
+        assert_eq!(result["type"], json!("object"));
+        assert_eq!(
+            result["properties"]["nullable_value"],
+            json!({"anyOf": [{"type": "string"}, {"type": "null"}]})
+        );
+        assert_eq!(
+            result["properties"]["list"],
+            json!({"items": {"type": "string"}})
+        );
+    }
+
     fn run_tool_choice(value: Value) -> Value {
         let input = json!({
             "model": "gpt-4o",
@@ -1113,6 +1208,164 @@ mod tests {
             result["messages"][0]["content"],
             r#"{"a":{"a":1,"b":2},"z":1}"#
         );
+    }
+
+    #[test]
+    fn anthropic_to_openai_no_media_tool_results_keep_legacy_representation() {
+        let raw_json_string = "{ \"status\": \"ok\", \"count\": 2 }";
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_string",
+                        "content": raw_json_string
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_array",
+                        "content": [{"type": "text", "text": "plain"}]
+                    }
+                ]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"], raw_json_string);
+        assert_eq!(
+            messages[1]["content"],
+            canonical_json_string(&json!([{"type": "text", "text": "plain"}]))
+        );
+    }
+
+    #[test]
+    fn anthropic_to_openai_moves_tool_result_image_to_user_message() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_image",
+                    "content": [
+                        {"type": "text", "text": "caption"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "CLAUDE_CHAT_IMAGE_SENTINEL"
+                            },
+                            "cache_control": {"type": "ephemeral"},
+                            "prompt_cache_breakpoint": true
+                        }
+                    ]
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "call_image");
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("tool result media moved"));
+        assert!(!messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("CLAUDE_CHAT_IMAGE_SENTINEL"));
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            messages[1]["content"][0]["text"],
+            "[cc-switch: media output of tool call call_image]"
+        );
+        assert_eq!(messages[1]["content"][1]["type"], "image_url");
+        assert!(messages[1]["content"][1].get("cache_control").is_none());
+        assert!(messages[1]["content"][1]
+            .get("prompt_cache_breakpoint")
+            .is_none());
+        assert_eq!(
+            messages[1]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,CLAUDE_CHAT_IMAGE_SENTINEL"
+        );
+    }
+
+    #[test]
+    fn anthropic_to_openai_batches_parallel_tool_result_media() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": [{
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": "image/png", "data": "ONE"}
+                        }]
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_2",
+                        "content": [{
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": "image/jpeg", "data": "TWO"}
+                        }]
+                    }
+                ]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn anthropic_to_openai_maps_remote_image_source() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image",
+                    "source": {
+                        "type": "url",
+                        "url": "https://example.com/image.png"
+                    },
+                    "cache_control": {"type": "ephemeral"},
+                    "prompt_cache_breakpoint": true
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        assert_eq!(
+            result["messages"][0]["content"][0]["image_url"]["url"],
+            "https://example.com/image.png"
+        );
+        assert!(result["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert!(result["messages"][0]["content"][0]
+            .get("prompt_cache_breakpoint")
+            .is_none());
     }
 
     #[test]

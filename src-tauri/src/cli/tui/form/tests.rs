@@ -503,7 +503,7 @@ fn provider_add_form_claudeapi_preset_keeps_affiliate_register_url_in_metadata()
 
     assert_eq!(
         claudeapi.register_url(),
-        "https://console.claudeapi.com/register?source=cc-switch-cli"
+        "https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii"
     );
 }
 
@@ -569,10 +569,10 @@ fn provider_add_form_claudeapi_template_claude_sets_base_url_and_partner_meta() 
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "ClaudeAPI");
-    assert_eq!(provider["websiteUrl"], "https://console.claudeapi.com");
+    assert_eq!(provider["websiteUrl"], "https://www.apito.ai");
     assert_eq!(
         provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
-        "https://gw.claudeapi.com"
+        "https://gw.apito.ai"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "claudeapi");
@@ -2542,6 +2542,48 @@ requires_openai_auth = true
 }
 
 #[test]
+fn provider_edit_form_codex_updates_legacy_flat_config() {
+    let provider = Provider::with_id(
+        "legacy".to_string(),
+        "Legacy Codex".to_string(),
+        json!({
+            "auth": {
+                "OPENAI_API_KEY": "sk-old"
+            },
+            "config": r#"base_url = "https://old.example.com/v1"
+model = "gpt-old"
+wire_api = "chat"
+requires_openai_auth = false
+env_key = "LEGACY_API_KEY"
+"#,
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert!(form.codex_is_chat_format());
+    assert_eq!(form.codex_wire_api, CodexWireApi::Responses);
+    assert!(!form.codex_requires_openai_auth);
+    assert_eq!(form.codex_env_key.value, "LEGACY_API_KEY");
+
+    form.codex_base_url.set("https://new.example.com/v1");
+    let out = form.to_provider_json_value();
+    let config = out["settingsConfig"]["config"]
+        .as_str()
+        .expect("settingsConfig.config should be string");
+
+    assert_eq!(
+        crate::codex_config::extract_codex_base_url(config).as_deref(),
+        Some("https://new.example.com/v1")
+    );
+    assert!(!config.contains("model_provider"));
+    assert!(config.contains("wire_api = \"responses\""));
+    assert!(config.contains("requires_openai_auth = false"));
+    assert!(config.contains("env_key = \"LEGACY_API_KEY\""));
+    assert_eq!(out["meta"]["apiFormat"], "openai_chat");
+}
+
+#[test]
 fn provider_add_form_codex_model_mapping_available_for_both_formats() {
     let mut form = ProviderAddFormState::new(AppType::Codex);
 
@@ -2830,6 +2872,93 @@ requires_openai_auth = true
     assert_eq!(saved["meta"]["apiFormat"], "openai_chat");
     assert!(config.contains("wire_api = \"responses\""));
     assert!(!config.contains("wire_api = \"chat\""));
+}
+
+#[test]
+fn provider_add_form_codex_anthropic_options_round_trip_and_clear_on_format_change() {
+    let mut provider = Provider::with_id(
+        "anthropic".to_string(),
+        "Anthropic Gateway".to_string(),
+        json!({
+            "auth": {"OPENAI_API_KEY": "sk-test"},
+            "config": r#"
+model_provider = "custom"
+model = "claude-sonnet-4-6"
+
+[model_providers.custom]
+name = "Anthropic Gateway"
+base_url = "https://gateway.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        api_format: Some("anthropic".to_string()),
+        api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+        impersonate_claude_code: Some(true),
+        max_output_tokens: Some(16_384),
+        ..Default::default()
+    });
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(form.claude_api_format, ClaudeApiFormat::Anthropic);
+    assert_eq!(
+        form.claude_api_key_field,
+        crate::provider::ClaudeApiKeyField::ApiKey
+    );
+    assert!(form.codex_impersonate_claude_code);
+    assert_eq!(form.codex_max_output_tokens.value, "16384");
+    let fields = form.fields();
+    assert!(fields.contains(&ProviderAddField::CodexAnthropicApiKeyField));
+    assert!(fields.contains(&ProviderAddField::CodexImpersonateClaudeCode));
+    assert!(fields.contains(&ProviderAddField::CodexMaxOutputTokens));
+
+    let saved = form.to_provider_json_value();
+    assert_eq!(saved["meta"]["apiFormat"], "anthropic");
+    assert_eq!(saved["meta"]["apiKeyField"], "ANTHROPIC_API_KEY");
+    assert_eq!(saved["meta"]["impersonateClaudeCode"], true);
+    assert_eq!(saved["meta"]["maxOutputTokens"], 16_384);
+
+    form.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+    let saved = form.to_provider_json_value();
+    assert_eq!(saved["meta"]["apiFormat"], "openai_responses");
+    assert!(saved["meta"].get("apiKeyField").is_none());
+    assert!(saved["meta"].get("impersonateClaudeCode").is_none());
+    assert!(saved["meta"].get("maxOutputTokens").is_none());
+}
+
+#[test]
+fn provider_add_form_codex_legacy_anthropic_wire_api_loads_as_anthropic() {
+    let provider = Provider::with_id(
+        "anthropic".to_string(),
+        "Anthropic Gateway".to_string(),
+        json!({
+            "config": r#"
+model_provider = "custom"
+model = "claude-sonnet-4-6"
+
+[model_providers.custom]
+name = "Anthropic Gateway"
+base_url = "https://gateway.example/v1"
+wire_api = "anthropic"
+requires_openai_auth = true
+"#
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(form.claude_api_format, ClaudeApiFormat::Anthropic);
+
+    let saved = form.to_provider_json_value();
+    let config = saved["settingsConfig"]["config"]
+        .as_str()
+        .expect("Codex config should be serialized");
+    assert_eq!(saved["meta"]["apiFormat"], "anthropic");
+    assert!(config.contains("wire_api = \"responses\""));
+    assert!(!config.contains("wire_api = \"anthropic\""));
 }
 
 #[test]

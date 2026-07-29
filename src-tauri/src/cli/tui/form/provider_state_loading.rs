@@ -200,7 +200,6 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
 }
 
 fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
-    let mut parsed_wire_api = None;
     if let Some(config) = provider
         .settings_config
         .get("config")
@@ -212,9 +211,6 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
         }
         if let Some(model) = parsed.model {
             form.codex_model.set(model);
-        }
-        if let Some(wire_api) = parsed.wire_api {
-            parsed_wire_api = Some(wire_api);
         }
         if let Some(requires_openai_auth) = parsed.requires_openai_auth {
             form.codex_requires_openai_auth = requires_openai_auth;
@@ -235,7 +231,28 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
             form.codex_api_key.set(key);
         }
     }
-    form.claude_api_format = parse_codex_api_format(provider, parsed_wire_api);
+    form.claude_api_format = parse_codex_api_format(provider);
+    form.claude_api_key_field = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_key_field.as_deref())
+        .filter(|field| *field == "ANTHROPIC_API_KEY")
+        .map(|_| crate::provider::ClaudeApiKeyField::ApiKey)
+        .unwrap_or(crate::provider::ClaudeApiKeyField::AuthToken);
+    form.codex_impersonate_claude_code = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.impersonate_claude_code)
+        == Some(true);
+    if let Some(max_output_tokens) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.max_output_tokens)
+        .filter(|value| *value > 0)
+    {
+        form.codex_max_output_tokens
+            .set(max_output_tokens.to_string());
+    }
     form.codex_wire_api = CodexWireApi::Responses;
     form.codex_chat_reasoning = provider
         .meta
@@ -476,34 +493,14 @@ fn parse_claude_api_format(provider: &Provider) -> ClaudeApiFormat {
     }
 }
 
-fn parse_codex_api_format(provider: &Provider, wire_api: Option<CodexWireApi>) -> ClaudeApiFormat {
-    if let Some(api_format) = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.api_format.as_deref())
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("api_format")
-                .and_then(|value| value.as_str())
-        })
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("apiFormat")
-                .and_then(|value| value.as_str())
-        })
-    {
-        return match api_format {
-            "openai_chat" => ClaudeApiFormat::OpenAiChat,
-            _ => ClaudeApiFormat::OpenAiResponses,
-        };
+fn parse_codex_api_format(provider: &Provider) -> ClaudeApiFormat {
+    if crate::proxy::providers::codex_provider_uses_anthropic(provider) {
+        return ClaudeApiFormat::Anthropic;
     }
-
-    match wire_api {
-        Some(CodexWireApi::Chat) => ClaudeApiFormat::OpenAiChat,
-        _ => ClaudeApiFormat::OpenAiResponses,
+    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+        return ClaudeApiFormat::OpenAiChat;
     }
+    ClaudeApiFormat::OpenAiResponses
 }
 
 fn opencode_model_rank(model: &Value) -> usize {

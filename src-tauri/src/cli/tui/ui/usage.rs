@@ -38,7 +38,7 @@ pub(super) fn render_usage(
         frame,
         chunks[1],
         theme,
-        usage_summary_spans(app, data, theme),
+        usage_summary_spans(app, data, theme, chunks[1].width.saturating_sub(4)),
     );
     render_usage_metrics(frame, app, data, chunks[2], theme);
 
@@ -91,7 +91,7 @@ pub(super) fn render_usage_logs(
         frame,
         chunks[2],
         theme,
-        usage_detail_summary_spans(app, data, theme),
+        usage_detail_summary_spans(app, data, theme, chunks[2].width.saturating_sub(4)),
     );
     render_usage_detail_table(frame, app, data, chunks[3], theme);
 }
@@ -1390,16 +1390,22 @@ fn detail_line(
     ])
 }
 
-/// The summary bar leads with one refresh indicator, shared by the page's own
-/// refresh and the background import — see [`usage_refresh_spans`].
+/// The summary bar ends with one refresh indicator, shared by the page's own
+/// refresh and the background import — see [`usage_refresh_active`].
 fn usage_summary_spans(
     app: &App,
     data: &UiData,
     theme: &super::theme::Theme,
+    available_width: u16,
 ) -> Vec<Span<'static>> {
-    let mut spans = usage_refresh_spans(app, theme);
-    spans.push(Span::raw(usage_summary_line(app, data)));
-    spans
+    summary_with_refresh_indicator(
+        usage_summary_line(app, data),
+        usage_refresh_active(app),
+        app.tick,
+        theme,
+        sync_escalation(app),
+        available_width,
+    )
 }
 
 fn usage_summary_line(app: &App, data: &UiData) -> String {
@@ -1488,31 +1494,29 @@ fn usage_detail_summary_spans(
     app: &App,
     data: &UiData,
     theme: &super::theme::Theme,
+    available_width: u16,
 ) -> Vec<Span<'static>> {
-    let mut spans = usage_refresh_spans(app, theme);
-    spans.push(Span::raw(usage_detail_summary_line(app, data)));
-    spans
+    summary_with_refresh_indicator(
+        usage_detail_summary_line(app, data),
+        usage_refresh_active(app),
+        app.tick,
+        theme,
+        sync_escalation(app),
+        available_width,
+    )
 }
 
-/// The bar's single refresh indicator, followed by its separator.
-///
 /// The page's own refresh and the background session import are two pipelines
 /// that can be live at the same time, and they used to claim two slots on the
 /// same line. They share one indicator now: it shows while *either* is
 /// running, keeps the generic label, and takes the escalation percentage from
-/// whichever import round earned one. Empty when both are idle.
-fn usage_refresh_spans(app: &App, theme: &super::theme::Theme) -> Vec<Span<'static>> {
+/// whichever import round earned one.
+fn usage_refresh_active(app: &App) -> bool {
     let page_refreshing = app.usage.manual_session_refreshing()
         || app.usage.is_loading_for(&app.app_type, app.usage.range)
         || app.usage.log_page_refresh_after_aggregate_requested()
         || app.usage.log_pager.has_refresh_pending();
-    if !page_refreshing && !session_usage_sync_active() {
-        return Vec::new();
-    }
-
-    let mut spans = refresh_indicator_spans(app.tick, theme, sync_escalation(app));
-    spans.push(Span::raw(" · "));
-    spans
+    page_refreshing || session_usage_sync_active()
 }
 
 fn usage_text(en: &'static str, zh: &'static str) -> &'static str {

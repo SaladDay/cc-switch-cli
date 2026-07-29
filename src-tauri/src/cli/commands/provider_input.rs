@@ -189,9 +189,9 @@ const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 8] = [
         id: ProviderAddTemplate::Claudeapi,
         provider_name: "ClaudeAPI",
         chip_label: "* ClaudeAPI",
-        website_url: "https://console.claudeapi.com",
+        website_url: "https://www.apito.ai",
         partner_promotion_key: "claudeapi",
-        claude_base_url: "https://gw.claudeapi.com",
+        claude_base_url: "https://gw.apito.ai",
         codex_base_url: "",
         gemini_base_url: "",
         opencode_base_url: "",
@@ -1185,6 +1185,76 @@ mod tests {
     }
 
     #[test]
+    fn codex_current_values_use_active_provider_over_stale_root() {
+        let current = json!({
+            "config": r#"base_url = "https://stale.example.com/v1"
+model_provider = "current"
+model = "gpt-current"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+"#
+        });
+
+        assert_eq!(
+            codex_current_base_url_model(Some(&current)),
+            (
+                Some("https://current.example.com/v1".to_string()),
+                Some("gpt-current".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn codex_current_values_support_legacy_flat_config() {
+        let current = json!({
+            "config": r#"base_url = "https://legacy.example.com/v1"
+model = "gpt-legacy"
+"#
+        });
+
+        assert_eq!(
+            codex_current_base_url_model(Some(&current)),
+            (
+                Some("https://legacy.example.com/v1".to_string()),
+                Some("gpt-legacy".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn cli_codex_prompt_update_saves_legacy_flat_base_url() {
+        let current = json!({
+            "auth": { "OPENAI_API_KEY": "sk-old" },
+            "config": r#"base_url = "https://old.example.com/v1"
+model = "gpt-old"
+wire_api = "chat"
+requires_openai_auth = false
+env_key = "OLD_API_KEY"
+"#
+        });
+
+        let updated = build_codex_settings_config_from_prompt(
+            Some(&current),
+            "sk-new",
+            "https://new.example.com/v1",
+            "gpt-new",
+            "custom",
+        );
+        let config = updated
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config should be present");
+
+        assert_eq!(
+            crate::codex_config::extract_codex_base_url(config).as_deref(),
+            Some("https://new.example.com/v1")
+        );
+        assert!(!config.contains("model_provider"));
+        assert_eq!(updated["auth"]["OPENAI_API_KEY"], "sk-new");
+    }
+
+    #[test]
     fn build_codex_settings_config_defaults_model_to_gpt_5_4() {
         let cfg = build_codex_settings_config(
             Some("sk-test"),
@@ -1643,11 +1713,11 @@ requires_openai_auth = true
         assert_eq!(provider.name, "ClaudeAPI");
         assert_eq!(
             provider.website_url.as_deref(),
-            Some("https://console.claudeapi.com")
+            Some("https://www.apito.ai")
         );
         assert_eq!(
             provider.settings_config["env"]["ANTHROPIC_BASE_URL"],
-            "https://gw.claudeapi.com"
+            "https://gw.apito.ai"
         );
         assert_eq!(
             provider
@@ -2551,26 +2621,10 @@ pub(crate) fn codex_current_base_url_model(
     else {
         return (None, None);
     };
+    let base_url = crate::codex_config::extract_codex_base_url(cfg);
     let Ok(table) = toml::from_str::<toml::Table>(cfg) else {
         return (None, None);
     };
-    let mut base_url = table
-        .get("base_url")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    if base_url.is_none() {
-        if let (Some(model_provider), Some(model_providers)) = (
-            table.get("model_provider").and_then(|v| v.as_str()),
-            table.get("model_providers").and_then(|v| v.as_table()),
-        ) {
-            base_url = model_providers
-                .get(model_provider)
-                .and_then(|v| v.as_table())
-                .and_then(|t| t.get("base_url"))
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-    }
     let model = table
         .get("model")
         .and_then(|v| v.as_str())
@@ -3769,28 +3823,8 @@ pub fn prompt_settings_config(
             let current_config_str = current
                 .and_then(|v| v.get("config"))
                 .and_then(|c| c.as_str());
-            let mut current_base_url: Option<String> = None;
-            if let Some(cfg) = current_config_str {
-                if let Ok(table) = toml::from_str::<toml::Table>(cfg) {
-                    current_base_url = table
-                        .get("base_url")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    if current_base_url.is_none() {
-                        if let (Some(model_provider), Some(model_providers)) = (
-                            table.get("model_provider").and_then(|v| v.as_str()),
-                            table.get("model_providers").and_then(|v| v.as_table()),
-                        ) {
-                            current_base_url = model_providers
-                                .get(model_provider)
-                                .and_then(|v| v.as_table())
-                                .and_then(|t| t.get("base_url"))
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                        }
-                    }
-                }
-            }
+            let current_base_url =
+                current_config_str.and_then(crate::codex_config::extract_codex_base_url);
 
             let is_openai_official_endpoint = current_base_url
                 .as_deref()
@@ -4107,34 +4141,15 @@ fn prompt_codex_config(current: Option<&Value>, provider_name: &str) -> Result<V
         .and_then(|v| v.get("config"))
         .and_then(|c| c.as_str());
 
-    let mut current_base_url: Option<String> = None;
-    let mut current_model: Option<String> = None;
-    if let Some(cfg) = current_config_str {
-        if let Ok(table) = toml::from_str::<toml::Table>(cfg) {
-            current_base_url = table
-                .get("base_url")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            if current_base_url.is_none() {
-                // Full upstream-style config: base_url lives under model_providers.<model_provider>.
-                if let (Some(model_provider), Some(model_providers)) = (
-                    table.get("model_provider").and_then(|v| v.as_str()),
-                    table.get("model_providers").and_then(|v| v.as_table()),
-                ) {
-                    current_base_url = model_providers
-                        .get(model_provider)
-                        .and_then(|v| v.as_table())
-                        .and_then(|t| t.get("base_url"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                }
-            }
-            current_model = table
+    let current_base_url = current_config_str.and_then(crate::codex_config::extract_codex_base_url);
+    let current_model = current_config_str
+        .and_then(|cfg| toml::from_str::<toml::Table>(cfg).ok())
+        .and_then(|table| {
+            table
                 .get("model")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-    }
+                .and_then(|value| value.as_str())
+                .map(String::from)
+        });
 
     // 1. API Key（恢复：用于旧版本 Codex 兼容性）
     let api_key = if let Some(current_key) = current_api_key {
@@ -4449,12 +4464,14 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
         }
         AppType::Codex => {
             if !provider.is_codex_official() {
-                let api_format =
-                    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
-                        "openai_chat"
-                    } else {
-                        "openai_responses"
-                    };
+                let api_format = if crate::proxy::providers::codex_provider_uses_anthropic(provider)
+                {
+                    "anthropic"
+                } else if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+                    "openai_chat"
+                } else {
+                    "openai_responses"
+                };
                 println!(
                     "  {}: {}",
                     texts::tui_label_claude_api_format(),
