@@ -31,13 +31,16 @@ use crate::services::usage_stats::{
 use crate::session_manager::scan_cache_store::{ScanCacheStore, SyncResumeHint};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 const CODEX_THREAD_REQUEST_ID_PREFIX: &str = "codex_session:thread-v1";
 
@@ -105,9 +108,82 @@ struct PendingEntry {
     reason: PendingReason,
 }
 
+/// 父 rollout 快照的新鲜度戳
+///
+/// 由**已打开句柄**的 `fstat` 生成（见 `parent_signatures_before`）：戳与随后读到
+/// 的内容必然出自同一个文件对象，不存在"stat 到 A、读到 B"的窗口。
+///
+/// Unix 上除 `(mtime_ns, size)` 外还带 `(dev, ino)`：symlink 改指向、或把另一个
+/// 尺寸与 mtime 都相同的文件 rename 覆盖上来时，前两项可能完全一致，只有 inode
+/// 会变。
+///
+/// 已知且接受的残余风险：
+/// - 同 inode、同尺寸、同 `mtime_ns` 的**原地改写**检测不到。rollout 是追加写的，
+///   这种改写只可能来自人为篡改。
+/// - 非 Unix 上退化为 `(mtime_ns, size)`：一次保持时间戳不变的同尺寸原子替换
+///   （先写好新文件再 rename 覆盖）对缓存不可见。std 的 `File::file_index()` 目前
+///   仍是 unstable，为此单独引入 Windows 平台依赖超出本次范围；上游移植时建议改用
+///   `GetFileInformationByHandle` 取 `(dwVolumeSerialNumber, nFileIndexHigh/Low)`
+///   把这一项补齐。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ParentFileStamp {
+    modified_nanos: i64,
+    size: u64,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl ParentFileStamp {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                modified_nanos: metadata_modified_nanos(metadata),
+                size: metadata.len(),
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                modified_nanos: metadata_modified_nanos(metadata),
+                size: metadata.len(),
+            }
+        }
+    }
+}
+
+/// 父 rollout 的整文件签名快照
+///
+/// 与上游 df3e07ed 的差异（纯性能优化）：上游把缓存键定为
+/// `(parent_path, cutoff_micros)`，而每个 fork 子线程的 cutoff 各不相同，
+/// 于是同一个父文件会被完整重解析 N 次（N = 子线程数）。这里改为按文件缓存
+/// 整表——保存全部有序 `(timestamp, signature)` 对与文件级 `max_timestamp`，
+/// 用 `ParentFileStamp` 做新鲜度校验，查询时在内存里按 cutoff 过滤。
+///
+/// 跨调用行为比上游更新鲜而非更陈旧：上游的 `(path, cutoff)` 缓存在文件变化时
+/// 从不失效，且把 cutoff 截断到微秒；这里父文件一被写入戳就会变、触发重解析，
+/// cutoff 也保持纳秒精度。所有 Ok/Err 判定与错误文案与上游一致，唯一的声明性
+/// 语义差异见 `parse_parent_signature_file` 的文档注释。
+#[derive(Debug, Clone)]
+struct ParentSignatureSnapshot {
+    /// 新鲜度戳
+    stamp: ParentFileStamp,
+    /// 按文件顺序保存的 token_count 签名及其时间戳
+    entries: Vec<(DateTime<Utc>, TokenUsageSignature)>,
+    /// 全文件（含非 token_count 行）的最大 timestamp
+    max_timestamp: Option<DateTime<Utc>>,
+    /// 是否存在缺少有效 timestamp 的 token_count 行（上游扫描到该行即报错）
+    missing_timestamp: bool,
+}
+
 #[derive(Debug, Default)]
 struct CodexReplayCaches {
-    parent_signatures: HashMap<(PathBuf, i64), Vec<TokenUsageSignature>>,
+    parent_signatures: HashMap<PathBuf, ParentSignatureSnapshot>,
     pending: HashMap<PathBuf, PendingEntry>,
 }
 
@@ -331,11 +407,21 @@ fn explicit_parent_from_meta(payload: &serde_json::Value) -> ParentResolution {
     }
 }
 
+/// 解析 rollout 时间戳字符串（RFC3339）
+///
+/// 抽出独立函数以便 `parse_timestamp`（`Value` 路径）与父文件扫描的窄化解析器
+/// （`ParentLine`）共用同一套解析规则：两侧只接受字符串，且接受完全相同的
+/// RFC3339 写法。
+fn parse_timestamp_str(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
 fn parse_timestamp(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
     value
         .and_then(serde_json::Value::as_str)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
+        .and_then(parse_timestamp_str)
 }
 
 fn parse_signature_counters(value: Option<&serde_json::Value>) -> Option<TokenCountersSignature> {
@@ -671,76 +757,556 @@ fn parse_codex_file(
     })
 }
 
-fn parent_signatures_before(
-    parent_path: &Path,
-    cutoff: DateTime<Utc>,
-) -> Result<Vec<TokenUsageSignature>, String> {
-    let cache_key = (parent_path.to_path_buf(), cutoff.timestamp_micros());
-    if let Ok(caches) = replay_caches().lock() {
-        if let Some(signatures) = caches.parent_signatures.get(&cache_key) {
-            return Ok(signatures.clone());
-        }
+// ---------------------------------------------------------------------------
+// 父 rollout 行的窄化解析（`ParentLine` / `ParentPayload`）
+//
+// 父文件扫描只关心四个值：顶层 `timestamp`、顶层 `type`、`payload.type`、
+// `payload.info`。这里手写 visitor 只捕获它们，其余键的值一律交给 `IgnoredAny`
+// 跳过——不构造 `Value` 树、不为长正文分配 `String`。
+//
+// 刻意不用 `#[derive(Deserialize)]`：derive 生成的结构体反序列化遇到重复字段会
+// 直接报错，而参考实现用的是开启 `preserve_order` 的 `serde_json::Value`，重复键
+// **取最后一个**。下面的 visitor 显式实现「后者覆盖前者」。
+// ---------------------------------------------------------------------------
+
+/// 捕获「字符串值 / 非字符串值」的字段
+///
+/// 参考实现读字段走的是 `Value::get(..).and_then(Value::as_str)`：非字符串
+/// （数字、null、对象、数组）一律等价于「没有这个字符串」，而不是解析失败。
+/// 这里保持同一语义——非字符串值原样跳过并返回 `None`。
+///
+/// 字符串本身无转义时零拷贝借用输入切片（`visit_borrowed_str`），有转义时回落
+/// `Cow::Owned`（`visit_str` / `visit_string`），于是 `"\u0074oken_count"` 与字面
+/// `"token_count"` 完全等价——这正是被删掉的原始字节前置过滤漏掉的那一类。
+struct MaybeStr<'de>(Option<Cow<'de, str>>);
+
+struct MaybeStrVisitor;
+
+impl<'de> Visitor<'de> for MaybeStrVisitor {
+    type Value = MaybeStr<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("任意 JSON 值")
     }
 
-    let file = fs::File::open(parent_path)
-        .map_err(|error| format!("无法打开父 rollout {}: {error}", parent_path.display()))?;
-    let mut signatures = Vec::new();
-    let mut max_timestamp: Option<DateTime<Utc>> = None;
+    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E> {
+        Ok(MaybeStr(Some(Cow::Borrowed(value))))
+    }
 
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let timestamp = parse_timestamp(value.get("timestamp"));
-        if let Some(timestamp) = timestamp {
-            max_timestamp = Some(max_timestamp.map_or(timestamp, |current| current.max(timestamp)));
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(MaybeStr(Some(Cow::Owned(value.to_owned()))))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(MaybeStr(Some(Cow::Owned(value))))
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_i128<E>(self, _value: i128) -> Result<Self::Value, E> {
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_u128<E>(self, _value: u128) -> Result<Self::Value, E> {
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(MaybeStr(None))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(MaybeStr(None))
+    }
+}
+
+impl<'de> Deserialize<'de> for MaybeStr<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(MaybeStrVisitor)
+    }
+}
+
+/// 顶层键：只区分关心的三个，其余归 `Other`（键名零分配比较）
+enum ParentLineField {
+    Timestamp,
+    Type,
+    Payload,
+    Other,
+}
+
+/// `payload` 内的键：只区分 `type` / `info`
+enum ParentPayloadField {
+    Type,
+    Info,
+    Other,
+}
+
+macro_rules! impl_field_key {
+    ($ty:ident, $expecting:literal, { $($name:literal => $variant:ident),+ $(,)? }) => {
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct FieldVisitor;
+
+                impl Visitor<'_> for FieldVisitor {
+                    type Value = $ty;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        formatter.write_str($expecting)
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                        Ok(match value {
+                            $($name => $ty::$variant,)+
+                            _ => $ty::Other,
+                        })
+                    }
+                }
+
+                deserializer.deserialize_str(FieldVisitor)
+            }
         }
-        if value.get("type").and_then(serde_json::Value::as_str) != Some("event_msg")
-            || value
-                .get("payload")
-                .and_then(|payload| payload.get("type"))
-                .and_then(serde_json::Value::as_str)
-                != Some("token_count")
-        {
-            continue;
+    };
+}
+
+impl_field_key!(ParentLineField, "父 rollout 行的顶层键", {
+    "timestamp" => Timestamp,
+    "type" => Type,
+    "payload" => Payload,
+});
+
+impl_field_key!(ParentPayloadField, "父 rollout 行的 payload 键", {
+    "type" => Type,
+    "info" => Info,
+});
+
+/// 父 rollout 行的 `payload` 子树
+///
+/// `info` 无条件捕获为完整 `Value`：它可能出现在 `type` 之前，且体量很小
+/// （只有 token 计数器）；捕获成 `Value` 才能原样复用既有的
+/// `parse_token_signature(&Value)`，语义与参考实现逐字一致。
+#[derive(Default)]
+struct ParentPayload<'de> {
+    kind: Option<Cow<'de, str>>,
+    info: Option<serde_json::Value>,
+}
+
+struct ParentPayloadVisitor;
+
+impl<'de> Visitor<'de> for ParentPayloadVisitor {
+    type Value = ParentPayload<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("任意 JSON 值")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut payload = ParentPayload::default();
+        while let Some(field) = map.next_key::<ParentPayloadField>()? {
+            match field {
+                // 重复键取最后一个：无条件覆盖，与 `preserve_order` 的 Value 一致。
+                ParentPayloadField::Type => {
+                    payload.kind = map.next_value::<MaybeStr<'de>>()?.0;
+                }
+                ParentPayloadField::Info => {
+                    payload.info = Some(map.next_value::<serde_json::Value>()?);
+                }
+                ParentPayloadField::Other => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
         }
-        let Some(info) = value
-            .get("payload")
-            .and_then(|payload| payload.get("info"))
-            .filter(|info| !info.is_null())
-        else {
-            continue;
-        };
-        let Some(signature) = parse_token_signature(info) else {
-            continue;
-        };
-        let Some(timestamp) = timestamp else {
+        Ok(payload)
+    }
+
+    // payload 不是对象时（字符串/数字/数组/null），参考实现的 `payload.get("type")`
+    // 只会得到 None，而不是整行解析失败——这里同样原样跳过并返回空 payload。
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_i128<E>(self, _value: i128) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_u128<E>(self, _value: u128) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(ParentPayload::default())
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ParentPayload<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ParentPayloadVisitor)
+    }
+}
+
+/// 父 rollout 的一行
+#[derive(Default)]
+struct ParentLine<'de> {
+    timestamp: Option<Cow<'de, str>>,
+    kind: Option<Cow<'de, str>>,
+    payload: Option<ParentPayload<'de>>,
+}
+
+struct ParentLineVisitor;
+
+impl<'de> Visitor<'de> for ParentLineVisitor {
+    type Value = ParentLine<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("任意 JSON 值")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut line = ParentLine::default();
+        while let Some(field) = map.next_key::<ParentLineField>()? {
+            match field {
+                // 重复键取最后一个：无条件覆盖。`{"timestamp":"A","timestamp":123}`
+                // 因此会把 timestamp 覆写回 None，与 Value 里 `as_str()` 的结果一致。
+                ParentLineField::Timestamp => {
+                    line.timestamp = map.next_value::<MaybeStr<'de>>()?.0;
+                }
+                ParentLineField::Type => {
+                    line.kind = map.next_value::<MaybeStr<'de>>()?.0;
+                }
+                ParentLineField::Payload => {
+                    line.payload = Some(map.next_value::<ParentPayload<'de>>()?);
+                }
+                ParentLineField::Other => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(line)
+    }
+
+    // 顶层不是对象时（数组/字符串/数字…），参考实现的 `value.get(..)` 全是 None，
+    // 该行既不贡献 max_timestamp 也不贡献签名——这里同样跳过后返回空行。
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(ParentLine::default())
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_i128<E>(self, _value: i128) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_u128<E>(self, _value: u128) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(ParentLine::default())
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ParentLine<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ParentLineVisitor)
+    }
+}
+
+impl ParentSignatureSnapshot {
+    /// 在内存快照上回答某个 cutoff 的查询（Ok/Err 判定与上游逐行扫描一致）
+    fn query(
+        &self,
+        parent_path: &Path,
+        cutoff: DateTime<Utc>,
+    ) -> Result<Vec<TokenUsageSignature>, String> {
+        // 上游在扫描到缺时间戳的 token_count 行时立即返回，故该错误优先于下面的
+        // “尚未写到 child fork 时刻”。
+        if self.missing_timestamp {
             return Err(format!(
                 "父 rollout {} 的 token_count 缺少有效 timestamp",
                 parent_path.display()
             ));
+        }
+        if self
+            .max_timestamp
+            .is_none_or(|timestamp| timestamp < cutoff)
+        {
+            return Err(format!(
+                "父 rollout {} 尚未写到 child fork 时刻",
+                parent_path.display()
+            ));
+        }
+        Ok(self
+            .entries
+            .iter()
+            .filter(|(timestamp, _)| *timestamp <= cutoff)
+            .map(|(_, signature)| signature.clone())
+            .collect())
+    }
+}
+
+/// 整表解析父 rollout：收集全部 token_count 签名、文件级最大时间戳
+///
+/// ## 解析策略：一条路径，不猜字节
+///
+/// 每一行都只走 `serde_json::from_str::<ParentLine>` 这一条路径——一个只捕获
+/// `timestamp` / `type` / `payload.type` / `payload.info` 的窄化 visitor，其余键
+/// 的值交给 `IgnoredAny` 跳过。父文件扫描里不存在任何"用原始字节猜 JSON 语义"的
+/// 前置过滤或快路径，因此转义写法（判别字符串写成 `"\u0074oken_count"` /
+/// `"\u0065vent_msg"`）、带空白的重复键（`"timestamp" : "B"`）、转义的重复键名
+/// （`"\u0074imestamp"`）等全部由解析器按 JSON 规范处理，与参考实现（逐行构造
+/// `serde_json::Value`）结论一致。重复键取最后一个，对齐本 crate 开启
+/// `preserve_order` 的 `Value`。
+///
+/// ## 与参考实现的声明性语义差异
+///
+/// 除下面两类行外，签名（`entries`）、错误判定（`missing_timestamp` /
+/// "尚未写到"）与错误文案对**任意输入**都与参考实现逐字一致。
+///
+/// ### 差异一：`Value` 比"只做跳过"的解析严格
+///
+/// 这类行**语法合法、但 `serde_json::Value` 构造不出来**。`Value` 额外拒绝三种
+/// 写法：
+/// - 浮点溢出（如 `1e400`：`Value` 只接受有限数）；
+/// - 嵌套深度 > 127（`Value` 有 128 层递归上限；`IgnoredAny` 的跳过是迭代式的、
+///   不设上限）；
+/// - 孤立代理项转义（如 `"\uD800"`：`Value` 要求可解码成 `String`）。
+///
+/// 参考实现对这类行整行丢弃（`from_str::<Value>` 直接报错），本实现则照常处理：
+/// 顶层 `timestamp` 会计入 `max_timestamp`；若该行同时是合法的 token_count 事件，
+/// 其签名也会被收下（缺 timestamp 时同样会置 `missing_timestamp`）。这是**刻意
+/// 选择**：能解析出来的顶层 timestamp 就是"文件已经写到这里"的证据，与某个无关
+/// 子树里有没有垃圾无关；参考实现的整行丢弃只是"拿 Value 当解析器"的副作用。
+///
+/// 边界按**解析路径**划分，而不是按"键名 / 值"划分：
+/// - **落在解析路径上**的位置与 `Value` 同样严格：顶层键名、`payload` 层键名、
+///   被捕获的 `timestamp` / `type` 字符串值、被整棵捕获的 `info` 子树。这些位置
+///   上的垃圾同样让本解析器整行失败 → 两个实现一起跳过整行，零差异。
+/// - **落在被跳过子树内部**的位置走 `IgnoredAny` 的宽松跳过，属于本差异类；
+///   被跳过的子树是：顶层 `timestamp`/`type`/`payload` 之外的键的值、`payload`
+///   里 `type`/`info` 之外的键的值。注意其中的**键名与值一样宽松**：
+///   `"junk":{"\uD800":0}` 的孤立代理项虽然在键名上，但那是被跳过子树里的嵌套
+///   键名，`Value` 拒绝而本解析器接受，仍属本差异类。
+/// - 现实中没有序列化器会产出这类行；写入截断产生的是**语法非法**行，两个实现
+///   都会跳过（见 `test_parent_signatures_ignore_invalid_json_max_timestamp`）。
+///
+/// ### 差异二：不复刻 serde_json 的 `RawValue` 私有哨兵
+///
+/// 本解析器按 JSON 规范读普通 JSON，**不实现** serde_json 的私有哨兵
+/// `{"$serde_json::private::RawValue":"<被转义的 JSON 文本>"}`。该哨兵在本 crate
+/// 里是活的：依赖图（axum）传递性打开了 serde_json 的 `raw_value` feature，于是
+/// `from_str::<Value>` 遇到这种单键对象时，会把内层字符串当 JSON **就地展开**，
+/// 把它重新解释成所嵌的对象；本解析器则只把 `$serde_json::private::RawValue`
+/// 当作一个普通的未知键跳过。
+///
+/// 可观察后果（如实陈述）：对手工构造的这类行，参考实现可能解出本解析器根本读不到
+/// 的 timestamp / 判别串 / 签名，两侧因此发散。哨兵出现在顶层对象、`timestamp` /
+/// `type`、`payload` 等**任何**位置都可能触发；唯独落在被整棵捕获的 `info` 子树
+/// 内部时两侧都交给 `Value` 处理，反而一致。
+///
+/// 不复刻的理由：没有任何序列化器会写出这个私有哨兵（它只在 serde_json 内部
+/// `RawValue` 的序列化/反序列化握手中出现），而复刻一个可能随 serde_json 版本
+/// 变化的私有实现细节，比把它声明出来更糟。
+fn parse_parent_signature_file(
+    file: fs::File,
+    parent_path: &Path,
+    stamp: ParentFileStamp,
+) -> ParentSignatureSnapshot {
+    let started = Instant::now();
+    let mut entries: Vec<(DateTime<Utc>, TokenUsageSignature)> = Vec::new();
+    let mut max_timestamp: Option<DateTime<Utc>> = None;
+    let mut missing_timestamp = false;
+    let mut total_lines = 0u64;
+
+    // 必须扫描完整父文件并逐行应用 cutoff，不能在首个未来时间戳处 break：
+    // rollout 写入顺序不承诺时间戳严格单调。
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            continue;
         };
-        if timestamp <= cutoff {
-            signatures.push(signature);
+        total_lines += 1;
+
+        // 解析失败即跳过该行（与参考实现对非法 JSON 的处理一致）。
+        let Ok(parsed) = serde_json::from_str::<ParentLine<'_>>(&line) else {
+            continue;
+        };
+        let timestamp = parsed.timestamp.as_deref().and_then(parse_timestamp_str);
+        if let Some(timestamp) = timestamp {
+            max_timestamp = Some(max_timestamp.map_or(timestamp, |current| current.max(timestamp)));
+        }
+        if parsed.kind.as_deref() != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = parsed.payload else {
+            continue;
+        };
+        if payload.kind.as_deref() != Some("token_count") {
+            continue;
+        }
+        let Some(info) = payload.info.filter(|info| !info.is_null()) else {
+            continue;
+        };
+        let Some(signature) = parse_token_signature(&info) else {
+            continue;
+        };
+        let Some(timestamp) = timestamp else {
+            missing_timestamp = true;
+            continue;
+        };
+        entries.push((timestamp, signature));
+    }
+
+    log::debug!(
+        "[CODEX-SYNC] parent-cache miss {}: lines={total_lines} signatures={} missing_ts={missing_timestamp} 耗时 {:?}",
+        parent_path.display(),
+        entries.len(),
+        started.elapsed()
+    );
+
+    ParentSignatureSnapshot {
+        stamp,
+        entries,
+        max_timestamp,
+        missing_timestamp,
+    }
+}
+
+/// 查询父 rollout 在 cutoff 之前的全部 token_count 签名
+///
+/// ## 先 open、再 fstat、再读，全程同一个句柄
+///
+/// 1. **无条件先 `open`**。打开失败直接返回，错误文案与参考实现同一份，因此
+///    `open` 类错误永远是**当次**的新鲜结果，不会被缓存掩盖。这一点是必要的：
+///    `chmod 000` 只改 ctime/mode，`(mtime_ns, size, dev, ino)` 全不变，若先查缓存
+///    就会把旧的内容型错误（"尚未写到…"）当成答案，与参考实现逐字发散。缓存能够
+///    回答的只有**由内容推导**的结论（签名集合、"尚未写到"、"缺少有效 timestamp"）。
+/// 2. 新鲜度戳取自这个句柄的 `fstat`（而非再对路径 stat 一次），戳与随后读到的
+///    内容必然出自同一个文件对象，不存在"stat 到 A、读到 B"的窗口。
+/// 3. 戳与缓存快照一致就丢掉句柄、直接在内存快照上按 cutoff 作答；不一致或未命中
+///    则从**同一个句柄**整表重解析，写回缓存后作答。
+///
+/// 父文件在解析期间被继续追加时，快照带的仍是解析开始时的戳，下次查询自然重解析。
+/// 残余风险见 `ParentFileStamp` 的文档注释。
+fn parent_signatures_before(
+    parent_path: &Path,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<TokenUsageSignature>, String> {
+    let file = fs::File::open(parent_path)
+        .map_err(|error| format!("无法打开父 rollout {}: {error}", parent_path.display()))?;
+    let stamp = file
+        .metadata()
+        .ok()
+        .map(|metadata| ParentFileStamp::from_metadata(&metadata));
+
+    if let Some(stamp) = stamp {
+        if let Ok(caches) = replay_caches().lock() {
+            if let Some(snapshot) = caches.parent_signatures.get(parent_path) {
+                if snapshot.stamp == stamp {
+                    log::debug!(
+                        "[CODEX-SYNC] parent-cache hit {}: signatures={} cutoff={cutoff}",
+                        parent_path.display(),
+                        snapshot.entries.len()
+                    );
+                    // 缓存有效：句柄再无用处，先释放再作答。
+                    drop(file);
+                    return snapshot.query(parent_path, cutoff);
+                }
+            }
         }
     }
 
-    if max_timestamp.is_none_or(|timestamp| timestamp < cutoff) {
-        return Err(format!(
-            "父 rollout {} 尚未写到 child fork 时刻",
-            parent_path.display()
-        ));
+    let snapshot = parse_parent_signature_file(file, parent_path, stamp.unwrap_or_default());
+    let answer = snapshot.query(parent_path, cutoff);
+    if stamp.is_some() {
+        if let Ok(mut caches) = replay_caches().lock() {
+            caches
+                .parent_signatures
+                .insert(parent_path.to_path_buf(), snapshot);
+        }
     }
-
-    if let Ok(mut caches) = replay_caches().lock() {
-        caches
-            .parent_signatures
-            .insert(cache_key, signatures.clone());
-    }
-    Ok(signatures)
+    answer
 }
 
 fn resolve_parent_signatures(
@@ -2459,5 +3025,1400 @@ mod tests {
         // 实际钳制在调用侧：delta.cached_input.min(delta.input)
         let clamped = delta.cached_input.min(delta.input);
         assert_eq!(clamped, 10);
+    }
+
+    // ---------------------------------------------------------------------
+    // parent_signatures_before 等价性 oracle
+    //
+    // `parent_signatures_before_reference` 是上游 df3e07ed 的原始实现（逐行
+    // 完整 JSON 解析、无文件级缓存）。下面的测试用合成 rollout 语料证明
+    // 新实现（按文件缓存 + 单一窄化 visitor 解析）输出逐字一致。
+    // ---------------------------------------------------------------------
+
+    fn parent_signatures_before_reference(
+        parent_path: &Path,
+        cutoff: DateTime<Utc>,
+    ) -> Result<Vec<TokenUsageSignature>, String> {
+        let file = fs::File::open(parent_path)
+            .map_err(|error| format!("无法打开父 rollout {}: {error}", parent_path.display()))?;
+        let mut signatures = Vec::new();
+        let mut max_timestamp: Option<DateTime<Utc>> = None;
+
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let timestamp = parse_timestamp(value.get("timestamp"));
+            if let Some(timestamp) = timestamp {
+                max_timestamp =
+                    Some(max_timestamp.map_or(timestamp, |current| current.max(timestamp)));
+            }
+            if value.get("type").and_then(serde_json::Value::as_str) != Some("event_msg")
+                || value
+                    .get("payload")
+                    .and_then(|payload| payload.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("token_count")
+            {
+                continue;
+            }
+            let Some(info) = value
+                .get("payload")
+                .and_then(|payload| payload.get("info"))
+                .filter(|info| !info.is_null())
+            else {
+                continue;
+            };
+            let Some(signature) = parse_token_signature(info) else {
+                continue;
+            };
+            let Some(timestamp) = timestamp else {
+                return Err(format!(
+                    "父 rollout {} 的 token_count 缺少有效 timestamp",
+                    parent_path.display()
+                ));
+            };
+            if timestamp <= cutoff {
+                signatures.push(signature);
+            }
+        }
+
+        if max_timestamp.is_none_or(|timestamp| timestamp < cutoff) {
+            return Err(format!(
+                "父 rollout {} 尚未写到 child fork 时刻",
+                parent_path.display()
+            ));
+        }
+
+        Ok(signatures)
+    }
+
+    /// 确定性伪随机（LCG），避免引入 rand 依赖
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed.wrapping_mul(6364136223846793005).wrapping_add(1))
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            self.next_u64() % bound.max(1)
+        }
+    }
+
+    fn corpus_base() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-10T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn corpus_time(offset_secs: u64) -> DateTime<Utc> {
+        corpus_base() + chrono::Duration::seconds(offset_secs as i64)
+    }
+
+    fn corpus_ts(offset_secs: u64) -> String {
+        corpus_time(offset_secs).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    /// 同一时刻的 `+08:00` 写法，用于校验 RFC3339 变体两侧解析一致
+    fn corpus_ts_offset(offset_secs: u64) -> String {
+        let zone = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        corpus_time(offset_secs).with_timezone(&zone).to_rfc3339()
+    }
+
+    fn token_count_line(ts: &str, index: u64) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{},"cached_input_tokens":{},"output_tokens":{},"reasoning_output_tokens":{},"total_tokens":{}}},"last_token_usage":{{"input_tokens":{},"output_tokens":{}}}}}}}}}"#,
+            1000 + index * 7,
+            index * 3,
+            200 + index,
+            index,
+            1200 + index * 8,
+            index + 1,
+            index + 2,
+        )
+    }
+
+    fn long_content(index: u64, filler: usize) -> String {
+        // 正文里塞入被转义的 `\"timestamp\":\"...\"`：合法 JSON 中字符串内的引号
+        // 必然转义，解析器不应把正文内容误当作重复键。
+        format!(
+            "assistant text {index} {} 引用了 \\\"timestamp\\\":\\\"2030-01-01T00:00:00Z\\\" 结束",
+            "x".repeat(filler)
+        )
+    }
+
+    /// 语料分布
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CorpusProfile {
+        /// 对抗性：各类边界行高频出现，用于等价性 oracle
+        Adversarial,
+        /// 贴近真实 rollout：约 2% token_count，其余绝大多数是长正文行
+        Realistic,
+    }
+
+    impl CorpusProfile {
+        /// 把一次随机采样映射到 `synthetic_rollout_corpus` 的行类型编号
+        fn kind(self, rng: &mut Lcg) -> u64 {
+            match self {
+                CorpusProfile::Adversarial => rng.below(100),
+                CorpusProfile::Realistic => match rng.below(1000) {
+                    0..=19 => 0,     // 2%   有效 token_count
+                    20..=24 => 20,   // 0.5% token_count info=null
+                    25..=29 => 24,   // 0.5% 正文含 token_count 字面量
+                    30..=959 => 28,  // 93%  长正文行（正文体量的主力）
+                    960..=979 => 58, // 2%   turn_context
+                    980..=984 => 68, // 0.5% 字段顺序不同
+                    985..=989 => 72, // 0.5% 带时区偏移
+                    990..=994 => 76, // 0.5% 截断的非法 JSON
+                    995..=996 => 84, // 0.2% 缺 timestamp
+                    997..=998 => 90, // 0.2% 重复 timestamp 键
+                    _ => 96,         // 0.1% 空行
+                },
+            }
+        }
+    }
+
+    /// 生成一份混合了各种边界行的合成 rollout 语料
+    ///
+    /// 返回 (文件内容, 可用作 cutoff 的时间戳候选)
+    fn synthetic_rollout_corpus(
+        seed: u64,
+        line_count: usize,
+        filler: usize,
+        profile: CorpusProfile,
+    ) -> (String, Vec<DateTime<Utc>>) {
+        let mut rng = Lcg::new(seed);
+        let mut slots: Vec<u64> = (1..=line_count as u64).collect();
+        // 打乱时间戳顺序：rollout 不承诺时间戳单调
+        for index in (1..slots.len()).rev() {
+            let target = rng.below((index + 1) as u64) as usize;
+            slots.swap(index, target);
+        }
+
+        let mut lines: Vec<String> = Vec::with_capacity(line_count);
+        let mut candidates: Vec<DateTime<Utc>> = Vec::new();
+
+        for (index, slot) in slots.iter().copied().enumerate() {
+            let index = index as u64;
+            let ts = corpus_ts(slot);
+            let kind = profile.kind(&mut rng);
+            let line = match kind {
+                0..=19 => {
+                    // 有效 token_count
+                    candidates.push(corpus_time(slot));
+                    token_count_line(&ts, index)
+                }
+                20..=23 => {
+                    // token_count 但 info 为 null（无签名）
+                    candidates.push(corpus_time(slot));
+                    format!(
+                        r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":null}}}}"#
+                    )
+                }
+                24..=27 => {
+                    // 正文里出现 token_count 字面量（不是真的 token_count 事件）
+                    format!(
+                        r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"agent_message","message":"讨论 \"token_count\" 事件：{}"}}}}"#,
+                        long_content(index, filler)
+                    )
+                }
+                28..=57 => {
+                    // 普通长正文行
+                    format!(
+                        r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"agent_message","message":"{}"}}}}"#,
+                        long_content(index, filler)
+                    )
+                }
+                58..=63 => {
+                    format!(
+                        r#"{{"timestamp":"{ts}","type":"turn_context","payload":{{"model":"gpt-5.6-sol"}}}}"#
+                    )
+                }
+                64..=67 => {
+                    format!(
+                        r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"{PARENT_ID}","source":"cli"}}}}"#
+                    )
+                }
+                68..=71 => {
+                    // 字段顺序不同：timestamp 不在行首
+                    format!(
+                        r#"{{"type":"turn_context","timestamp":"{ts}","payload":{{"model":"gpt-5.6-sol"}}}}"#
+                    )
+                }
+                72..=75 => {
+                    // RFC3339 带时区偏移写法
+                    format!(
+                        r#"{{"timestamp":"{}","type":"turn_context","payload":{{}}}}"#,
+                        corpus_ts_offset(slot)
+                    )
+                }
+                76..=79 => {
+                    // 非法 JSON，但行首是合法 timestamp 前缀（截断写入）
+                    format!(
+                        r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"agent_message","message":"truncated {}"#,
+                        long_content(index, filler / 4)
+                    )
+                }
+                80..=83 => "not json at all {\"timestamp\":\"2031-01-01T00:00:00Z\"".to_string(),
+                84..=86 => {
+                    // 缺 timestamp 字段
+                    r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#.to_string()
+                }
+                87..=89 => {
+                    // timestamp 非法
+                    r#"{"timestamp":"not-a-timestamp","type":"turn_context","payload":{}}"#
+                        .to_string()
+                }
+                90..=92 => {
+                    // 重复 timestamp 键：Value(preserve_order) 取后者
+                    format!(
+                        r#"{{"timestamp":"{ts}","type":"turn_context","timestamp":"{}","payload":{{}}}}"#,
+                        corpus_ts(slot.saturating_add(line_count as u64 + 10))
+                    )
+                }
+                93..=95 => {
+                    // timestamp 为非字符串
+                    format!(r#"{{"timestamp":{slot},"type":"turn_context","payload":{{}}}}"#)
+                }
+                _ => String::new(), // 空行
+            };
+            lines.push(line);
+        }
+
+        candidates.sort_unstable();
+        candidates.dedup();
+        (lines.join("\n") + "\n", candidates)
+    }
+
+    fn assert_oracle_matches(path: &Path, cutoffs: &[DateTime<Utc>]) {
+        for cutoff in cutoffs {
+            let expected = parent_signatures_before_reference(path, *cutoff);
+            let actual = parent_signatures_before(path, *cutoff);
+            assert_eq!(
+                actual,
+                expected,
+                "cutoff {cutoff} 在 {} 上与参考实现不一致",
+                path.display()
+            );
+        }
+    }
+
+    fn cutoff_matrix(candidates: &[DateTime<Utc>]) -> Vec<DateTime<Utc>> {
+        let mut cutoffs = vec![
+            corpus_time(0) - chrono::Duration::days(3650), // 远早于全部
+            corpus_time(0),                                // 首行之前
+        ];
+        // 精确边界：逐个 token_count 时间戳
+        cutoffs.extend(candidates.iter().copied());
+        // 边界 ±1ms（落在两行之间）
+        for candidate in candidates {
+            cutoffs.push(*candidate - chrono::Duration::milliseconds(1));
+            cutoffs.push(*candidate + chrono::Duration::milliseconds(1));
+        }
+        if let Some(last) = candidates.last() {
+            cutoffs.push(*last + chrono::Duration::days(3650)); // 远晚于全部
+        }
+        cutoffs
+    }
+
+    #[test]
+    fn test_parent_signatures_match_reference_on_synthetic_corpus() {
+        let dir = tempdir().unwrap();
+
+        for profile in [CorpusProfile::Adversarial, CorpusProfile::Realistic] {
+            for seed in 1..=6u64 {
+                let (contents, candidates) = synthetic_rollout_corpus(seed, 240, 96, profile);
+                let path = dir
+                    .path()
+                    .join(format!("rollout-oracle-{profile:?}-{seed}.jsonl"));
+                fs::write(&path, &contents).unwrap();
+
+                assert!(
+                    !candidates.is_empty(),
+                    "语料应至少包含一个 token_count 时间戳"
+                );
+                assert_oracle_matches(&path, &cutoff_matrix(&candidates));
+            }
+        }
+    }
+
+    #[test]
+    fn test_parent_signatures_match_reference_on_missing_timestamp() {
+        let dir = tempdir().unwrap();
+
+        // token_count 行缺 timestamp：无论 cutoff 如何都应报“缺少有效 timestamp”，
+        // 且优先于“尚未写到 child fork 时刻”。
+        let missing = dir.path().join("rollout-missing-ts.jsonl");
+        fs::write(
+            &missing,
+            format!(
+                "{}\n{}\n{}\n",
+                token_count_line(&corpus_ts(1), 1),
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":6}}}}"#,
+                token_count_line(&corpus_ts(3), 2),
+            ),
+        )
+        .unwrap();
+        assert_oracle_matches(
+            &missing,
+            &[
+                corpus_time(0),
+                corpus_time(1),
+                corpus_time(2),
+                corpus_time(3),
+                corpus_time(9_000),
+            ],
+        );
+
+        // token_count 行 timestamp 非法，同样落到“缺少有效 timestamp”
+        let invalid = dir.path().join("rollout-invalid-ts.jsonl");
+        fs::write(
+            &invalid,
+            format!(
+                "{}\n{}\n",
+                token_count_line("not-a-timestamp", 1),
+                token_count_line(&corpus_ts(2), 2),
+            ),
+        )
+        .unwrap();
+        assert_oracle_matches(&invalid, &[corpus_time(1), corpus_time(2), corpus_time(5)]);
+    }
+
+    #[test]
+    fn test_parent_signatures_ignore_invalid_json_max_timestamp() {
+        // 非法 JSON 行即使带着最大 timestamp，也不能参与 max_timestamp 判定：
+        // 否则“父 rollout 尚未写到 child fork 时刻”会被错误地判成 Ok。
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-truncated-tail.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n",
+                token_count_line(&corpus_ts(1), 1),
+                token_count_line(&corpus_ts(2), 2),
+                // 截断的未完成行，时间戳比所有完整行都晚
+                format_args!(
+                    r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"agent_message","message":"trunc"#,
+                    corpus_ts(9_000)
+                ),
+            ),
+        )
+        .unwrap();
+
+        let cutoff = corpus_time(5);
+        let expected = parent_signatures_before_reference(&path, cutoff);
+        assert!(
+            expected.is_err(),
+            "参考实现应认为父文件尚未写到 cutoff：{expected:?}"
+        );
+        assert_eq!(parent_signatures_before(&path, cutoff), expected);
+        assert_oracle_matches(&path, &[corpus_time(1), corpus_time(2), corpus_time(9_000)]);
+    }
+
+    #[test]
+    fn test_parent_signatures_cache_invalidated_by_append() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-appended.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                token_count_line(&corpus_ts(1), 1),
+                token_count_line(&corpus_ts(2), 2),
+            ),
+        )
+        .unwrap();
+
+        // 首次查询：命中 miss 分支并写入缓存
+        let first = parent_signatures_before(&path, corpus_time(2)).unwrap();
+        assert_eq!(first.len(), 2);
+        // 缓存命中路径同样要复现“尚未写到 child fork 时刻”
+        let ahead = parent_signatures_before(&path, corpus_time(9_000));
+        assert_eq!(
+            ahead,
+            parent_signatures_before_reference(&path, corpus_time(9_000))
+        );
+        assert!(ahead.is_err());
+
+        // 追加新行：新鲜度戳变化必须使缓存失效
+        let appended = format!(
+            "{}{}\n{}\n",
+            fs::read_to_string(&path).unwrap(),
+            token_count_line(&corpus_ts(9_000), 3),
+            token_count_line(&corpus_ts(9_001), 4),
+        );
+        fs::write(&path, appended).unwrap();
+
+        let after = parent_signatures_before(&path, corpus_time(9_000)).unwrap();
+        assert_eq!(
+            after,
+            parent_signatures_before_reference(&path, corpus_time(9_000)).unwrap()
+        );
+        assert_eq!(after.len(), 3, "追加后应看到第 3 条签名");
+        assert_oracle_matches(
+            &path,
+            &[
+                corpus_time(1),
+                corpus_time(2),
+                corpus_time(9_000),
+                corpus_time(9_001),
+            ],
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 评审反例：曾被"用原始字节猜 JSON 语义"漏掉的写法，现在必须与参考实现一致
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_parent_signatures_match_reference_on_escaped_discriminators() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-escaped-discriminators.jsonl");
+
+        // payload.type 用 \u 转义拼写：解码后仍是 token_count，参考实现照常提取。
+        let escaped_payload_type = format!(
+            r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"\u0074oken_count","info":{{"total_token_usage":{{"input_tokens":11,"output_tokens":22}}}}}}}}"#,
+            corpus_ts(1)
+        );
+        // 顶层 type 用 \u 转义拼写：解码后仍是 event_msg。
+        let escaped_line_type = format!(
+            r#"{{"timestamp":"{}","type":"\u0065vent_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":33,"output_tokens":44}}}}}}}}"#,
+            corpus_ts(2)
+        );
+        assert!(
+            !escaped_payload_type.contains("\"token_count\""),
+            "转义写法不应出现字面量 token_count 判别串"
+        );
+        assert!(
+            !escaped_line_type.contains("\"event_msg\""),
+            "转义写法不应出现字面量 event_msg 判别串"
+        );
+
+        fs::write(
+            &path,
+            format!(
+                "{escaped_payload_type}\n{escaped_line_type}\n{}\n{}\n",
+                token_count_line(&corpus_ts(3), 7),
+                format_args!(
+                    r#"{{"timestamp":"{}","type":"turn_context","payload":{{}}}}"#,
+                    corpus_ts(50)
+                ),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            parent_signatures_before(&path, corpus_time(50))
+                .expect("父文件已写到 cutoff")
+                .len(),
+            3,
+            "三条 token_count（含两条转义拼写）都应被提取"
+        );
+        assert_oracle_matches(
+            &path,
+            &[
+                corpus_time(0),
+                corpus_time(1),
+                corpus_time(2),
+                corpus_time(3),
+                corpus_time(50),
+                corpus_time(51),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_parent_signatures_match_reference_on_duplicate_key_spellings() {
+        let dir = tempdir().unwrap();
+
+        // 写法一：键与冒号之间有空白（`"timestamp" : "B"`）。后者生效。
+        let whitespace = dir.path().join("rollout-dup-whitespace.jsonl");
+        fs::write(
+            &whitespace,
+            format!(
+                "{}\n{}\n",
+                format_args!(
+                    r#"{{"timestamp":"{}","type":"turn_context","timestamp" : "{}","payload":{{}}}}"#,
+                    corpus_ts(1),
+                    corpus_ts(80)
+                ),
+                token_count_line(&corpus_ts(3), 7),
+            ),
+        )
+        .unwrap();
+        assert!(
+            parent_signatures_before(&whitespace, corpus_time(80)).is_ok(),
+            "重复键取后者：max_timestamp 应到 ts(80)"
+        );
+        assert!(parent_signatures_before(&whitespace, corpus_time(81)).is_err());
+        assert_oracle_matches(
+            &whitespace,
+            &[
+                corpus_time(1),
+                corpus_time(3),
+                corpus_time(80),
+                corpus_time(81),
+            ],
+        );
+
+        // 写法二：键名本身被 \u 转义（解码后仍是 timestamp）。后者同样生效。
+        let escaped = dir.path().join("rollout-dup-escaped-key.jsonl");
+        fs::write(
+            &escaped,
+            format!(
+                "{}\n{}\n",
+                format_args!(
+                    r#"{{"timestamp":"{}","type":"turn_context","\u0074imestamp":"{}","payload":{{}}}}"#,
+                    corpus_ts(2),
+                    corpus_ts(81)
+                ),
+                token_count_line(&corpus_ts(3), 7),
+            ),
+        )
+        .unwrap();
+        assert!(
+            parent_signatures_before(&escaped, corpus_time(81)).is_ok(),
+            "转义键名与字面键名同键，取后者"
+        );
+        assert!(parent_signatures_before(&escaped, corpus_time(82)).is_err());
+        assert_oracle_matches(
+            &escaped,
+            &[
+                corpus_time(2),
+                corpus_time(3),
+                corpus_time(81),
+                corpus_time(82),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_parent_signatures_match_reference_on_non_string_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-non-string-fields.jsonl");
+        let contents = [
+            // timestamp 非字符串：参考实现 as_str() → None，不贡献 max_timestamp
+            r#"{"timestamp":1234,"type":"turn_context","payload":{}}"#.to_string(),
+            r#"{"timestamp":{"nested":"2031-01-01T00:00:00Z"},"type":"turn_context","payload":{}}"#
+                .to_string(),
+            r#"{"timestamp":["2031-01-01T00:00:00Z"],"type":"turn_context","payload":{}}"#
+                .to_string(),
+            r#"{"timestamp":null,"type":"turn_context","payload":{}}"#.to_string(),
+            // type 非字符串 → 不匹配 event_msg（不是解析错误）
+            format!(
+                r#"{{"timestamp":"{}","type":7,"payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":9}}}}}}}}"#,
+                corpus_ts(4)
+            ),
+            // payload 不是对象：仍须贡献 max_timestamp，不能让整行解析失败
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":"not-an-object"}}"#,
+                corpus_ts(5)
+            ),
+            // payload.type 非字符串
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":9,"info":{{"total_token_usage":{{"input_tokens":9}}}}}}}}"#,
+                corpus_ts(6)
+            ),
+            // 重复 timestamp 键且后者非字符串 → last-wins 覆写成"没有时间戳"
+            format!(
+                r#"{{"timestamp":"{}","type":"turn_context","timestamp":5,"payload":{{}}}}"#,
+                corpus_ts(7)
+            ),
+            // 顶层不是对象
+            "[1,2,3]".to_string(),
+            "\"just a string\"".to_string(),
+            "42".to_string(),
+            // 锚点：唯一有效的 token_count，也提供 max_timestamp
+            token_count_line(&corpus_ts(8), 5),
+        ]
+        .join("\n");
+        fs::write(&path, contents + "\n").unwrap();
+
+        assert_eq!(
+            parent_signatures_before(&path, corpus_time(8))
+                .expect("锚点行提供 max_timestamp")
+                .len(),
+            1,
+            "只有锚点行是有效 token_count"
+        );
+        assert_oracle_matches(
+            &path,
+            &[
+                corpus_time(3),
+                corpus_time(4),
+                corpus_time(5),
+                corpus_time(6),
+                corpus_time(7),
+                corpus_time(8),
+                corpus_time(9),
+            ],
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 声明性语义差异（见 `parse_parent_signature_file` 文档注释）：
+    // 语法合法、但 `serde_json::Value` 构造不出来，且垃圾落在被跳过子树的行。
+    // ---------------------------------------------------------------------
+
+    /// 三类 `Value` 拒绝、跳过式解析接受的垃圾载荷（`"key":value` 片段）
+    fn value_hostile_payloads() -> Vec<(&'static str, String)> {
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        vec![
+            ("float-overflow", r#""junk":1e400"#.to_string()),
+            ("deep-nesting", format!(r#""junk":{deep}"#)),
+            ("lone-surrogate", r#""junk":"\uD800""#.to_string()),
+        ]
+    }
+
+    #[test]
+    fn test_parent_signatures_declared_divergence_on_skipped_subtree_junk() {
+        let dir = tempdir().unwrap();
+
+        for (name, junk) in value_hostile_payloads() {
+            let path = dir
+                .path()
+                .join(format!("rollout-divergence-max-{name}.jsonl"));
+            // 垃圾落在顶层被跳过的 `junk` 键上，该行携带全文件最大 timestamp
+            let junk_line = format!(
+                r#"{{"timestamp":"{}","type":"turn_context","payload":{{}},{junk}}}"#,
+                corpus_ts(9_000)
+            );
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&junk_line).is_err(),
+                "{name}: Value 应拒绝该行"
+            );
+            assert!(
+                serde_json::from_str::<IgnoredAny>(&junk_line).is_ok(),
+                "{name}: 该行语法应合法"
+            );
+            fs::write(
+                &path,
+                format!("{}\n{junk_line}\n", token_count_line(&corpus_ts(1), 1)),
+            )
+            .unwrap();
+
+            let cutoff = corpus_time(500);
+            let reference = parent_signatures_before_reference(&path, cutoff);
+            assert!(
+                reference
+                    .as_ref()
+                    .is_err_and(|error| error.contains("尚未写到")),
+                "{name}: 参考实现整行丢弃 → 应报尚未写到，实际 {reference:?}"
+            );
+            let actual = parent_signatures_before(&path, cutoff).unwrap_or_else(|error| {
+                panic!("{name}: 新实现应把可解析出的 timestamp 计为写入进度: {error}")
+            });
+            assert_eq!(actual.len(), 1, "{name}: 签名集合不受影响");
+
+            // 两侧都能作答的 cutoff 上，签名逐字一致
+            for cutoff in [corpus_time(0), corpus_time(1)] {
+                assert_eq!(
+                    parent_signatures_before(&path, cutoff),
+                    parent_signatures_before_reference(&path, cutoff),
+                    "{name}: cutoff {cutoff} 上签名应一致"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parent_signatures_declared_divergence_extends_to_signatures() {
+        // 文档注释点名的边界：垃圾落在 token_count 行**被跳过**的兄弟子树时，
+        // 差异不止 max_timestamp——参考实现连该行的签名一起丢，新实现照常收下；
+        // 缺 timestamp 时新实现还会给出"缺少有效 timestamp"错误。
+        let dir = tempdir().unwrap();
+
+        for (name, junk) in value_hostile_payloads() {
+            let path = dir
+                .path()
+                .join(format!("rollout-divergence-sig-{name}.jsonl"));
+            let junk_signature_line = format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":77,"output_tokens":88}}}}}},{junk}}}"#,
+                corpus_ts(2)
+            );
+            fs::write(
+                &path,
+                format!(
+                    "{}\n{junk_signature_line}\n{}\n",
+                    token_count_line(&corpus_ts(1), 1),
+                    format_args!(
+                        r#"{{"timestamp":"{}","type":"turn_context","payload":{{}}}}"#,
+                        corpus_ts(9_000)
+                    ),
+                ),
+            )
+            .unwrap();
+
+            let cutoff = corpus_time(500);
+            assert_eq!(
+                parent_signatures_before_reference(&path, cutoff)
+                    .unwrap()
+                    .len(),
+                1,
+                "{name}: 参考实现丢掉整行（连签名一起）"
+            );
+            assert_eq!(
+                parent_signatures_before(&path, cutoff).unwrap().len(),
+                2,
+                "{name}: 新实现收下被跳过子树里带垃圾的 token_count 签名"
+            );
+
+            let missing = dir
+                .path()
+                .join(format!("rollout-divergence-missing-{name}.jsonl"));
+            let junk_missing_line = format!(
+                r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":77}}}}}},{junk}}}"#
+            );
+            fs::write(
+                &missing,
+                format!(
+                    "{}\n{junk_missing_line}\n",
+                    token_count_line(&corpus_ts(1), 1)
+                ),
+            )
+            .unwrap();
+            assert!(
+                parent_signatures_before_reference(&missing, corpus_time(1)).is_ok(),
+                "{name}: 参考实现静默丢行"
+            );
+            let actual = parent_signatures_before(&missing, corpus_time(1));
+            assert!(
+                actual
+                    .as_ref()
+                    .is_err_and(|error| error.contains("缺少有效 timestamp")),
+                "{name}: 新实现按缺 timestamp 的 token_count 处理，实际 {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parent_signatures_match_reference_on_captured_subtree_junk() {
+        // 垃圾落在**被捕获**的子树（info / timestamp 字符串 / 键名）时零差异：
+        // Value 捕获或字符串解码失败 → 整行解析失败 → 与参考实现一样跳过。
+        let dir = tempdir().unwrap();
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        let path = dir.path().join("rollout-captured-junk.jsonl");
+        let contents = [
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":1e400}}}}}}}}"#,
+                corpus_ts(9_001)
+            ),
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":5}},"aux":{deep}}}}}}}"#,
+                corpus_ts(9_002)
+            ),
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":5}},"aux":"\uD800"}}}}}}"#,
+                corpus_ts(9_003)
+            ),
+            // 被捕获的 timestamp 字符串里的孤立代理项
+            r#"{"timestamp":"\uD800","type":"turn_context","payload":{}}"#.to_string(),
+            // 键名里的孤立代理项
+            format!(
+                r#"{{"timestamp":"{}","\uD800":1,"type":"turn_context","payload":{{}}}}"#,
+                corpus_ts(9_004)
+            ),
+            // 锚点
+            token_count_line(&corpus_ts(1), 1),
+            format!(
+                r#"{{"timestamp":"{}","type":"turn_context","payload":{{}}}}"#,
+                corpus_ts(10)
+            ),
+        ]
+        .join("\n");
+        fs::write(&path, contents + "\n").unwrap();
+
+        assert!(
+            parent_signatures_before(&path, corpus_time(10)).is_ok(),
+            "锚点行提供 max_timestamp"
+        );
+        assert!(
+            parent_signatures_before(&path, corpus_time(11)).is_err(),
+            "所有 9_00x 行两侧都被跳过，max_timestamp 不应越过 ts(10)"
+        );
+        assert_oracle_matches(
+            &path,
+            &[
+                corpus_time(0),
+                corpus_time(1),
+                corpus_time(10),
+                corpus_time(11),
+                corpus_time(9_005),
+            ],
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 声明性语义差异之二：serde_json 的私有 `RawValue` 哨兵
+    //
+    // 依赖图（axum）传递性打开了 serde_json 的 `raw_value` feature，于是
+    // `from_str::<Value>` 会把 `{"$serde_json::private::RawValue":"<JSON 文本>"}`
+    // **就地展开**成所嵌的值；窄化 visitor 按 JSON 规范读，只把它当未知键。
+    // ---------------------------------------------------------------------
+
+    /// 构造 `{"$serde_json::private::RawValue":"<被转义的 JSON 文本>"}` 哨兵对象
+    fn raw_value_sentinel(inner_json: &str) -> String {
+        format!(
+            r#"{{"$serde_json::private::RawValue":{}}}"#,
+            serde_json::Value::String(inner_json.to_string())
+        )
+    }
+
+    #[test]
+    fn test_parent_signatures_declared_divergence_on_raw_value_sentinel() {
+        let dir = tempdir().unwrap();
+
+        // 1) 哨兵落在 payload 位置：Value 展开出真正的 token_count payload，
+        //    本实现只看到一个未知键 → 该行不贡献签名。
+        let payload_path = dir.path().join("rollout-sentinel-payload.jsonl");
+        let sentinel_payload_line = format!(
+            r#"{{"timestamp":"{}","type":"event_msg","payload":{}}}"#,
+            corpus_ts(1),
+            raw_value_sentinel(
+                r#"{"type":"token_count","info":{"total_token_usage":{"input_tokens":42,"output_tokens":7}}}"#
+            )
+        );
+        assert!(
+            !sentinel_payload_line.contains(r#""type":"token_count""#),
+            "哨兵内层是被转义的 JSON 文本，不应出现字面量判别串"
+        );
+        fs::write(&payload_path, format!("{sentinel_payload_line}\n")).unwrap();
+
+        let cutoff = corpus_time(1);
+        let reference = parent_signatures_before_reference(&payload_path, cutoff)
+            .expect("顶层 timestamp 让参考实现认为已写到 cutoff");
+        assert_eq!(reference.len(), 1, "参考实现展开哨兵后提取到签名");
+        assert_eq!(
+            reference[0].total.as_ref().unwrap().input,
+            Some(42),
+            "参考实现读到的是哨兵内层的计数器"
+        );
+        let actual = parent_signatures_before(&payload_path, cutoff)
+            .expect("顶层 timestamp 本实现照样读得到");
+        assert!(
+            actual.is_empty(),
+            "本实现按普通 JSON 读：哨兵只是未知键，该行无签名，实际 {actual:?}"
+        );
+
+        // 2) 哨兵落在顶层：Value 展开出一整行 token_count 事件（连 timestamp 一起），
+        //    本实现读不到任何键 → 该行既不贡献签名也不贡献 max_timestamp。
+        let top_path = dir.path().join("rollout-sentinel-top.jsonl");
+        let sentinel_top_line = raw_value_sentinel(&token_count_line(&corpus_ts(2), 9));
+        fs::write(
+            &top_path,
+            format!(
+                "{}\n{sentinel_top_line}\n",
+                token_count_line(&corpus_ts(1), 1)
+            ),
+        )
+        .unwrap();
+
+        // cutoff 落在锚点行上：两侧都只看得到锚点签名 → 零差异
+        assert_oracle_matches(&top_path, &[corpus_time(0), corpus_time(1)]);
+        // cutoff 落在哨兵行时刻：参考实现认为文件已写到 ts(2) 并给出两条签名，
+        // 本实现读不到那个 timestamp → "尚未写到"
+        let reference_top = parent_signatures_before_reference(&top_path, corpus_time(2))
+            .expect("参考实现展开哨兵后 max_timestamp 到 ts(2)");
+        assert_eq!(reference_top.len(), 2, "参考实现连哨兵行的签名一起收下");
+        let actual_top = parent_signatures_before(&top_path, corpus_time(2));
+        assert!(
+            actual_top
+                .as_ref()
+                .is_err_and(|error| error.contains("尚未写到")),
+            "本实现读不到哨兵里的 timestamp，实际 {actual_top:?}"
+        );
+
+        // 3) 哨兵落在被捕获的 timestamp 字符串位置：Value 展开成 String → 时间戳成立，
+        //    本实现的 MaybeStr 看到的是对象 → 等价于"没有字符串"。
+        let ts_path = dir.path().join("rollout-sentinel-timestamp.jsonl");
+        let sentinel_ts_line = format!(
+            r#"{{"timestamp":{},"type":"turn_context","payload":{{}}}}"#,
+            raw_value_sentinel(&format!(r#""{}""#, corpus_ts(9_000)))
+        );
+        fs::write(
+            &ts_path,
+            format!(
+                "{}\n{sentinel_ts_line}\n",
+                token_count_line(&corpus_ts(1), 1)
+            ),
+        )
+        .unwrap();
+        assert!(
+            parent_signatures_before_reference(&ts_path, corpus_time(9_000)).is_ok(),
+            "参考实现展开哨兵后拿到 ts(9_000)"
+        );
+        let actual_ts = parent_signatures_before(&ts_path, corpus_time(9_000));
+        assert!(
+            actual_ts
+                .as_ref()
+                .is_err_and(|error| error.contains("尚未写到")),
+            "本实现视为 timestamp 非字符串，实际 {actual_ts:?}"
+        );
+    }
+
+    #[test]
+    fn test_parent_signatures_declared_divergence_on_nested_skipped_key_junk() {
+        // 被跳过子树里的**键名**与值一样宽松：孤立代理项落在嵌套键名上时，
+        // Value 拒绝整行、`IgnoredAny` 照常跳过 → 属声明性差异类。
+        let dir = tempdir().unwrap();
+
+        for (name, junk_line) in [
+            (
+                "skipped-top-key",
+                format!(
+                    r#"{{"timestamp":"{}","type":"turn_context","payload":{{}},"junk":{{"\uD800":0}}}}"#,
+                    corpus_ts(9_000)
+                ),
+            ),
+            (
+                "skipped-payload-key",
+                format!(
+                    r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"agent_message","extra":{{"\uD800":0}}}}}}"#,
+                    corpus_ts(9_000)
+                ),
+            ),
+        ] {
+            let path = dir
+                .path()
+                .join(format!("rollout-nested-surrogate-{name}.jsonl"));
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&junk_line).is_err(),
+                "{name}: Value 应拒绝该行"
+            );
+            assert!(
+                serde_json::from_str::<IgnoredAny>(&junk_line).is_ok(),
+                "{name}: 该行语法应合法"
+            );
+            fs::write(
+                &path,
+                format!("{}\n{junk_line}\n", token_count_line(&corpus_ts(1), 1)),
+            )
+            .unwrap();
+
+            let cutoff = corpus_time(500);
+            let reference = parent_signatures_before_reference(&path, cutoff);
+            assert!(
+                reference
+                    .as_ref()
+                    .is_err_and(|error| error.contains("尚未写到")),
+                "{name}: 参考实现整行丢弃 → 应报尚未写到，实际 {reference:?}"
+            );
+            let actual = parent_signatures_before(&path, cutoff).unwrap_or_else(|error| {
+                panic!("{name}: 本实现应把可解析出的 timestamp 计为写入进度: {error}")
+            });
+            assert_eq!(actual.len(), 1, "{name}: 签名集合不受影响");
+        }
+
+        // 对照：孤立代理项落在**解析路径上**的键名（顶层键 / payload 键）时，
+        // 两个实现一起拒绝整行，零差异。
+        let path = dir.path().join("rollout-path-surrogate-key.jsonl");
+        let contents = [
+            format!(
+                r#"{{"timestamp":"{}","\uD800":1,"type":"turn_context","payload":{{}}}}"#,
+                corpus_ts(9_001)
+            ),
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"\uD800":1,"type":"token_count","info":{{"total_token_usage":{{"input_tokens":5}}}}}}}}"#,
+                corpus_ts(9_002)
+            ),
+            token_count_line(&corpus_ts(1), 1),
+            format!(
+                r#"{{"timestamp":"{}","type":"turn_context","payload":{{}}}}"#,
+                corpus_ts(10)
+            ),
+        ]
+        .join("\n");
+        fs::write(&path, contents + "\n").unwrap();
+        assert!(
+            parent_signatures_before(&path, corpus_time(10)).is_ok(),
+            "锚点行提供 max_timestamp"
+        );
+        assert!(
+            parent_signatures_before(&path, corpus_time(11)).is_err(),
+            "解析路径上的孤立代理项让两侧一起丢行，max_timestamp 不应越过 ts(10)"
+        );
+        assert_oracle_matches(
+            &path,
+            &[
+                corpus_time(0),
+                corpus_time(1),
+                corpus_time(10),
+                corpus_time(11),
+                corpus_time(9_003),
+            ],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parent_signatures_open_error_takes_precedence_over_cached_content_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // open 先行：即使新鲜度戳完全不变，`open` 失败也必须给出当次的新鲜错误，
+        // 而不是拿旧快照里的内容型错误顶包。
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-chmod-open-error.jsonl");
+        fs::write(&path, format!("{}\n", token_count_line(&corpus_ts(1), 1))).unwrap();
+
+        // 先用一次内容型错误把缓存填上
+        let cutoff = corpus_time(9_000);
+        let cached = parent_signatures_before(&path, cutoff);
+        assert!(
+            cached
+                .as_ref()
+                .is_err_and(|error| error.contains("尚未写到")),
+            "缓存里应存着内容型错误，实际 {cached:?}"
+        );
+
+        // chmod 000 只改 ctime/mode：(mtime_ns, size, dev, ino) 全不变，
+        // 因此"先查缓存"的实现会继续吐旧的内容型错误。
+        let original = fs::metadata(&path).unwrap().permissions();
+        let before = fs::metadata(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(
+            (metadata_modified_nanos(&before), before.len()),
+            (metadata_modified_nanos(&after), after.len()),
+            "chmod 不应改动 mtime/size"
+        );
+
+        // root 无视 mode：先探一次，打不开才有断言意义
+        let readable_anyway = fs::File::open(&path).is_ok();
+        let outcome = (!readable_anyway).then(|| {
+            (
+                parent_signatures_before(&path, cutoff),
+                parent_signatures_before_reference(&path, cutoff),
+            )
+        });
+        // 恢复权限，否则 tempdir 清理可能受影响
+        fs::set_permissions(&path, original).unwrap();
+
+        let Some((actual, expected)) = outcome else {
+            eprintln!("[skip] 当前用户可无视 mode 0o000（疑似 root），跳过断言");
+            return;
+        };
+        assert!(
+            expected
+                .as_ref()
+                .is_err_and(|error| error.starts_with("无法打开父 rollout")),
+            "参考实现应报打开失败，实际 {expected:?}"
+        );
+        assert_eq!(
+            actual, expected,
+            "open 错误必须是当次新鲜的，且与参考实现逐字一致"
+        );
+    }
+
+    #[test]
+    fn test_parent_signatures_match_reference_on_duplicate_captured_keys() {
+        // 重复的 payload / info / 判别串一律"后者整体替换前者"（不是合并），
+        // 与本 crate 开启 `preserve_order` 的 Value 一致。
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-duplicate-captured.jsonl");
+        let info_a = r#"{"total_token_usage":{"input_tokens":11,"output_tokens":1}}"#;
+        let info_b = r#"{"total_token_usage":{"input_tokens":22,"output_tokens":2}}"#;
+
+        let contents = [
+            // 1. 重复 payload（对象→对象）：后者**替换**而非合并。后者没有 type，
+            //    整行因此不再是 token_count；若是合并就会错误地留下前者的 type。
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{info_a}}},"payload":{{"info":{info_b}}}}}"#,
+                corpus_ts(2)
+            ),
+            // 2. 重复 payload：前者缺 type、后者完整 → 后者生效，产出签名
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"info":{info_a}}},"payload":{{"type":"token_count","info":{info_b}}}}}"#,
+                corpus_ts(3)
+            ),
+            // 3. 重复 info：后者生效
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{info_a},"info":{info_b}}}}}"#,
+                corpus_ts(4)
+            ),
+            // 4. 判别串「字符串→非字符串」：后者把它覆写成"没有字符串" → 不匹配
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","type":7,"payload":{{"type":"token_count","info":{info_b}}}}}"#,
+                corpus_ts(5)
+            ),
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","type":9,"info":{info_b}}}}}"#,
+                corpus_ts(6)
+            ),
+            // 5. 判别串「非字符串→字符串」：后者生效 → 匹配
+            format!(
+                r#"{{"timestamp":"{}","type":7,"type":"event_msg","payload":{{"type":9,"type":"token_count","info":{info_b}}}}}"#,
+                corpus_ts(7)
+            ),
+        ]
+        .join("\n");
+        fs::write(&path, contents + "\n").unwrap();
+
+        let signatures =
+            parent_signatures_before(&path, corpus_time(7)).expect("末行提供 max_timestamp");
+        assert_eq!(
+            signatures.len(),
+            3,
+            "只有第 2/3/6 行是有效 token_count（第 1 行证明 payload 是替换而非合并）"
+        );
+        assert!(
+            signatures
+                .iter()
+                .all(|signature| signature.total.as_ref().unwrap().input == Some(22)),
+            "重复键一律取后者，实际 {signatures:?}"
+        );
+        assert_oracle_matches(
+            &path,
+            &[
+                corpus_time(1),
+                corpus_time(2),
+                corpus_time(3),
+                corpus_time(4),
+                corpus_time(5),
+                corpus_time(6),
+                corpus_time(7),
+                corpus_time(8),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_parent_signatures_match_reference_on_overflow_in_captured_positions() {
+        // `1e999` 落在**被捕获**的位置（timestamp / type / payload.type / info）时，
+        // 两个实现都必须真正读出这个值 → 一起整行失败，零差异。
+        // （对比：落在被跳过子树里才是声明性差异类。）
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-overflow-captured.jsonl");
+        let contents = [
+            r#"{"timestamp":1e999,"type":"turn_context","payload":{}}"#.to_string(),
+            format!(
+                r#"{{"timestamp":"{}","type":1e999,"payload":{{}}}}"#,
+                corpus_ts(9_001)
+            ),
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":1e999,"info":{{"total_token_usage":{{"input_tokens":5}}}}}}}}"#,
+                corpus_ts(9_002)
+            ),
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":1e999}}}}"#,
+                corpus_ts(9_003)
+            ),
+            // 锚点
+            token_count_line(&corpus_ts(1), 1),
+            format!(
+                r#"{{"timestamp":"{}","type":"turn_context","payload":{{}}}}"#,
+                corpus_ts(10)
+            ),
+        ]
+        .join("\n");
+        fs::write(&path, contents + "\n").unwrap();
+
+        assert_eq!(
+            parent_signatures_before(&path, corpus_time(10))
+                .expect("锚点行提供 max_timestamp")
+                .len(),
+            1,
+            "只有锚点行是有效 token_count"
+        );
+        assert!(
+            parent_signatures_before(&path, corpus_time(11)).is_err(),
+            "所有 9_00x 行两侧都被跳过，max_timestamp 不应越过 ts(10)"
+        );
+        assert_oracle_matches(
+            &path,
+            &[
+                corpus_time(0),
+                corpus_time(1),
+                corpus_time(10),
+                corpus_time(11),
+                corpus_time(9_004),
+            ],
+        );
+    }
+
+    /// 把文件 mtime 设成固定值，用于构造"同 (mtime, size) 但不同 inode"的替换
+    #[cfg(unix)]
+    fn set_fixed_mtime(path: &Path, time: SystemTime) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parent_signatures_stamp_detects_rename_replacement() {
+        // 新鲜度戳在 Unix 上带 (dev, ino)：把另一个同尺寸、同 mtime 的文件 rename
+        // 覆盖上来时，只有 inode 会变，缓存必须失效。
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-stamp.jsonl");
+        let stamp_line = |input: u64| {
+            format!(
+                r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{input},"output_tokens":7}}}}}}}}"#,
+                corpus_ts(1)
+            )
+        };
+        let original = format!("{}\n", stamp_line(100_000));
+        let replacement_contents = format!("{}\n", stamp_line(200_000));
+        assert_eq!(
+            original.len(),
+            replacement_contents.len(),
+            "两份内容必须同尺寸，才能让 (mtime, size) 完全相同"
+        );
+
+        let fixed = SystemTime::UNIX_EPOCH + std::time::Duration::new(1_800_000_000, 123_456_789);
+        fs::write(&path, &original).unwrap();
+        set_fixed_mtime(&path, fixed);
+        let before = fs::metadata(&path).unwrap();
+
+        let first = parent_signatures_before(&path, corpus_time(1)).unwrap();
+        assert_eq!(
+            first,
+            parent_signatures_before_reference(&path, corpus_time(1)).unwrap()
+        );
+        assert_eq!(
+            first[0].total.as_ref().unwrap().input,
+            Some(100_000),
+            "首次查询应读到原始内容"
+        );
+
+        // 先在别处建好替换文件（与原文件同时存在 → inode 必不同），再 rename 覆盖
+        let staged = dir.path().join("rollout-stamp.replacement");
+        fs::write(&staged, &replacement_contents).unwrap();
+        set_fixed_mtime(&staged, fixed);
+        fs::rename(&staged, &path).unwrap();
+
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len(), "size 必须相同");
+        assert_eq!(
+            metadata_modified_nanos(&before),
+            metadata_modified_nanos(&after),
+            "mtime 必须相同：本用例只考验 (dev, ino)"
+        );
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(before.ino(), after.ino(), "rename 替换后 inode 必须不同");
+        }
+
+        let second = parent_signatures_before(&path, corpus_time(1)).unwrap();
+        assert_eq!(
+            second,
+            parent_signatures_before_reference(&path, corpus_time(1)).unwrap()
+        );
+        assert_eq!(
+            second[0].total.as_ref().unwrap().input,
+            Some(200_000),
+            "同 (mtime, size) 的 rename 替换必须触发重解析"
+        );
+    }
+
+    #[test]
+    fn test_parent_signatures_cutoff_is_nanosecond_exact() {
+        // 钉住相对 HEAD 的刻意改进：HEAD 的 (path, cutoff_micros) 缓存把 cutoff
+        // 截断到微秒，下面两个相距 400ns 的 cutoff 会被它折叠成同一个答案。
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-nanos.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                token_count_line("2026-07-10T03:00:01.000000500Z", 1),
+                format_args!(
+                    r#"{{"timestamp":"{}","type":"turn_context","payload":{{}}}}"#,
+                    corpus_ts(90)
+                ),
+            ),
+        )
+        .unwrap();
+
+        let parse = |raw: &str| {
+            DateTime::parse_from_rfc3339(raw)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let before = parse("2026-07-10T03:00:01.000000300Z");
+        let after = parse("2026-07-10T03:00:01.000000700Z");
+        assert_eq!((after - before).num_nanoseconds(), Some(400));
+
+        assert!(
+            parent_signatures_before(&path, before).unwrap().is_empty(),
+            "300ns 的 cutoff 早于 500ns 的签名"
+        );
+        assert_eq!(
+            parent_signatures_before(&path, after).unwrap().len(),
+            1,
+            "700ns 的 cutoff 晚于 500ns 的签名"
+        );
+        assert_oracle_matches(&path, &[before, after]);
+    }
+
+    /// 性能基准：`cargo test -- --ignored --nocapture bench_parent_signatures`
+    #[test]
+    #[ignore = "性能基准，需显式 --ignored 运行"]
+    fn bench_parent_signatures_vs_reference() {
+        const LINES: usize = 50_000;
+        const CHILDREN: usize = 20;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollout-bench.jsonl");
+        let (contents, candidates) =
+            synthetic_rollout_corpus(42, LINES, 600, CorpusProfile::Realistic);
+        fs::write(&path, &contents).unwrap();
+
+        let total = contents.lines().count();
+        let step = candidates.len() / CHILDREN.max(1);
+        let cutoffs: Vec<DateTime<Utc>> = (0..CHILDREN)
+            .map(|index| candidates[(index * step).min(candidates.len() - 1)])
+            .collect();
+
+        clear_codex_replay_caches();
+        let started = Instant::now();
+        for cutoff in &cutoffs {
+            let _ = parent_signatures_before(&path, *cutoff);
+        }
+        let new_elapsed = started.elapsed();
+
+        let started = Instant::now();
+        for cutoff in &cutoffs {
+            let _ = parent_signatures_before_reference(&path, *cutoff);
+        }
+        let reference_elapsed = started.elapsed();
+
+        println!(
+            "[bench] 语料 {} 行 / {:.1} MiB，token_count 行 {}",
+            total,
+            contents.len() as f64 / (1024.0 * 1024.0),
+            candidates.len(),
+        );
+        println!(
+            "[bench] {CHILDREN} 个子 cutoff：新实现 {new_elapsed:?}，参考实现 {reference_elapsed:?}，加速 {:.1}x",
+            reference_elapsed.as_secs_f64() / new_elapsed.as_secs_f64().max(f64::MIN_POSITIVE)
+        );
+
+        // 冷缓存单次解析成本（窄化解析器的单遍成本，不含缓存收益）
+        clear_codex_replay_caches();
+        let started = Instant::now();
+        let _ = parent_signatures_before(&path, cutoffs[CHILDREN / 2]);
+        let cold = started.elapsed();
+        let started = Instant::now();
+        let _ = parent_signatures_before_reference(&path, cutoffs[CHILDREN / 2]);
+        let reference_single = started.elapsed();
+        println!(
+            "[bench] 单次冷解析：新实现 {cold:?}，参考实现 {reference_single:?}，加速 {:.1}x",
+            reference_single.as_secs_f64() / cold.as_secs_f64().max(f64::MIN_POSITIVE)
+        );
     }
 }
