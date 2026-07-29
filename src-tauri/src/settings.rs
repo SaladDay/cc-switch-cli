@@ -570,6 +570,11 @@ pub struct AppSettings {
     /// cleared when the toggle turns off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unify_codex_migrate_existing: Option<bool>,
+    /// CLI-only: keep importing local session logs in the background while the
+    /// TUI runs, so the home usage chart tracks live activity. Absent in
+    /// settings written by other clients, which is why it defaults to true.
+    #[serde(default = "default_usage_auto_sync")]
+    pub usage_auto_sync: bool,
     /// Skills 同步方式（auto|symlink|copy）
     #[serde(default)]
     pub skill_sync_method: crate::services::skill::SyncMethod,
@@ -605,6 +610,10 @@ fn default_minimize_to_tray_on_close() -> bool {
     true
 }
 
+fn default_usage_auto_sync() -> bool {
+    true
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -635,6 +644,7 @@ impl Default for AppSettings {
             preserve_codex_official_auth_on_switch: false,
             unify_codex_session_history: false,
             unify_codex_migrate_existing: None,
+            usage_auto_sync: default_usage_auto_sync(),
             skill_sync_method: crate::services::skill::SyncMethod::default(),
             security: None,
             webdav_sync: None,
@@ -1143,6 +1153,30 @@ pub fn set_icon_mode(mode: &str) -> Result<(), AppError> {
     update_settings(settings)
 }
 
+/// What [`usage_auto_sync_enabled`] reports when the settings lock is poisoned.
+///
+/// Fail-closed, because the two failure modes are not symmetric: resurrecting a
+/// background scan the user explicitly disabled burns their CPU behind their
+/// back and the setting they already flipped cannot stop it, while a paused
+/// auto-sync only means the home chart goes stale until the next manual sync.
+const USAGE_AUTO_SYNC_ON_POISONED_LOCK: bool = false;
+
+/// Whether the TUI may keep re-importing local session logs in the background.
+///
+/// A settings file that simply lacks the key still reads as enabled (see
+/// [`default_usage_auto_sync`]); only a lock we can no longer trust degrades to
+/// [`USAGE_AUTO_SYNC_ON_POISONED_LOCK`].
+pub fn usage_auto_sync_enabled() -> bool {
+    read_usage_auto_sync(settings_store())
+}
+
+fn read_usage_auto_sync(store: &RwLock<AppSettings>) -> bool {
+    store
+        .read()
+        .map(|settings| settings.usage_auto_sync)
+        .unwrap_or(USAGE_AUTO_SYNC_ON_POISONED_LOCK)
+}
+
 pub fn get_visible_apps() -> VisibleApps {
     settings_store()
         .read()
@@ -1347,6 +1381,55 @@ mod tests {
     };
     use crate::test_support::TestEnvGuard;
     use serde_json::json;
+    use std::sync::RwLock;
+
+    #[test]
+    fn usage_auto_sync_defaults_on_and_survives_a_settings_file_without_the_key() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+
+        assert!(AppSettings::default().usage_auto_sync);
+
+        // Settings written by an older build (or by the desktop app) simply
+        // omit the key; it must read back as enabled.
+        let legacy: AppSettings =
+            serde_json::from_value(json!({ "showInTray": true })).expect("deserialize legacy");
+        assert!(legacy.usage_auto_sync);
+
+        let opted_out: AppSettings =
+            serde_json::from_value(json!({ "usageAutoSync": false })).expect("deserialize opt-out");
+        assert!(!opted_out.usage_auto_sync);
+
+        update_settings(AppSettings {
+            usage_auto_sync: false,
+            ..AppSettings::default()
+        })
+        .expect("persist settings");
+        assert!(!super::usage_auto_sync_enabled());
+    }
+
+    #[test]
+    fn usage_auto_sync_fails_closed_on_a_poisoned_lock() {
+        // A local store, so poisoning it cannot leak into the process-global
+        // settings every other test reads through.
+        let store = RwLock::new(AppSettings {
+            usage_auto_sync: true,
+            ..AppSettings::default()
+        });
+        assert!(super::read_usage_auto_sync(&store));
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.write().expect("take the write lock");
+            panic!("poison the settings lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(store.read().is_err(), "the lock should now be poisoned");
+
+        assert!(
+            !super::read_usage_auto_sync(&store),
+            "an explicitly disabled background scan must never resurrect itself"
+        );
+    }
 
     #[test]
     fn codex_unified_session_history_defaults_off() {

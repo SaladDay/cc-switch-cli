@@ -832,6 +832,142 @@ pub mod texts {
         }
     }
 
+    // ============================================
+    // REFRESH INDICATOR (刷新指示器)
+    // ============================================
+
+    /// The one label every "still working" indicator uses — the home usage
+    /// card, the Usage summary bars, the pricing summary. Surfaces that need a
+    /// busy indicator reuse this instead of minting their own near-duplicate.
+    pub fn tui_refreshing() -> &'static str {
+        if is_chinese() {
+            "正在刷新"
+        } else {
+            "Refreshing"
+        }
+    }
+
+    // ============================================
+    // HOME USAGE CHART (首页用量图表)
+    // ============================================
+
+    /// Card title; the range is appended with the shared `·` separator so
+    /// ASCII terminals get " Usage - 30d ".
+    pub fn tui_home_chart_card_title() -> &'static str {
+        if is_chinese() {
+            "用量"
+        } else {
+            "Usage"
+        }
+    }
+
+    pub fn tui_home_chart_card_range() -> &'static str {
+        if is_chinese() {
+            "近 30 天"
+        } else {
+            "30d"
+        }
+    }
+
+    /// Header of the models column inside the usage card.
+    pub fn tui_home_chart_list_title() -> &'static str {
+        if is_chinese() {
+            "模型花费"
+        } else {
+            "Models by Cost"
+        }
+    }
+
+    pub fn tui_home_chart_other() -> &'static str {
+        if is_chinese() {
+            "其他"
+        } else {
+            "Other"
+        }
+    }
+
+    pub fn tui_home_chart_loading() -> &'static str {
+        if is_chinese() {
+            "正在加载用量..."
+        } else {
+            "Loading usage..."
+        }
+    }
+
+    pub fn tui_home_chart_live() -> &'static str {
+        if is_chinese() {
+            "实时"
+        } else {
+            "live"
+        }
+    }
+
+    pub fn tui_home_chart_last_updated(relative: &str) -> String {
+        if is_chinese() {
+            format!("最近更新 {relative}")
+        } else {
+            format!("Last updated: {relative}")
+        }
+    }
+
+    pub fn tui_home_chart_never_synced() -> &'static str {
+        if is_chinese() {
+            "尚未导入本地用量"
+        } else {
+            "no local import yet"
+        }
+    }
+
+    pub fn tui_home_chart_just_now() -> &'static str {
+        if is_chinese() {
+            "刚刚"
+        } else {
+            "just now"
+        }
+    }
+
+    pub fn tui_home_chart_minutes_ago(minutes: u64) -> String {
+        if is_chinese() {
+            format!("{minutes} 分钟前")
+        } else {
+            format!("{minutes}m ago")
+        }
+    }
+
+    pub fn tui_home_chart_hours_ago(hours: u64) -> String {
+        if is_chinese() {
+            format!("{hours} 小时前")
+        } else {
+            format!("{hours}h ago")
+        }
+    }
+
+    pub fn tui_home_chart_days_ago(days: u64) -> String {
+        if is_chinese() {
+            format!("{days} 天前")
+        } else {
+            format!("{days}d ago")
+        }
+    }
+
+    /// Empty state for apps that never import local session logs (Hermes,
+    /// OpenClaw): their usage can only come from proxy traffic.
+    pub fn tui_home_chart_empty_proxy_only() -> &'static str {
+        if is_chinese() {
+            "暂无用量：该应用仅统计代理流量"
+        } else {
+            "No usage yet - this app only records proxy traffic"
+        }
+    }
+
+    pub fn tui_home_chart_empty_pending() -> &'static str {
+        if is_chinese() {
+            "暂无用量：等待首次同步"
+        } else {
+            "No usage yet - first sync pending"
+        }
+    }
+
     pub fn tui_label_webdav_status() -> &'static str {
         if is_chinese() {
             "状态"
@@ -4396,16 +4532,6 @@ pub mod texts {
         } else {
             "Keys: a=add  e=edit  Space=switch  /=filter"
         }
-    }
-
-    pub fn tui_home_ascii_logo() -> &'static str {
-        // Same ASCII art across languages.
-        r#"                                  _  _         _
-   ___  ___        ___ __      __(_)| |_  ___ | |__
-  / __|/ __|_____ / __|\ \ /\ / /| || __|/ __|| '_ \
- | (__| (__|_____|\__ \ \ V  V / | || |_| (__ | | | |
-  \___|\___|      |___/  \_/\_/  |_| \__|\___||_| |_|
-                                                      "#
     }
 
     pub fn tui_common_snippet_keys() -> &'static str {

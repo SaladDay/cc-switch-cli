@@ -4370,3 +4370,127 @@ fn parse_model_ids_supports_multiple_shapes_and_dedups_stably() {
         vec!["gemini-2.0-pro", "gemini-2.0-flash"]
     );
 }
+
+#[test]
+fn home_route_queues_the_fixed_usage_aggregate() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Main;
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    maybe_queue_usage_pricing_on_view(&mut app, &mut cache, Some(&tx));
+
+    let req = rx
+        .try_recv()
+        .expect("home route should queue a usage aggregate");
+    let UsagePricingReq::Load {
+        app_type, range, ..
+    } = req
+    else {
+        panic!("expected an aggregate load request");
+    };
+    assert_eq!(app_type, AppType::Claude);
+    assert!(
+        !matches!(range, data::UsageRangePreset::Custom(_)),
+        "the home chart needs a fixed-range snapshot, got {range:?}"
+    );
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::ThirtyDays));
+}
+
+#[test]
+fn home_route_forces_a_fixed_range_even_when_usage_is_on_a_custom_window() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Main;
+    app.usage.range = data::UsageRangePreset::Custom(data::UsageCustomRange {
+        start: 1_700_000_000,
+        end: 1_700_086_400,
+    });
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    maybe_queue_usage_pricing_on_view(&mut app, &mut cache, Some(&tx));
+
+    let req = rx.try_recv().expect("home route should queue an aggregate");
+    let UsagePricingReq::Load { range, .. } = req else {
+        panic!("expected an aggregate load request");
+    };
+    assert!(
+        !matches!(range, data::UsageRangePreset::Custom(_)),
+        "custom ranges never produce the 30-day per-model buckets, got {range:?}"
+    );
+}
+
+#[test]
+fn home_route_defers_the_first_session_sync_past_the_opening_frames() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Main;
+    app.tick = 0;
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+    let mut started = false;
+
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started);
+    assert!(!started, "the first frames must not trigger the scan");
+    assert!(rx.try_recv().is_err());
+
+    app.tick = USAGE_SESSION_SYNC_HOME_DELAY_TICKS;
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started);
+    assert!(started);
+    assert!(matches!(rx.try_recv(), Ok(SessionUsageSyncReq::Run { .. })));
+
+    // Once-per-process: staying on the home page does not re-queue.
+    app.tick += 1;
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn usage_routes_still_queue_the_session_sync_immediately() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Usage;
+    app.tick = 0;
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+    let mut started = false;
+
+    maybe_queue_usage_session_sync(&app, Some(&tx), &mut tracker, &mut started);
+
+    assert!(started);
+    assert!(matches!(rx.try_recv(), Ok(SessionUsageSyncReq::Run { .. })));
+}
+
+#[test]
+#[serial]
+fn periodic_usage_sync_waits_one_interval_and_honors_the_opt_out() {
+    let home = TempDir::new().expect("temp home");
+    let _env = EnvGuard::set_home(home.path());
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.tick = 0;
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+
+    // First call only seeds the interval baseline.
+    queue_usage_session_sync_if_due(&mut app, Some(&tx), &mut tracker);
+    assert!(rx.try_recv().is_err());
+
+    app.tick = USAGE_AUTO_SYNC_INTERVAL_TICKS;
+    queue_usage_session_sync_if_due(&mut app, Some(&tx), &mut tracker);
+    assert!(matches!(rx.try_recv(), Ok(SessionUsageSyncReq::Run { .. })));
+
+    // A scan already in flight is not re-queued.
+    app.tick += USAGE_AUTO_SYNC_INTERVAL_TICKS;
+    queue_usage_session_sync_if_due(&mut app, Some(&tx), &mut tracker);
+    assert!(rx.try_recv().is_err());
+
+    tracker.cancel();
+    let mut settings = crate::settings::get_settings();
+    settings.usage_auto_sync = false;
+    crate::settings::update_settings(settings).expect("persist opt-out");
+
+    app.tick += USAGE_AUTO_SYNC_INTERVAL_TICKS;
+    queue_usage_session_sync_if_due(&mut app, Some(&tx), &mut tracker);
+    assert!(rx.try_recv().is_err(), "opting out disables the re-sync");
+}

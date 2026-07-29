@@ -687,6 +687,14 @@ pub struct App {
     pub proxy_visual_transition: Option<ProxyVisualTransition>,
     pub quota_auto_target_key: Option<String>,
     pub quota_last_auto_tick: Option<u64>,
+    /// Tick of the last periodic session-usage sync, seeded on the first check
+    /// so the interval is measured from TUI start rather than firing at once.
+    pub usage_last_auto_sync_tick: Option<u64>,
+    /// Tick the currently running session-usage sync round started at, or
+    /// `None` while no round is in flight. Refresh indicators stay numberless
+    /// until a round outlives the escalation threshold; see
+    /// `ui::shared::sync_escalation`.
+    pub usage_sync_round_started_tick: Option<u64>,
     pub prompt_import_prompted_apps: HashSet<String>,
     pub common_config_notice_confirmed: bool,
     pub usage_query_notice_confirmed: bool,

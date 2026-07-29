@@ -174,7 +174,7 @@ fn pricing_summary_line(app: &App, data: &UiData) -> String {
             .usage
             .is_loading_for(&app.app_type, UsageRangePreset::SevenDays)
         {
-            format!("{}{}", pricing_refresh_prefix(app, "正在刷新"), summary)
+            format!("{}{}", pricing_refresh_prefix(app), summary)
         } else {
             summary
         }
@@ -199,21 +199,18 @@ fn pricing_summary_line(app: &App, data: &UiData) -> String {
             .usage
             .is_loading_for(&app.app_type, UsageRangePreset::SevenDays)
         {
-            format!("{}{}", pricing_refresh_prefix(app, "Refreshing"), summary)
+            format!("{}{}", pricing_refresh_prefix(app), summary)
         } else {
             summary
         }
     }
 }
 
-fn pricing_refresh_prefix(app: &App, label: &str) -> String {
-    let spinner = match app.tick % 4 {
-        0 => "⠋",
-        1 => "⠙",
-        2 => "⠹",
-        _ => "⠸",
-    };
-    format!("{spinner} {label} · ")
+/// The pricing summary is a plain string, so it carries the indicator's glyph
+/// and label without its accent styling — but off the same frame source, so it
+/// stays in step with every other spinner on screen.
+fn pricing_refresh_prefix(app: &App) -> String {
+    format!("{} {} · ", spinner_frame(app.tick), texts::tui_refreshing())
 }
 
 fn current_pricing_is_loading(app: &App, data: &UiData) -> bool {

@@ -34,7 +34,12 @@ pub(super) fn render_usage(
     let keys = crate::cli::tui::keymap::usage::key_bar_items(app, data);
     render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
-    render_summary_bar(frame, chunks[1], theme, usage_summary_line(app, data));
+    render_summary_bar_spans(
+        frame,
+        chunks[1],
+        theme,
+        usage_summary_spans(app, data, theme),
+    );
     render_usage_metrics(frame, app, data, chunks[2], theme);
 
     render_usage_trend(frame, app, data, chunks[3], theme);
@@ -82,11 +87,11 @@ pub(super) fn render_usage_logs(
     );
 
     render_usage_detail_tabs(frame, app, chunks[1], theme);
-    render_summary_bar(
+    render_summary_bar_spans(
         frame,
         chunks[2],
         theme,
-        usage_detail_summary_line(app, data),
+        usage_detail_summary_spans(app, data, theme),
     );
     render_usage_detail_table(frame, app, data, chunks[3], theme);
 }
@@ -1385,36 +1390,30 @@ fn detail_line(
     ])
 }
 
-/// 后台会话日志导入进行时的进度后缀（如 " · 正在导入本地用量 1234/18704"）。
-/// 空闲时返回空串。数据来自 sync_progress 全局原子量——CLI 构建没有逐行
-/// 通知通道，渲染时直接读取即可。
-fn usage_sync_progress_suffix() -> String {
-    match crate::services::session_usage::sync_progress::snapshot() {
-        Some((done, total)) if total > 0 => {
-            if i18n::is_chinese() {
-                format!(" · 正在导入本地用量 {done}/{total}")
-            } else {
-                format!(" · importing local usage {done}/{total}")
-            }
-        }
-        _ => String::new(),
-    }
+/// The summary bar leads with one refresh indicator, shared by the page's own
+/// refresh and the background import — see [`usage_refresh_spans`].
+fn usage_summary_spans(
+    app: &App,
+    data: &UiData,
+    theme: &super::theme::Theme,
+) -> Vec<Span<'static>> {
+    let mut spans = usage_refresh_spans(app, theme);
+    spans.push(Span::raw(usage_summary_line(app, data)));
+    spans
 }
 
 fn usage_summary_line(app: &App, data: &UiData) -> String {
-    let sync_suffix = usage_sync_progress_suffix();
     if current_usage_is_loading(app, data) {
         if i18n::is_chinese() {
-            return format!("{} · 正在加载中...{sync_suffix}", app.usage.range.label());
+            return format!("{} · 正在加载中...", app.usage.range.label());
         }
-        return format!("{} · Loading...{sync_suffix}", app.usage.range.label());
+        return format!("{} · Loading...", app.usage.range.label());
     }
 
     let summary = data.usage.summary_for(app.usage.range);
-    let refresh_prefix = usage_refresh_prefix(app);
     if i18n::is_chinese() {
         format!(
-            "{refresh_prefix}{} · {} 请求 · {} tokens · {} · 平均延迟 {}{sync_suffix}",
+            "{} · {} 请求 · {} tokens · {} · 平均延迟 {}",
             app.usage.range.label(),
             summary.total_requests,
             format_token_compact(summary.total_tokens()),
@@ -1423,7 +1422,7 @@ fn usage_summary_line(app: &App, data: &UiData) -> String {
         )
     } else {
         format!(
-            "{refresh_prefix}{} · {} requests · {} tokens · {} · {} avg latency{sync_suffix}",
+            "{} · {} requests · {} tokens · {} · {} avg latency",
             app.usage.range.label(),
             summary.total_requests,
             format_token_compact(summary.total_tokens()),
@@ -1439,7 +1438,7 @@ fn current_usage_is_loading(app: &App, data: &UiData) -> bool {
 }
 
 fn usage_detail_summary_line(app: &App, data: &UiData) -> String {
-    let mut line = match app.usage.pane {
+    match app.usage.pane {
         UsagePane::Models => {
             let count = data.usage.top_models_for(app.usage.range).len();
             if i18n::is_chinese() {
@@ -1482,28 +1481,38 @@ fn usage_detail_summary_line(app: &App, data: &UiData) -> String {
                 )
             }
         }
-    };
-    line.insert_str(0, &usage_refresh_prefix(app));
-    line.push_str(&usage_sync_progress_suffix());
-    line
+    }
 }
 
-fn usage_refresh_prefix(app: &App) -> String {
-    if app.usage.manual_session_refreshing()
+fn usage_detail_summary_spans(
+    app: &App,
+    data: &UiData,
+    theme: &super::theme::Theme,
+) -> Vec<Span<'static>> {
+    let mut spans = usage_refresh_spans(app, theme);
+    spans.push(Span::raw(usage_detail_summary_line(app, data)));
+    spans
+}
+
+/// The bar's single refresh indicator, followed by its separator.
+///
+/// The page's own refresh and the background session import are two pipelines
+/// that can be live at the same time, and they used to claim two slots on the
+/// same line. They share one indicator now: it shows while *either* is
+/// running, keeps the generic label, and takes the escalation percentage from
+/// whichever import round earned one. Empty when both are idle.
+fn usage_refresh_spans(app: &App, theme: &super::theme::Theme) -> Vec<Span<'static>> {
+    let page_refreshing = app.usage.manual_session_refreshing()
         || app.usage.is_loading_for(&app.app_type, app.usage.range)
         || app.usage.log_page_refresh_after_aggregate_requested()
-        || app.usage.log_pager.has_refresh_pending()
-    {
-        let spinner = match app.tick % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        };
-        format!("{spinner} {} · ", usage_text("Refreshing", "正在刷新"))
-    } else {
-        String::new()
+        || app.usage.log_pager.has_refresh_pending();
+    if !page_refreshing && !session_usage_sync_active() {
+        return Vec::new();
     }
+
+    let mut spans = refresh_indicator_spans(app.tick, theme, sync_escalation(app));
+    spans.push(Span::raw(" · "));
+    spans
 }
 
 fn usage_text(en: &'static str, zh: &'static str) -> &'static str {
@@ -1584,7 +1593,7 @@ fn usage_sparkline(values: &[f64]) -> String {
         .join("")
 }
 
-fn format_money(value: f64) -> String {
+pub(super) fn format_money(value: f64) -> String {
     if value >= 100.0 {
         format!("${value:.0}")
     } else if value >= 10.0 {
@@ -1602,7 +1611,7 @@ fn format_money_per_request(total_cost: f64, total_requests: u64) -> String {
     }
 }
 
-fn format_token_compact(total: u64) -> String {
+pub(super) fn format_token_compact(total: u64) -> String {
     if total < 1_000 {
         return total.to_string();
     }

@@ -26,8 +26,8 @@ use crate::{
             ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
             OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderHealthSnapshot, ProviderRow,
             ProvidersSnapshot, ProxySnapshot, ProxyTargetSnapshot, SkillsSnapshot, UiData,
-            UsageLogRow, UsageProviderStatsRow, UsageRangePreset, UsageSnapshot,
-            UsageSummarySnapshot, UsageTrendBucket,
+            UsageDailyModelBucket, UsageLogRow, UsageProviderStatsRow, UsageRangePreset,
+            UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
         },
         form::{
             ClaudeModelPickerColumn, FormFocus, FormState, PromptMetaFormState, ProviderAddField,
@@ -139,6 +139,56 @@ fn passive_text_helpers_bound_leading_space_and_zero_width_inputs() {
     assert!(combining_summary.ends_with('…'));
     assert!(truncated.chars().count() <= 49);
     assert!(truncated.ends_with('…'));
+}
+
+#[test]
+fn span_truncation_clips_styled_lines_at_every_boundary_width() {
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Span;
+
+    let spans = || {
+        vec![
+            Span::raw("abc"),
+            Span::styled("def", Style::default().fg(Color::Red)),
+            Span::raw("ghi"),
+        ]
+    };
+    let text = |spans: Vec<Span<'_>>| {
+        spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect::<String>()
+    };
+
+    // Fits: untouched, styles and all.
+    assert_eq!(super::truncate_spans_to_width(spans(), 9), spans());
+    assert_eq!(super::truncate_spans_to_width(spans(), 99), spans());
+
+    // Cut mid-span, cut on a span boundary, and cut down to the marker alone.
+    // The marker follows the icon mode, which is process-global here.
+    let cut = super::truncation_marker();
+    assert_eq!(
+        text(super::truncate_spans_to_width(spans(), 8)),
+        format!("abcdefg{cut}")
+    );
+    assert_eq!(
+        text(super::truncate_spans_to_width(spans(), 4)),
+        format!("abc{cut}")
+    );
+    assert_eq!(text(super::truncate_spans_to_width(spans(), 1)), cut);
+    assert!(super::truncate_spans_to_width(spans(), 0).is_empty());
+
+    // The styled middle span keeps its style when it is the one clipped.
+    let clipped = super::truncate_spans_to_width(spans(), 6);
+    assert_eq!(text(clipped.clone()), format!("abcde{cut}"));
+    assert_eq!(clipped[1].style.fg, Some(Color::Red));
+
+    // A pathological value clips instead of walking the whole string.
+    let huge = vec![Span::raw("x".repeat(70_000))];
+    assert_eq!(
+        super::spans_display_width(&super::truncate_spans_to_width(huge, 20)),
+        20
+    );
 }
 
 #[test]
@@ -5304,7 +5354,7 @@ fn prompt_form_content_key_bar_shows_ctrl_o_external_editor_hint() {
 }
 
 #[test]
-fn home_restores_main_logo_and_home_labels() {
+fn home_replaces_the_logo_hero_with_the_usage_chart() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -5315,8 +5365,8 @@ fn home_restores_main_logo_and_home_labels() {
 
     let buf = render(&app, &data);
     let all = all_text(&buf);
-    assert!(all.contains("___  ___"));
-    assert!(all.contains("\\___|\\___|"));
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(all.contains("Connection Details"));
 }
 
@@ -5540,8 +5590,8 @@ fn home_hides_proxy_dashboard_when_proxy_is_off() {
     let all = all_text(&buf);
     let footer = line_at(&buf, buf.area.height - 1);
 
-    assert!(all.contains("___  ___"));
-    assert!(all.contains("\\___|\\___|"));
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("127.0.0.1:15721"), "{all}");
@@ -5661,7 +5711,8 @@ fn home_footer_shows_proxy_on_shortcut_when_stopped() {
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!footer.contains("NAV"), "{footer}");
     assert!(!footer.contains("ACT"), "{footer}");
-    assert!(all.contains("___  ___"));
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"));
 }
 
@@ -5730,7 +5781,8 @@ fn home_proxy_dashboard_keeps_current_app_off_semantics_when_another_app_is_acti
     let footer = line_at(&buf, buf.area.height - 1);
 
     assert!(footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("Shared runtime ready"), "{all}");
     assert!(!all.contains("x1.00"), "{all}");
@@ -5767,7 +5819,8 @@ fn home_proxy_dashboard_stays_off_for_current_worker_without_takeover() {
     );
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
 }
 
 #[test]
@@ -5791,7 +5844,8 @@ fn home_proxy_dashboard_hides_attach_cta_for_foreground_runtime_owned_elsewhere(
     let footer = line_at(&buf, buf.area.height - 1);
 
     assert!(!footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
 }
 
@@ -5842,7 +5896,8 @@ fn home_proxy_dashboard_shows_idle_baseline_without_header_copy() {
     let shared_buf = render(&app, &shared_runtime);
     let shared_text = all_text(&shared_buf);
     let shared_footer = line_at(&shared_buf, shared_buf.area.height - 1);
-    assert!(shared_text.contains("___  ___"), "{shared_text}");
+    assert!(!shared_text.contains("___  ___"), "{shared_text}");
+    assert!(shared_text.contains("Usage · 30d"), "{shared_text}");
     assert!(!shared_text.contains("Proxy Dashboard"), "{shared_text}");
     assert!(!shared_text.contains("x1.25"), "{shared_text}");
     assert!(shared_footer.contains("proxy on"), "{shared_footer}");
@@ -5985,7 +6040,8 @@ fn home_proxy_dashboard_marks_unsupported_apps_without_proxy_cta() {
     assert!(!all.contains("start proxy"));
     assert!(!all.contains("stop proxy"));
     assert!(!footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("Claude Test Provider"), "{all}");
 }
@@ -6037,7 +6093,8 @@ fn home_proxy_dashboard_keeps_current_app_route_separate_from_global_proxy_route
     let all = all_text(&buf);
     let footer = line_at(&buf, buf.area.height - 1);
 
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Latest proxy route"));
@@ -6065,7 +6122,8 @@ fn home_proxy_dashboard_hides_internal_target_identifiers() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains("___  ___"));
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"));
     assert!(!all.contains("Claude Test Provider"));
     assert!(!all.contains("Current app route"));
@@ -12345,4 +12403,1356 @@ fn openclaw_agents_render_windows_ten_thousand_fallbacks_and_borrows_huge_extra(
             .map(str::len),
         Some(1_000_000)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Home usage chart
+// ---------------------------------------------------------------------------
+
+/// A 30-day axis with the supplied models spread over the three most recent
+/// days. Each entry is `(model, billable tokens/day, USD/day)`; both scale with
+/// the day multiplier, so the ranking is the same on every day of the window.
+///
+/// Costs are deliberately *not* proportional to tokens: the card ranks by cost
+/// and sizes bars by real tokens, and a fixture where the two agree could not
+/// tell a correct implementation from one that confuses them.
+fn usage_with_daily_models(models: &[(&str, u64, f64)]) -> UsageSnapshot {
+    use chrono::{Days, Local};
+
+    let today = Local::now().date_naive();
+    let start = today.checked_sub_days(Days::new(29)).unwrap_or(today);
+    let trends_30d = (0..30)
+        .map(|offset| {
+            let date = start.checked_add_days(Days::new(offset)).unwrap_or(start);
+            UsageTrendBucket {
+                key: date.format("%Y-%m-%d").to_string(),
+                label: date.format("%m/%d").to_string(),
+                ..UsageTrendBucket::default()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut daily_models = Vec::new();
+    for (offset, bucket) in trends_30d.iter().rev().take(3).enumerate() {
+        let multiplier = offset as u64 + 1;
+        for (model, tokens, cost) in models {
+            let day_tokens = tokens.saturating_mul(multiplier);
+            daily_models.push(UsageDailyModelBucket {
+                date_key: bucket.key.clone(),
+                model: (*model).to_string(),
+                total_tokens: day_tokens,
+                total_cost_usd: cost * multiplier as f64,
+                // A third input, two thirds output, with cache traffic an order
+                // of magnitude larger — the shape a real Claude day has.
+                input_tokens: day_tokens / 3,
+                output_tokens: day_tokens - day_tokens / 3,
+                cache_read_tokens: day_tokens.saturating_mul(20),
+                cache_creation_tokens: day_tokens.saturating_mul(4),
+            });
+        }
+    }
+
+    UsageSnapshot {
+        trends_30d,
+        daily_models,
+        last_synced_at: Some(chrono::Local::now().timestamp() - 7_200),
+        ..UsageSnapshot::default()
+    }
+}
+
+/// The standard five-model fixture: `claude-opus` is small in tokens and by far
+/// the most expensive, so a token-ranked implementation would fold it into
+/// "Other" and a cost-ranked one puts it first.
+const HOME_CHART_MODELS: [(&str, u64, f64); 5] = [
+    ("claude-opus", 1_000, 6.0),
+    ("claude-sonnet", 5_000, 3.0),
+    ("claude-haiku", 4_000, 1.5),
+    ("gpt-5.4", 3_000, 0.75),
+    ("mystery-model", 2_000, 0.25),
+];
+
+fn row_of(buf: &Buffer, needle: &str) -> Option<u16> {
+    (0..buf.area.height).find(|y| line_at(buf, *y).contains(needle))
+}
+
+/// Ratatui draws box-drawing rails in every icon mode, so a whole rendered row
+/// is never ASCII. ASCII-mode spinner assertions check the braille block
+/// instead: no `⠋⠙⠹⠸` may survive the downgrade.
+fn contains_braille(text: &str) -> bool {
+    text.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
+}
+
+/// Card title as it renders for the active icon mode.
+fn usage_card_title() -> String {
+    if crate::cli::tui::icons::use_emoji() {
+        "Usage · 30d".to_string()
+    } else {
+        "Usage - 30d".to_string()
+    }
+}
+
+/// The Chinese card title as the test backend lays it out: ratatui pads every
+/// double-width grapheme with a blank cell.
+fn zh_usage_card_title() -> String {
+    let separator = if crate::cli::tui::icons::use_emoji() {
+        " · "
+    } else {
+        " - "
+    };
+    buffer_cell_text(&format!("用量{separator}近 30 天"))
+}
+
+/// Text strictly inside the home usage card, both rails excluded. Ratatui
+/// draws box-drawing borders in every icon mode, so ASCII assertions have to
+/// look at the card body rather than the whole region.
+fn usage_card_inner_text(buf: &Buffer) -> String {
+    usage_card_inner_text_with_title(buf, &usage_card_title())
+}
+
+fn usage_card_inner_text_with_title(buf: &Buffer, title: &str) -> String {
+    let top = row_of(buf, title).expect("usage card title row");
+    let left = (0..buf.area.width)
+        .find(|x| buf[(*x, top)].symbol() == "┌")
+        .expect("usage card left rail");
+    let right = ((left + 1)..buf.area.width)
+        .find(|x| buf[(*x, top)].symbol() == "┐")
+        .expect("usage card right rail");
+    let bottom = ((top + 1)..buf.area.height)
+        .find(|y| buf[(left, *y)].symbol() == "└")
+        .expect("usage card bottom rail");
+
+    let mut out = String::new();
+    for y in (top + 1)..bottom {
+        for x in (left + 1)..right {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn home_usage_chart_renders_title_bars_and_legend() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    let buf = render(&app, &data);
+
+    // The card chrome carries the title and the status, like its siblings.
+    let title_row = line_at(&buf, row_of(&buf, "Usage · 30d").expect("card title row"));
+    assert!(title_row.contains("┌ Usage · 30d ─"), "{title_row}");
+    assert!(title_row.contains("Last updated: 2h ago"), "{title_row}");
+
+    let card = usage_card_inner_text(&buf);
+    assert!(card.contains('█'), "bars should render:\n{card}");
+
+    // Breathing room: a blank row under the title rail and a blank column on
+    // both sides of every content row.
+    let rows = card.lines().collect::<Vec<_>>();
+    assert!(
+        rows[0].trim().is_empty(),
+        "the card opens with a blank row:\n{card}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.starts_with(' ') && row.ends_with(' ')),
+        "content never touches the side rails:\n{card}"
+    );
+
+    // 120 columns is wide enough for the models column.
+    assert!(card.contains("Models by Cost"), "{card}");
+    assert!(card.contains("● claude-opus"), "{card}");
+    assert!(
+        card.contains("● Other"),
+        "the list needs a residual bucket:\n{card}"
+    );
+    let opus_row = card
+        .lines()
+        .find(|line| line.contains("● claude-opus"))
+        .expect("a model row");
+    assert!(opus_row.contains('%'), "{opus_row}");
+    assert!(opus_row.contains('$'), "{opus_row}");
+
+    // 120 columns leaves the list 40 wide, under the detail line's floor: the
+    // rows stay one-liners.
+    assert!(!card.contains("In: "), "{card}");
+}
+
+#[test]
+fn home_usage_chart_lists_the_token_breakdown_under_each_model() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    // 160 columns leaves the list its 52-column cap: wide enough for detail.
+    let card = usage_card_inner_text(&render_with_size(&app, &data, 160, 45));
+
+    let opus = card
+        .lines()
+        .position(|line| line.contains("● claude-opus"))
+        .expect("the opus row");
+    let detail = card.lines().nth(opus + 1).expect("its detail line");
+    for label in ["In: ", "Out: ", "CR: ", "CW: "] {
+        assert!(detail.contains(label), "{label} missing in {detail:?}");
+    }
+    assert!(detail.contains('•'), "{detail:?}");
+    // Indented under the name and confined to the list column: everything left
+    // of the list rule still belongs to the chart.
+    let (chart_half, list_half) = detail.rsplit_once('│').expect("the list rule");
+    assert!(!chart_half.contains("In: "), "{detail:?}");
+    assert!(
+        list_half.starts_with("    In: "),
+        "the detail line hangs under the model name: {detail:?}"
+    );
+
+    // The residual bucket aggregates its folded models, so it has a line too.
+    let other = card
+        .lines()
+        .position(|line| line.contains("● Other"))
+        .expect("the residual row");
+    assert!(
+        card.lines()
+            .nth(other + 1)
+            .is_some_and(|line| line.contains("In: ") && line.contains("CW: ")),
+        "the residual row carries a detail line too:\n{card}"
+    );
+}
+
+#[test]
+fn home_usage_chart_drops_only_the_detail_lines_when_the_list_is_short() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    // Wide enough for the detail line (52 columns), one row too short for the
+    // header plus two rows per model.
+    let card = usage_card_inner_text(&render_with_size(&app, &data, 160, 33));
+
+    assert!(card.contains("Models by Cost"), "{card}");
+    for model in ["● claude-opus", "● gpt-5.4", "● Other"] {
+        assert!(card.contains(model), "{model} missing:\n{card}");
+    }
+    assert!(
+        !card.contains("In: "),
+        "the names survive, the detail lines go:\n{card}"
+    );
+}
+
+#[test]
+fn home_usage_chart_bars_span_the_whole_card_width() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let card = usage_card_inner_text(&buf);
+    let axis = card
+        .lines()
+        .find(|line| line.contains('└'))
+        .expect("the chart axis");
+    // y label column + the axis corner + one column per body cell, and the
+    // whole chart column ends where the list rule starts.
+    let rule = axis.chars().filter(|ch| *ch == '│').count();
+    assert_eq!(rule, 1, "the list rule spans the card height:\n{card}");
+    let drawn = axis.chars().filter(|ch| *ch == '─').count();
+    assert!(
+        drawn >= 60,
+        "a 160-column terminal should give the bars ~67 columns, got {drawn}:\n{card}"
+    );
+}
+
+#[test]
+fn home_usage_chart_shows_the_live_badge_while_the_proxy_routes_this_app() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+    data.proxy.running = true;
+    data.proxy.claude_takeover = true;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("• live"), "{all}");
+    assert!(!all.contains("Last updated"), "{all}");
+}
+
+#[test]
+fn home_usage_chart_shows_an_empty_hint_per_app_family() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+    let all = all_text(&render(&app, &data));
+    assert!(all.contains("No usage yet - first sync pending"), "{all}");
+
+    let mut openclaw = App::new(Some(AppType::OpenClaw));
+    openclaw.route = Route::Main;
+    openclaw.focus = Focus::Content;
+    let openclaw_data = minimal_data(&openclaw.app_type);
+    let openclaw_text = all_text(&render(&openclaw, &openclaw_data));
+    assert!(
+        openclaw_text.contains("only records proxy traffic"),
+        "{openclaw_text}"
+    );
+}
+
+#[test]
+fn home_usage_chart_spins_while_the_first_aggregate_loads() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::ThirtyDays);
+
+    let data = minimal_data(&app.app_type);
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains("⠸ Loading usage..."),
+        "the spinner leads the body's own label:\n{all}"
+    );
+}
+
+#[test]
+fn home_usage_chart_degrades_on_small_terminals_without_panicking() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage =
+        usage_with_daily_models(&[("claude-opus", 5_000, 6.0), ("claude-haiku", 1_000, 1.0)]);
+
+    // 80x24 leaves the card two body rows: the top pad plus one content row.
+    // That row goes to the sparkline, and the bars do not fit.
+    let small_buf = render_with_size(&app, &data, 80, 24);
+    let small = all_text(&small_buf);
+    assert!(small.contains("Usage · 30d"), "{small}");
+    assert!(!small.contains("Models by Cost"), "{small}");
+    let small_card = usage_card_inner_text(&small_buf);
+    assert_eq!(small_card.lines().count(), 2, "{small_card}");
+    assert!(
+        small_card
+            .lines()
+            .next()
+            .is_some_and(|row| row.trim().is_empty()),
+        "the card opens with its blank pad row:\n{small_card:?}"
+    );
+    assert!(
+        small_card.trim_end().ends_with('▃'),
+        "the single content row still draws the sparkline:\n{small_card:?}"
+    );
+    assert!(
+        small_card.lines().all(|line| !line.contains('│')),
+        "no list rule without a list:\n{small_card}"
+    );
+
+    // 80 columns with room to breathe: bars across the full card, legend row,
+    // still no models column.
+    let tall_buf = render_with_size(&app, &data, 80, 40);
+    let tall = all_text(&tall_buf);
+    assert!(!tall.contains("Models by Cost"), "{tall}");
+    let tall_card = usage_card_inner_text(&tall_buf);
+    assert!(tall_card.contains('█'), "{tall_card}");
+    assert!(tall_card.contains("● claude-opus"), "{tall_card}");
+    let axis = tall_card
+        .lines()
+        .find(|line| line.contains('└'))
+        .expect("the chart axis");
+    assert!(
+        axis.starts_with(' ') && axis.ends_with(' '),
+        "the padding holds the axis off both rails:\n{tall_card}"
+    );
+    assert_eq!(
+        axis.trim_end().chars().count(),
+        axis.chars().count() - 1,
+        "the axis reaches the padding, not the card's right rail:\n{tall_card}"
+    );
+
+    // Anything smaller must still render without panicking.
+    for (width, height) in [(60u16, 20u16), (40, 14), (30, 10), (20, 8)] {
+        let buf = render_with_size(&app, &data, width, height);
+        assert_eq!(buf.area.width, width);
+    }
+}
+
+#[test]
+fn home_usage_chart_keeps_the_chart_region_ascii_in_ascii_icon_mode() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 5;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[
+        ("claude-opus", 5_000, 6.0),
+        ("claude-sonnet", 4_000, 3.0),
+        ("claude-haiku", 3_000, 1.5),
+        (
+            "a-very-long-model-identifier-that-needs-truncating",
+            2_500,
+            0.75,
+        ),
+        ("gpt-5.4", 2_000, 0.25),
+    ]);
+
+    // A wide terminal so the assertion covers the models column too.
+    let buf = render_with_size(&app, &data, 160, 45);
+    let chart = usage_card_inner_text(&buf);
+
+    assert!(
+        chart.is_ascii(),
+        "ascii icon mode must not leak unicode glyphs:\n{chart}"
+    );
+    assert!(chart.contains('#'), "ascii bars should render:\n{chart}");
+    assert!(chart.contains("Models by Cost"), "{chart}");
+    // Model rows of the list column: `<glyph> <name> <share> <cost>`.
+    let list_rows = chart
+        .lines()
+        .filter_map(|line| line.rsplit_once('|').map(|(_, list)| list))
+        .filter_map(|list| {
+            let rest = list.strip_prefix(' ')?;
+            let mut chars = rest.chars();
+            let glyph = chars.next()?;
+            // A dot is followed by a space; headers and detail lines are not.
+            (chars.next() == Some(' ') && !glyph.is_whitespace())
+                .then(|| (glyph, rest[1..].trim().to_string()))
+        })
+        .collect::<Vec<_>>();
+
+    // Cost ranks the list, and claude-opus is the costliest here despite
+    // carrying the fewest tokens.
+    assert!(
+        list_rows
+            .first()
+            .is_some_and(|(_, text)| text.starts_with("claude-opus")),
+        "the costliest model leads the list, got {list_rows:?}:\n{chart}"
+    );
+
+    // Without color the dot is the only thing telling two series apart, so
+    // every slot has to draw its own glyph.
+    let list_dots = list_rows
+        .iter()
+        .map(|(glyph, _)| *glyph)
+        .collect::<Vec<_>>();
+    let distinct = list_dots
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert!(
+        distinct >= 2,
+        "ascii mode must not collapse every series onto one dot, got {list_dots:?}:\n{chart}"
+    );
+    assert!(
+        list_dots.iter().all(char::is_ascii),
+        "{list_dots:?} must stay ascii"
+    );
+
+    let long_row = chart
+        .lines()
+        .find(|line| line.contains("a-very-long-model-identifier-that-"))
+        .expect("the long model row");
+    assert!(
+        long_row.contains('~'),
+        "long names use the ascii ellipsis:\n{long_row}"
+    );
+    // The detail line falls back to the ascii separator.
+    let detail = chart
+        .lines()
+        .find(|line| line.contains("In: "))
+        .expect("a detail line");
+    assert!(detail.contains(" - Out: "), "{detail:?}");
+    assert!(detail.contains(" - CW: "), "{detail:?}");
+
+    // The loading spinner shares the gate.
+    let mut loading = App::new(Some(AppType::Claude));
+    loading.route = Route::Main;
+    loading.focus = Focus::Content;
+    loading.tick = 5;
+    loading
+        .usage
+        .start_loading(AppType::Claude, UsageRangePreset::ThirtyDays);
+    let loading_buf = render_with_size(&loading, &minimal_data(&loading.app_type), 160, 45);
+    let loading_region = usage_card_inner_text(&loading_buf);
+    assert!(
+        loading_region.contains("/ Loading usage..."),
+        "the ascii spinner leads the body label:\n{loading_region}"
+    );
+    assert!(
+        loading_region.is_ascii(),
+        "ascii spinner must stay ascii:\n{loading_region}"
+    );
+}
+
+#[test]
+fn home_connection_card_carries_the_webdav_status_line() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.webdav_sync = Some(crate::settings::WebDavSyncSettings {
+        enabled: true,
+        base_url: "https://dav.example.com".to_string(),
+        remote_root: "cc-switch-sync".to_string(),
+        profile: "default".to_string(),
+        username: "user".to_string(),
+        password: "secret".to_string(),
+        auto_sync: false,
+        status: crate::settings::WebDavSyncStatus {
+            last_sync_at: Some(1_700_000_000),
+            ..crate::settings::WebDavSyncStatus::default()
+        },
+    });
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    let webdav_line = all
+        .lines()
+        .find(|line| line.contains("WebDAV Sync"))
+        .expect("the connection card should carry a WebDAV line");
+
+    assert!(webdav_line.contains('✓'), "{webdav_line}");
+    assert!(webdav_line.contains("OK"), "{webdav_line}");
+    assert!(webdav_line.contains("2023/11"), "{webdav_line}");
+    // The standalone card is gone: no second WebDAV section title.
+    assert_eq!(all.matches("WebDAV Sync").count(), 1, "{all}");
+}
+
+/// The connection card is sized from its line *count*, so it must not wrap:
+/// ratatui word-wraps, and any estimate of that would eventually clip the last
+/// line — the WebDAV one — out of the card.
+#[test]
+fn home_connection_card_truncates_instead_of_wrapping_on_narrow_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_current = true;
+    data.providers.rows[0].api_url = Some(format!(
+        "https://{}.example.com/v1",
+        "long-host-".repeat(12)
+    ));
+
+    let buf = render_with_size(&app, &data, 90, 30);
+    let all = all_text(&buf);
+
+    let api_line = all
+        .lines()
+        .find(|line| line.contains("API URL"))
+        .expect("the API URL row");
+    assert!(
+        api_line.contains('…'),
+        "the oversized URL is clipped, not wrapped:\n{api_line}"
+    );
+    assert!(
+        !all.contains("long-host-long-host-long-host-long-host-"),
+        "no second row carries the overflow:\n{all}"
+    );
+    // Every card line is still on screen, the WebDAV one included. The labels
+    // are padded to a fixed column, which also keeps the header's own
+    // "Provider:" badge out of the count.
+    for label in ["Provider      :", "API URL       :", "WebDAV Sync   :"] {
+        assert_eq!(
+            all.lines().filter(|line| line.contains(label)).count(),
+            1,
+            "{label} must appear exactly once:\n{all}"
+        );
+    }
+}
+
+/// A pathological value must clip, not drive the layout through a wrapped
+/// `u16`. In a debug build the old `line.width() as u16 + 2` would also be one
+/// overflow away from a panic.
+#[test]
+fn home_connection_card_survives_an_absurdly_long_url() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_current = true;
+    data.providers.rows[0].api_url = Some(format!("https://{}", "u".repeat(70_000)));
+
+    for (width, height) in [(160u16, 45u16), (120, 40), (60, 20), (30, 12)] {
+        let buf = render_with_size(&app, &data, width, height);
+        assert_eq!(buf.area.width, width);
+        let all = all_text(&buf);
+        // The card keeps its normal footprint: three labelled rows, one each.
+        assert_eq!(
+            all.lines().filter(|line| line.contains("WebDAV")).count(),
+            usize::from(width >= 60),
+            "the last card line must survive at {width}x{height}:\n{all}"
+        );
+    }
+}
+
+/// NoColor terminals get the same per-slot glyphs as ASCII ones: `●` in one ink
+/// is four identical dots.
+#[test]
+fn home_usage_chart_uses_distinct_slot_glyphs_without_color() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    let card = usage_card_inner_text(&render_with_size(&app, &data, 160, 45));
+
+    assert!(
+        !card.contains('●'),
+        "a single shape carries no information without color:\n{card}"
+    );
+    let dots = ['*', '#', '%', '@', '.']
+        .into_iter()
+        .filter(|glyph| {
+            card.contains(&format!("{glyph} claude")) || card.contains(&format!("{glyph} Other"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        dots.len() >= 2,
+        "expected distinct slot glyphs, got {dots:?}:\n{card}"
+    );
+}
+
+/// The card has to survive a Chinese locale: the heading is wider, and the
+/// layout must neither panic nor lose the list.
+#[test]
+fn home_usage_chart_renders_in_chinese() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let all = all_text(&buf);
+    assert!(all.contains(&buffer_cell_text("用量")), "{all}");
+    assert!(all.contains(&buffer_cell_text("最近更新")), "{all}");
+
+    let card = usage_card_inner_text_with_title(&buf, &zh_usage_card_title());
+    assert!(
+        card.contains(&buffer_cell_text("模型花费")),
+        "the ZH list heading:\n{card}"
+    );
+    assert!(
+        card.contains(&buffer_cell_text("其他")),
+        "the ZH residual bucket:\n{card}"
+    );
+    assert!(card.contains('█'), "bars still render:\n{card}");
+    assert!(
+        card.lines()
+            .all(|row| row.starts_with(' ') && row.ends_with(' ')),
+        "content never touches the side rails:\n{card}"
+    );
+
+    // 130x40 is the other size the card is eyeballed at; it must not panic.
+    let narrow = all_text(&render_with_size(&app, &data, 130, 40));
+    assert!(narrow.contains(&buffer_cell_text("用量")), "{narrow}");
+}
+
+#[test]
+fn spinner_frame_cycles_four_frames_per_alphabet() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let unicode = (0..5).map(super::spinner_frame).collect::<Vec<_>>();
+    assert_eq!(unicode, vec!["⠋", "⠙", "⠹", "⠸", "⠋"]);
+
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+    let ascii = (0..5).map(super::spinner_frame).collect::<Vec<_>>();
+    assert_eq!(ascii, vec!["|", "/", "-", "\\", "|"]);
+    assert!(
+        ascii.iter().all(|frame| frame.is_ascii()),
+        "no braille leaks into ascii mode: {ascii:?}"
+    );
+}
+
+#[test]
+fn refresh_indicator_carries_the_accent_and_the_shared_label() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let theme = theme_for(&AppType::Claude);
+
+    let spans = super::refresh_indicator_spans(1, &theme, None);
+    let text = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(text, "⠙ Refreshing");
+    assert!(
+        spans.iter().all(|span| span.style.fg == Some(theme.accent)),
+        "the glyph and its label share the accent: {spans:?}"
+    );
+
+    // The escalation percentage rides the same indicator.
+    let escalated = super::refresh_indicator_spans(1, &theme, Some(42));
+    let escalated_text = escalated
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(escalated_text, "⠙ Refreshing 42%");
+
+    // Tight slots take the glyph alone, off the same frame source.
+    let glyph = super::refresh_spinner_span(1, &theme);
+    assert_eq!(glyph.content.as_ref(), "⠙");
+    assert_eq!(glyph.style.fg, Some(theme.accent));
+}
+
+#[test]
+fn refresh_indicator_reuses_the_chinese_refresh_wording() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let theme = theme_for(&AppType::Claude);
+
+    let text = super::refresh_indicator_spans(2, &theme, Some(42))
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(text, "⠹ 正在刷新 42%");
+}
+
+#[test]
+fn refresh_indicator_drops_its_hue_under_no_color() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let theme = theme_for(&AppType::Claude);
+
+    let spans = super::refresh_indicator_spans(0, &theme, None);
+    assert!(
+        spans.iter().all(|span| span.style.fg.is_none()),
+        "NoColor keeps the motion and drops the hue: {spans:?}"
+    );
+    assert!(
+        spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .contains("Refreshing"),
+        "the label survives NoColor: {spans:?}"
+    );
+}
+
+#[test]
+fn sync_escalation_stays_wordless_until_a_round_outlives_ten_seconds() {
+    // 50 ticks at the 200ms tick rate.
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 49, Some((5, 10))),
+        None
+    );
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 50, Some((5, 10))),
+        Some(50)
+    );
+    // The threshold is measured from the round's own start tick.
+    assert_eq!(
+        super::sync_escalation_percent(Some(10), 59, Some((5, 10))),
+        None
+    );
+    assert_eq!(
+        super::sync_escalation_percent(Some(10), 60, Some((5, 10))),
+        Some(50)
+    );
+
+    // No round in flight, and rounds that do not know their total yet, stay
+    // wordless however long they run.
+    assert_eq!(
+        super::sync_escalation_percent(None, 5_000, Some((5, 10))),
+        None
+    );
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 5_000, Some((5, 0))),
+        None
+    );
+    assert_eq!(super::sync_escalation_percent(Some(0), 5_000, None), None);
+
+    // Floors, and never overshoots on a total that shrank mid-round.
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 50, Some((1, 3))),
+        Some(33)
+    );
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 50, Some((7, 3))),
+        Some(100)
+    );
+}
+
+#[test]
+fn sync_round_tracking_starts_on_the_first_live_tick_and_resets_between_rounds() {
+    let mut app = App::new(Some(AppType::Claude));
+
+    app.tick = 7;
+    app.note_session_sync_round(false);
+    assert_eq!(app.usage_sync_round_started_tick, None);
+
+    app.note_session_sync_round(true);
+    assert_eq!(app.usage_sync_round_started_tick, Some(7));
+
+    app.tick = 30;
+    app.note_session_sync_round(true);
+    assert_eq!(
+        app.usage_sync_round_started_tick,
+        Some(7),
+        "a running round keeps the tick it started on"
+    );
+
+    app.note_session_sync_round(false);
+    assert_eq!(app.usage_sync_round_started_tick, None);
+
+    app.tick = 42;
+    app.note_session_sync_round(true);
+    assert_eq!(
+        app.usage_sync_round_started_tick,
+        Some(42),
+        "the next round starts its own clock"
+    );
+}
+
+#[test]
+fn sync_escalation_reads_the_live_round_against_the_app_clock() {
+    let _override = super::SyncProgressOverride::set(Some((21, 50)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.tick = 10;
+    app.note_session_sync_round(true);
+
+    app.tick = 59;
+    assert_eq!(super::sync_escalation(&app), None);
+
+    app.tick = 60;
+    assert_eq!(super::sync_escalation(&app), Some(42));
+}
+
+#[test]
+fn home_usage_card_rail_spins_without_a_counter_while_syncing() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.note_session_sync_round(true);
+
+    let mut data = minimal_data(&app.app_type);
+    // Data on screen keeps the body quiet, so the rail owns the indicator.
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+
+    assert!(
+        rail.contains("⠸ Refreshing"),
+        "the spinner and its label own the rail:\n{rail}"
+    );
+    assert!(!rail.contains("1234/18704"), "{rail}");
+    assert!(!rail.contains("18704"), "{rail}");
+    assert!(!rail.to_lowercase().contains("sync"), "{rail}");
+    assert!(
+        !rail.contains('%'),
+        "a short round earns no number:\n{rail}"
+    );
+    // The rail is exclusive: no stale-timestamp text behind the indicator.
+    assert!(!rail.contains("Last updated"), "{rail}");
+}
+
+#[test]
+fn home_usage_card_rail_earns_a_percentage_after_ten_seconds() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 4;
+    app.note_session_sync_round(true);
+    app.tick = 4 + super::SYNC_ESCALATION_TICKS;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+
+    assert!(
+        rail.contains("Refreshing 6%"),
+        "a slow round appends its share to the one indicator:\n{rail}"
+    );
+    assert!(!rail.contains("1234/18704"), "{rail}");
+}
+
+#[test]
+fn home_usage_card_shows_one_indicator_across_its_rail_and_body() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    // An import round *and* the card's own first aggregate, both in flight.
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.note_session_sync_round(true);
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::ThirtyDays);
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 160, 45);
+    let card = usage_card_inner_text(&buf);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+
+    // The body names the wait, so the rail steps back to its resting status.
+    assert!(card.contains("⠸ Loading usage..."), "{card}");
+    assert!(
+        !rail.contains('⠸'),
+        "the rail must not spin alongside the body:\n{rail}"
+    );
+    assert!(!rail.contains("Refreshing"), "{rail}");
+    assert_eq!(
+        card.matches('⠸').count(),
+        1,
+        "exactly one spinner inside the card:\n{card}"
+    );
+}
+
+#[test]
+fn home_usage_card_rail_keeps_its_spinner_ascii_in_ascii_icon_mode() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.note_session_sync_round(true);
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+
+    assert!(rail.contains("\\ Refreshing"), "{rail}");
+    assert!(
+        !contains_braille(&rail),
+        "no braille leaks into ascii mode:\n{rail}"
+    );
+}
+
+#[test]
+fn usage_summary_bar_merges_a_manual_refresh_and_a_background_import() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    // Both pipelines live at once: this bar used to animate twice.
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.tick = 1;
+    app.note_session_sync_round(true);
+    app.usage.start_manual_session_refresh();
+    let data = minimal_data(&app.app_type);
+
+    let buf = render_with_size(&app, &data, 120, 40);
+    let summary_row = row_of(&buf, "avg latency").expect("the usage summary bar");
+    let summary = line_at(&buf, summary_row);
+    assert!(summary.contains("⠙ Refreshing · "), "{summary}");
+    assert_eq!(
+        summary.matches("Refreshing").count(),
+        1,
+        "one bar, one indicator:\n{summary}"
+    );
+    assert_eq!(
+        summary.matches('⠙').count(),
+        1,
+        "one bar, one spinner:\n{summary}"
+    );
+    assert!(!summary.contains("importing local usage"), "{summary}");
+    assert!(!summary.contains("1234/18704"), "{summary}");
+
+    // The detail bar merges the same two pipelines.
+    app.route = Route::UsageLogs;
+    let logs_buf = render_with_size(&app, &data, 120, 40);
+    let logs_row = row_of(&logs_buf, "model stats").expect("the usage detail summary bar");
+    let logs = line_at(&logs_buf, logs_row);
+    assert_eq!(logs.matches("Refreshing").count(), 1, "{logs}");
+    assert_eq!(logs.matches('⠙').count(), 1, "{logs}");
+
+    // Idle again: the summary bar carries no indicator at all.
+    let _idle = super::SyncProgressOverride::set(None);
+    let mut idle_app = App::new(Some(AppType::Claude));
+    idle_app.route = Route::Usage;
+    idle_app.focus = Focus::Content;
+    idle_app.tick = 1;
+    idle_app.note_session_sync_round(false);
+    let idle_buf = render_with_size(&idle_app, &data, 120, 40);
+    let idle_row = row_of(&idle_buf, "avg latency").expect("the usage summary bar");
+    let idle = line_at(&idle_buf, idle_row);
+    assert!(!idle.contains("Refreshing"), "{idle}");
+    assert!(!idle.contains('⠙') && !idle.contains('⠋'), "{idle}");
+}
+
+#[test]
+fn usage_summary_bar_spins_for_a_background_import_alone() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((21, 50)));
+
+    // No manual refresh: the import alone still earns the bar's indicator.
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.tick = 4;
+    app.note_session_sync_round(true);
+
+    // One tick short of the threshold: the indicator is there, the number is not.
+    app.tick = 3 + super::SYNC_ESCALATION_TICKS;
+    let early = render_with_size(&app, &minimal_data(&app.app_type), 120, 40);
+    let early_row = row_of(&early, "avg latency").expect("the usage summary bar");
+    let early_summary = line_at(&early, early_row);
+    assert!(early_summary.contains("Refreshing · "), "{early_summary}");
+    assert!(
+        !early_summary.contains('%'),
+        "a round under ten seconds earns no number:\n{early_summary}"
+    );
+
+    // 50 ticks in, the percentage joins the same indicator.
+    app.tick = 4 + super::SYNC_ESCALATION_TICKS;
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 120, 40);
+    let summary_row = row_of(&buf, "avg latency").expect("the usage summary bar");
+    let summary = line_at(&buf, summary_row);
+    assert!(
+        summary.contains("Refreshing 42% · "),
+        "the escalation rides the merged indicator:\n{summary}"
+    );
+    assert_eq!(summary.matches("Refreshing").count(), 1, "{summary}");
+    assert_eq!(summary.matches('%').count(), 1, "{summary}");
+}
+
+#[test]
+fn usage_summary_bar_keeps_its_spinner_ascii_in_ascii_icon_mode() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.tick = 1;
+    app.note_session_sync_round(true);
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 120, 40);
+    let summary_row = row_of(&buf, "avg latency").expect("the usage summary bar");
+    let summary = line_at(&buf, summary_row);
+    assert!(summary.contains("/ Refreshing"), "{summary}");
+    assert!(
+        !contains_braille(&summary),
+        "no braille leaks into ascii mode:\n{summary}"
+    );
+}
+
+#[test]
+fn sessions_scope_line_spins_while_a_scan_is_in_flight() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.tick = 1;
+    app.sessions.loading = true;
+    let data = minimal_data(&app.app_type);
+
+    let buf = render_with_size(&app, &data, 120, 40);
+    let scope_row = row_of(&buf, "Scope").expect("the sessions scope line");
+    let scope = line_at(&buf, scope_row);
+    assert_eq!(
+        scope.matches('⠙').count(),
+        1,
+        "one scope line, one spinner:\n{scope}"
+    );
+    // The scope text already names the scan, so the glyph rides alone.
+    assert!(!scope.contains("Refreshing"), "{scope}");
+
+    // A finished scan drops the indicator entirely.
+    app.sessions.loading = false;
+    app.sessions.loaded_once = true;
+    let done_buf = render_with_size(&app, &data, 120, 40);
+    let done_row = row_of(&done_buf, "Scope").expect("the sessions scope line");
+    let done = line_at(&done_buf, done_row);
+    assert!(!done.contains('⠙'), "{done}");
+}
+
+#[test]
+fn sessions_scope_line_keeps_its_spinner_ascii_in_ascii_icon_mode() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.tick = 1;
+    app.sessions.loading = true;
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 120, 40);
+    let scope_row = row_of(&buf, "Scope").expect("the sessions scope line");
+    let scope = line_at(&buf, scope_row);
+    assert!(scope.contains('/'), "{scope}");
+    assert!(
+        !contains_braille(&scope),
+        "no braille leaks into ascii mode:\n{scope}"
+    );
+}
+
+#[test]
+fn pagination_footer_busy_state_uses_the_shared_spinner_glyph() {
+    use crate::cli::tui::input::{ScrollDirection, WheelGestureId};
+
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Recent;
+    app.tick = 2;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.logs_total = 205;
+    data.usage.recent_logs = (0..100)
+        .map(|index| UsageLogRow {
+            request_id: format!("p0-{index}"),
+            model: format!("model-{index}"),
+            created_at: 1_000 - index,
+            cursor_rowid: index + 1,
+            ..UsageLogRow::default()
+        })
+        .collect();
+    app.on_usage_logs_wheel(
+        ScrollDirection::Down,
+        10_000,
+        WheelGestureId::from_raw(1),
+        &data,
+    );
+    assert!(app.usage.log_pager.start_request(
+        1,
+        9,
+        crate::cli::tui::data::UsageLogPageDirection::Older,
+    ));
+
+    let buf = render_with_size(&app, &data, 180, 40);
+    let row = row_of(&buf, "Loading page 2").expect("the paging footer");
+    let footer = line_at(&buf, row);
+    assert_eq!(
+        footer.matches('⠹').count(),
+        1,
+        "one footer, one spinner:\n{footer}"
+    );
+    // A footer cell is too tight for a second label next to "Loading page 2".
+    assert!(!footer.contains("Refreshing"), "{footer}");
+    // The range label still shares the rail with the busy action.
+    assert!(footer.contains("Page 1"), "{footer}");
+}
+
+#[test]
+fn pagination_footer_keeps_its_spinner_ascii_in_ascii_icon_mode() {
+    use crate::cli::tui::input::{ScrollDirection, WheelGestureId};
+
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Recent;
+    app.tick = 2;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.logs_total = 205;
+    data.usage.recent_logs = (0..100)
+        .map(|index| UsageLogRow {
+            request_id: format!("p0-{index}"),
+            model: format!("model-{index}"),
+            created_at: 1_000 - index,
+            cursor_rowid: index + 1,
+            ..UsageLogRow::default()
+        })
+        .collect();
+    app.on_usage_logs_wheel(
+        ScrollDirection::Down,
+        10_000,
+        WheelGestureId::from_raw(1),
+        &data,
+    );
+    assert!(app.usage.log_pager.start_request(
+        1,
+        9,
+        crate::cli::tui::data::UsageLogPageDirection::Older,
+    ));
+
+    let buf = render_with_size(&app, &data, 180, 40);
+    let row = row_of(&buf, "Loading page 2").expect("the paging footer");
+    let footer = line_at(&buf, row);
+    assert!(footer.contains("- Loading page 2"), "{footer}");
+    assert!(
+        !contains_braille(&footer),
+        "no braille leaks into ascii mode:\n{footer}"
+    );
+}
+
+#[test]
+fn home_usage_card_rail_falls_back_to_the_glyph_when_the_label_will_not_fit() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.note_session_sync_round(true);
+    let data = minimal_data(&app.app_type);
+
+    // 52 columns leave the rail too little room for " ⠸ Refreshing ": it keeps
+    // the glyph rather than dropping the signal.
+    let narrow = render_with_size(&app, &data, 52, 45);
+    let narrow_row = row_of(&narrow, &usage_card_title()).expect("usage card title row");
+    let narrow_rail = line_at(&narrow, narrow_row);
+    assert!(narrow_rail.contains('⠸'), "{narrow_rail}");
+    assert!(!narrow_rail.contains("Refreshing"), "{narrow_rail}");
+
+    // Eight more columns and the label comes back.
+    let wide = render_with_size(&app, &data, 60, 45);
+    let wide_row = row_of(&wide, &usage_card_title()).expect("usage card title row");
+    let wide_rail = line_at(&wide, wide_row);
+    assert!(wide_rail.contains("⠸ Refreshing"), "{wide_rail}");
 }

@@ -72,6 +72,8 @@ impl App {
             proxy_visual_transition: None,
             quota_auto_target_key: None,
             quota_last_auto_tick: None,
+            usage_last_auto_sync_tick: None,
+            usage_sync_round_started_tick: None,
             prompt_import_prompted_apps: HashSet::new(),
             common_config_notice_confirmed: true,
             usage_query_notice_confirmed: true,
@@ -319,6 +321,28 @@ impl App {
             if self.tick.saturating_sub(transition.started_tick) >= PROXY_HERO_TRANSITION_TICKS {
                 self.proxy_visual_transition = None;
             }
+        }
+    }
+
+    /// Remember when the current session-usage sync round started, so a refresh
+    /// indicator can tell a two-second incremental sync from a multi-minute
+    /// first import.
+    /// The main loop feeds this the services-side snapshot's liveness once per
+    /// tick; the round's start tick is the first tick it was seen alive.
+    ///
+    /// KNOWN LIMIT: liveness is sampled once per tick, so two back-to-back
+    /// rounds that start and finish inside the same tick read as one long
+    /// round, and the second can inherit the first's escalation percentage for
+    /// a frame. Harmless — the number only ever appears after ten seconds of
+    /// continuous work — and the alternative is a round id the services side
+    /// does not publish.
+    pub(crate) fn note_session_sync_round(&mut self, active: bool) {
+        if !active {
+            self.usage_sync_round_started_tick = None;
+            return;
+        }
+        if self.usage_sync_round_started_tick.is_none() {
+            self.usage_sync_round_started_tick = Some(self.tick);
         }
     }
 
