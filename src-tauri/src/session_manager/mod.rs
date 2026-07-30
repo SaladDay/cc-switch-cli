@@ -174,82 +174,9 @@ pub(crate) fn append_utf8_bounded(output: &mut String, input: &str, max_bytes: u
     true
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct DeleteSessionRequest {
-    pub provider_id: String,
-    pub session_id: String,
-    pub source_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct DeleteSessionOutcome {
-    pub provider_id: String,
-    pub session_id: String,
-    pub source_path: String,
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[allow(dead_code)]
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let (r1, r2, r3, r4, r5, r6) = std::thread::scope(|s| {
-        let h1 = s.spawn(codex::scan_sessions);
-        let h2 = s.spawn(claude::scan_sessions);
-        let h3 = s.spawn(opencode::scan_sessions);
-        let h4 = s.spawn(openclaw::scan_sessions);
-        let h5 = s.spawn(gemini::scan_sessions);
-        let h6 = s.spawn(hermes::scan_sessions);
-        (
-            h1.join().unwrap_or_default(),
-            h2.join().unwrap_or_default(),
-            h3.join().unwrap_or_default(),
-            h4.join().unwrap_or_default(),
-            h5.join().unwrap_or_default(),
-            h6.join().unwrap_or_default(),
-        )
-    });
-
-    let mut sessions = Vec::new();
-    sessions.extend(r1);
-    sessions.extend(r2);
-    sessions.extend(r3);
-    sessions.extend(r4);
-    sessions.extend(r5);
-    sessions.extend(r6);
-
-    sort_by_recent(&mut sessions);
-    sessions
-}
-
-pub fn scan_sessions_for_provider(provider_id: &str) -> Vec<SessionMeta> {
-    let mut sessions = scan_sessions_unordered_for_provider(provider_id);
-
-    sort_by_recent(&mut sessions);
-    sessions
-}
-
-/// Provider scan without an intermediate sort. The all-provider TUI worker
-/// moves each provider Vec into one merged Vec and sorts that authoritative
-/// result exactly once.
-pub(crate) fn scan_sessions_unordered_for_provider(provider_id: &str) -> Vec<SessionMeta> {
-    match provider_id {
-        "codex" => codex::scan_sessions(),
-        "claude" => claude::scan_sessions(),
-        "opencode" => opencode::scan_sessions(),
-        "openclaw" => openclaw::scan_sessions(),
-        "gemini" => gemini::scan_sessions(),
-        "hermes" => hermes::scan_sessions(),
-        _ => Vec::new(),
-    }
-}
-
 /// Sort sessions most-recent-first by last-active (falling back to created) time.
-/// Shared by every scan entry point so the file and cache paths order identically.
+/// Retained for bounded legacy-snapshot compatibility; current manifests use
+/// their own deterministic row ordering.
 pub(crate) fn sort_by_recent(sessions: &mut [SessionMeta]) {
     sessions.sort_by(|a, b| {
         let a_ts = a.last_active_at.or(a.created_at).unwrap_or(0);
@@ -258,93 +185,25 @@ pub(crate) fn sort_by_recent(sessions: &mut [SessionMeta]) {
     });
 }
 
-/// The file-parse-backed providers, in the same order the full scan fans them out.
+/// Providers in the stable order used by the "all providers" manifest stream.
 /// SQLite-only sources (opencode.db / hermes state.db) are queried inside their
 /// provider module and are intentionally not covered by the file cache.
-/// pub(crate)：TUI worker 逐 provider 扫描并渐进回传时复用同一顺序。
 pub(crate) const CACHED_PROVIDERS: [&str; 6] = [
     "codex", "claude", "opencode", "openclaw", "gemini", "hermes",
 ];
 
-/// One logical Sessions page plus a look-ahead row. The stale first paint is
-/// deliberately bounded by this value; the background revalidation still
-/// produces the complete authoritative list.
+/// Legacy snapshot row cap (one historical 100-row page plus look-ahead).
+/// Current manifests page independently; the value also bounds compatibility
+/// reads and the UI's fallback identity lookup for a provisional first page.
 pub(crate) const SCAN_CACHE_FIRST_PAINT_LIMIT: usize = 101;
 
-/// Cache-aware scan of a single provider (sorted like `scan_sessions_for_provider`).
-/// The "all providers" view iterates [`CACHED_PROVIDERS`] with this function in
-/// the TUI session worker, emitting a progressive partial after each provider.
-#[allow(dead_code)]
-pub fn scan_sessions_cached_for_provider(
-    store: &ScanCacheStore,
-    provider_id: &str,
-    force: bool,
-) -> Vec<SessionMeta> {
-    let mut sessions = provider_scan_cached(store, provider_id, force);
-    sort_by_recent(&mut sessions);
-    sessions
-}
-
-/// Scan one provider while streaming each available session back to the
-/// detached TUI worker. File-backed providers invoke the callback during cache
-/// reconciliation/parsing, before their complete Vec exists. Hybrid SQLite
-/// providers keep their query on the same worker and stream its rows before the
-/// final authoritative merge/sort.
-pub(crate) fn scan_sessions_progressive_for_provider(
-    store: Option<&ScanCacheStore>,
-    provider_id: &str,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    match provider_id {
-        "codex" => codex::scan_sessions_progressive(store, force, on_session),
-        "claude" => claude::scan_sessions_progressive(store, force, on_session),
-        "opencode" => opencode::scan_sessions_progressive(store, force, on_session),
-        "openclaw" => openclaw::scan_sessions_progressive(store, force, on_session),
-        "gemini" => gemini::scan_sessions_progressive(store, force, on_session),
-        "hermes" => hermes::scan_sessions_progressive(store, force, on_session),
-        _ => Vec::new(),
-    }
-}
-
-/// Cancellation-aware provider scan for deep search. A cancelled scan returns
-/// `None`; its partial rows are never treated as a complete search corpus.
-pub(crate) fn scan_sessions_progressive_for_provider_cancellable(
-    store: Option<&ScanCacheStore>,
-    provider_id: &str,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    match provider_id {
-        "codex" => {
-            codex::scan_sessions_progressive_cancellable(store, force, on_session, is_cancelled)
-        }
-        "claude" => {
-            claude::scan_sessions_progressive_cancellable(store, force, on_session, is_cancelled)
-        }
-        "opencode" => {
-            opencode::scan_sessions_progressive_cancellable(store, force, on_session, is_cancelled)
-        }
-        "openclaw" => {
-            openclaw::scan_sessions_progressive_cancellable(store, force, on_session, is_cancelled)
-        }
-        "gemini" => {
-            gemini::scan_sessions_progressive_cancellable(store, force, on_session, is_cancelled)
-        }
-        "hermes" => {
-            hermes::scan_sessions_progressive_cancellable(store, force, on_session, is_cancelled)
-        }
-        _ => Some(Vec::new()),
-    }
-}
-
 /// Bounded, owned-row provider stream for page-manifest construction. Unlike
-/// the compatibility scan APIs above, this path never returns a provider-sized
-/// `Vec`, never collects every target before parsing, and never loads every
-/// sidecar row into a `HashMap`. The optional identity enricher is registered
-/// only after base rows have reached the provisional sink; it applies bounded
-/// provider metadata while the manifest consumes its identity-ordered run.
+/// the retired compatibility scan APIs, this path never returns a
+/// provider-sized `Vec`, never collects every target before parsing, and never
+/// loads every sidecar row into a `HashMap`. The optional identity enricher is
+/// registered only after base rows have reached the provisional sink; it applies
+/// bounded provider metadata while the manifest consumes its identity-ordered
+/// run.
 pub(crate) fn stream_sessions_for_provider_cancellable(
     store: Option<&ScanCacheStore>,
     provider_id: &str,
@@ -447,29 +306,6 @@ pub(crate) fn build_fresh_session_manifest(
         .map_err(|error| format!("failed to publish isolated session page snapshot: {error}"))
 }
 
-fn provider_scan_cached(
-    store: &ScanCacheStore,
-    provider_id: &str,
-    force: bool,
-) -> Vec<SessionMeta> {
-    match provider_id {
-        "codex" => codex::scan_sessions_cached(store, force),
-        "claude" => claude::scan_sessions_cached(store, force),
-        "opencode" => opencode::scan_sessions_cached(store, force),
-        "openclaw" => openclaw::scan_sessions_cached(store, force),
-        "gemini" => gemini::scan_sessions_cached(store, force),
-        "hermes" => hermes::scan_sessions_cached(store, force),
-        _ => Vec::new(),
-    }
-}
-
-/// Build the stale-while-revalidate first paint from the bounded, schema-free
-/// recency snapshot written by the previous authoritative scan. This never
-/// queries or sorts the full SQLite sidecar table.
-pub fn load_scan_cache_snapshot(provider_id: &str) -> Vec<SessionMeta> {
-    recent_snapshot::load(provider_id)
-}
-
 /// A single search hit (matched message snippet inside a session).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -488,16 +324,7 @@ pub struct SessionSearchHit {
     pub snippets: Vec<SearchSnippet>,
 }
 
-/// Search the full conversation content of every session (across all providers)
-/// for the given query. Returns one `SessionSearchHit` per session that contains
-/// at least one match. This is a live, full-scan search — no index, always fresh.
-#[allow(dead_code)]
-pub fn search_sessions(query: &str) -> Vec<SessionSearchHit> {
-    let sessions = scan_sessions();
-    search_sessions_in(&sessions, query)
-}
-
-/// Same as `search_sessions`, but operates on an already-loaded session list.
+/// Search the full conversation content of an already-loaded session list.
 pub fn search_sessions_in(sessions: &[SessionMeta], query: &str) -> Vec<SessionSearchHit> {
     search_sessions_in_cancellable(sessions, query, &|| false).unwrap_or_default()
 }
@@ -696,17 +523,6 @@ pub(crate) fn purge_deleted_session_from_local_caches(
     purged
 }
 
-#[allow(dead_code)]
-pub fn delete_sessions(requests: &[DeleteSessionRequest]) -> Vec<DeleteSessionOutcome> {
-    collect_delete_session_outcomes(requests, |request| {
-        delete_session(
-            &request.provider_id,
-            &request.session_id,
-            &request.source_path,
-        )
-    })
-}
-
 fn delete_session_with_root(
     provider_id: &str,
     session_id: &str,
@@ -755,42 +571,6 @@ fn canonicalize_existing_path(path: &Path, label: &str) -> Result<PathBuf, Strin
 
     path.canonicalize()
         .map_err(|e| format!("Failed to resolve {label} {}: {e}", path.display()))
-}
-
-#[allow(dead_code)]
-fn collect_delete_session_outcomes<F>(
-    requests: &[DeleteSessionRequest],
-    mut deleter: F,
-) -> Vec<DeleteSessionOutcome>
-where
-    F: FnMut(&DeleteSessionRequest) -> Result<bool, String>,
-{
-    requests
-        .iter()
-        .map(|request| match deleter(request) {
-            Ok(true) => DeleteSessionOutcome {
-                provider_id: request.provider_id.clone(),
-                session_id: request.session_id.clone(),
-                source_path: request.source_path.clone(),
-                success: true,
-                error: None,
-            },
-            Ok(false) => DeleteSessionOutcome {
-                provider_id: request.provider_id.clone(),
-                session_id: request.session_id.clone(),
-                source_path: request.source_path.clone(),
-                success: false,
-                error: Some("Session was not deleted".to_string()),
-            },
-            Err(error) => DeleteSessionOutcome {
-                provider_id: request.provider_id.clone(),
-                session_id: request.session_id.clone(),
-                source_path: request.source_path.clone(),
-                success: false,
-                error: Some(error),
-            },
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -918,45 +698,5 @@ mod tests {
             .expect_err("expected missing source path to fail");
 
         assert!(err.contains("session source not found"));
-    }
-
-    #[test]
-    fn batch_delete_collects_successes_and_failures_in_order() {
-        let requests = vec![
-            DeleteSessionRequest {
-                provider_id: "codex".to_string(),
-                session_id: "s1".to_string(),
-                source_path: "/tmp/s1".to_string(),
-            },
-            DeleteSessionRequest {
-                provider_id: "claude".to_string(),
-                session_id: "s2".to_string(),
-                source_path: "/tmp/s2".to_string(),
-            },
-            DeleteSessionRequest {
-                provider_id: "gemini".to_string(),
-                session_id: "s3".to_string(),
-                source_path: "/tmp/s3".to_string(),
-            },
-        ];
-
-        let outcomes = collect_delete_session_outcomes(&requests, |request| {
-            match request.session_id.as_str() {
-                "s1" => Ok(true),
-                "s2" => Err("boom".to_string()),
-                _ => Ok(false),
-            }
-        });
-
-        assert_eq!(outcomes.len(), 3);
-        assert!(outcomes[0].success);
-        assert_eq!(outcomes[0].error, None);
-        assert!(!outcomes[1].success);
-        assert_eq!(outcomes[1].error.as_deref(), Some("boom"));
-        assert!(!outcomes[2].success);
-        assert_eq!(
-            outcomes[2].error.as_deref(),
-            Some("Session was not deleted")
-        );
     }
 }

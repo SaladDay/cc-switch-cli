@@ -1168,15 +1168,6 @@ pub struct SessionsState {
     /// entry scan on every tick. Explicit refresh still calls `start_scan`
     /// directly, and a different scope naturally records a new attempt.
     scan_attempted_scope: Option<String>,
-    /// Whether the active scan may replace the visible rows with bounded
-    /// progressive previews. A manual refresh keeps an already-authoritative
-    /// list on screen and ignores previews, avoiding any O(N) retain/sort on the
-    /// UI thread.
-    scan_accepts_previews: bool,
-    /// True only when `rows` came from an accepted successful `ScanFinished` or
-    /// an in-memory authoritative restore. Cached snapshots, progressive rows,
-    /// and failed partial scans must never enter the inactive scope cache.
-    rows_authoritative: bool,
     pub detail_key: Option<String>,
     pub messages_key: Option<String>,
     pub messages: Vec<crate::session_manager::SessionMessage>,
@@ -1200,8 +1191,8 @@ pub struct SessionsState {
     pub delete_seq: u64,
     pub delete_active: HashSet<u64>,
     /// UI 侧 tombstone：在途扫描期间删除成功的会话键（`session_key`），用于挡住
-    /// 删除前读到旧列表的 partial/finished 把已删会话放回 UI。在 `finish_scan`
-    /// 终态清空（见其时序注释）。键与删除流程一致（provider:session:source_path）。
+    /// 删除前读到的 provisional/manifest page 把已删会话放回 UI。仅在对应的
+    /// purge manifest 安装后清空。键与删除流程一致（provider:session:source_path）。
     pub scan_tombstones: HashSet<String>,
     /// Exact delete revision that owns each manifest-purge tombstone. The
     /// visible set above remains the hot-path filter; this map prevents a late
@@ -1278,8 +1269,6 @@ impl Default for SessionsState {
             scan_seq: 0,
             scan_active: None,
             scan_attempted_scope: None,
-            scan_accepts_previews: false,
-            rows_authoritative: false,
             detail_key: None,
             messages_key: None,
             messages: Vec::new(),
@@ -1309,21 +1298,6 @@ impl Default for SessionsState {
             deep_search_pending: None,
         }
     }
-}
-
-/// Enforce the worker/UI preview contract without ever dropping an accidentally
-/// huge tail on the UI thread. Only the fixed prefix is cloned; ownership and
-/// destruction of the original Vec move to a background thread.
-fn bounded_session_preview(
-    rows: Vec<crate::session_manager::SessionMeta>,
-) -> Vec<crate::session_manager::SessionMeta> {
-    let limit = crate::session_manager::SCAN_CACHE_FIRST_PAINT_LIMIT;
-    if rows.len() <= limit {
-        return rows;
-    }
-    let preview = rows.iter().take(limit).cloned().collect();
-    retire_session_rows(rows);
-    preview
 }
 
 /// Releasing hundreds of thousands of String-heavy rows can itself stall the
@@ -3020,7 +2994,6 @@ impl SessionsState {
             } else if self.scan_active.is_none() {
                 self.loading = false;
             }
-            self.rows_authoritative = true;
             self.invalidated_tombstone_scopes.remove(scope);
         }
         applied
@@ -3360,7 +3333,6 @@ impl SessionsState {
             self.loading = false;
         }
         self.loaded_once = true;
-        self.rows_authoritative = true;
         self.last_error = None;
         true
     }
@@ -3422,6 +3394,7 @@ impl SessionsState {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn has_query_tombstones_to_clear(&self) -> bool {
         !self.query_tombstones_to_clear.is_empty()
     }
@@ -3561,7 +3534,6 @@ impl SessionsState {
             self.rows_revision = self.rows_revision.wrapping_add(1);
             self.selected_idx = 0;
             self.loaded_once = false;
-            self.rows_authoritative = false;
             self.pending_manifest = None;
             self.base_manifest = None;
             self.materialized_view = None;
@@ -3590,7 +3562,6 @@ impl SessionsState {
             provider_id,
             self.tombstones_for_scope(self.provider_id.as_deref().unwrap_or_default()),
         ));
-        self.scan_accepts_previews = false;
         self.purge_refresh_required = false;
         self.loading = true;
         self.last_error = None;
@@ -3611,7 +3582,6 @@ impl SessionsState {
                 self.scan_tombstones_to_clear = None;
             }
             self.scan_active = None;
-            self.scan_accepts_previews = false;
             self.loading = false;
             self.loaded_once = true;
             // Provisional rows are not a durable query source. Preserve the
@@ -3628,10 +3598,10 @@ impl SessionsState {
     }
 
     /// Drop rows tombstoned by an in-flight delete (see `scan_tombstones`). A scan
-    /// thread may have read a session file *before* the user deleted it, so the
-    /// partial/finished it later delivers still carries that session; filtering
-    /// here keeps the deleted row from resurrecting in the UI. No-op (early
-    /// return) when there are no tombstones, which is the common case.
+    /// thread may have read a session file *before* the user deleted it, so a
+    /// provisional or manifest page delivered later can still carry that
+    /// session; filtering here keeps the deleted row from resurrecting in the
+    /// UI. No-op (early return) when there are no tombstones, the common case.
     fn drop_tombstoned_rows(&self, rows: &mut Vec<crate::session_manager::SessionMeta>) {
         let scope = self.provider_id.as_deref().unwrap_or_default();
         if self.invalidated_tombstone_scopes.contains(scope) {
@@ -3661,126 +3631,6 @@ impl SessionsState {
             // Legacy unit fixtures insert directly into `scan_tombstones`;
             // those entries intentionally apply to every scope.
             .unwrap_or_else(|| self.scan_tombstones.contains(&key))
-    }
-
-    pub(crate) fn finish_scan(
-        &mut self,
-        request_id: u64,
-        mut rows: Vec<crate::session_manager::SessionMeta>,
-    ) -> bool {
-        if self.scan_active != Some(request_id) {
-            return false;
-        }
-        self.drop_tombstoned_rows(&mut rows);
-        let scope = self.provider_id.clone().unwrap_or_default();
-        let safe_tombstones = self.take_scan_tombstones_for_manifest(request_id, &scope);
-        // Tombstones are cleared by the purge publication, never merely by a
-        // scan result that may have raced the delete barrier.
-        self.scan_active = None;
-        self.scan_accepts_previews = false;
-        self.loading = false;
-        self.loaded_once = true;
-        self.rows_authoritative = true;
-        self.last_error = None;
-        self.replace_rows(rows);
-        self.clear_tombstones_for_scope(&scope, safe_tombstones);
-        // The message handler reconciles detail/selection against its captured
-        // structured identity. Keeping that check there avoids a second O(N)
-        // pass through a million-row result on the UI thread.
-        true
-    }
-
-    /// Apply the stale-while-revalidate first paint: the list built from the
-    /// bounded recency snapshot, delivered before the revalidating scan finishes. The
-    /// rows become interactive immediately, but `loading`/`scan_active` stay set
-    /// so the header keeps showing the refresh indicator and the eventual
-    /// `finish_scan` (same request id) still applies. The in-memory scan cache is
-    /// deliberately not written here — only the final, complete list is cached.
-    /// Returns true when the snapshot was applied (still the active scan).
-    pub(crate) fn apply_cached_snapshot(
-        &mut self,
-        request_id: u64,
-        mut rows: Vec<crate::session_manager::SessionMeta>,
-    ) -> bool {
-        if self.scan_active != Some(request_id) {
-            return false;
-        }
-        if !self.scan_accepts_previews {
-            return false;
-        }
-        rows = bounded_session_preview(rows);
-        self.drop_tombstoned_rows(&mut rows);
-        self.loaded_once = true;
-        self.replace_rows(rows);
-        true
-    }
-
-    /// Add the first row discovered by a still-running provider only when the
-    /// current bounded preview has no row for that provider. This preserves a
-    /// 101-row JSON snapshot (and its selection/detail identity) instead of
-    /// collapsing it to one arbitrary discovery-order row. `ScanPartial` later
-    /// replaces the provider with its true recency top-K.
-    pub(crate) fn apply_progressive_preview(
-        &mut self,
-        request_id: u64,
-        provider_id: &str,
-        row: crate::session_manager::SessionMeta,
-    ) -> bool {
-        if self.scan_active != Some(request_id) || !self.scan_accepts_previews {
-            return false;
-        }
-        if self
-            .rows
-            .iter()
-            .any(|existing| existing.provider_id == provider_id)
-        {
-            return false;
-        }
-        if self.row_is_tombstoned_for_scope(&row, self.provider_id.as_deref().unwrap_or_default()) {
-            return false;
-        }
-
-        self.loaded_once = true;
-        self.rows.push(row);
-        crate::session_manager::sort_by_recent(&mut self.rows);
-        self.rows
-            .truncate(crate::session_manager::SCAN_CACHE_FIRST_PAINT_LIMIT);
-        self.rows_revision = self.rows_revision.wrapping_add(1);
-        true
-    }
-
-    /// Progressive fill during a revalidating "all providers" scan: replace one
-    /// provider's rows with its freshly-scanned list while the other providers
-    /// keep their current rows (cached snapshot or earlier partials). Keeps the
-    /// refresh indicator on until `finish_scan` (same request id) lands.
-    pub(crate) fn apply_partial_scan(
-        &mut self,
-        request_id: u64,
-        provider_id: &str,
-        mut rows: Vec<crate::session_manager::SessionMeta>,
-    ) -> bool {
-        if self.scan_active != Some(request_id) {
-            return false;
-        }
-        if !self.scan_accepts_previews {
-            return false;
-        }
-        rows = bounded_session_preview(rows);
-        self.drop_tombstoned_rows(&mut rows);
-        self.loaded_once = true;
-        // Both sides are bounded before any retain/extend/sort executes. This
-        // is a defence-in-depth invariant: even a future worker regression that
-        // sends a full provider Vec cannot move O(N) work onto the UI thread.
-        if self.rows.len() > crate::session_manager::SCAN_CACHE_FIRST_PAINT_LIMIT {
-            return false;
-        }
-        self.rows.retain(|row| row.provider_id != provider_id);
-        self.rows.extend(rows);
-        crate::session_manager::sort_by_recent(&mut self.rows);
-        self.rows
-            .truncate(crate::session_manager::SCAN_CACHE_FIRST_PAINT_LIMIT);
-        self.rows_revision = self.rows_revision.wrapping_add(1);
-        true
     }
 
     fn replace_rows(&mut self, rows: Vec<crate::session_manager::SessionMeta>) {
@@ -5181,7 +5031,6 @@ mod sessions_state_tests {
         assert!(state.pending_manifest.is_none());
         assert!(state.scan_active.is_none());
         assert!(!state.loading);
-        assert!(state.rows_authoritative);
 
         let stale_page = base_reader.load_page(0).expect("stale located page");
         assert!(!state.finish_manifest_reconcile(
@@ -6119,84 +5968,6 @@ mod sessions_state_tests {
         assert_eq!(state.logical_total_messages(), 0);
     }
 
-    /// 渐进回传：partial 只替换对应 provider 的行、保留其他 provider 的行，
-    /// 结果按最近活跃排序；stale request id 被忽略。
-    #[test]
-    fn apply_partial_scan_replaces_only_that_provider() {
-        let mut state = SessionsState::default();
-        let request_id = state.start_scan("all".to_string());
-        state.scan_accepts_previews = true;
-        state.rows = vec![meta("claude", "c-old", 10), meta("codex", "x-1", 30)];
-
-        assert!(state.apply_partial_scan(request_id, "claude", vec![meta("claude", "c-new", 20)],));
-        let ids: Vec<&str> = state.rows.iter().map(|r| r.session_id.as_str()).collect();
-        assert_eq!(ids, vec!["x-1", "c-new"]);
-        assert!(state.loading, "refresh indicator must stay on");
-
-        // stale request id：不应用
-        assert!(!state.apply_partial_scan(request_id + 1, "codex", vec![]));
-        assert_eq!(state.rows.len(), 2);
-    }
-
-    /// A scan completion is not a delete barrier: the tombstone remains until
-    /// the separately repacked manifest is installed.
-    #[test]
-    fn scan_tombstone_blocks_deleted_session_from_inflight_scan() {
-        let mut state = SessionsState::default();
-        let request_id = state.start_scan("all".to_string());
-        state.scan_accepts_previews = true;
-        let a = meta("claude", "a", 10);
-        let b = meta("codex", "b", 20);
-        state.rows = vec![a.clone(), b.clone()];
-
-        // 模拟"在途扫描期间删除 A"：从 rows 移除并登记 tombstone。键与删除流程
-        // 一致（session_key = provider:session:source_path）。
-        let key_a = crate::cli::tui::app::session_key(&a);
-        state.rows.retain(|row| row.session_id != "a");
-        state.scan_tombstones.insert(key_a.clone());
-
-        // 删除前读到旧列表的 partial 把 A 带回 —— 必须被过滤掉。
-        assert!(state.apply_partial_scan(request_id, "claude", vec![a.clone()]));
-        assert!(
-            state.rows.iter().all(|row| row.session_id != "a"),
-            "partial 不得复活已删会话"
-        );
-
-        // 终态同样带回 A（扫描线程在删除前就读完文件）—— 仍过滤；只有安全
-        // manifest 安装后才能释放 tombstone。
-        assert!(state.finish_scan(request_id, vec![a.clone(), b.clone()]));
-        assert!(
-            state.rows.iter().all(|row| row.session_id != "a"),
-            "finish_scan 不得复活已删会话"
-        );
-        assert!(state.scan_tombstones.contains(&key_a));
-
-        // 尚未安装安全 manifest 前，即使下一轮结果带回同 key 也继续过滤。
-        let request_id2 = state.start_scan("all".to_string());
-        assert!(state.finish_scan(request_id2, vec![a.clone(), b.clone()]));
-        assert!(state.rows.iter().all(|row| row.session_id != "a"));
-    }
-
-    /// A failed scan must not clear a delete tombstone: its input may predate
-    /// the deletion and it proves nothing about manifest repacking.
-    #[test]
-    fn fail_scan_preserves_delete_tombstones() {
-        let mut state = SessionsState::default();
-        let request_id = state.start_scan("all".to_string());
-        let a = meta("claude", "a", 10);
-        state
-            .scan_tombstones
-            .insert(crate::cli::tui::app::session_key(&a));
-
-        state.fail_scan(request_id, "boom".to_string());
-        assert!(!state.scan_tombstones.is_empty());
-
-        // 失败后下一轮结果带回同 key 时仍受 tombstone 保护。
-        let request_id2 = state.start_scan("all".to_string());
-        assert!(state.finish_scan(request_id2, vec![a.clone()]));
-        assert!(state.rows.iter().all(|row| row.session_id != "a"));
-    }
-
     #[test]
     fn failed_scan_with_only_provisional_rows_keeps_terminal_error() {
         let mut state = SessionsState::default();
@@ -6214,127 +5985,6 @@ mod sessions_state_tests {
         assert_eq!(state.rows.len(), 1);
         assert!(state.page_token().is_none());
         assert_eq!(state.last_error.as_deref(), Some("manifest publish failed"));
-    }
-
-    /// 秒开快照同样按 tombstone 过滤：删除成功后即使 stale 快照带回已删会话，也
-    /// 不渲染。
-    #[test]
-    fn scan_tombstone_filters_cached_snapshot() {
-        let mut state = SessionsState::default();
-        let request_id = state.start_scan("all".to_string());
-        state.scan_accepts_previews = true;
-        let a = meta("claude", "a", 10);
-        let b = meta("codex", "b", 20);
-        state
-            .scan_tombstones
-            .insert(crate::cli::tui::app::session_key(&a));
-
-        assert!(state.apply_cached_snapshot(request_id, vec![a, b]));
-        let ids: Vec<&str> = state.rows.iter().map(|r| r.session_id.as_str()).collect();
-        assert_eq!(ids, vec!["b"], "快照应过滤掉 tombstoned 会话");
-    }
-
-    #[test]
-    fn authoritative_finish_replaces_bounded_partials() {
-        let mut state = SessionsState::default();
-        let request_id = state.start_scan("all".to_string());
-        state.scan_accepts_previews = true;
-        assert!(state.apply_partial_scan(request_id, "claude", vec![meta("claude", "a", 10)]));
-        assert!(state.apply_partial_scan(request_id, "codex", vec![meta("codex", "b", 20)]));
-
-        assert!(state.finish_scan(
-            request_id,
-            vec![meta("codex", "b", 20), meta("claude", "a", 10)]
-        ));
-
-        let ids: Vec<&str> = state
-            .rows
-            .iter()
-            .map(|row| row.session_id.as_str())
-            .collect();
-        assert_eq!(ids, vec!["b", "a"]);
-        assert!(!state.loading);
-        assert!(state.loaded_once);
-        assert!(state.scan_active.is_none());
-    }
-
-    #[test]
-    fn partial_scan_hard_limits_accidentally_unbounded_worker_input() {
-        let mut state = SessionsState::default();
-        let request_id = state.start_scan("all".to_string());
-        state.scan_accepts_previews = true;
-        let rows = (0..1_000)
-            .map(|index| meta("claude", &format!("s-{index}"), index))
-            .collect();
-
-        assert!(state.apply_partial_scan(request_id, "claude", rows));
-
-        assert_eq!(
-            state.rows.len(),
-            crate::session_manager::SCAN_CACHE_FIRST_PAINT_LIMIT
-        );
-    }
-
-    #[test]
-    fn early_progress_does_not_collapse_existing_provider_snapshot() {
-        let mut state = SessionsState::default();
-        let request_id = state.start_scan("all".to_string());
-        state.scan_accepts_previews = true;
-        let cached: Vec<_> = (0..crate::session_manager::SCAN_CACHE_FIRST_PAINT_LIMIT)
-            .map(|index| meta("claude", &format!("cached-{index}"), index as i64))
-            .collect();
-        assert!(state.apply_cached_snapshot(request_id, cached));
-
-        assert!(!state.apply_progressive_preview(
-            request_id,
-            "claude",
-            meta("claude", "arbitrary-first", 9_999)
-        ));
-
-        assert_eq!(
-            state.rows.len(),
-            crate::session_manager::SCAN_CACHE_FIRST_PAINT_LIMIT
-        );
-        assert!(state
-            .rows
-            .iter()
-            .all(|row| row.session_id != "arbitrary-first"));
-    }
-
-    #[test]
-    fn early_progress_adds_first_row_for_missing_provider_only() {
-        let mut state = SessionsState::default();
-        let request_id = state.start_scan("all".to_string());
-        state.scan_accepts_previews = true;
-
-        assert!(state.apply_progressive_preview(request_id, "claude", meta("claude", "first", 1)));
-        assert!(!state.apply_progressive_preview(
-            request_id,
-            "claude",
-            meta("claude", "second", 2)
-        ));
-        assert_eq!(state.rows.len(), 1);
-        assert_eq!(state.rows[0].session_id, "first");
-    }
-
-    #[test]
-    fn refresh_of_authoritative_rows_ignores_progressive_previews() {
-        let mut state = SessionsState::default();
-        let first = state.start_scan("all".to_string());
-        let authoritative = (0..200)
-            .map(|index| meta("claude", &format!("old-{index}"), index))
-            .collect();
-        assert!(state.finish_scan(first, authoritative));
-
-        let refresh = state.start_scan("all".to_string());
-        assert!(!state.apply_partial_scan(
-            refresh,
-            "claude",
-            vec![meta("claude", "preview", 9_999)]
-        ));
-
-        assert_eq!(state.rows.len(), 200);
-        assert!(state.rows.iter().all(|row| row.session_id != "preview"));
     }
 
     #[test]

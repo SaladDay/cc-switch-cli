@@ -18,116 +18,6 @@ use super::utils::{
 
 const PROVIDER_ID: &str = "gemini";
 
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let gemini_dir = crate::gemini_config::get_gemini_dir();
-    let tmp_dir = gemini_dir.join("tmp");
-    if !tmp_dir.exists() {
-        return Vec::new();
-    }
-
-    let mut sessions = Vec::new();
-
-    // Iterate over project directories: tmp/<project_name>/chats/session-*.json
-    let project_dirs = match std::fs::read_dir(&tmp_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-
-    for entry in project_dirs.flatten() {
-        let chats_dir = entry.path().join("chats");
-        if !chats_dir.is_dir() {
-            continue;
-        }
-
-        let chat_files = match std::fs::read_dir(&chats_dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
-        let project_root_file = entry.path().join(".project_root");
-        let project_dir = read_to_string_cancellable(&project_root_file, &|| false)
-            .ok()
-            .flatten();
-
-        for file_entry in chat_files.flatten() {
-            let path = file_entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            if let Some(meta) = parse_session(&path) {
-                sessions.push(SessionMeta {
-                    project_dir: project_dir.clone(),
-                    ..meta
-                });
-            }
-        }
-    }
-
-    sessions
-}
-
-/// Cache-aware scan over `tmp/<project>/chats/*.json`.
-pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    cache::scan_provider_cached(
-        store,
-        PROVIDER_ID,
-        scan_targets(),
-        force,
-        parse_meta,
-        |_| true,
-    )
-}
-
-pub(crate) fn scan_sessions_progressive(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    let targets = scan_targets();
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_meta,
-            |_| true,
-            on_session,
-        ),
-        None => cache::scan_provider_uncached_progressive(targets, parse_meta, on_session),
-    }
-}
-
-pub(crate) fn scan_sessions_progressive_cancellable(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    let targets = scan_targets_in_cancellable(
-        &crate::gemini_config::get_gemini_dir().join("tmp"),
-        is_cancelled,
-    )?;
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive_cancellable(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_meta,
-            |_| true,
-            on_session,
-            is_cancelled,
-        ),
-        None => cache::scan_provider_uncached_progressive_cancellable(
-            targets,
-            parse_meta,
-            on_session,
-            is_cancelled,
-        ),
-    }
-}
-
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
     force: bool,
@@ -213,74 +103,6 @@ fn visit_stream_targets(
         )?;
     }
     Ok(())
-}
-
-fn scan_targets() -> Vec<FileScanTarget> {
-    scan_targets_in(&crate::gemini_config::get_gemini_dir().join("tmp"))
-}
-
-/// 收集 `tmp/<project>/chats/*.json` 的直属文件。与 `scan_sessions` 一致，只扫
-/// `chats/` 单层目录（用平铺收集器而非递归），嵌套子目录里的文件不纳入——否则
-/// 缓存路径会展示旧路径看不到的文件，且其旁路 `.project_root` 定位会取错目录。
-fn scan_targets_in(tmp_dir: &Path) -> Vec<FileScanTarget> {
-    scan_targets_in_cancellable(tmp_dir, &|| false)
-        .expect("non-cancellable target scan cannot stop")
-}
-
-fn scan_targets_in_cancellable(
-    tmp_dir: &Path,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<FileScanTarget>> {
-    let mut targets = Vec::new();
-    if is_cancelled() {
-        return None;
-    }
-    let project_dirs = match std::fs::read_dir(tmp_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Some(targets),
-    };
-    for entry in project_dirs.flatten() {
-        if is_cancelled() {
-            return None;
-        }
-        let chats_dir = entry.path().join("chats");
-        if !chats_dir.is_dir() {
-            continue;
-        }
-        let mut project_targets = Vec::new();
-        if !cache::collect_targets_flat_cancellable(
-            &chats_dir,
-            "json",
-            &mut project_targets,
-            is_cancelled,
-        ) {
-            return None;
-        }
-        // project_dir 派生自旁路的 .project_root：它变化时缓存也必须失效
-        let project_root = entry.path().join(".project_root");
-        for target in &mut project_targets {
-            if is_cancelled() {
-                return None;
-            }
-            cache::mix_sibling_into_fingerprint(target, &project_root);
-        }
-        targets.extend(project_targets);
-    }
-    Some(targets)
-}
-
-/// Parse one session file, injecting `project_dir` from the sibling
-/// `<project>/.project_root` exactly like `scan_sessions` does. The cached
-/// `SessionMeta` bakes this in, so unchanged files keep the resolved directory.
-fn parse_meta(path: &Path) -> Option<SessionMeta> {
-    let mut meta = parse_session(path)?;
-    // path: tmp/<project>/chats/<session>.json → .project_root at tmp/<project>/
-    meta.project_dir = path
-        .parent()
-        .and_then(Path::parent)
-        .map(|project| project.join(".project_root"))
-        .and_then(|file| read_to_string_cancellable(&file, &|| false).ok().flatten());
-    Some(meta)
 }
 
 fn fingerprint_target(path: &Path) -> Option<FileScanTarget> {
@@ -405,10 +227,6 @@ fn extract_json_value(input: &str, key: &str) -> Option<Value> {
         }
     }
     None
-}
-
-pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
-    load_messages_cancellable(path, &|| false)
 }
 
 pub(crate) fn load_messages_cancellable(
@@ -687,7 +505,16 @@ mod tests {
         // 嵌套子目录里的会话文件不应被缓存扫描收集
         std::fs::write(chats.join("archive").join("session-2.json"), "{}").expect("write");
 
-        let targets = scan_targets_in(tmp_dir);
+        let mut targets = Vec::new();
+        visit_stream_targets(
+            tmp_dir,
+            &mut |target| {
+                targets.push(target);
+                Ok(())
+            },
+            &|| false,
+        )
+        .expect("visit targets");
         assert_eq!(targets.len(), 1, "只收集 chats/ 直属文件");
         assert!(targets
             .iter()
@@ -722,7 +549,8 @@ mod tests {
         assert_eq!(meta.session_id, "bounded-id");
         assert_eq!(meta.source_path.as_deref(), Some(expected_source.as_str()));
 
-        let error = load_messages(&path).expect_err("oversized detail must stay bounded");
+        let error = load_messages_cancellable(&path, &|| false)
+            .expect_err("oversized detail must stay bounded");
         assert!(error.contains("4 MiB bounded preview limit"));
     }
 
@@ -744,7 +572,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[0].content, "hello");
@@ -768,7 +596,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "assistant");
         assert!(msgs[0].content.contains("[Tool: web_search]"));

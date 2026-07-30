@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::ops::ControlFlow;
@@ -15,7 +14,7 @@ use tempfile::TempDir;
 
 use crate::codex_config::{get_codex_config_dir, read_codex_config_text};
 use crate::codex_state_db::codex_state_db_paths;
-use crate::session_manager::cache::{self, FileScanTarget};
+use crate::session_manager::cache;
 use crate::session_manager::paged_manifest::IdentityRowEnricher;
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
@@ -408,165 +407,6 @@ impl IdentityRowEnricher for CodexTitleEnricher {
     }
 }
 
-fn load_thread_titles() -> HashMap<String, String> {
-    load_thread_titles_cancellable(&|| false).unwrap_or_default()
-}
-
-fn load_thread_titles_cancellable(
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<HashMap<String, String>> {
-    let config_dir = get_codex_config_dir();
-    load_thread_titles_for_config_dir_cancellable(&config_dir, is_cancelled)
-}
-
-fn load_thread_titles_for_config_dir_cancellable(
-    config_dir: &Path,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<HashMap<String, String>> {
-    if is_cancelled() {
-        return None;
-    }
-    let config_text = read_codex_config_text().unwrap_or_default();
-    let db_paths = codex_state_db_paths(config_dir, &config_text);
-    load_thread_titles_from_paths(
-        &config_dir.join(CODEX_SESSION_INDEX_FILENAME),
-        &db_paths,
-        is_cancelled,
-    )
-}
-
-fn load_thread_titles_from_paths(
-    session_index_path: &Path,
-    db_paths: &[PathBuf],
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<HashMap<String, String>> {
-    let mut titles = load_thread_titles_from_session_index(session_index_path, is_cancelled)?;
-    for db_path in db_paths {
-        if is_cancelled() {
-            return None;
-        }
-        // Match Codex itself: an explicit state DB title overrides the legacy
-        // session-index fallback. A configured SQLite home is visited last.
-        titles.extend(load_thread_titles_from_db(db_path, is_cancelled)?);
-    }
-    Some(titles)
-}
-
-fn load_thread_titles_from_session_index(
-    index_path: &Path,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<HashMap<String, String>> {
-    if !index_path.exists() {
-        return Some(HashMap::new());
-    }
-
-    let mut titles = HashMap::new();
-    let result = visit_bounded_lines_cancellable(index_path, is_cancelled, &mut |line| {
-        let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(line.trim()) else {
-            return ControlFlow::Continue(());
-        };
-        let id = entry.id.trim();
-        let title = entry.thread_name.trim();
-        if !id.is_empty() && !title.is_empty() {
-            titles.insert(id.to_string(), truncate_summary(title, TITLE_MAX_CHARS));
-        }
-        ControlFlow::Continue(())
-    });
-
-    match result {
-        Ok(Some(())) => Some(titles),
-        Ok(None) => None,
-        Err(_) if is_cancelled() => None,
-        Err(err) => {
-            log::warn!(
-                "Failed to read Codex session index {}: {err}",
-                index_path.display()
-            );
-            Some(titles)
-        }
-    }
-}
-
-fn load_thread_titles_from_db(
-    db_path: &Path,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<HashMap<String, String>> {
-    if is_cancelled() {
-        return None;
-    }
-    if !db_path.exists() {
-        return Some(HashMap::new());
-    }
-
-    let conn = match Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(conn) => conn,
-        Err(err) => {
-            log::warn!(
-                "Failed to open Codex state database {}: {err}",
-                db_path.display()
-            );
-            return Some(HashMap::new());
-        }
-    };
-    if let Err(err) = conn.busy_timeout(Duration::from_secs(2)) {
-        log::warn!(
-            "Failed to set Codex state database busy timeout for {}: {err}",
-            db_path.display()
-        );
-        return Some(HashMap::new());
-    }
-
-    // Mirror Codex's `distinct_thread_metadata_title`: the state DB wins only
-    // for a non-empty title that differs from the first user message. Keep the
-    // comparison in SQLite so a potentially huge first message never enters
-    // Rust memory.
-    let result = with_sqlite_cancellation(&conn, is_cancelled, || {
-        let mut stmt = conn.prepare(
-            "SELECT id, title FROM threads \
-             WHERE title <> '' \
-             AND (first_user_message IS NULL OR TRIM(title) <> TRIM(first_user_message))",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let title: String = row.get(1)?;
-            Ok((id, title))
-        })?;
-
-        let mut titles = HashMap::new();
-        for row in rows {
-            if is_cancelled() {
-                break;
-            }
-            let Ok((id, title)) = row else {
-                continue;
-            };
-            let id = id.trim();
-            let title = title.trim();
-            if !id.is_empty() && !title.is_empty() {
-                titles.insert(id.to_string(), truncate_summary(title, TITLE_MAX_CHARS));
-            }
-        }
-        Ok::<_, rusqlite::Error>(titles)
-    });
-
-    if is_cancelled() {
-        return None;
-    }
-    match result {
-        Ok(titles) => Some(titles),
-        Err(err) => {
-            log::warn!(
-                "Failed to query Codex thread titles from {}: {err}",
-                db_path.display()
-            );
-            Some(HashMap::new())
-        }
-    }
-}
-
 fn build_bounded_title_enricher(
     session_index_path: &Path,
     db_paths: &[PathBuf],
@@ -756,114 +596,6 @@ fn append_db_title_candidates(
     Ok(())
 }
 
-fn overlay_thread_title(meta: &mut SessionMeta, thread_titles: &HashMap<String, String>) {
-    if let Some(title) = thread_titles.get(&meta.session_id) {
-        meta.title = Some(title.clone());
-    }
-}
-
-fn overlay_thread_titles(sessions: &mut [SessionMeta], thread_titles: &HashMap<String, String>) {
-    for session in sessions {
-        overlay_thread_title(session, thread_titles);
-    }
-}
-
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let config_dir = get_codex_config_dir();
-    let mut files = Vec::new();
-
-    // 扫描活跃会话目录（按日期分区）
-    let sessions_root = config_dir.join("sessions");
-    collect_jsonl_files(&sessions_root, &mut files);
-
-    // 扫描归档会话目录（扁平结构）
-    let archived_root = config_dir.join("archived_sessions");
-    collect_jsonl_files(&archived_root, &mut files);
-
-    let mut sessions = super::utils::parse_sessions_parallel(files, parse_session);
-    overlay_thread_titles(&mut sessions, &load_thread_titles());
-    sessions
-}
-
-/// Cache-aware scan across the active and archived session directories.
-pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    let mut sessions = cache::scan_provider_cached(
-        store,
-        PROVIDER_ID,
-        scan_targets(),
-        force,
-        parse_session,
-        |_| true,
-    );
-    overlay_thread_titles(&mut sessions, &load_thread_titles());
-    sessions
-}
-
-pub(crate) fn scan_sessions_progressive(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    let thread_titles = load_thread_titles();
-    let targets = scan_targets();
-    let mut emit_enriched = |meta: &SessionMeta| {
-        let mut enriched = meta.clone();
-        overlay_thread_title(&mut enriched, &thread_titles);
-        on_session(&enriched);
-    };
-    let mut sessions = match store {
-        Some(store) => cache::scan_provider_cached_progressive(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_session,
-            |_| true,
-            &mut emit_enriched,
-        ),
-        None => {
-            cache::scan_provider_uncached_progressive(targets, parse_session, &mut emit_enriched)
-        }
-    };
-    overlay_thread_titles(&mut sessions, &thread_titles);
-    sessions
-}
-
-pub(crate) fn scan_sessions_progressive_cancellable(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    let thread_titles = load_thread_titles_cancellable(is_cancelled)?;
-    let targets = scan_targets_cancellable(is_cancelled)?;
-    let mut emit_enriched = |meta: &SessionMeta| {
-        let mut enriched = meta.clone();
-        overlay_thread_title(&mut enriched, &thread_titles);
-        on_session(&enriched);
-    };
-    let mut sessions = match store {
-        Some(store) => cache::scan_provider_cached_progressive_cancellable(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_session,
-            |_| true,
-            &mut emit_enriched,
-            is_cancelled,
-        ),
-        None => cache::scan_provider_uncached_progressive_cancellable(
-            targets,
-            parse_session,
-            &mut emit_enriched,
-            is_cancelled,
-        ),
-    }?;
-    overlay_thread_titles(&mut sessions, &thread_titles);
-    Some(sessions)
-}
-
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
     force: bool,
@@ -943,35 +675,6 @@ fn stream_sessions_in_config_dir_cancellable(
         on_session,
         is_cancelled,
     )
-}
-
-fn scan_targets() -> Vec<FileScanTarget> {
-    scan_targets_cancellable(&|| false).expect("non-cancellable target scan cannot stop")
-}
-
-fn scan_targets_cancellable(
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<FileScanTarget>> {
-    let config_dir = get_codex_config_dir();
-    let mut targets = Vec::new();
-    if !cache::collect_targets_recursive_cancellable(
-        &config_dir.join("sessions"),
-        "jsonl",
-        &mut targets,
-        is_cancelled,
-    ) || !cache::collect_targets_recursive_cancellable(
-        &config_dir.join("archived_sessions"),
-        "jsonl",
-        &mut targets,
-        is_cancelled,
-    ) {
-        return None;
-    }
-    Some(targets)
-}
-
-pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
-    load_messages_cancellable(path, &|| false)
 }
 
 pub(crate) fn load_messages_cancellable(
@@ -1297,31 +1000,9 @@ fn infer_session_id_from_filename(path: &Path) -> Option<String> {
     UUID_RE.find(&file_name).map(|mat| mat.as_str().to_string())
 }
 
-fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
-    if !root.exists() {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_jsonl_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            files.push(path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex_state_db::CODEX_STATE_DB_FILENAME;
-    use crate::session_manager::providers::utils::MAX_METADATA_LINE_BYTES;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
@@ -1362,107 +1043,6 @@ mod tests {
 
         let meta = parse_session(&path).unwrap();
         assert_eq!(meta.title.as_deref(), Some("How do I deploy?"));
-    }
-
-    #[test]
-    fn state_db_titles_are_trimmed_and_only_keep_explicit_renames() {
-        let temp = tempdir().expect("tempdir");
-        let db_path = temp.path().join(CODEX_STATE_DB_FILENAME);
-        let conn = Connection::open(&db_path).expect("open state db");
-        conn.execute_batch(
-            "CREATE TABLE threads (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                first_user_message TEXT
-            );
-            INSERT INTO threads (id, title, first_user_message) VALUES
-                ('renamed', '  Renamed Codex thread  ', 'First prompt'),
-                ('blank', '   ', 'First prompt'),
-                ('same', '  First prompt  ', 'First prompt'),
-                ('no-message', 'Name before first prompt', NULL);",
-        )
-        .expect("seed state db");
-        drop(conn);
-
-        let titles = load_thread_titles_from_db(&db_path, &|| false).expect("not cancelled");
-
-        assert_eq!(
-            titles.get("renamed").map(String::as_str),
-            Some("Renamed Codex thread")
-        );
-        assert_eq!(
-            titles.get("no-message").map(String::as_str),
-            Some("Name before first prompt")
-        );
-        assert!(!titles.contains_key("blank"));
-        assert!(!titles.contains_key("same"));
-    }
-
-    #[test]
-    fn session_index_uses_latest_valid_bounded_name() {
-        let temp = tempdir().expect("tempdir");
-        let index_path = temp.path().join(CODEX_SESSION_INDEX_FILENAME);
-        let oversized = "x".repeat(MAX_METADATA_LINE_BYTES + 1);
-        std::fs::write(
-            &index_path,
-            format!(
-                concat!(
-                    "{{\"id\":\"thread-1\",\"thread_name\":\"Old name\"}}\n",
-                    "{{\"id\":\"oversized\",\"thread_name\":\"{oversized}\"}}\n",
-                    "not json\n",
-                    "{{\"id\":\"thread-1\",\"thread_name\":\"  New name  \"}}\n"
-                ),
-                oversized = oversized,
-            ),
-        )
-        .expect("write session index");
-
-        let titles =
-            load_thread_titles_from_session_index(&index_path, &|| false).expect("not cancelled");
-
-        assert_eq!(titles.get("thread-1").map(String::as_str), Some("New name"));
-        assert!(!titles.contains_key("oversized"));
-    }
-
-    #[test]
-    fn state_db_explicit_title_overrides_session_index_fallback() {
-        let temp = tempdir().expect("tempdir");
-        let index_path = temp.path().join(CODEX_SESSION_INDEX_FILENAME);
-        std::fs::write(
-            &index_path,
-            concat!(
-                "{\"id\":\"thread-1\",\"thread_name\":\"Legacy name\"}\n",
-                "{\"id\":\"thread-2\",\"thread_name\":\"Legacy fallback\"}\n"
-            ),
-        )
-        .expect("write session index");
-
-        let db_path = temp.path().join(CODEX_STATE_DB_FILENAME);
-        let conn = Connection::open(&db_path).expect("open state db");
-        conn.execute_batch(
-            "CREATE TABLE threads (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                first_user_message TEXT
-            );
-            INSERT INTO threads (id, title, first_user_message) VALUES
-                ('thread-1', 'SQLite name', 'First prompt'),
-                ('thread-2', 'First prompt', 'First prompt');",
-        )
-        .expect("seed state db");
-        drop(conn);
-
-        let titles = load_thread_titles_from_paths(&index_path, &[db_path], &|| false)
-            .expect("not cancelled");
-
-        assert_eq!(
-            titles.get("thread-1").map(String::as_str),
-            Some("SQLite name")
-        );
-        assert_eq!(
-            titles.get("thread-2").map(String::as_str),
-            Some("Legacy fallback")
-        );
     }
 
     #[test]
@@ -1728,7 +1308,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 4);
 
         assert_eq!(msgs[0].role, "user");

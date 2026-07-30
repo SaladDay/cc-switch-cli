@@ -1,10 +1,10 @@
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
 use crate::config::get_claude_config_dir;
-use crate::session_manager::cache::{self, FileScanTarget};
+use crate::session_manager::cache;
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
     SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta,
@@ -18,75 +18,6 @@ use super::utils::{
 };
 
 const PROVIDER_ID: &str = "claude";
-
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let root = get_claude_config_dir().join("projects");
-    let mut files = Vec::new();
-    collect_jsonl_files(&root, &mut files);
-
-    super::utils::parse_sessions_parallel(files, parse_session)
-}
-
-/// Cache-aware scan: reuses cached metadata for unchanged files and re-parses
-/// only new or modified `.jsonl` files. Agent sessions still parse to `None`
-/// (a cheap filename check) and are simply not cached.
-pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    cache::scan_provider_cached(
-        store,
-        PROVIDER_ID,
-        scan_targets(),
-        force,
-        parse_session,
-        |_| true,
-    )
-}
-
-pub(crate) fn scan_sessions_progressive(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    let targets = scan_targets();
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_session,
-            |_| true,
-            on_session,
-        ),
-        None => cache::scan_provider_uncached_progressive(targets, parse_session, on_session),
-    }
-}
-
-pub(crate) fn scan_sessions_progressive_cancellable(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    let targets = scan_targets_cancellable(is_cancelled)?;
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive_cancellable(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_session,
-            |_| true,
-            on_session,
-            is_cancelled,
-        ),
-        None => cache::scan_provider_uncached_progressive_cancellable(
-            targets,
-            parse_session,
-            on_session,
-            is_cancelled,
-        ),
-    }
-}
 
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
@@ -118,25 +49,6 @@ pub(crate) fn stream_sessions_cancellable(
         on_session,
         is_cancelled,
     )
-}
-
-fn scan_targets() -> Vec<FileScanTarget> {
-    scan_targets_cancellable(&|| false).expect("non-cancellable target scan cannot stop")
-}
-
-fn scan_targets_cancellable(
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<FileScanTarget>> {
-    let root = get_claude_config_dir().join("projects");
-    let mut targets = Vec::new();
-    if !cache::collect_targets_recursive_cancellable(&root, "jsonl", &mut targets, is_cancelled) {
-        return None;
-    }
-    Some(targets)
-}
-
-pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
-    load_messages_cancellable(path, &|| false)
 }
 
 pub(crate) fn load_messages_cancellable(
@@ -465,26 +377,6 @@ fn infer_session_id_from_filename(path: &Path) -> Option<String> {
         .map(|stem| stem.to_string())
 }
 
-fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
-    if !root.exists() {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_jsonl_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            files.push(path);
-        }
-    }
-}
-
 fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::metadata(path) {
         Ok(meta) => {
@@ -544,7 +436,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "assistant");
         assert!(msgs[0].content.contains("[Tool: Write]"));
@@ -562,7 +454,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "assistant");
         assert!(msgs[0].content.contains("Let me help."));
@@ -579,7 +471,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "user");
         assert!(msgs[0].content.contains("Please continue"));

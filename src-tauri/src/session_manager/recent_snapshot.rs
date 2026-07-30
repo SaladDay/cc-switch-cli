@@ -1,15 +1,11 @@
-//! Bounded, schema-free first-paint snapshots for the Sessions TUI.
+//! Compatibility cleanup for the retired bounded first-paint snapshots.
 //!
-//! The scan sidecar's SQLite rows are keyed for incremental revalidation, not
-//! for recency. Ordering that table by metadata without a matching index would
-//! make startup perform an O(N) temporary sort, while ordering by file mtime is
-//! not equivalent to the session's real `last_active_at`/`created_at` order.
-//! Instead, an authoritative background scan atomically writes one small JSON
-//! snapshot per scope. Opening a Sessions page therefore reads and deserializes
-//! at most one page plus its look-ahead row, without changing any database
-//! schema.
+//! Current Sessions views use immutable paged manifests and no longer create or
+//! read these JSON files. Deletion still removes a matching row from snapshots
+//! left by older releases so a downgrade cannot briefly resurrect the deleted
+//! session. The reader and writer below are retained only to implement and test
+//! that bounded compatibility cleanup.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -81,72 +77,9 @@ where
     deserializer.deserialize_seq(BoundedRowsVisitor)
 }
 
-#[derive(Debug, Clone)]
-struct SnapshotTombstone {
-    generation: u64,
-    provider_id: String,
-    session_id: String,
-    source_path: String,
-}
-
-impl SnapshotTombstone {
-    fn matches(&self, row: &SessionMeta) -> bool {
-        self.provider_id == row.provider_id
-            && self.session_id == row.session_id
-            && self.source_path == row.source_path.as_deref().unwrap_or_default()
-    }
-}
-
-#[derive(Default)]
-struct SnapshotCoordinator {
-    generation: u64,
-    next_scan_id: u64,
-    active_scans: HashMap<u64, u64>,
-    tombstones: Vec<SnapshotTombstone>,
-}
-
-fn snapshot_coordinator() -> &'static Mutex<SnapshotCoordinator> {
-    static COORDINATOR: OnceLock<Mutex<SnapshotCoordinator>> = OnceLock::new();
-    COORDINATOR.get_or_init(|| Mutex::new(SnapshotCoordinator::default()))
-}
-
-/// Generation guard for one authoritative scan. Deletes registered after this
-/// guard starts are filtered from its snapshot even if the scan read the file
-/// before deletion and finishes later.
-pub(crate) struct ScanGeneration {
-    id: u64,
-    started_at: u64,
-}
-
-pub(crate) fn begin_scan() -> ScanGeneration {
-    let mut coordinator = snapshot_coordinator()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    coordinator.next_scan_id = coordinator.next_scan_id.saturating_add(1);
-    let id = coordinator.next_scan_id;
-    let started_at = coordinator.generation;
-    coordinator.active_scans.insert(id, started_at);
-    ScanGeneration { id, started_at }
-}
-
-impl Drop for ScanGeneration {
-    fn drop(&mut self) {
-        let mut coordinator = snapshot_coordinator()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.active_scans.remove(&self.id);
-        prune_tombstones(&mut coordinator);
-    }
-}
-
-fn prune_tombstones(coordinator: &mut SnapshotCoordinator) {
-    if let Some(oldest_scan) = coordinator.active_scans.values().copied().min() {
-        coordinator
-            .tombstones
-            .retain(|tombstone| tombstone.generation > oldest_scan);
-    } else {
-        coordinator.tombstones.clear();
-    }
+fn snapshot_purge_lock() -> &'static Mutex<()> {
+    static PURGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    PURGE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn supported_scope(provider_id: &str) -> bool {
@@ -216,17 +149,6 @@ fn invalid_snapshot(path: &Path, reason: &str) -> AppError {
     ))
 }
 
-/// Load one bounded first-paint snapshot. Any corruption, missing file, or
-/// incompatible cache version is a cache miss; the authoritative scan still
-/// runs and repairs the snapshot in the background.
-pub(crate) fn load(provider_id: &str) -> Vec<SessionMeta> {
-    let Ok(config_dir) = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())
-    else {
-        return Vec::new();
-    };
-    load_at(&config_dir, provider_id).unwrap_or_default()
-}
-
 fn load_at(config_dir: &Path, provider_id: &str) -> Result<Vec<SessionMeta>, AppError> {
     let Some(path) = snapshot_path(config_dir, provider_id) else {
         return Ok(Vec::new());
@@ -277,81 +199,29 @@ fn load_at(config_dir: &Path, provider_id: &str) -> Result<Vec<SessionMeta>, App
     Ok(snapshot.rows)
 }
 
-/// Persist the true recency top-K from an authoritative, already-sorted scan.
-/// Failures are intentionally non-fatal because this file is only a local
-/// acceleration cache.
-pub(crate) fn persist_authoritative(
-    scan: &ScanGeneration,
-    provider_id: &str,
-    rows: &[SessionMeta],
-) {
-    let Ok(config_dir) = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())
-    else {
-        return;
-    };
-    if let Err(error) = persist_authoritative_for_scan_at(&config_dir, scan, provider_id, rows) {
-        log::debug!("[SESSION-SCAN] 写入最近会话快照失败 ({provider_id}): {error}");
-    }
-}
-
-fn persist_authoritative_for_scan_at(
-    config_dir: &Path,
-    scan: &ScanGeneration,
-    provider_id: &str,
-    rows: &[SessionMeta],
-) -> Result<(), AppError> {
-    let coordinator = snapshot_coordinator()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    persist_authoritative_at_filtered(
-        config_dir,
-        provider_id,
-        rows,
-        &coordinator.tombstones,
-        scan.started_at,
-    )
-}
-
 #[cfg(test)]
 fn persist_authoritative_at(
     config_dir: &Path,
     provider_id: &str,
     rows: &[SessionMeta],
 ) -> Result<(), AppError> {
-    persist_authoritative_at_filtered(config_dir, provider_id, rows, &[], u64::MAX)
-}
-
-fn persist_authoritative_at_filtered(
-    config_dir: &Path,
-    provider_id: &str,
-    rows: &[SessionMeta],
-    tombstones: &[SnapshotTombstone],
-    scan_generation: u64,
-) -> Result<(), AppError> {
     if !supported_scope(provider_id) {
         return Ok(());
     }
-    let visible = |row: &&SessionMeta| {
-        !tombstones
-            .iter()
-            .any(|tombstone| tombstone.generation > scan_generation && tombstone.matches(row))
-    };
 
     if provider_id == "all" {
-        write_scope(config_dir, "all", rows.iter().filter(visible))?;
+        write_scope(config_dir, "all", rows.iter())?;
         for scope in CACHED_PROVIDERS {
             write_scope(
                 config_dir,
                 scope,
-                rows.iter()
-                    .filter(visible)
-                    .filter(|row| row.provider_id == scope),
+                rows.iter().filter(|row| row.provider_id == scope),
             )?;
         }
         return Ok(());
     }
 
-    write_scope(config_dir, provider_id, rows.iter().filter(visible))?;
+    write_scope(config_dir, provider_id, rows.iter())?;
 
     // If every per-provider snapshot exists, their union is sufficient to
     // derive the global top-K exactly: no provider can contribute its 102nd row
@@ -375,11 +245,6 @@ fn persist_authoritative_at_filtered(
         }
         all_candidates.extend(scope_rows);
     }
-    all_candidates.retain(|row| {
-        !tombstones
-            .iter()
-            .any(|tombstone| tombstone.generation > scan_generation && tombstone.matches(row))
-    });
     sort_by_recent(&mut all_candidates);
     all_candidates.truncate(SCAN_CACHE_FIRST_PAINT_LIMIT);
     write_scope(config_dir, "all", all_candidates.iter())
@@ -442,17 +307,9 @@ fn register_delete_and_purge_at(
     session_id: &str,
     source_path: &str,
 ) {
-    let mut coordinator = snapshot_coordinator()
+    let _purge_guard = snapshot_purge_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    coordinator.generation = coordinator.generation.saturating_add(1);
-    let generation = coordinator.generation;
-    coordinator.tombstones.push(SnapshotTombstone {
-        generation,
-        provider_id: provider_id.to_string(),
-        session_id: session_id.to_string(),
-        source_path: source_path.to_string(),
-    });
     for scope in [provider_id, "all"] {
         let Ok(mut rows) = load_at(config_dir, scope) else {
             continue;
@@ -467,7 +324,6 @@ fn register_delete_and_purge_at(
             let _ = write_scope(config_dir, scope, rows.iter());
         }
     }
-    prune_tombstones(&mut coordinator);
 }
 
 #[cfg(test)]
@@ -675,28 +531,5 @@ mod tests {
 
         assert!(load_at(temp.path(), "claude").expect("reload").is_empty());
         assert_eq!(load_at(temp.path(), "all").expect("reload").len(), 1);
-    }
-
-    #[test]
-    fn delete_after_scan_start_cannot_be_reintroduced_by_late_snapshot_persist() {
-        let temp = tempdir().expect("tempdir");
-        let scan = begin_scan();
-        let gone = meta("claude", "gone", 20);
-        let kept = meta("claude", "kept", 10);
-
-        // The scan has already captured `gone`; deletion lands and purges any
-        // old snapshot before that stale scan reaches its persist step.
-        register_delete_and_purge_at(
-            temp.path(),
-            "claude",
-            "gone",
-            gone.source_path.as_deref().expect("gone source"),
-        );
-        persist_authoritative_for_scan_at(temp.path(), &scan, "claude", &[gone, kept])
-            .expect("late persist");
-
-        let loaded = load_at(temp.path(), "claude").expect("load snapshot");
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].session_id, "kept");
     }
 }

@@ -45,122 +45,6 @@ fn strip_message_id_suffix(text: &str) -> &str {
     }
 }
 
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let agents_dir = get_openclaw_dir().join("agents");
-    if !agents_dir.exists() {
-        return Vec::new();
-    }
-
-    let mut sessions = Vec::new();
-    let display_names = DisplayNameIndexCache::new();
-
-    // Traverse each agent directory
-    let agent_entries = match std::fs::read_dir(&agents_dir) {
-        Ok(entries) => entries,
-        Err(_) => return sessions,
-    };
-
-    for agent_entry in agent_entries.flatten() {
-        let agent_path = agent_entry.path();
-        if !agent_path.is_dir() {
-            continue;
-        }
-
-        let sessions_dir = agent_path.join("sessions");
-        if !sessions_dir.is_dir() {
-            continue;
-        }
-
-        let session_entries = match std::fs::read_dir(&sessions_dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
-        let names = display_names
-            .get(&sessions_dir, &|| false)
-            .unwrap_or_else(empty_display_names);
-
-        for entry in session_entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                continue;
-            }
-
-            if let Some(meta) = parse_session(&path, Some(names.as_ref())) {
-                sessions.push(meta);
-            }
-        }
-    }
-
-    sessions
-}
-
-/// Cache-aware scan over `agents/<agent>/sessions/*.jsonl`.
-pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    let display_names = DisplayNameIndexCache::new();
-    cache::scan_provider_cached(
-        store,
-        PROVIDER_ID,
-        scan_targets(),
-        force,
-        |path| parse_meta(path, &display_names, &|| false),
-        |_| true,
-    )
-}
-
-pub(crate) fn scan_sessions_progressive(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    let targets = scan_targets();
-    let display_names = DisplayNameIndexCache::new();
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            |path| parse_meta(path, &display_names, &|| false),
-            |_| true,
-            on_session,
-        ),
-        None => cache::scan_provider_uncached_progressive(
-            targets,
-            |path| parse_meta(path, &display_names, &|| false),
-            on_session,
-        ),
-    }
-}
-
-pub(crate) fn scan_sessions_progressive_cancellable(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    let targets = scan_targets_in_cancellable(&get_openclaw_dir().join("agents"), is_cancelled)?;
-    let display_names = DisplayNameIndexCache::new();
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive_cancellable(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            |path| parse_meta(path, &display_names, is_cancelled),
-            |_| true,
-            on_session,
-            is_cancelled,
-        ),
-        None => cache::scan_provider_uncached_progressive_cancellable(
-            targets,
-            |path| parse_meta(path, &display_names, is_cancelled),
-            on_session,
-            is_cancelled,
-        ),
-    }
-}
-
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
     force: bool,
@@ -246,77 +130,6 @@ fn fingerprint_target(path: &Path) -> Option<FileScanTarget> {
     cache::mix_sibling_into_fingerprint_strict(&mut target, &path.parent()?.join("sessions.json"))
         .ok()?;
     Some(target)
-}
-
-fn scan_targets() -> Vec<FileScanTarget> {
-    scan_targets_in(&get_openclaw_dir().join("agents"))
-}
-
-/// 收集 `agents/<agent>/sessions/*.jsonl` 的直属文件。与 `scan_sessions` 一致，
-/// 只扫 `sessions/` 单层目录（用平铺收集器而非递归），嵌套子目录里的文件不纳入
-/// ——否则缓存路径会展示旧路径看不到的文件，且其旁路 `sessions.json` 定位会取错
-/// 目录。
-fn scan_targets_in(agents_dir: &Path) -> Vec<FileScanTarget> {
-    scan_targets_in_cancellable(agents_dir, &|| false)
-        .expect("non-cancellable target scan cannot stop")
-}
-
-fn scan_targets_in_cancellable(
-    agents_dir: &Path,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<FileScanTarget>> {
-    let mut targets = Vec::new();
-    if is_cancelled() {
-        return None;
-    }
-    let agent_entries = match std::fs::read_dir(agents_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Some(targets),
-    };
-    for agent_entry in agent_entries.flatten() {
-        if is_cancelled() {
-            return None;
-        }
-        let sessions_dir = agent_entry.path().join("sessions");
-        if !sessions_dir.is_dir() {
-            continue;
-        }
-        let mut agent_targets = Vec::new();
-        if !cache::collect_targets_flat_cancellable(
-            &sessions_dir,
-            "jsonl",
-            &mut agent_targets,
-            is_cancelled,
-        ) {
-            return None;
-        }
-        // 标题派生自旁路的 sessions.json 显示名索引：它变化时缓存也必须失效
-        let display_names = sessions_dir.join("sessions.json");
-        for target in &mut agent_targets {
-            if is_cancelled() {
-                return None;
-            }
-            cache::mix_sibling_into_fingerprint(target, &display_names);
-        }
-        targets.extend(agent_targets);
-    }
-    Some(targets)
-}
-
-/// Parse one session file with the scan-scoped, bounded display-name cache.
-fn parse_meta(
-    path: &Path,
-    display_names: &DisplayNameIndexCache,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<SessionMeta> {
-    if is_cancelled() {
-        return None;
-    }
-    let names = path
-        .parent()
-        .and_then(|sessions_dir| display_names.get(sessions_dir, is_cancelled))?;
-    let meta = parse_session(path, Some(names.as_ref()))?;
-    (!is_cancelled()).then_some(meta)
 }
 
 fn parse_meta_authoritative(
@@ -533,14 +346,6 @@ impl DisplayNameIndexCache {
             .indexes
             .len()
     }
-}
-
-fn empty_display_names() -> Arc<HashMap<String, String>> {
-    Arc::new(HashMap::new())
-}
-
-pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
-    load_messages_cancellable(path, &|| false)
 }
 
 pub(crate) fn load_messages_cancellable(
@@ -880,7 +685,16 @@ mod tests {
         // 嵌套子目录里的会话文件不应被缓存扫描收集
         std::fs::write(sessions.join("archive").join("session-2.jsonl"), "{}\n").expect("write");
 
-        let targets = scan_targets_in(agents_dir);
+        let mut targets = Vec::new();
+        visit_stream_targets(
+            agents_dir,
+            &mut |target| {
+                targets.push(target);
+                Ok(())
+            },
+            &|| false,
+        )
+        .expect("visit targets");
         assert_eq!(targets.len(), 1, "只收集 sessions/ 直属文件");
         assert!(targets
             .iter()
@@ -935,7 +749,9 @@ mod tests {
         .expect("write index");
 
         let display_names = DisplayNameIndexCache::new();
-        let meta = parse_meta(&path, &display_names, &|| false).expect("parse metadata");
+        let meta = parse_meta_authoritative(&path, &display_names, &|| false)
+            .expect("scan")
+            .expect("parse metadata");
         assert_eq!(meta.title.as_deref(), Some("重构登录模块"));
         assert_eq!(display_names.index_file_reads(), 1);
     }
@@ -976,7 +792,8 @@ mod tests {
             for chunk in paths.chunks(32) {
                 scope.spawn(move || {
                     for path in chunk {
-                        let meta = parse_meta(path, display_names, &|| false)
+                        let meta = parse_meta_authoritative(path, display_names, &|| false)
+                            .expect("scan")
                             .expect("parse session metadata");
                         assert!(meta
                             .title
@@ -1011,7 +828,9 @@ mod tests {
             .expect("extend oversized index");
 
         let display_names = DisplayNameIndexCache::new();
-        let meta = parse_meta(&session_path, &display_names, &|| false).expect("parse row");
+        let meta = parse_meta_authoritative(&session_path, &display_names, &|| false)
+            .expect("scan")
+            .expect("parse row");
         assert_eq!(meta.title.as_deref(), Some("fallback title"));
         assert_eq!(
             display_names.index_file_reads(),

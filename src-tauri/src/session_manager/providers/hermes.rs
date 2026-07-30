@@ -8,7 +8,7 @@ use rusqlite::{types::ValueRef, Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::hermes_config::get_hermes_dir;
-use crate::session_manager::cache::{self, FileScanTarget};
+use crate::session_manager::cache;
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
     truncate_string_utf8, SearchSnippet, SessionMessage, SessionMessageBatch,
@@ -32,96 +32,6 @@ fn get_hermes_db_path() -> PathBuf {
 
 fn get_hermes_sessions_dir() -> PathBuf {
     get_hermes_dir().join("sessions")
-}
-
-/// Scan sessions from both SQLite database and JSONL transcript files,
-/// with SQLite taking precedence on ID conflicts.
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    merge_sqlite_jsonl(scan_sessions_sqlite(), scan_sessions_jsonl())
-}
-
-/// Cache-aware scan: the JSONL transcripts go through the persistent file cache,
-/// while the SQLite database is always queried fresh. Merged with SQLite taking
-/// precedence — identical semantics to `scan_sessions`.
-pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    let jsonl_sessions = cache::scan_provider_cached(
-        store,
-        PROVIDER_ID,
-        scan_targets(),
-        force,
-        parse_jsonl_session,
-        |_| true,
-    );
-    merge_sqlite_jsonl(scan_sessions_sqlite(), jsonl_sessions)
-}
-
-pub(crate) fn scan_sessions_progressive(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    let targets = scan_targets();
-    let jsonl_sessions = match store {
-        Some(store) => cache::scan_provider_cached_progressive(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_jsonl_session,
-            |_| true,
-            &mut *on_session,
-        ),
-        None => cache::scan_provider_uncached_progressive(
-            targets,
-            parse_jsonl_session,
-            &mut *on_session,
-        ),
-    };
-
-    let sqlite_sessions = scan_sessions_sqlite();
-    for session in &sqlite_sessions {
-        on_session(session);
-    }
-    merge_sqlite_jsonl(sqlite_sessions, jsonl_sessions)
-}
-
-pub(crate) fn scan_sessions_progressive_cancellable(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    let targets = scan_targets_cancellable(is_cancelled)?;
-    let jsonl_sessions = match store {
-        Some(store) => cache::scan_provider_cached_progressive_cancellable(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_jsonl_session,
-            |_| true,
-            &mut *on_session,
-            is_cancelled,
-        )?,
-        None => cache::scan_provider_uncached_progressive_cancellable(
-            targets,
-            parse_jsonl_session,
-            &mut *on_session,
-            is_cancelled,
-        )?,
-    };
-    let sqlite_sessions = scan_sessions_sqlite_cancellable(is_cancelled)?;
-    for session in &sqlite_sessions {
-        if is_cancelled() {
-            return None;
-        }
-        on_session(session);
-    }
-    if is_cancelled() {
-        None
-    } else {
-        merge_sqlite_jsonl_cancellable(sqlite_sessions, jsonl_sessions, is_cancelled)
-    }
 }
 
 pub(crate) fn stream_sessions_cancellable(
@@ -471,147 +381,9 @@ fn stream_sqlite_sessions(
     Ok(())
 }
 
-/// Merge SQLite and JSONL sessions, keeping the SQLite row when the same
-/// `session_id` exists in both.
-fn merge_sqlite_jsonl(
-    sqlite_sessions: Vec<SessionMeta>,
-    jsonl_sessions: Vec<SessionMeta>,
-) -> Vec<SessionMeta> {
-    if sqlite_sessions.is_empty() {
-        return jsonl_sessions;
-    }
-    if jsonl_sessions.is_empty() {
-        return sqlite_sessions;
-    }
-
-    let sqlite_ids: std::collections::HashSet<String> = sqlite_sessions
-        .iter()
-        .map(|s| s.session_id.clone())
-        .collect();
-
-    let mut merged = sqlite_sessions;
-    for s in jsonl_sessions {
-        if !sqlite_ids.contains(&s.session_id) {
-            merged.push(s);
-        }
-    }
-    merged
-}
-
-fn merge_sqlite_jsonl_cancellable(
-    sqlite_sessions: Vec<SessionMeta>,
-    jsonl_sessions: Vec<SessionMeta>,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    if is_cancelled() {
-        return None;
-    }
-    if sqlite_sessions.is_empty() {
-        return Some(jsonl_sessions);
-    }
-    if jsonl_sessions.is_empty() {
-        return Some(sqlite_sessions);
-    }
-    let mut sqlite_ids = std::collections::HashSet::with_capacity(sqlite_sessions.len());
-    for session in &sqlite_sessions {
-        if is_cancelled() {
-            return None;
-        }
-        sqlite_ids.insert(session.session_id.clone());
-    }
-    let mut merged = sqlite_sessions;
-    for session in jsonl_sessions {
-        if is_cancelled() {
-            return None;
-        }
-        if !sqlite_ids.contains(&session.session_id) {
-            merged.push(session);
-        }
-    }
-    Some(merged)
-}
-
-/// Collect the flat `sessions/` directory (both `.jsonl` and `.json`), statting
-/// each file once. Matches `scan_sessions_jsonl`'s non-recursive traversal.
-fn scan_targets() -> Vec<FileScanTarget> {
-    scan_targets_cancellable(&|| false).expect("non-cancellable target scan cannot stop")
-}
-
-fn scan_targets_cancellable(
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<FileScanTarget>> {
-    let sessions_dir = get_hermes_sessions_dir();
-    let mut targets = Vec::new();
-    if is_cancelled() {
-        return None;
-    }
-    let entries = match std::fs::read_dir(&sessions_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Some(targets),
-    };
-    for entry in entries.flatten() {
-        if is_cancelled() {
-            return None;
-        }
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str());
-        if ext != Some("jsonl") && ext != Some("json") {
-            continue;
-        }
-        if let Some(target) = cache::stat_target(&path) {
-            targets.push(target);
-        }
-    }
-    Some(targets)
-}
-
 // ── SQLite scanning ─────────────────────────────────────────────────
 
-fn scan_sessions_sqlite() -> Vec<SessionMeta> {
-    scan_sessions_sqlite_cancellable(&|| false)
-        .expect("non-cancellable SQLite session scan cannot stop")
-}
-
-fn scan_sessions_sqlite_cancellable(
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    if is_cancelled() {
-        return None;
-    }
-    let conn = match open_stream_database() {
-        Ok(Some(conn)) => conn,
-        Ok(None) => return Some(Vec::new()),
-        Err(cache::StreamScanStop::Cancelled) => return None,
-        Err(_) => return Some(Vec::new()),
-    };
-    let plan = match HermesStreamPlan::discover(&conn) {
-        Ok(plan) => plan,
-        Err(_) => return Some(Vec::new()),
-    };
-    let mut sessions = Vec::new();
-    let mut stats = cache::StreamScanStats::default();
-    let result = stream_sqlite_sessions(
-        &conn,
-        &plan,
-        &mut |meta| {
-            sessions.push(meta);
-            ControlFlow::Continue(())
-        },
-        is_cancelled,
-        &mut stats,
-    );
-    match result {
-        Ok(()) => Some(sessions),
-        Err(cache::StreamScanStop::Cancelled) => None,
-        Err(_) => Some(Vec::new()),
-    }
-}
-
 /// Load messages from the Hermes SQLite database.
-pub fn load_messages_sqlite(source: &str) -> Result<SessionMessageBatch, String> {
-    load_messages_sqlite_cancellable(source, &|| false)
-}
-
 pub(crate) fn load_messages_sqlite_cancellable(
     source: &str,
     is_cancelled: &(dyn Fn() -> bool + Sync),
@@ -837,35 +609,6 @@ pub(crate) fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
 
 // ── JSONL scanning ──────────────────────────────────────────────────
 
-fn scan_sessions_jsonl() -> Vec<SessionMeta> {
-    let sessions_dir = get_hermes_sessions_dir();
-    if !sessions_dir.exists() {
-        return Vec::new();
-    }
-
-    let entries = match std::fs::read_dir(&sessions_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut sessions = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str());
-        if ext != Some("jsonl") && ext != Some("json") {
-            continue;
-        }
-        if let Some(meta) = parse_jsonl_session(&path) {
-            sessions.push(meta);
-        }
-    }
-    sessions
-}
-
-fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
-    parse_jsonl_session_authoritative(path).ok().flatten()
-}
-
 fn parse_jsonl_session_authoritative(
     path: &Path,
 ) -> Result<Option<SessionMeta>, cache::StreamScanStop> {
@@ -1004,10 +747,6 @@ fn parse_jsonl_session_lines(path: &Path, head: &[String], tail: &[String]) -> O
 }
 
 /// Load messages from a Hermes JSONL transcript file.
-pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
-    load_messages_cancellable(path, &|| false)
-}
-
 pub(crate) fn load_messages_cancellable(
     path: &Path,
     is_cancelled: &(dyn Fn() -> bool + Sync),
@@ -1328,7 +1067,9 @@ mod tests {
         writeln!(f, r#"{{"type":"message","message":{{"role":"assistant","content":"Hi there"}},"timestamp":"2026-01-01T00:01:00Z"}}"#).unwrap();
         f.flush().unwrap();
 
-        let meta = parse_jsonl_session(&path).expect("should parse");
+        let meta = parse_jsonl_session_authoritative(&path)
+            .expect("scan")
+            .expect("should parse");
         assert_eq!(meta.session_id, "s1");
         assert_eq!(meta.title.as_deref(), Some("My Session"));
         assert_eq!(meta.project_dir.as_deref(), Some("/home/user/project"));
@@ -1344,7 +1085,9 @@ mod tests {
         writeln!(f, r#"{{"role":"user","content":"Hello","ts":1700000000}}"#).unwrap();
         f.flush().unwrap();
 
-        let meta = parse_jsonl_session(&path).expect("should parse");
+        let meta = parse_jsonl_session_authoritative(&path)
+            .expect("scan")
+            .expect("should parse");
         assert_eq!(meta.session_id, "my-session");
         assert!(meta.title.is_some()); // Falls back to first user message
     }
@@ -1366,7 +1109,7 @@ mod tests {
         .unwrap();
         f.flush().unwrap();
 
-        let msgs = load_messages(&path).expect("should load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("should load");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[1].role, "assistant");
@@ -1382,7 +1125,7 @@ mod tests {
         writeln!(f, r#"{{"type":"message","message":{{"role":"assistant","content":"Hi"}},"timestamp":"2026-01-01T00:01:00Z"}}"#).unwrap();
         f.flush().unwrap();
 
-        let msgs = load_messages(&path).expect("should load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("should load");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
         assert!(msgs[0].ts.is_some());

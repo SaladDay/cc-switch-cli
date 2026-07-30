@@ -225,7 +225,9 @@ impl ScanCacheStore {
         }
     }
 
-    /// 读取某个 provider 的全部缓存行，键为绝对文件路径。
+    /// Test-only full-table inspection. Production scans use bounded batches
+    /// and must never materialize an entire provider cache.
+    #[cfg(test)]
     pub fn load_for_provider(
         &self,
         provider: &str,
@@ -284,79 +286,6 @@ impl ScanCacheStore {
         };
         Self::delete_oversized_rowids_bounded(&mut conn, &oversized_rowids);
         Ok(map)
-    }
-
-    /// Cancellation-aware cache read used by deep search. `None` means the
-    /// caller invalidated the search while rows were streaming from SQLite;
-    /// the partial map must not be used for reconciliation.
-    pub(crate) fn load_for_provider_cancellable(
-        &self,
-        provider: &str,
-        is_cancelled: &(dyn Fn() -> bool + Sync),
-    ) -> Result<Option<HashMap<String, CachedScanRow>>, AppError> {
-        if is_cancelled() {
-            return Ok(None);
-        }
-        let mut conn = self.lock()?;
-        let (map, oversized_rowids) = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT rowid, file_path, mtime_ns, size, cache_version,
-                            CASE WHEN typeof(meta) = 'text'
-                                       AND length(CAST(meta AS BLOB)) <= ?2
-                                 THEN meta ELSE NULL END
-                     FROM session_scan_cache
-                     WHERE provider = ?1",
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let rows = stmt
-                .query_map(
-                    rusqlite::params![provider, MAX_SCAN_CACHE_META_BYTES as i64],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, i64>(4)?,
-                            row.get::<_, Option<String>>(5)?,
-                        ))
-                    },
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
-
-            let mut map = HashMap::new();
-            let mut oversized_rowids = Vec::with_capacity(OVERSIZED_META_CLEANUP_LIMIT);
-            for row in rows {
-                if is_cancelled() {
-                    return Ok(None);
-                }
-                let (rowid, file_path, mtime_ns, size, cache_version, meta_json) =
-                    row.map_err(|e| AppError::Database(e.to_string()))?;
-                let Some(meta_json) = meta_json else {
-                    if oversized_rowids.len() < OVERSIZED_META_CLEANUP_LIMIT {
-                        oversized_rowids.push(rowid);
-                    }
-                    continue;
-                };
-                map.insert(
-                    file_path,
-                    CachedScanRow {
-                        mtime_ns,
-                        size,
-                        cache_version,
-                        meta_json,
-                    },
-                );
-            }
-            (map, oversized_rowids)
-        };
-        if is_cancelled() {
-            Ok(None)
-        } else {
-            Self::delete_oversized_rowids_bounded(&mut conn, &oversized_rowids);
-            Ok(Some(map))
-        }
     }
 
     /// Load only the cache rows needed by one bounded discovery batch. Each
@@ -817,9 +746,8 @@ impl ScanCacheStore {
 /// 只记 debug，绝不影响删除结果本身。
 ///
 /// TUI 删除 worker 与 CLI `sessions delete` 成功路径共用此函数，保证两个入口
-/// 一致地清缓存——否则删完再开另一入口时，stale-while-revalidate 的秒开快照会
-/// 让已删会话短暂"复活"（要等后台重扫的 deletes 才自愈）。内部自行 `open()`
-/// sidecar；打不开就降级为无操作（下一轮 revalidate 仍会靠文件缺失自愈）。
+/// 一致地清缓存，避免后续扫描复用已删除文件的旧元数据。内部自行 `open()`
+/// sidecar；打不开就降级为无操作（下一轮扫描仍会靠文件缺失自愈）。
 pub fn purge_session(provider_id: &str, session_id: &str, source_path: &str) {
     match ScanCacheStore::open() {
         Ok(store) => purge_session_in(&store, provider_id, session_id, source_path),
@@ -827,8 +755,8 @@ pub fn purge_session(provider_id: &str, session_id: &str, source_path: &str) {
             log::debug!("[SESSION-SCAN] 删除会话后打开扫描缓存失败 ({source_path}): {err}")
         }
     }
-    // JSON recency snapshots are independent of SQLite. Purge them even when
-    // the sidecar database cannot be opened so stale first paint cannot revive
+    // Legacy JSON recency snapshots are independent of SQLite. Purge them even
+    // when the sidecar database cannot be opened so a downgrade cannot revive
     // the deleted row.
     super::recent_snapshot::purge(provider_id, session_id, source_path);
 }
