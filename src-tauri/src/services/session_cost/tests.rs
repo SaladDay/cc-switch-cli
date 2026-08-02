@@ -744,7 +744,11 @@ fn missing_and_future_schema_databases_degrade_to_empty_overlays_without_initial
             std::fs::create_dir_all(db_path.parent().expect("database parent"))
                 .expect("create database parent");
             let conn = Connection::open(&db_path).expect("create future database");
-            Database::create_tables_on_conn(&conn).expect("create current tables");
+            Database::create_tables_on_conn(
+                &conn,
+                crate::database::MigrationRunContext::LocalUpgrade,
+            )
+            .expect("create current tables");
             Database::set_user_version(&conn, crate::database::SCHEMA_VERSION + 1)
                 .expect("set future schema");
         }

@@ -7738,6 +7738,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_config_import_loading_message() -> &'static str {
+        if is_chinese() {
+            "正在校验并导入配置，请稍候…"
+        } else {
+            "Validating and importing configuration…"
+        }
+    }
+
+    pub fn tui_config_restore_loading_message() -> &'static str {
+        if is_chinese() {
+            "正在校验并恢复备份，请稍候…"
+        } else {
+            "Validating and restoring backup…"
+        }
+    }
+
     pub fn tui_config_backup_title() -> &'static str {
         if is_chinese() {
             "备份配置"
@@ -8833,6 +8849,38 @@ pub mod texts {
             format!("导入文件不存在: {}", path)
         } else {
             format!("Import file not found: {}", path)
+        }
+    }
+
+    pub fn tui_toast_config_import_in_progress() -> &'static str {
+        if is_chinese() {
+            "配置导入正在进行中。"
+        } else {
+            "A configuration import is already in progress."
+        }
+    }
+
+    pub fn tui_toast_config_import_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("配置导入后台任务不可用: {err}")
+        } else {
+            format!("Configuration import worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_toast_config_import_request_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("无法启动配置导入: {err}")
+        } else {
+            format!("Failed to start configuration import: {err}")
+        }
+    }
+
+    pub fn tui_toast_config_import_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("配置导入失败: {err}")
+        } else {
+            format!("Configuration import failed: {err}")
         }
     }
 

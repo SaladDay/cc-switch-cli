@@ -8,6 +8,23 @@ impl ProviderService {
         provider_id: &str,
         codex_home: &Path,
     ) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::capture_codex_temp_launch_snapshot_with_permit(
+            state,
+            provider_id,
+            codex_home,
+            &permit,
+        )
+    }
+
+    pub(crate) fn capture_codex_temp_launch_snapshot_with_permit(
+        state: &AppState,
+        provider_id: &str,
+        codex_home: &Path,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         let (provider, common_snippet) = {
             let guard = state.config.read().map_err(AppError::from)?;
             let provider = guard
@@ -71,7 +88,7 @@ impl ProviderService {
             }
         }
 
-        state.save()
+        state.save_with_permit(permit)
     }
 
     pub(super) fn extract_codex_common_config_from_config_toml(

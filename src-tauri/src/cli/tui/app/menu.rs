@@ -733,6 +733,12 @@ impl App {
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+            if matches!(
+                self.overlay,
+                Overlay::Loading { kind, .. } if kind.is_restore_mutation()
+            ) {
+                return Action::None;
+            }
             self.should_quit = true;
             return Action::Quit;
         }

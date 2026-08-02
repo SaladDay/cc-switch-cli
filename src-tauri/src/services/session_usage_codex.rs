@@ -298,24 +298,7 @@ pub(crate) fn reset_codex_usage_on_conn(
     conn: &rusqlite::Connection,
     codex_dir: &Path,
 ) -> Result<(), AppError> {
-    if sqlite_table_exists(conn, "proxy_request_logs")?
-        && sqlite_column_exists(conn, "proxy_request_logs", "data_source")?
-    {
-        conn.execute(
-            "DELETE FROM proxy_request_logs WHERE data_source = 'codex_session'",
-            [],
-        )
-        .map_err(|error| AppError::Database(format!("清理 Codex 会话明细失败: {error}")))?;
-    }
-    if sqlite_table_exists(conn, "usage_daily_rollups")?
-        && sqlite_column_exists(conn, "usage_daily_rollups", "provider_id")?
-    {
-        conn.execute(
-            "DELETE FROM usage_daily_rollups WHERE provider_id = '_codex_session'",
-            [],
-        )
-        .map_err(|error| AppError::Database(format!("清理 Codex 用量汇总失败: {error}")))?;
-    }
+    reset_codex_usage_rows_on_conn(conn)?;
     if sqlite_table_exists(conn, "session_log_sync")?
         && sqlite_column_exists(conn, "session_log_sync", "file_path")?
     {
@@ -344,6 +327,44 @@ pub(crate) fn reset_codex_usage_on_conn(
             )
             .map_err(|error| AppError::Database(format!("清理 Codex 同步 cursor 失败: {error}")))?;
         }
+    }
+    Ok(())
+}
+
+fn reset_codex_usage_rows_on_conn(conn: &rusqlite::Connection) -> Result<(), AppError> {
+    if sqlite_table_exists(conn, "proxy_request_logs")?
+        && sqlite_column_exists(conn, "proxy_request_logs", "data_source")?
+    {
+        conn.execute(
+            "DELETE FROM proxy_request_logs WHERE data_source = 'codex_session'",
+            [],
+        )
+        .map_err(|error| AppError::Database(format!("清理 Codex 会话明细失败: {error}")))?;
+    }
+    if sqlite_table_exists(conn, "usage_daily_rollups")?
+        && sqlite_column_exists(conn, "usage_daily_rollups", "provider_id")?
+    {
+        conn.execute(
+            "DELETE FROM usage_daily_rollups WHERE provider_id = '_codex_session'",
+            [],
+        )
+        .map_err(|error| AppError::Database(format!("清理 Codex 用量汇总失败: {error}")))?;
+    }
+    Ok(())
+}
+
+/// Pure database-only v15 restore migration. Incoming session cursors are
+/// device-local and are never copied into a canonical stage, so clearing the
+/// whole cursor table is both deterministic and independent of host paths.
+pub(crate) fn reset_codex_usage_on_untrusted_restore(
+    conn: &rusqlite::Connection,
+) -> Result<(), AppError> {
+    reset_codex_usage_rows_on_conn(conn)?;
+    if sqlite_table_exists(conn, "session_log_sync")?
+        && sqlite_column_exists(conn, "session_log_sync", "file_path")?
+    {
+        conn.execute("DELETE FROM session_log_sync", [])
+            .map_err(|error| AppError::Database(format!("清理恢复源同步 cursor 失败: {error}")))?;
     }
     Ok(())
 }

@@ -6,9 +6,15 @@ use crate::cli::i18n::texts;
 use crate::error::AppError;
 
 use super::super::app::ToastKind;
-use super::super::data::{load_state, UiData};
+use super::super::data::{load_state_for_mutation, UiData};
 use super::super::runtime_systems::ManagedAuthReq;
 use super::RuntimeActionContext;
+
+pub(super) fn acquire_settings_mutation_permit(
+) -> Result<crate::services::state_coordination::OrdinaryMutationPermit, AppError> {
+    crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)
+}
 
 fn visible_apps_mode_label(mode: crate::settings::VisibleAppsMode) -> &'static str {
     match mode {
@@ -21,17 +27,17 @@ pub(super) fn set_proxy_enabled(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,
 ) -> Result<(), AppError> {
-    let state = load_state()?;
+    let (state, permit) = load_state_for_mutation()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
     runtime
-        .block_on(
-            state
-                .proxy_service
-                .set_managed_session_for_app(ctx.app.app_type.as_str(), enabled),
-        )
+        .block_on(state.proxy_service.set_managed_session_for_app_with_permit(
+            &permit,
+            ctx.app.app_type.as_str(),
+            enabled,
+        ))
         .map_err(AppError::Message)?;
 
     *ctx.data = UiData::load(&ctx.app.app_type)?;
@@ -59,7 +65,7 @@ pub(super) fn set_proxy_listen_port(
     ctx: &mut RuntimeActionContext<'_>,
     port: u16,
 ) -> Result<(), AppError> {
-    let state = load_state()?;
+    let (state, _permit) = load_state_for_mutation()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -95,7 +101,7 @@ pub(super) fn set_proxy_auto_failover(
     app_type: AppType,
     enabled: bool,
 ) -> Result<(), AppError> {
-    let state = load_state()?;
+    let (state, permit) = load_state_for_mutation()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -111,16 +117,16 @@ pub(super) fn set_proxy_auto_failover(
             .block_on(
                 state
                     .proxy_service
-                    .enable_auto_failover_for_app(app_type.as_str()),
+                    .enable_auto_failover_for_app_with_permit(&permit, app_type.as_str()),
             )
             .map_err(AppError::Message)?;
     } else {
         runtime
-            .block_on(
-                state
-                    .proxy_service
-                    .set_auto_failover_for_app(app_type.as_str(), false),
-            )
+            .block_on(state.proxy_service.set_auto_failover_for_app_with_permit(
+                &permit,
+                app_type.as_str(),
+                false,
+            ))
             .map_err(AppError::Message)?;
     }
 
@@ -140,7 +146,7 @@ pub(super) fn enable_proxy_and_auto_failover(
     ctx: &mut RuntimeActionContext<'_>,
     app_type: AppType,
 ) -> Result<(), AppError> {
-    let state = load_state()?;
+    let (state, permit) = load_state_for_mutation()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -152,7 +158,7 @@ pub(super) fn enable_proxy_and_auto_failover(
         .block_on(async {
             state
                 .proxy_service
-                .enable_proxy_and_auto_failover_for_app(app_type.as_str())
+                .enable_proxy_and_auto_failover_for_app_with_permit(&permit, app_type.as_str())
                 .await
         })
         .map_err(AppError::Message)?;
@@ -172,16 +178,17 @@ pub(super) fn set_openclaw_config_dir(
     ctx: &mut RuntimeActionContext<'_>,
     path: Option<String>,
 ) -> Result<(), AppError> {
+    let (state, permit) = load_state_for_mutation()?;
     let mut settings = crate::settings::get_settings();
     settings.openclaw_config_dir = path;
     crate::settings::update_settings(settings)?;
 
-    let state = load_state()?;
     let sync_result = if crate::sync_policy::should_sync_live(&AppType::OpenClaw) {
-        crate::services::ProviderService::sync_openclaw_to_live(&state).err()
+        crate::services::ProviderService::sync_openclaw_to_live_with_permit(&state, &permit).err()
     } else {
         None
     };
+    drop(state);
 
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
@@ -212,6 +219,7 @@ pub(super) fn set_preferred_editor(
         crate::cli::editor::validate_preferred_editor_command(command)?;
     }
 
+    let _permit = acquire_settings_mutation_permit()?;
     crate::settings::set_preferred_editor(command)?;
     ctx.app.push_toast(
         texts::tui_toast_preferred_editor_saved(),
@@ -224,6 +232,7 @@ pub(super) fn set_preserve_codex_official_auth(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,
 ) -> Result<(), AppError> {
+    let _permit = acquire_settings_mutation_permit()?;
     crate::settings::set_preserve_codex_official_auth_on_switch(enabled)?;
     ctx.app.push_toast(
         texts::tui_toast_codex_official_auth_preservation_toggled(enabled),
@@ -283,16 +292,19 @@ pub(super) fn switch_visible_apps_to_manual(
         }
     };
 
-    let mut settings = crate::settings::get_settings();
-    settings.visible_apps = apps;
-    settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Manual;
-    settings.visible_apps_settings.auto_prompt_decided = true;
-    if let Err(err) = crate::settings::update_settings(settings) {
-        ctx.app.overlay = super::super::app::Overlay::VisibleAppsPicker {
-            selected,
-            apps: crate::settings::get_visible_apps(),
-        };
-        return Err(err);
+    {
+        let _permit = acquire_settings_mutation_permit()?;
+        let mut settings = crate::settings::get_settings();
+        settings.visible_apps = apps;
+        settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Manual;
+        settings.visible_apps_settings.auto_prompt_decided = true;
+        if let Err(err) = crate::settings::update_settings(settings) {
+            ctx.app.overlay = super::super::app::Overlay::VisibleAppsPicker {
+                selected,
+                apps: crate::settings::get_visible_apps(),
+            };
+            return Err(err);
+        }
     }
 
     if let Some((next, next_data)) = next_app_data {
@@ -427,10 +439,19 @@ pub(super) fn set_visible_apps_mode(
     ctx: &mut RuntimeActionContext<'_>,
     mode: crate::settings::VisibleAppsMode,
 ) -> Result<(), AppError> {
-    crate::settings::set_visible_apps_mode(mode)?;
-    if mode == crate::settings::VisibleAppsMode::Auto {
-        let detection = crate::services::visible_apps::detect_visible_app_installation();
-        let outcome = crate::services::visible_apps::apply_startup_policy(&detection)?;
+    let outcome = {
+        let _permit = acquire_settings_mutation_permit()?;
+        crate::settings::set_visible_apps_mode(mode)?;
+        if mode == crate::settings::VisibleAppsMode::Auto {
+            let detection = crate::services::visible_apps::detect_visible_app_installation();
+            Some(crate::services::visible_apps::apply_startup_policy(
+                &detection,
+            )?)
+        } else {
+            None
+        }
+    };
+    if let Some(outcome) = outcome {
         for notice in &outcome.notices {
             ctx.app.push_toast(
                 crate::services::visible_apps::notice_message(notice),
@@ -454,9 +475,19 @@ pub(super) fn confirm_visible_apps_auto_detection(
     ctx: &mut RuntimeActionContext<'_>,
     use_auto: bool,
 ) -> Result<(), AppError> {
-    let detection = crate::services::visible_apps::detect_visible_app_installation();
-    if use_auto {
-        let changed = crate::services::visible_apps::accept_auto_detection(&detection)?;
+    let changed = {
+        let _permit = acquire_settings_mutation_permit()?;
+        let detection = crate::services::visible_apps::detect_visible_app_installation();
+        if use_auto {
+            Some(crate::services::visible_apps::accept_auto_detection(
+                &detection,
+            )?)
+        } else {
+            crate::services::visible_apps::keep_manual_visibility(&detection)?;
+            None
+        }
+    };
+    if let Some(changed) = changed {
         if !changed.is_empty() {
             let notice =
                 crate::services::visible_apps::VisibleAppsNotice::AutoUpdated { apps: changed };
@@ -473,7 +504,6 @@ pub(super) fn confirm_visible_apps_auto_detection(
             );
         }
     } else {
-        crate::services::visible_apps::keep_manual_visibility(&detection)?;
         ctx.app.push_toast(
             texts::tui_toast_visible_apps_mode_saved(texts::tui_settings_visible_apps_mode_manual()),
             super::super::app::ToastKind::Success,
@@ -519,6 +549,7 @@ where
     }
 
     if apps.is_enabled_for(&ctx.app.app_type) {
+        let _permit = acquire_settings_mutation_permit()?;
         crate::settings::set_visible_apps(apps)?;
         ctx.app.push_toast(
             texts::tui_toast_visible_apps_saved(),
@@ -532,7 +563,10 @@ where
     })?;
     let next_data = load_data(&next)?;
 
-    crate::settings::set_visible_apps(apps)?;
+    {
+        let _permit = acquire_settings_mutation_permit()?;
+        crate::settings::set_visible_apps(apps)?;
+    }
     super::apply_preloaded_app_switch(ctx.app, ctx.data, next, next_data);
     ctx.app.push_toast(
         texts::tui_toast_visible_apps_saved(),
@@ -545,7 +579,7 @@ fn update_proxy_config(
     ctx: &mut RuntimeActionContext<'_>,
     mutate: impl FnOnce(&mut crate::proxy::ProxyConfig),
 ) -> Result<(), AppError> {
-    let state = load_state()?;
+    let (state, permit) = load_state_for_mutation()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -563,7 +597,11 @@ fn update_proxy_config(
 
     let mut config = runtime.block_on(state.proxy_service.get_config())?;
     mutate(&mut config);
-    runtime.block_on(state.proxy_service.update_config(&config))?;
+    runtime.block_on(
+        state
+            .proxy_service
+            .update_config_with_permit(&permit, &config),
+    )?;
 
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(

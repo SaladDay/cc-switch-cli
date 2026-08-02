@@ -3,7 +3,7 @@
 //! WebDAV and S3 deliberately share the same manifest and artifact format so
 //! either transport receives the same validation and restore guarantees.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,12 @@ use tempfile::tempdir;
 
 use crate::database::{Database, SCHEMA_VERSION};
 use crate::error::AppError;
+use crate::skill_directory::SkillDirectory;
+use crate::store::AppState;
 
-use super::webdav_sync::archive::{restore_skills_zip, zip_skills_ssot, SkillsBackup};
+use super::skills_restore::{require_exact_skill_payload, PreparedSkillsRestore};
+use super::webdav_sync::archive::zip_skills_ssot;
+use super::{RestoreCoordinator, RestorePublication};
 
 pub(crate) const PROTOCOL_FORMAT: &str = "cc-switch-webdav-sync";
 pub(crate) const PROTOCOL_VERSION: u32 = 2;
@@ -68,6 +72,7 @@ pub(crate) struct ArtifactMeta {
     pub size: u64,
 }
 
+#[derive(Debug)]
 pub(crate) struct LocalSnapshot {
     pub db_sql: Vec<u8>,
     pub skills_zip: Vec<u8>,
@@ -91,7 +96,15 @@ impl RemoteLayout {
 }
 
 pub(crate) fn build_local_snapshot() -> Result<LocalSnapshot, AppError> {
-    let db_sql = Database::init()?.export_sql_string_for_sync()?.into_bytes();
+    // SQLite rows and the Skills tree form one logical snapshot. Ordinary
+    // workflows may update them in separate durable steps, so a shared permit
+    // cannot make the cross-resource read coherent.
+    let snapshot_permit =
+        super::state_coordination::acquire_consistent_state_snapshot_permit_blocking()
+            .map_err(AppError::Message)?;
+    let database = Database::init()?;
+    let expected_skill_directories = database_skill_directories(&database)?;
+    let db_sql = database.export_sql_string_for_sync()?.into_bytes();
 
     let temp = tempdir().map_err(|error| {
         io_context_localized(
@@ -102,9 +115,11 @@ pub(crate) fn build_local_snapshot() -> Result<LocalSnapshot, AppError> {
         )
     })?;
     let skills_zip_path = temp.path().join(REMOTE_SKILLS_ZIP);
-    zip_skills_ssot(&skills_zip_path)?;
+    let payload_skill_directories = zip_skills_ssot(&skills_zip_path)?;
+    require_exact_skill_payload(&expected_skill_directories, &payload_skill_directories)?;
     let skills_zip =
         std::fs::read(&skills_zip_path).map_err(|error| AppError::io(&skills_zip_path, error))?;
+    drop(snapshot_permit);
 
     let mut artifacts = BTreeMap::new();
     artifacts.insert(
@@ -141,6 +156,28 @@ pub(crate) fn build_local_snapshot() -> Result<LocalSnapshot, AppError> {
         manifest_bytes,
         manifest_hash,
     })
+}
+
+fn database_skill_directories(database: &Database) -> Result<BTreeSet<String>, AppError> {
+    let mut identities = BTreeMap::<String, String>::new();
+    let mut directories = BTreeSet::new();
+    for skill in database.get_all_installed_skills()?.into_values() {
+        let directory = SkillDirectory::parse(&skill.directory).map_err(|error| {
+            AppError::InvalidInput(format!(
+                "invalid Skill directory {:?} in local database: {error}",
+                skill.directory
+            ))
+        })?;
+        let collision_key = directory.collision_key();
+        if let Some(existing) = identities.insert(collision_key, directory.as_str().to_string()) {
+            return Err(AppError::InvalidInput(format!(
+                "local Skills database contains duplicate or normalization-colliding directories {existing:?} and {:?}",
+                directory.as_str()
+            )));
+        }
+        directories.insert(directory.as_str().to_string());
+    }
+    Ok(directories)
 }
 
 pub(crate) fn effective_db_compat_version(
@@ -217,8 +254,9 @@ pub(crate) fn validate_manifest_compat(
 }
 
 pub(crate) fn validate_artifact_size_limit(name: &str, size: u64) -> Result<(), AppError> {
-    if size > MAX_SYNC_ARTIFACT_BYTES {
-        let max_mb = MAX_SYNC_ARTIFACT_BYTES / 1024 / 1024;
+    let limit = sync_artifact_size_limit(name);
+    if size > limit {
+        let max_mb = limit / 1024 / 1024;
         return Err(localized(
             "sync.artifact_too_large",
             format!("artifact {name} 超过下载上限（{max_mb} MB）"),
@@ -226,6 +264,14 @@ pub(crate) fn validate_artifact_size_limit(name: &str, size: u64) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+pub(crate) fn sync_artifact_size_limit(name: &str) -> u64 {
+    if name == REMOTE_DB_SQL {
+        crate::database::MAX_SQL_IMPORT_BYTES
+    } else {
+        MAX_SYNC_ARTIFACT_BYTES
+    }
 }
 
 pub(crate) fn verify_artifact(
@@ -270,7 +316,28 @@ pub(crate) fn verify_artifact(
 
 /// Apply a verified snapshot while preserving the local WebDAV implementation's
 /// future-schema preflight and Skills rollback guarantees.
+#[cfg(test)]
 pub(crate) fn apply_snapshot(db_sql: &[u8], skills_zip: &[u8]) -> Result<(), AppError> {
+    let restore = RestoreCoordinator::acquire_blocking()?;
+    let state = restore.load_state()?;
+    let (prepared_database, prepared_skills) =
+        prepare_snapshot(restore.operation(), db_sql, skills_zip)?;
+    restore
+        .publish(&state, prepared_database, Some(prepared_skills), |_| ())
+        .map(|_| ())
+}
+
+fn prepare_snapshot(
+    operation: crate::restore_protocol::RestoreOperationId,
+    db_sql: &[u8],
+    skills_zip: &[u8],
+) -> Result<
+    (
+        crate::database::PreparedDatabaseRestore,
+        PreparedSkillsRestore,
+    ),
+    AppError,
+> {
     let sql = std::str::from_utf8(db_sql).map_err(|error| {
         localized(
             "sync.sql_not_utf8",
@@ -280,67 +347,28 @@ pub(crate) fn apply_snapshot(db_sql: &[u8], skills_zip: &[u8]) -> Result<(), App
     })?;
     validate_sql_user_version_for_import(sql)?;
 
-    let skills_backup = SkillsBackup::backup_current_skills()?;
-    restore_skills_zip(skills_zip)?;
-
-    if let Err(db_error) = Database::init().and_then(|db| db.import_sql_string_for_sync(sql)) {
-        if let Err(rollback_error) = skills_backup.restore() {
-            return Err(localized(
-                "sync.db_import_and_rollback_failed",
-                format!("导入数据库失败: {db_error}; 同时回滚 Skills 失败: {rollback_error}"),
-                format!(
-                    "Database import failed: {db_error}; skills rollback also failed: {rollback_error}"
-                ),
-            ));
-        }
-        return Err(db_error);
-    }
-
-    Ok(())
+    let prepared_database = Database::prepare_sql_string_for_sync(sql)?;
+    let expected_directories = prepared_database.skill_directories()?;
+    let prepared_skills =
+        PreparedSkillsRestore::prepare(operation, skills_zip, &expected_directories)?;
+    Ok((prepared_database, prepared_skills))
 }
 
-pub(crate) async fn apply_snapshot_with_restore_guard(
+pub(crate) async fn apply_snapshot_with_restore_guard_and_then<Snapshot>(
     db_sql: &[u8],
     skills_zip: &[u8],
-) -> Result<(), AppError> {
-    let _guard = super::state_coordination::acquire_restore_mutation_guard()
-        .await
-        .map_err(AppError::Message)?;
-    ensure_restore_allowed().await?;
-    apply_snapshot(db_sql, skills_zip)
-}
-
-async fn ensure_restore_allowed() -> Result<(), AppError> {
-    let db = std::sync::Arc::new(Database::init()?);
-    let proxy_service = super::ProxyService::new(db);
-    if proxy_service.get_status().await.running {
-        return Err(localized(
-            "sync.restore_proxy_running",
-            "本地代理正在运行，请先停止代理后再执行云同步恢复",
-            "The local proxy is running. Stop it before restoring a cloud-sync snapshot.",
-        ));
-    }
-
-    let takeover_active = proxy_service
-        .is_app_takeover_active(&crate::AppType::Claude)
-        .await
-        .map_err(AppError::Message)?
-        || proxy_service
-            .is_app_takeover_active(&crate::AppType::Codex)
-            .await
-            .map_err(AppError::Message)?
-        || proxy_service
-            .is_app_takeover_active(&crate::AppType::Gemini)
-            .await
-            .map_err(AppError::Message)?;
-    if takeover_active {
-        return Err(localized(
-            "sync.restore_takeover_active",
-            "当前仍有应用处于代理接管状态，请先关闭接管后再执行云同步恢复",
-            "An app takeover is still active. Disable takeover before restoring a cloud-sync snapshot.",
-        ));
-    }
-    Ok(())
+    snapshot: impl FnOnce(&AppState) -> Snapshot,
+) -> Result<RestorePublication<Snapshot>, AppError> {
+    let restore = RestoreCoordinator::acquire().await?;
+    let state = restore.load_state()?;
+    let (prepared_database, prepared_skills) =
+        prepare_snapshot(restore.operation(), db_sql, skills_zip)?;
+    let completion = restore.publish(&state, prepared_database, Some(prepared_skills), snapshot)?;
+    Ok(RestorePublication {
+        token: completion.publication,
+        status: completion.status,
+        snapshot: completion.snapshot,
+    })
 }
 
 pub(crate) fn validate_sql_user_version_for_import(sql: &str) -> Result<(), AppError> {
@@ -428,6 +456,21 @@ pub(crate) fn normalize_device_name(raw: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn installed_skill(directory: &str) -> crate::app_config::InstalledSkill {
+        crate::app_config::InstalledSkill {
+            id: format!("local:{directory}"),
+            name: directory.to_string(),
+            description: None,
+            directory: directory.to_string(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: crate::app_config::SkillApps::default(),
+            installed_at: 0,
+        }
+    }
+
     fn manifest(db_compat_version: Option<u32>) -> SyncManifest {
         SyncManifest {
             format: PROTOCOL_FORMAT.to_string(),
@@ -441,9 +484,55 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(home_settings)]
+    fn snapshot_rejects_skill_database_rows_without_file_payload() {
+        let home = tempfile::tempdir().expect("create isolated sync home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let database = Database::init().expect("initialize database");
+        database
+            .save_skill(&installed_skill("missing-payload"))
+            .expect("save Skill metadata");
+        drop(database);
+
+        let error =
+            build_local_snapshot().expect_err("metadata without files must reject the snapshot");
+        assert!(error.to_string().contains("database/files mismatch"));
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn snapshot_rejects_skill_file_payload_without_database_row() {
+        let home = tempfile::tempdir().expect("create isolated sync home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        drop(Database::init().expect("initialize database"));
+        let skill = crate::services::SkillService::get_ssot_dir()
+            .expect("resolve Skills root")
+            .join("unexpected-payload");
+        std::fs::create_dir_all(&skill).expect("create unexpected Skill");
+        std::fs::write(skill.join("SKILL.md"), b"unexpected").expect("write Skill payload");
+
+        let error =
+            build_local_snapshot().expect_err("files without metadata must reject the snapshot");
+        assert!(error.to_string().contains("database/files mismatch"));
+    }
+
+    #[test]
     fn future_database_schema_is_rejected_before_restore() {
         let sql = format!("PRAGMA user_version={};\n", SCHEMA_VERSION + 1);
         assert!(validate_sql_user_version_for_import(&sql).is_err());
+    }
+
+    #[test]
+    fn database_artifact_uses_the_sql_import_limit_before_download() {
+        let sql_limit = 256 * 1024 * 1024;
+        assert!(
+            validate_artifact_size_limit(REMOTE_DB_SQL, sql_limit + 1).is_err(),
+            "db.sql must be rejected at its importer limit, before transport allocation"
+        );
+        assert!(
+            validate_artifact_size_limit(REMOTE_SKILLS_ZIP, sql_limit + 1).is_ok(),
+            "skills archives keep their independent transport limit"
+        );
     }
 
     #[test]

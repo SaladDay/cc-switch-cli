@@ -8,23 +8,26 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::services::RestorePublication;
 use crate::settings::{
     get_s3_sync_settings, update_s3_sync_status, S3SyncSettings, WebDavSyncStatus,
 };
+use crate::store::AppState;
 
 use super::s3::{self, S3Credentials};
 use super::sync_protocol::{
-    apply_snapshot_with_restore_guard, build_local_snapshot, localized, sha256_hex,
-    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
-    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
-    PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    apply_snapshot_with_restore_guard_and_then, build_local_snapshot, localized, sha256_hex,
+    sync_artifact_size_limit, validate_artifact_size_limit, validate_manifest_compat,
+    verify_artifact, ArtifactMeta, RemoteLayout, SyncManifest, DB_COMPAT_VERSION,
+    MAX_MANIFEST_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 use super::webdav_sync::SyncDecision;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct S3SyncSummary {
+pub struct S3SyncSummary<Snapshot = ()> {
     pub decision: SyncDecision,
     pub message: String,
+    pub(crate) publication: Option<RestorePublication<Snapshot>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,7 +81,13 @@ impl S3SyncService {
     }
 
     pub fn download() -> Result<S3SyncSummary, AppError> {
-        let result = run_http(run_with_sync_lock(download()));
+        Self::download_and_then(|_| ())
+    }
+
+    pub(crate) fn download_and_then<Snapshot>(
+        snapshot: impl FnOnce(&AppState) -> Snapshot,
+    ) -> Result<S3SyncSummary<Snapshot>, AppError> {
+        let result = run_http(run_with_sync_lock(download(snapshot)));
         if let Err(error) = &result {
             persist_sync_error_best_effort(error, "manual");
         }
@@ -136,10 +145,13 @@ async fn upload() -> Result<S3SyncSummary, AppError> {
     Ok(S3SyncSummary {
         decision: SyncDecision::Upload,
         message: "S3 upload completed".to_string(),
+        publication: None,
     })
 }
 
-async fn download() -> Result<S3SyncSummary, AppError> {
+async fn download<Snapshot>(
+    capture: impl FnOnce(&AppState) -> Snapshot,
+) -> Result<S3SyncSummary<Snapshot>, AppError> {
     let mut settings = load_s3_settings(true)?;
     settings.validate()?;
     let credentials = credentials_for(&settings);
@@ -170,13 +182,15 @@ async fn download() -> Result<S3SyncSummary, AppError> {
     )
     .await?;
 
-    apply_snapshot_with_restore_guard(&database, &skills).await?;
+    let publication =
+        apply_snapshot_with_restore_guard_and_then(&database, &skills, capture).await?;
 
     let manifest_hash = sha256_hex(&manifest_bytes);
     persist_sync_success_best_effort(&mut settings, &manifest_hash, etag);
     Ok(S3SyncSummary {
         decision: SyncDecision::Download,
         message: "S3 download completed".to_string(),
+        publication: Some(publication),
     })
 }
 
@@ -227,15 +241,19 @@ async fn download_and_verify(
     validate_artifact_size_limit(artifact_name, metadata.size)?;
 
     let key = s3_key(settings, artifact_name);
-    let (bytes, _) = s3::get_object(credentials, &key, MAX_SYNC_ARTIFACT_BYTES as usize)
-        .await?
-        .ok_or_else(|| {
-            localized(
-                "s3.sync.remote_missing_artifact",
-                format!("远端缺少 artifact 文件: {artifact_name}"),
-                format!("Remote artifact file missing: {artifact_name}"),
-            )
-        })?;
+    let (bytes, _) = s3::get_object(
+        credentials,
+        &key,
+        sync_artifact_size_limit(artifact_name) as usize,
+    )
+    .await?
+    .ok_or_else(|| {
+        localized(
+            "s3.sync.remote_missing_artifact",
+            format!("远端缺少 artifact 文件: {artifact_name}"),
+            format!("Remote artifact file missing: {artifact_name}"),
+        )
+    })?;
     verify_artifact(&bytes, artifact_name, metadata)?;
     Ok(bytes)
 }
@@ -263,6 +281,8 @@ fn persist_sync_success(
     manifest_hash: &str,
     etag: Option<String>,
 ) -> Result<(), AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let status = WebDavSyncStatus {
         last_sync_at: Some(Utc::now().timestamp()),
         last_error: None,
@@ -286,6 +306,16 @@ fn persist_sync_success_best_effort(
 }
 
 fn persist_sync_error_best_effort(error: &AppError, source: &str) {
+    let _permit =
+        match crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking() {
+            Ok(permit) => permit,
+            Err(persist_error) => {
+                log::warn!(
+                    "[S3] Failed to acquire sync-status mutation capability: {persist_error}"
+                );
+                return;
+            }
+        };
     let Some(mut settings) = get_s3_sync_settings() else {
         return;
     };

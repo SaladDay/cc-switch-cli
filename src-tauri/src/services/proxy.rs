@@ -30,7 +30,7 @@ use crate::{
         types::{ActiveTarget, GlobalProxyConfig, ProxyTakeoverStatus},
         ProxyConfig, ProxyServer, ProxyServerInfo, ProxyStatus,
     },
-    services::provider::live_merge,
+    services::{provider::live_merge, state_coordination::OrdinaryMutationPermit},
     AppError,
 };
 
@@ -185,6 +185,12 @@ impl ProxyService {
         self.run_in_blocking_runtime(|service| async move { Ok(service.is_running().await) })
     }
 
+    pub(crate) fn is_running_snapshot_blocking(&self) -> Result<bool, String> {
+        self.run_in_blocking_runtime(|service| async move {
+            Ok(service.get_status_snapshot().await.running)
+        })
+    }
+
     pub fn is_app_takeover_active_blocking(&self, app_type: &AppType) -> Result<bool, String> {
         let app_type = app_type.clone();
         self.run_in_blocking_runtime(move |service| async move {
@@ -206,9 +212,24 @@ impl ProxyService {
             .any(|session| self.should_preserve_takeover_for_active_managed_session(&session))
     }
 
-    pub fn recover_takeovers_on_startup_blocking(&self) -> Result<(), String> {
-        self.run_in_blocking_runtime(|service| async move {
-            service.recover_takeovers_on_startup().await
+    pub(crate) fn recover_takeovers_on_startup_blocking_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
+        let service = self.clone();
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| {
+                            format!("failed to create proxy recovery runtime: {error}")
+                        })?;
+                    runtime.block_on(service.recover_takeovers_on_startup_with_permit(permit))
+                })
+                .join()
+                .map_err(|_| "proxy recovery helper panicked".to_string())?
         })
     }
 
@@ -452,28 +473,42 @@ impl ProxyService {
     }
 
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
         let config = self.get_config().await.map_err(|e| e.to_string())?;
-        self.start_with_resolved_config_unlocked(config).await
+        self.start_with_resolved_config_with_permit(&permit, config)
+            .await
     }
 
     pub async fn start_with_runtime_config(
         &self,
         config: ProxyConfig,
     ) -> Result<ProxyServerInfo, String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-        self.start_with_resolved_config_unlocked(config).await
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.start_with_runtime_config_with_permit(&permit, config)
+            .await
+    }
+
+    pub(crate) async fn start_with_runtime_config_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        config: ProxyConfig,
+    ) -> Result<ProxyServerInfo, String> {
+        self.start_with_resolved_config_with_permit(permit, config)
+            .await
     }
 
     pub async fn start_managed_session(&self, app_type: &str) -> Result<ProxyServerInfo, String> {
-        // This delegates to the daemon, whose IPC handler owns the state
-        // mutation guard while it rewrites live config. Holding the guard in
-        // the caller while waiting for the daemon can deadlock the handshake.
-        self.start_managed_session_unlocked(app_type).await
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.start_managed_session_with_permit(&permit, app_type)
+            .await
     }
 
-    async fn start_managed_session_unlocked(
+    async fn start_managed_session_with_permit(
         &self,
+        _permit: &OrdinaryMutationPermit,
         app_type: &str,
     ) -> Result<ProxyServerInfo, String> {
         Self::ensure_managed_sessions_supported()?;
@@ -592,7 +627,11 @@ impl ProxyService {
         }
     }
 
-    async fn daemon_drop_takeover(&self, app_type: &str) -> Result<(), String> {
+    async fn daemon_drop_takeover(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+    ) -> Result<(), String> {
         #[cfg(unix)]
         {
             use crate::daemon::ipc::client;
@@ -603,7 +642,7 @@ impl ProxyService {
             // daemon would have done so the DB and live config stay aligned
             // with "this app is no longer being proxied".
             if !socket_path.exists() {
-                return self.local_disable_takeover(app_type).await;
+                return self.local_disable_takeover(permit, app_type).await;
             }
             let app_type_owned = app_type.to_string();
             let socket_for_task = socket_path.clone();
@@ -649,7 +688,7 @@ impl ProxyService {
                     // takes the !socket_path.exists() short-circuit instead of
                     // tripping over the same ECONNREFUSED again.
                     let _ = std::fs::remove_file(&socket_path);
-                    self.local_disable_takeover(app_type).await
+                    self.local_disable_takeover(permit, app_type).await
                 }
             }
         }
@@ -719,10 +758,14 @@ impl ProxyService {
     /// cross-process state-mutation guard around it (so a concurrent CLI
     /// invocation can't race the live-config restore), and clears the matching
     /// daemon-managed runtime marker.
-    async fn local_disable_takeover(&self, app_type: &str) -> Result<(), String> {
+    async fn local_disable_takeover(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+    ) -> Result<(), String> {
         let app = Self::takeover_app_from_str(app_type)?;
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-        self.disable_takeover_for_app_unlocked(&app, false).await?;
+        self.disable_takeover_for_app_with_permit(permit, &app, false)
+            .await?;
         if !self
             .db
             .is_live_takeover_active()
@@ -751,19 +794,15 @@ impl ProxyService {
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        // Intentionally NO state-mutation guard here. This function purely
-        // delegates to the daemon (`daemon_ensure_worker` / `daemon_drop_takeover`)
-        // which acquires its own cross-process guard inside its IPC handler.
-        // Holding the guard on the foreground side and then making a synchronous
-        // IPC call deadlocks against the daemon's handler — observed as
-        // "Resource temporarily unavailable (os error 35)" once the IPC read
-        // times out.
-        self.set_managed_session_for_app_unlocked(app_type, enabled)
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.set_managed_session_for_app_with_permit(&permit, app_type, enabled)
             .await
     }
 
-    async fn set_managed_session_for_app_unlocked(
+    pub(crate) async fn set_managed_session_for_app_with_permit(
         &self,
+        permit: &OrdinaryMutationPermit,
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
@@ -801,9 +840,11 @@ impl ProxyService {
         // Disable: route through the daemon when one is running so it stays
         // the sole writer of `proxy_runtime_session`.
         if self.should_drop_takeover_via_daemon(&app_type_enum).await? {
-            self.daemon_drop_takeover(app_type_enum.as_str()).await
+            self.daemon_drop_takeover(permit, app_type_enum.as_str())
+                .await
         } else {
-            self.local_disable_takeover(app_type_enum.as_str()).await
+            self.local_disable_takeover(permit, app_type_enum.as_str())
+                .await
         }
     }
 
@@ -837,8 +878,9 @@ impl ProxyService {
         Ok(())
     }
 
-    async fn start_with_resolved_config_unlocked(
+    async fn start_with_resolved_config_with_permit(
         &self,
+        _permit: &OrdinaryMutationPermit,
         config: ProxyConfig,
     ) -> Result<ProxyServerInfo, String> {
         self.sync_persisted_global_proxy_enabled(true).await?;
@@ -892,9 +934,18 @@ impl ProxyService {
     }
 
     pub async fn recover_takeovers_on_startup(&self) -> Result<(), String> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.recover_takeovers_on_startup_with_permit(&permit).await
+    }
+
+    pub(crate) async fn recover_takeovers_on_startup_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
         for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
             if self.has_managed_worker_for_app(&app_type).await {
-                self.reconcile_takeover_for_live_managed_worker(&app_type)
+                self.reconcile_takeover_for_live_managed_worker(permit, &app_type)
                     .await?;
                 continue;
             }
@@ -953,6 +1004,7 @@ impl ProxyService {
 
     async fn reconcile_takeover_for_live_managed_worker(
         &self,
+        permit: &OrdinaryMutationPermit,
         app_type: &AppType,
     ) -> Result<(), String> {
         let app_key = app_type.as_str();
@@ -971,7 +1023,7 @@ impl ProxyService {
 
         if matches!(app_type, AppType::Codex) && live_taken_over {
             if let Some(backup) = backup.as_ref() {
-                self.rebuild_codex_takeover_from_backup_if_needed(&backup.original_config)
+                self.rebuild_codex_takeover_from_backup_if_needed(permit, &backup.original_config)
                     .await?;
             }
         }
@@ -990,6 +1042,7 @@ impl ProxyService {
 
     async fn rebuild_codex_takeover_from_backup_if_needed(
         &self,
+        permit: &OrdinaryMutationPermit,
         backup_json: &str,
     ) -> Result<(), String> {
         let live = self.read_codex_live()?;
@@ -1015,7 +1068,8 @@ impl ProxyService {
         // Upstream startup recovery restores the clean backup before enabling
         // takeover again and deliberately skips syncing that restored official
         // credential into the selected third-party provider.
-        self.enable_takeover_for_app_unlocked_with_options(
+        self.enable_takeover_for_app_with_options(
+            permit,
             &AppType::Codex,
             None,
             EnableTakeoverOptions {
@@ -1036,21 +1090,33 @@ impl ProxyService {
     }
 
     pub async fn stop(&self) -> Result<(), String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-        self.stop_server_unlocked().await
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.stop_server_with_permit(&permit).await
     }
 
     pub async fn stop_with_restore(&self) -> Result<(), String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.stop_with_restore_with_permit(&permit).await
+    }
 
-        if let Err(error) = self.stop_server_unlocked().await {
+    pub(crate) async fn stop_with_restore_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
+        if let Err(error) = self.stop_server_with_permit(permit).await {
             log::warn!("stop proxy runtime before restore failed: {error}");
         }
 
-        self.restore_active_takeovers_on_shutdown_unlocked().await
+        self.restore_active_takeovers_on_shutdown_with_permit(permit)
+            .await
     }
 
-    async fn stop_server_unlocked(&self) -> Result<(), String> {
+    async fn stop_server_with_permit(
+        &self,
+        _permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
         let mut stopped_runtime = false;
 
         if let Some(server) = self.runtime.server.write().await.take() {
@@ -1525,9 +1591,17 @@ impl ProxyService {
     }
 
     pub async fn update_config(&self, config: &ProxyConfig) -> Result<(), AppError> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+        let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit()
             .await
             .map_err(AppError::Message)?;
+        self.update_config_with_permit(&permit, config).await
+    }
+
+    pub(crate) async fn update_config_with_permit(
+        &self,
+        _permit: &OrdinaryMutationPermit,
+        config: &ProxyConfig,
+    ) -> Result<(), AppError> {
         self.db.update_proxy_config(config.clone()).await
     }
 
@@ -1564,9 +1638,17 @@ impl ProxyService {
         &self,
         enabled: bool,
     ) -> Result<GlobalProxySwitchUpdate, AppError> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+        let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit()
             .await
             .map_err(AppError::Message)?;
+        self.set_global_enabled_with_permit(&permit, enabled).await
+    }
+
+    pub(crate) async fn set_global_enabled_with_permit(
+        &self,
+        _permit: &OrdinaryMutationPermit,
+        enabled: bool,
+    ) -> Result<GlobalProxySwitchUpdate, AppError> {
         let mut config = self.get_global_config().await?;
         config.proxy_enabled = enabled;
         let cleared_auto_failover = if enabled {
@@ -1840,8 +1922,22 @@ impl ProxyService {
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.set_auto_failover_for_app_with_permit(&permit, app_type, enabled)
+            .await
+    }
+
+    pub(crate) async fn set_auto_failover_for_app_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
         if enabled {
-            return self.enable_auto_failover_for_app(app_type).await;
+            return self
+                .enable_auto_failover_for_app_with_permit(permit, app_type)
+                .await;
         }
 
         let app_type = Self::takeover_app_from_str(app_type)?;
@@ -1892,19 +1988,31 @@ impl ProxyService {
     }
 
     pub async fn enable_auto_failover_for_app(&self, app_type: &str) -> Result<(), String> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.enable_auto_failover_for_app_with_permit(&permit, app_type)
+            .await
+    }
+
+    pub(crate) async fn enable_auto_failover_for_app_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+    ) -> Result<(), String> {
         let first_provider_id = self.first_failover_provider_id(app_type)?;
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
         self.ensure_proxy_routing_active_for_app(app_key).await?;
         self.regenerate_failover_live_snapshots_for_app(&app_type, Some(&first_provider_id))
             .await?;
-        self.switch_proxy_target(app_key, &first_provider_id)
+        self.switch_proxy_target_with_permit(permit, app_key, &first_provider_id)
             .await?;
         self.persist_auto_failover_for_app(app_key, true).await
     }
 
     async fn prepare_proxy_and_auto_failover_activation(
         &self,
+        permit: &OrdinaryMutationPermit,
         app_type: &str,
     ) -> Result<AutoFailoverActivation, String> {
         let first_provider_id = self.first_failover_provider_id(app_type)?;
@@ -1930,7 +2038,7 @@ impl ProxyService {
             .map_err(|error| format!("load rollback backup for {app_key} failed: {error}"))?
             .map(|backup| backup.original_config)
             .ok_or_else(|| format!("missing rollback backup for {app_key}"))?;
-        self.switch_proxy_target(app_key, &first_provider_id)
+        self.switch_proxy_target_with_permit(permit, app_key, &first_provider_id)
             .await?;
         Ok(AutoFailoverActivation {
             app_type,
@@ -1979,53 +2087,60 @@ impl ProxyService {
         &self,
         app_type: &str,
     ) -> Result<(), String> {
-        let activation = {
-            let _guard =
-                crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-            self.prepare_proxy_and_auto_failover_activation(app_type)
-                .await?
-        };
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.enable_proxy_and_auto_failover_for_app_with_permit(&permit, app_type)
+            .await
+    }
+
+    pub(crate) async fn enable_proxy_and_auto_failover_for_app_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+    ) -> Result<(), String> {
+        let activation = self
+            .prepare_proxy_and_auto_failover_activation(permit, app_type)
+            .await?;
         let app_key = activation.app_type.as_str();
-        if let Err(start_error) = self.set_managed_session_for_app(app_key, true).await {
+        if let Err(start_error) = self
+            .set_managed_session_for_app_with_permit(permit, app_key, true)
+            .await
+        {
+            self.db
+                .save_live_backup(app_key, &activation.rollback_live_backup)
+                .await
+                .map_err(|rollback_error| {
+                    format!(
+                        "enable proxy and auto failover failed: {start_error}; rollback failed: restore live backup for {app_key} failed: {rollback_error}"
+                    )
+                })?;
+            if let Err(rollback_error) = self
+                .disable_takeover_for_app_with_permit(permit, &activation.app_type, false)
+                .await
             {
-                let _guard =
-                    crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-                self.db
-                    .save_live_backup(app_key, &activation.rollback_live_backup)
-                    .await
-                    .map_err(|rollback_error| {
-                        format!(
-                            "enable proxy and auto failover failed: {start_error}; rollback failed: restore live backup for {app_key} failed: {rollback_error}"
-                        )
-                    })?;
-                if let Err(rollback_error) = self
-                    .disable_takeover_for_app_unlocked(&activation.app_type, false)
-                    .await
-                {
-                    return Err(format!(
-                        "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
-                    ));
+                return Err(format!(
+                    "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
+                ));
+            }
+            let restore_backup_result = match activation.previous_live_backup.as_deref() {
+                Some(previous_live_backup) => {
+                    self.db
+                        .save_live_backup(app_key, previous_live_backup)
+                        .await
                 }
-                let restore_backup_result = match activation.previous_live_backup.as_deref() {
-                    Some(previous_live_backup) => {
-                        self.db
-                            .save_live_backup(app_key, previous_live_backup)
-                            .await
-                    }
-                    None => self.db.delete_live_backup(app_key).await,
-                };
-                if let Err(rollback_error) = restore_backup_result {
-                    return Err(format!(
-                        "enable proxy and auto failover failed: {start_error}; rollback failed: restore prior live backup for {app_key} failed: {rollback_error}"
-                    ));
-                }
-                if let Err(rollback_error) =
-                    self.restore_current_provider_after_activation_failure(&activation)
-                {
-                    return Err(format!(
-                        "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
-                    ));
-                }
+                None => self.db.delete_live_backup(app_key).await,
+            };
+            if let Err(rollback_error) = restore_backup_result {
+                return Err(format!(
+                    "enable proxy and auto failover failed: {start_error}; rollback failed: restore prior live backup for {app_key} failed: {rollback_error}"
+                ));
+            }
+            if let Err(rollback_error) =
+                self.restore_current_provider_after_activation_failure(&activation)
+            {
+                return Err(format!(
+                    "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
+                ));
             }
             return Err(start_error);
         }
@@ -2058,21 +2173,36 @@ impl ProxyService {
     }
 
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.set_takeover_for_app_with_permit(&permit, app_type, enabled)
+            .await
+    }
+
+    pub(crate) async fn set_takeover_for_app_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
 
         if enabled {
-            self.enable_takeover_for_app_unlocked(&app_type).await
+            self.enable_takeover_for_app_with_permit(permit, &app_type)
+                .await
         } else {
-            self.disable_takeover_for_app_unlocked(&app_type, true)
+            self.disable_takeover_for_app_with_permit(permit, &app_type, true)
                 .await
         }
     }
 
-    pub(crate) async fn clear_daemon_takeover_for_app(&self, app_type: &str) -> Result<(), String> {
+    pub(crate) async fn clear_daemon_takeover_for_app_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+    ) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-        self.disable_takeover_for_app_unlocked(&app_type, false)
+        self.disable_takeover_for_app_with_permit(permit, &app_type, false)
             .await
     }
 
@@ -2564,6 +2694,18 @@ impl ProxyService {
         app_type: &str,
         provider_id: &str,
     ) -> Result<HotSwitchOutcome, String> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.hot_switch_provider_with_permit(&permit, app_type, provider_id)
+            .await
+    }
+
+    pub(crate) async fn hot_switch_provider_with_permit(
+        &self,
+        _permit: &OrdinaryMutationPermit,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<HotSwitchOutcome, String> {
         let _guard = self.switch_locks.lock_for_app(app_type).await;
 
         let app_type_enum = Self::takeover_app_from_str(app_type)?;
@@ -2681,7 +2823,21 @@ impl ProxyService {
         app_type: &str,
         provider_id: &str,
     ) -> Result<(), String> {
-        let outcome = self.hot_switch_provider(app_type, provider_id).await?;
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.switch_proxy_target_with_permit(&permit, app_type, provider_id)
+            .await
+    }
+
+    async fn switch_proxy_target_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<(), String> {
+        let outcome = self
+            .hot_switch_provider_with_permit(permit, app_type, provider_id)
+            .await?;
 
         if outcome.logical_target_changed {
             log::info!("代理模式：已切换 {app_type} 的目标供应商为 {provider_id}");
@@ -2778,28 +2934,48 @@ impl ProxyService {
             .map_err(|error| format!("save {} live backup failed: {error}", app_type.as_str()))
     }
 
-    async fn restore_active_takeovers_on_shutdown_unlocked(&self) -> Result<(), String> {
+    async fn restore_active_takeovers_on_shutdown_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
         for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
-            self.disable_takeover_for_app_unlocked(&app_type, false)
+            self.disable_takeover_for_app_with_permit(permit, &app_type, false)
                 .await?;
         }
 
         Ok(())
     }
 
-    async fn enable_takeover_for_app_unlocked(&self, app_type: &AppType) -> Result<(), String> {
-        self.enable_takeover_for_app_unlocked_with_provider(app_type, None)
+    async fn enable_takeover_for_app_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &AppType,
+    ) -> Result<(), String> {
+        self.enable_takeover_for_app_with_provider(permit, app_type, None)
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn enable_takeover_for_daemon_worker(
         &self,
         app_type: &str,
         fallback_provider_id: Option<&str>,
     ) -> Result<(), String> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
+        self.enable_takeover_for_daemon_worker_with_permit(&permit, app_type, fallback_provider_id)
+            .await
+    }
+
+    pub(crate) async fn enable_takeover_for_daemon_worker_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-        self.enable_takeover_for_app_unlocked_with_options(
+        self.enable_takeover_for_app_with_options(
+            permit,
             &app_type,
             fallback_provider_id,
             EnableTakeoverOptions {
@@ -2810,12 +2986,14 @@ impl ProxyService {
         .await
     }
 
-    async fn enable_takeover_for_app_unlocked_with_provider(
+    async fn enable_takeover_for_app_with_provider(
         &self,
+        permit: &OrdinaryMutationPermit,
         app_type: &AppType,
         fallback_provider_id: Option<&str>,
     ) -> Result<(), String> {
-        self.enable_takeover_for_app_unlocked_with_options(
+        self.enable_takeover_for_app_with_options(
+            permit,
             app_type,
             fallback_provider_id,
             EnableTakeoverOptions::default(),
@@ -2823,8 +3001,9 @@ impl ProxyService {
         .await
     }
 
-    async fn enable_takeover_for_app_unlocked_with_options(
+    async fn enable_takeover_for_app_with_options(
         &self,
+        permit: &OrdinaryMutationPermit,
         app_type: &AppType,
         fallback_provider_id: Option<&str>,
         options: EnableTakeoverOptions,
@@ -2837,7 +3016,8 @@ impl ProxyService {
             && !self.has_managed_worker_for_app(app_type).await
         {
             let config = self.runtime_config_for_app(app_type).await?;
-            self.start_with_resolved_config_unlocked(config).await?;
+            self.start_with_resolved_config_with_permit(permit, config)
+                .await?;
         }
 
         let app_key = app_type.as_str();
@@ -2925,8 +3105,9 @@ impl ProxyService {
         Ok(())
     }
 
-    async fn disable_takeover_for_app_unlocked(
+    async fn disable_takeover_for_app_with_permit(
         &self,
+        permit: &OrdinaryMutationPermit,
         app_type: &AppType,
         stop_server_when_last: bool,
     ) -> Result<(), String> {
@@ -2981,7 +3162,7 @@ impl ProxyService {
                 .await
                 .map_err(|error| format!("check active takeovers failed: {error}"))?
         {
-            if let Err(error) = self.stop_server_unlocked().await {
+            if let Err(error) = self.stop_server_with_permit(permit).await {
                 if error != "proxy server is not running" {
                     return Err(error);
                 }
@@ -5458,8 +5639,11 @@ experimental_bearer_token = "PROXY_MANAGED"
         db.set_proxy_flags_sync("codex", true, false)
             .expect("seed codex takeover");
 
+        let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit()
+            .await
+            .expect("acquire mutation permit");
         service
-            .disable_takeover_for_app_unlocked(&AppType::Claude, true)
+            .disable_takeover_for_app_with_permit(&permit, &AppType::Claude, true)
             .await
             .expect("disable claude takeover");
 
@@ -5806,8 +5990,11 @@ wire_api = "responses"
         .expect("save dirty Codex live backup");
         seed_proxy_flags_raw(&db, "codex", true, false);
 
+        let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit()
+            .await
+            .expect("acquire mutation permit");
         service
-            .disable_takeover_for_app_unlocked(&AppType::Codex, false)
+            .disable_takeover_for_app_with_permit(&permit, &AppType::Codex, false)
             .await
             .expect("disable Codex takeover with dirty backup");
 
@@ -5868,8 +6055,11 @@ wire_api = "responses"
         db.add_to_failover_queue("claude", &provider.id)
             .expect("queue provider");
 
+        let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit()
+            .await
+            .expect("acquire mutation permit");
         let activation = service
-            .prepare_proxy_and_auto_failover_activation("claude")
+            .prepare_proxy_and_auto_failover_activation(&permit, "claude")
             .await
             .expect("prepare proxy and auto failover activation");
 
@@ -7032,7 +7222,7 @@ base_url = "https://api.openai.com/v1"
         let service = ProxyService::new(db.clone());
         use_ephemeral_app_proxy_port(db.as_ref(), "claude");
 
-        let guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+        let guard = crate::services::state_coordination::acquire_restore_exclusive_permit()
             .await
             .expect("acquire shared restore guard");
         let completed = Arc::new(AtomicBool::new(false));
@@ -7088,7 +7278,7 @@ base_url = "https://api.openai.com/v1"
         };
         let expected_port = updated.listen_port;
 
-        let guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+        let guard = crate::services::state_coordination::acquire_restore_exclusive_permit()
             .await
             .expect("acquire shared restore guard");
         let completed = Arc::new(AtomicBool::new(false));
@@ -8146,8 +8336,12 @@ wire_api = "responses"
         crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
             .expect("set effective current Codex provider");
 
+        let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit()
+            .await
+            .expect("acquire mutation permit");
         service
-            .enable_takeover_for_app_unlocked_with_options(
+            .enable_takeover_for_app_with_options(
+                &permit,
                 &AppType::Codex,
                 None,
                 EnableTakeoverOptions {

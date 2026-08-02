@@ -9,12 +9,14 @@ pub mod copilot_auth;
 pub mod env_checker;
 #[allow(dead_code)]
 pub mod env_manager;
+mod live_projection;
 pub mod local_env_check;
 pub mod mcp;
 pub mod model_fetch;
 pub mod prompt;
 pub mod provider;
 pub mod proxy;
+pub(crate) mod restore;
 pub(crate) mod s3;
 pub mod s3_sync;
 pub(crate) mod session_cost;
@@ -24,6 +26,7 @@ pub mod session_usage_driver;
 pub mod session_usage_gemini;
 pub mod session_usage_opencode;
 pub mod skill;
+pub(crate) mod skills_restore;
 pub mod speedtest;
 pub mod sql_helpers;
 pub(crate) mod state_coordination;
@@ -44,6 +47,10 @@ pub use model_fetch::FetchedModel;
 pub use prompt::PromptService;
 pub use provider::{reapply_current_codex_official_live, ProviderService};
 pub use proxy::ProxyService;
+pub(crate) use restore::{
+    RestoreCompletion, RestoreCoordinator, RestorePostCommitStatus, RestorePublication,
+    RestorePublicationToken,
+};
 pub use s3_sync::{S3RemoteInfo, S3SyncService, S3SyncSummary};
 pub use skill::{ImportSkillSelection, SkillService};
 pub use speedtest::{EndpointLatency, SpeedtestService};

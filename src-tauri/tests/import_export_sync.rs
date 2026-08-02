@@ -3,7 +3,7 @@ use serde_json::json;
 use std::{fs, path::Path};
 
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, AppError, AppType, ConfigService, Database,
+    get_claude_settings_path, read_json_file, AppError, AppState, AppType, ConfigService, Database,
     MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
 
@@ -1075,6 +1075,12 @@ fn create_backup_retains_only_latest_entries() {
 
     let backups_dir = home.join(".cc-switch").join("backups");
     fs::create_dir_all(&backups_dir).expect("create backups dir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&backups_dir, fs::Permissions::from_mode(0o700))
+            .expect("secure backups dir");
+    }
     for idx in 0..12 {
         let manual = backups_dir.join(format!("manual_{idx:02}.sql"));
         fs::write(&manual, format!("-- manual backup {idx}\n")).expect("seed manual backup");
@@ -1167,8 +1173,9 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
         .export_sql(&import_path)
         .expect("export import sql");
 
-    let backup_id = ConfigService::import_config_from_path(&import_path, &app_state)
-        .expect("import should succeed");
+    drop(app_state);
+    let backup_id =
+        ConfigService::import_config_from_path(&import_path).expect("import should succeed");
     assert!(
         !backup_id.is_empty(),
         "expected pre-import backup id when database exists"
@@ -1177,13 +1184,14 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
     let backup_path = home
         .join(".cc-switch")
         .join("backups")
-        .join(format!("{backup_id}.sql"));
+        .join(format!("{backup_id}.db"));
     assert!(
         backup_path.exists(),
         "backup file should exist at {}",
         backup_path.display()
     );
 
+    let app_state = AppState::try_new().expect("reload state after committed import");
     let current = app_state
         .db
         .get_current_provider(AppType::Claude.as_str())
@@ -1211,6 +1219,28 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
         !manager.providers.contains_key("p-old"),
         "import should drop providers that no longer exist in the imported database"
     );
+    drop(cfg);
+    drop(app_state);
+
+    let listed_backups = ConfigService::list_backups(&home.join(".cc-switch").join("config.json"))
+        .expect("list SQL and SQLite backups");
+    assert!(
+        listed_backups.iter().any(|backup| backup.id == backup_id),
+        "the returned safety backup id must be discoverable"
+    );
+
+    ConfigService::restore_from_backup_id(&backup_id)
+        .expect("restore the returned SQLite safety backup");
+    let restored = AppState::try_new().expect("reload restored safety backup");
+    assert_eq!(
+        restored
+            .db
+            .get_current_provider(AppType::Claude.as_str())
+            .expect("read restored current provider")
+            .as_deref(),
+        Some("p-old"),
+        "binary safety backup must restore through the same coordinator"
+    );
 }
 
 #[test]
@@ -1227,8 +1257,9 @@ fn import_config_from_path_invalid_json_returns_error() {
 
     let app_state = state_from_config(MultiAppConfig::default());
 
-    let err = ConfigService::import_config_from_path(&invalid_path, &app_state)
-        .expect_err("import should fail");
+    drop(app_state);
+    let err =
+        ConfigService::import_config_from_path(&invalid_path).expect_err("import should fail");
     match err {
         AppError::Localized { key, .. } => assert_eq!(key, "backup.sql.invalid_format"),
         other => panic!("expected Localized invalid SQL error, got {other:?}"),
@@ -1244,7 +1275,8 @@ fn import_config_from_path_missing_file_produces_io_error() {
     let missing_path = Path::new("/nonexistent/import.sql");
     let app_state = state_from_config(MultiAppConfig::default());
 
-    let err = ConfigService::import_config_from_path(missing_path, &app_state)
+    drop(app_state);
+    let err = ConfigService::import_config_from_path(missing_path)
         .expect_err("import should fail for missing file");
     match err {
         AppError::InvalidInput(_) => {}

@@ -943,17 +943,20 @@ pub(crate) fn handle_action(
         }
         Action::ConfigExport { path } => config::export(&mut ctx, path),
         Action::ConfigShowFull => config::show_full(&mut ctx),
-        Action::ConfigImport { path } => config::import(&mut ctx, path),
+        Action::ConfigImport { .. } | Action::ConfigRestoreBackup { .. } => Err(AppError::Message(
+            "Configuration restores must be dispatched through the background worker".to_string(),
+        )),
         Action::ConfigBackup { name } => config::backup(&mut ctx, name),
-        Action::ConfigRestoreBackup { id } => config::restore_backup(&mut ctx, id),
         Action::ConfigValidate => config::validate(&mut ctx),
         Action::ConfigOpenProxyHelp => config::open_proxy_help(&mut ctx),
         Action::ConfirmCommonConfigNotice => {
+            let _permit = settings::acquire_settings_mutation_permit()?;
             ctx.app.common_config_notice_confirmed = true;
             crate::settings::set_common_config_confirmed(true)?;
             Ok(())
         }
         Action::ConfirmUsageQueryNotice => {
+            let _permit = settings::acquire_settings_mutation_permit()?;
             ctx.app.usage_query_notice_confirmed = true;
             crate::settings::set_usage_confirmed(true)?;
             Ok(())
@@ -999,6 +1002,7 @@ pub(crate) fn handle_action(
         Action::HermesOpenMemoryDirectory => config::open_hermes_memory_directory(&mut ctx),
         Action::ConfigReset => config::reset(&mut ctx),
         Action::SetSkipClaudeOnboarding { enabled } => {
+            let _permit = settings::acquire_settings_mutation_permit()?;
             crate::settings::set_skip_claude_onboarding(enabled)?;
             ctx.app.push_toast(
                 texts::tui_toast_skip_claude_onboarding_toggled(enabled),
@@ -1007,6 +1011,7 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SetClaudePluginIntegration { enabled } => {
+            let _permit = settings::acquire_settings_mutation_permit()?;
             crate::settings::set_enable_claude_plugin_integration(enabled)?;
             if let Err(err) = crate::claude_plugin::sync_claude_plugin_on_settings_toggle(enabled) {
                 ctx.app.push_toast(
@@ -1048,6 +1053,7 @@ pub(crate) fn handle_action(
             ctx.data.reload_token,
         ),
         Action::SetLanguage(lang) => {
+            let _permit = settings::acquire_settings_mutation_permit()?;
             set_language(lang)?;
             ctx.app
                 .push_toast(texts::language_changed(), ToastKind::Success);

@@ -15,22 +15,25 @@ use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::services::webdav;
+use crate::services::RestorePublication;
 use crate::settings::{
     get_webdav_sync_settings, update_webdav_sync_status, WebDavSyncSettings, WebDavSyncStatus,
 };
+use crate::store::AppState;
 
 use super::sync_protocol::{
-    apply_snapshot_with_restore_guard, build_local_snapshot, localized, sha256_hex,
-    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
-    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
-    PROTOCOL_FORMAT, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    apply_snapshot_with_restore_guard_and_then, build_local_snapshot, localized, sha256_hex,
+    sync_artifact_size_limit, validate_artifact_size_limit, validate_manifest_compat,
+    verify_artifact, ArtifactMeta, RemoteLayout, SyncManifest, DB_COMPAT_VERSION,
+    MAX_MANIFEST_BYTES, PROTOCOL_FORMAT, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST,
+    REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
 use super::sync_protocol::{
     apply_snapshot, compute_snapshot_id, detect_system_device_name, effective_db_compat_version,
     extract_sql_user_version, normalize_device_name, validate_sql_user_version_for_import,
-    LEGACY_DB_COMPAT_VERSION, MAX_DEVICE_NAME_LEN,
+    LEGACY_DB_COMPAT_VERSION, MAX_DEVICE_NAME_LEN, MAX_SYNC_ARTIFACT_BYTES,
 };
 
 #[cfg(test)]
@@ -49,9 +52,10 @@ pub enum SyncDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WebDavSyncSummary {
+pub struct WebDavSyncSummary<Snapshot = ()> {
     pub decision: SyncDecision,
     pub message: String,
+    pub(crate) publication: Option<RestorePublication<Snapshot>>,
 }
 
 struct RemoteSnapshot {
@@ -90,12 +94,24 @@ impl WebDavSyncService {
     }
 
     pub fn download() -> Result<WebDavSyncSummary, AppError> {
-        run_http(run_with_sync_lock(download()))
+        Self::download_and_then(|_| ())
+    }
+
+    pub(crate) fn download_and_then<Snapshot>(
+        snapshot: impl FnOnce(&AppState) -> Snapshot,
+    ) -> Result<WebDavSyncSummary<Snapshot>, AppError> {
+        run_http(run_with_sync_lock(download(snapshot)))
     }
 
     /// 用户确认后调用：下载 V1 数据 → 应用 → 上传 V2 → 删除 V1
     pub fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
-        run_http(run_with_sync_lock(migrate_v1_to_v2()))
+        Self::migrate_v1_to_v2_and_then(|_| ())
+    }
+
+    pub(crate) fn migrate_v1_to_v2_and_then<Snapshot>(
+        snapshot: impl FnOnce(&AppState) -> Snapshot,
+    ) -> Result<WebDavSyncSummary<Snapshot>, AppError> {
+        run_http(run_with_sync_lock(migrate_v1_to_v2(snapshot)))
     }
 }
 
@@ -154,10 +170,13 @@ async fn upload() -> Result<WebDavSyncSummary, AppError> {
     Ok(WebDavSyncSummary {
         decision: SyncDecision::Upload,
         message: "WebDAV upload completed".to_string(),
+        publication: None,
     })
 }
 
-async fn download() -> Result<WebDavSyncSummary, AppError> {
+async fn download<Snapshot>(
+    capture: impl FnOnce(&AppState) -> Snapshot,
+) -> Result<WebDavSyncSummary<Snapshot>, AppError> {
     let mut settings = load_webdav_settings(true)?;
     let auth = webdav::auth_from_credentials(&settings.username, &settings.password);
 
@@ -182,18 +201,21 @@ async fn download() -> Result<WebDavSyncSummary, AppError> {
         )
         .await?;
 
-        apply_snapshot_with_restore_guard(&db_sql, &skills_zip).await?;
+        let publication =
+            apply_snapshot_with_restore_guard_and_then(&db_sql, &skills_zip, capture).await?;
         persist_sync_success_best_effort(&mut settings, &manifest_hash, snapshot.manifest_etag);
         cleanup_v1_remote(&settings, &auth).await;
 
         Ok(WebDavSyncSummary {
             decision: SyncDecision::Download,
             message: "WebDAV download completed".to_string(),
+            publication: Some(publication),
         })
     } else if detect_v1_manifest(&settings, &auth).await?.is_some() {
         Ok(WebDavSyncSummary {
             decision: SyncDecision::V1MigrationNeeded,
             message: String::new(),
+            publication: None,
         })
     } else {
         Err(localized(
@@ -311,7 +333,7 @@ async fn download_and_verify(
     validate_artifact_size_limit(artifact_name, meta.size)?;
 
     let url = build_artifact_url(settings, layout, artifact_name)?;
-    let (bytes, _) = webdav::get_bytes(&url, auth, Some(MAX_SYNC_ARTIFACT_BYTES))
+    let (bytes, _) = webdav::get_bytes(&url, auth, Some(sync_artifact_size_limit(artifact_name)))
         .await?
         .ok_or_else(|| {
             localized(
@@ -334,6 +356,8 @@ fn persist_sync_success(
     manifest_hash: &str,
     etag: Option<String>,
 ) -> Result<(), AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let status = WebDavSyncStatus {
         last_sync_at: Some(Utc::now().timestamp()),
         last_error: None,
@@ -464,8 +488,9 @@ async fn download_v1_artifact(
     file_name: &str,
     meta: &V1ArtifactMeta,
 ) -> Result<Vec<u8>, AppError> {
-    if meta.size > MAX_SYNC_ARTIFACT_BYTES {
-        let max_mb = MAX_SYNC_ARTIFACT_BYTES / 1024 / 1024;
+    let limit = sync_artifact_size_limit(file_name);
+    if meta.size > limit {
+        let max_mb = limit / 1024 / 1024;
         return Err(localized(
             "webdav.sync.v1_artifact_too_large",
             format!("V1 artifact {file_name} 超过下载上限（{max_mb} MB）"),
@@ -474,7 +499,7 @@ async fn download_v1_artifact(
     }
 
     let url = build_v1_artifact_url(settings, file_name)?;
-    let (bytes, _) = webdav::get_bytes(&url, auth, Some(MAX_SYNC_ARTIFACT_BYTES))
+    let (bytes, _) = webdav::get_bytes(&url, auth, Some(limit))
         .await?
         .ok_or_else(|| {
             localized(
@@ -520,7 +545,9 @@ async fn cleanup_v1_remote(settings: &WebDavSyncSettings, auth: &webdav::WebDavA
 }
 
 /// 迁移 V1 → V2：下载 V1 数据 → 本地应用 → 上传 V2 → 删除 V1
-async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
+async fn migrate_v1_to_v2<Snapshot>(
+    capture: impl FnOnce(&AppState) -> Snapshot,
+) -> Result<WebDavSyncSummary<Snapshot>, AppError> {
     let settings = load_webdav_settings(true)?;
     let auth = webdav::auth_from_credentials(&settings.username, &settings.password);
 
@@ -550,7 +577,8 @@ async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
     .await?;
 
     // 3. 应用到本地
-    apply_snapshot_with_restore_guard(&db_sql, &skills_zip).await?;
+    let publication =
+        apply_snapshot_with_restore_guard_and_then(&db_sql, &skills_zip, capture).await?;
 
     // 4. 重新上传为 V2 格式（upload 内部会 best-effort 清理 V1 远端数据）
     upload().await?;
@@ -558,6 +586,7 @@ async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
     Ok(WebDavSyncSummary {
         decision: SyncDecision::Download,
         message: "V1 → V2 migration completed".to_string(),
+        publication: Some(publication),
     })
 }
 
@@ -810,6 +839,17 @@ mod tests {
                 [],
             )
             .expect("insert remote provider");
+            conn.execute(
+                "INSERT INTO skills (
+                     id, name, directory, enabled_claude, enabled_codex,
+                     enabled_gemini, enabled_opencode, enabled_hermes, installed_at
+                 ) VALUES (
+                     'remote:remote-skill', 'Remote Skill', 'remote-skill',
+                     1, 0, 0, 0, 0, 1
+                 )",
+                [],
+            )
+            .expect("insert remote Skill metadata");
         }
         let db_sql = remote_db
             .export_sql_string_for_sync()
@@ -904,6 +944,69 @@ mod tests {
                 .exists(),
             "future schema restore must not unpack replacement skills"
         );
+    }
+
+    #[test]
+    fn apply_snapshot_rejects_skill_rows_without_matching_file_payload() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let existing_skill = crate::services::skill::SkillService::get_ssot_dir()
+            .expect("ssot dir")
+            .join("existing")
+            .join("SKILL.md");
+        std::fs::create_dir_all(existing_skill.parent().expect("skill parent"))
+            .expect("create existing skill parent");
+        std::fs::write(&existing_skill, "existing").expect("write existing skill");
+
+        let remote_db = Database::memory().expect("create remote db");
+        {
+            let connection = crate::database::lock_conn!(remote_db.conn);
+            connection
+                .execute(
+                    "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                     VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                    [],
+                )
+                .expect("insert remote provider");
+            connection
+                .execute(
+                    "INSERT INTO skills (
+                         id, name, directory, enabled_claude, enabled_codex,
+                         enabled_gemini, enabled_opencode, enabled_hermes, installed_at
+                     ) VALUES (
+                         'remote:missing-payload', 'Missing Payload', 'missing-payload',
+                         1, 0, 0, 0, 0, 1
+                     )",
+                    [],
+                )
+                .expect("insert remote skill metadata");
+        }
+        let db_sql = remote_db
+            .export_sql_string_for_sync()
+            .expect("export remote database");
+
+        let empty_zip_path = temp.path().join("empty-skills.zip");
+        let writer = zip::ZipWriter::new(
+            std::fs::File::create(&empty_zip_path).expect("create empty skills zip"),
+        );
+        writer.finish().expect("finish empty skills zip");
+        let empty_skills_zip = std::fs::read(&empty_zip_path).expect("read empty skills zip");
+
+        let error = apply_snapshot(db_sql.as_bytes(), &empty_skills_zip)
+            .expect_err("skill metadata without files must reject the whole snapshot");
+        assert!(
+            error.to_string().contains("missing-payload")
+                || error.to_string().contains("Skills")
+                || error.to_string().contains("skills"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&existing_skill).expect("read existing skill"),
+            "existing",
+            "a rejected snapshot must not alter live Skills"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]

@@ -8,7 +8,7 @@ use crate::cli::commands::config_openclaw;
 use crate::cli::commands::config_s3;
 use crate::cli::commands::config_webdav;
 use crate::cli::i18n::texts;
-use crate::cli::ui::{error, highlight, info, success, to_json};
+use crate::cli::ui::{error, highlight, info, success, to_json, warning};
 use crate::error::AppError;
 use crate::services::ConfigService;
 use crate::store::AppState;
@@ -215,20 +215,20 @@ fn import_config(file: &Path) -> Result<(), AppError> {
     }
 
     // Perform import
-    let state = get_state()?;
-    let backup_id = ConfigService::import_config_from_path(file, &state)?;
+    let restore = ConfigService::import_config_from_path_with_status(file)?;
 
-    // 导入后同步 live 配置
-    if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state) {
-        log::warn!("配置导入后同步 live 配置失败: {e}");
-    }
-
-    println!(
-        "{}",
-        success(&format!("✓ Configuration imported from {}", file.display()))
+    print_local_restore_status(
+        restore.pending_retry_message(),
+        format!("✓ Configuration imported from {}", file.display()),
     );
-    if !backup_id.is_empty() {
-        println!("{}", info(&format!("  Backup created: {}", backup_id)));
+    if !restore.pre_restore_backup_id.is_empty() {
+        println!(
+            "{}",
+            info(&format!(
+                "  Backup created: {}",
+                restore.pre_restore_backup_id
+            ))
+        );
     }
     println!();
     println!(
@@ -284,22 +284,19 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
             return Ok(());
         }
 
-        let state = get_state()?;
-        let pre_restore_backup = ConfigService::restore_from_backup_id(id, &state)?;
+        let restore = ConfigService::restore_from_backup_id_with_status(id)?;
 
-        // 恢复后同步 live 配置
-        if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state) {
-            log::warn!("备份恢复后同步 live 配置失败: {e}");
-        }
-
-        println!(
-            "{}",
-            success(&format!("✓ Configuration restored from backup '{}'", id))
+        print_local_restore_status(
+            restore.pending_retry_message(),
+            format!("✓ Configuration restored from backup '{}'", id),
         );
-        if !pre_restore_backup.is_empty() {
+        if !restore.pre_restore_backup_id.is_empty() {
             println!(
                 "{}",
-                info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+                info(&format!(
+                    "  Pre-restore backup: {}",
+                    restore.pre_restore_backup_id
+                ))
             );
         }
         println!();
@@ -344,22 +341,19 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
             return Ok(());
         }
 
-        let state = get_state()?;
-        let pre_restore_backup = ConfigService::import_config_from_path(file, &state)?;
+        let restore = ConfigService::import_config_from_path_with_status(file)?;
 
-        // 恢复后同步 live 配置
-        if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state) {
-            log::warn!("配置恢复后同步 live 配置失败: {e}");
-        }
-
-        println!(
-            "{}",
-            success(&format!("✓ Configuration restored from {}", file.display()))
+        print_local_restore_status(
+            restore.pending_retry_message(),
+            format!("✓ Configuration restored from {}", file.display()),
         );
-        if !pre_restore_backup.is_empty() {
+        if !restore.pre_restore_backup_id.is_empty() {
             println!(
                 "{}",
-                info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+                info(&format!(
+                    "  Pre-restore backup: {}",
+                    restore.pre_restore_backup_id
+                ))
             );
         }
         println!();
@@ -418,25 +412,22 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
         return Ok(());
     }
 
-    let state = get_state()?;
-    let pre_restore_backup = ConfigService::restore_from_backup_id(&selected_backup.id, &state)?;
+    let restore = ConfigService::restore_from_backup_id_with_status(&selected_backup.id)?;
 
-    // 恢复后同步 live 配置
-    if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state) {
-        log::warn!("备份恢复后同步 live 配置失败: {e}");
-    }
-
-    println!(
-        "{}",
-        success(&format!(
+    print_local_restore_status(
+        restore.pending_retry_message(),
+        format!(
             "✓ Configuration restored from: {}",
             selected_backup.display_name
-        ))
+        ),
     );
-    if !pre_restore_backup.is_empty() {
+    if !restore.pre_restore_backup_id.is_empty() {
         println!(
             "{}",
-            info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+            info(&format!(
+                "  Pre-restore backup: {}",
+                restore.pre_restore_backup_id
+            ))
         );
     }
     println!();
@@ -446,6 +437,13 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
     );
 
     Ok(())
+}
+
+fn print_local_restore_status(pending_retry: Option<String>, success_message: String) {
+    match pending_retry {
+        Some(message) => println!("{}", warning(&message)),
+        None => println!("{}", success(&success_message)),
+    }
 }
 
 fn validate_config() -> Result<(), AppError> {
@@ -510,6 +508,8 @@ fn reset_config() -> Result<(), AppError> {
         return Ok(());
     }
 
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     // Create a backup before reset (SQL)
     let config_path = crate::config::get_app_config_path();
     let backup_id = ConfigService::create_backup(&config_path, None)?;

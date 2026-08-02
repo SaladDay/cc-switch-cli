@@ -1183,6 +1183,16 @@ pub(crate) fn load_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
+pub(crate) fn load_state_for_mutation() -> Result<
+    (
+        AppState,
+        crate::services::state_coordination::OrdinaryMutationPermit,
+    ),
+    AppError,
+> {
+    AppState::try_new_with_ordinary_workflow()
+}
+
 pub(crate) fn load_snapshot_state() -> Result<AppState, AppError> {
     AppState::try_open_snapshot()
 }

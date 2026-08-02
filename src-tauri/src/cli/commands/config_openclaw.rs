@@ -514,6 +514,7 @@ fn show_dir(json: bool) -> Result<(), AppError> {
 }
 
 fn set_dir(path: Option<String>) -> Result<(), AppError> {
+    let (state, permit) = crate::store::AppState::try_new_with_ordinary_workflow()?;
     let mut settings = crate::settings::get_settings();
     settings.openclaw_config_dir = path;
     crate::settings::update_settings(settings)?;
@@ -521,8 +522,9 @@ fn set_dir(path: Option<String>) -> Result<(), AppError> {
     println!("{}", success("OpenClaw config directory saved."));
 
     if crate::sync_policy::should_sync_live(&AppType::OpenClaw) {
-        let state = crate::store::AppState::try_new()?;
-        if let Err(err) = crate::services::ProviderService::sync_openclaw_to_live(&state) {
+        if let Err(err) =
+            crate::services::ProviderService::sync_openclaw_to_live_with_permit(&state, &permit)
+        {
             println!(
                 "{}",
                 warning(&format!(

@@ -5,16 +5,104 @@
 use super::{lock_conn, Database, SCHEMA_VERSION};
 use crate::error::AppError;
 use rusqlite::{params, Connection};
+use std::sync::Mutex;
+use tempfile::NamedTempFile;
+
+/// A disk-backed database created exclusively from this binary's current
+/// schema code. Its fields are private so an untrusted connection cannot be
+/// wrapped or converted into a publishable restore stage.
+pub(super) struct CanonicalStage {
+    connection: Connection,
+    _file: NamedTempFile,
+}
+
+impl CanonicalStage {
+    pub(super) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub(super) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
+    /// Open the stage through the normal read-only database facade without
+    /// copying its pages into process memory. This lets validation exercise
+    /// production hydration while keeping peak memory proportional to rows
+    /// being decoded rather than to the whole restore database.
+    pub(super) fn open_readonly_database(&self) -> Result<Database, AppError> {
+        let connection =
+            Connection::open_with_flags(self._file.path(), super::readonly_database_open_flags())
+                .map_err(|error| AppError::Database(error.to_string()))?;
+        Ok(Database {
+            conn: Mutex::new(connection),
+            runtime_key: format!("canonical-restore-validation:{}", uuid::Uuid::new_v4()),
+            db_path: None,
+        })
+    }
+}
+
+/// Selects whether migrations may consult trusted local state or must remain a
+/// pure transformation of an untrusted restore database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MigrationRunContext {
+    LocalUpgrade,
+    /// Trusted schema construction in a disposable restore stage. It may run
+    /// the complete local migration chain but must never inspect host paths or
+    /// settings.
+    CanonicalFactory,
+    UntrustedRestore,
+}
 
 impl Database {
+    /// Construct the only publish-capable restore stage from a fresh disk file
+    /// using this binary's schema and migration chain.
+    pub(super) fn current_canonical_stage() -> Result<CanonicalStage, AppError> {
+        let file = NamedTempFile::new().map_err(|error| AppError::IoContext {
+            context: "create canonical restore stage".to_string(),
+            source: error,
+        })?;
+        let connection =
+            Connection::open(file.path()).map_err(|error| AppError::Database(error.to_string()))?;
+        connection
+            .execute_batch(
+                "PRAGMA auto_vacuum = INCREMENTAL;
+                 PRAGMA foreign_keys = ON;
+                 PRAGMA trusted_schema = OFF;",
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+
+        Self::create_tables_on_conn(&connection, MigrationRunContext::CanonicalFactory)?;
+        Self::set_user_version(&connection, 0)?;
+        Self::apply_schema_migrations_on_conn(&connection, MigrationRunContext::CanonicalFactory)?;
+        Self::ensure_model_pricing_seeded_on_conn(&connection)?;
+        if Self::get_user_version(&connection)? != SCHEMA_VERSION {
+            return Err(AppError::Database(
+                "canonical stage factory did not reach the current schema version".to_string(),
+            ));
+        }
+
+        Ok(CanonicalStage {
+            connection,
+            _file: file,
+        })
+    }
+
     /// 创建所有数据库表
     pub(crate) fn create_tables(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
-        Self::create_tables_on_conn(&conn)
+        Self::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
     }
 
     /// 在指定连接上创建表（供迁移和测试使用）
-    pub(crate) fn create_tables_on_conn(conn: &Connection) -> Result<(), AppError> {
+    pub(crate) fn create_tables_on_conn(
+        conn: &Connection,
+        context: MigrationRunContext,
+    ) -> Result<(), AppError> {
+        if context == MigrationRunContext::UntrustedRestore {
+            return Err(AppError::Config(
+                "current-schema factory is unavailable to untrusted migration".to_string(),
+            ));
+        }
         // 1. Providers 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS providers (
@@ -297,14 +385,15 @@ impl Database {
 
         // 修复跑过上游未发布开发版的数据库：旧的全局 current marker 在 v12
         // 定稿后改为按 scope 存储。与上游保持相同的一次性映射语义。
-        if conn
-            .execute(
-                "INSERT OR REPLACE INTO settings (key, value)
+        if context == MigrationRunContext::LocalUpgrade
+            && conn
+                .execute(
+                    "INSERT OR REPLACE INTO settings (key, value)
                  SELECT 'current_profile_id_claude', value FROM settings
                  WHERE key = 'current_profile_id'",
-                [],
-            )
-            .is_ok()
+                    [],
+                )
+                .is_ok()
         {
             let _ = conn.execute("DELETE FROM settings WHERE key = 'current_profile_id'", []);
         }
@@ -391,11 +480,14 @@ impl Database {
     /// 应用 Schema 迁移
     pub(crate) fn apply_schema_migrations(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
-        Self::apply_schema_migrations_on_conn(&conn)
+        Self::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
     }
 
     /// 在指定连接上应用 Schema 迁移
-    pub(crate) fn apply_schema_migrations_on_conn(conn: &Connection) -> Result<(), AppError> {
+    pub(crate) fn apply_schema_migrations_on_conn(
+        conn: &Connection,
+        context: MigrationRunContext,
+    ) -> Result<(), AppError> {
         conn.execute("SAVEPOINT schema_migration;", [])
             .map_err(|e| AppError::Database(format!("开启迁移 savepoint 失败: {e}")))?;
 
@@ -491,7 +583,7 @@ impl Database {
                     }
                     15 => {
                         log::info!("迁移数据库从 v15 到 v16（重建 Codex 会话用量）");
-                        Self::migrate_v15_to_v16(conn)?;
+                        Self::migrate_v15_to_v16(conn, context)?;
                         Self::set_user_version(conn, 16)?;
                     }
                     _ => {
@@ -500,12 +592,18 @@ impl Database {
                         )));
                     }
                 }
-                version = Self::get_user_version(conn)?;
+                let migrated_version = Self::get_user_version(conn)?;
+                if context == MigrationRunContext::UntrustedRestore {
+                    Self::validate_migration_source_version(conn, migrated_version)?;
+                }
+                version = migrated_version;
             }
-            Self::repair_proxy_request_logs_columns(conn)?;
-            Self::repair_usage_rollup_semantics_column(conn)?;
-            Self::create_request_logs_indexes_if_supported(conn)?;
-            Self::normalize_auto_failover_requires_takeover(conn)?;
+            if context != MigrationRunContext::UntrustedRestore {
+                Self::repair_proxy_request_logs_columns(conn)?;
+                Self::repair_usage_rollup_semantics_column(conn)?;
+                Self::create_request_logs_indexes_if_supported(conn)?;
+                Self::normalize_auto_failover_requires_takeover(conn)?;
+            }
             Ok(())
         })();
 
@@ -518,7 +616,17 @@ impl Database {
             Err(e) => {
                 conn.execute("ROLLBACK TO schema_migration;", []).ok();
                 conn.execute("RELEASE schema_migration;", []).ok();
-                Err(e)
+                if context == MigrationRunContext::UntrustedRestore {
+                    match e {
+                        AppError::InvalidInput(_) => Err(e),
+                        other => Err(AppError::InvalidInput(format!(
+                            "untrusted schema migration v{version}->v{} failed: {other}",
+                            version + 1
+                        ))),
+                    }
+                } else {
+                    Err(e)
+                }
             }
         }
     }
@@ -1598,9 +1706,16 @@ impl Database {
     /// v15 -> v16: remove Codex session rows and cursors so startup sync can
     /// rebuild them with fork-history alignment. Must stay connection-level:
     /// schema migration already owns the Database connection mutex.
-    fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
-        let codex_dir = crate::codex_config::get_codex_config_dir();
-        crate::services::session_usage_codex::reset_codex_usage_on_conn(conn, &codex_dir)
+    fn migrate_v15_to_v16(conn: &Connection, context: MigrationRunContext) -> Result<(), AppError> {
+        match context {
+            MigrationRunContext::LocalUpgrade => {
+                let codex_dir = crate::codex_config::get_codex_config_dir();
+                crate::services::session_usage_codex::reset_codex_usage_on_conn(conn, &codex_dir)
+            }
+            MigrationRunContext::CanonicalFactory | MigrationRunContext::UntrustedRestore => {
+                crate::services::session_usage_codex::reset_codex_usage_on_untrusted_restore(conn)
+            }
+        }
     }
 
     /// 插入默认模型定价数据
@@ -2874,7 +2989,7 @@ impl Database {
         Self::ensure_model_pricing_seeded_on_conn(&conn)
     }
 
-    fn ensure_model_pricing_seeded_on_conn(conn: &Connection) -> Result<(), AppError> {
+    pub(crate) fn ensure_model_pricing_seeded_on_conn(conn: &Connection) -> Result<(), AppError> {
         // 每次启动都执行 INSERT OR IGNORE，增量追加新模型；仅修复仍等于旧内置值的定价。
         Self::seed_model_pricing(conn)?;
         Self::repair_current_model_pricing(conn)?;

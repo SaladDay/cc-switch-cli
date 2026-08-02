@@ -27,7 +27,7 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 
-use app::{Action, App, EditorSubmit, Overlay, ToastKind};
+use app::{Action, App, EditorSubmit, LoadingKind, Overlay, ToastKind};
 use runtime_actions::{apply_preloaded_app_switch, handle_action};
 #[cfg(test)]
 use runtime_actions::{
@@ -47,18 +47,19 @@ use runtime_systems::{
 };
 pub(crate) use runtime_systems::{fetch_provider_models_for_tui, ModelFetchStrategy};
 use runtime_systems::{
-    handle_codex_history_msg, handle_local_env_msg, handle_managed_auth_msg,
-    handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg, handle_session_msg,
-    handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg, handle_update_msg,
-    handle_webdav_msg, start_app_data_system, start_codex_history_system, start_local_env_system,
-    start_managed_auth_system, start_model_fetch_system, start_proxy_system, start_quota_system,
-    start_session_system, start_session_usage_sync_system, start_skills_system,
-    start_speedtest_system, start_stream_check_system, start_update_system,
-    start_usage_pricing_system, start_webdav_system, AppDataLoadKind, AppDataMsg, AppDataReq,
-    CodexHistoryReq, LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyMsgEffect, ProxyReq,
-    QuotaReq, RequestTracker, SessionReq, SessionUsageSyncMsg, SessionUsageSyncReq, SkillsReq,
-    StreamCheckReq, UpdateReq, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg,
-    UsagePricingReq, WebDavReq,
+    handle_codex_history_msg, handle_config_restore_msg, handle_local_env_msg,
+    handle_managed_auth_msg, handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg,
+    handle_session_msg, handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg,
+    handle_update_msg, handle_webdav_msg, start_app_data_system, start_codex_history_system,
+    start_config_restore_system, start_local_env_system, start_managed_auth_system,
+    start_model_fetch_system, start_proxy_system, start_quota_system, start_session_system,
+    start_session_usage_sync_system, start_skills_system, start_speedtest_system,
+    start_stream_check_system, start_update_system, start_usage_pricing_system,
+    start_webdav_system, AppDataLoadKind, AppDataMsg, AppDataReq, CodexHistoryReq,
+    ConfigRestoreKind, ConfigRestoreReq, ConfigRestoreSource, LocalEnvReq, ManagedAuthReq,
+    ModelFetchReq, ProxyMsgEffect, ProxyReq, QuotaReq, RequestTracker, SessionReq,
+    SessionUsageSyncMsg, SessionUsageSyncReq, SkillsReq, StreamCheckReq, UpdateReq,
+    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, WebDavReq,
 };
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
@@ -2334,40 +2335,18 @@ fn effective_cache_invalidation(
     }
 }
 
-fn drop_cached_worker_state(
+fn request_cached_worker_state_drop(
     app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
-) -> Result<(), AppError> {
-    let mut acks = Vec::new();
-
+) {
     if let Some(tx) = app_data_req_tx {
-        let (ack_tx, ack_rx) = mpsc::channel();
-        if tx.send(AppDataReq::DropState { ack: ack_tx }).is_ok() {
-            acks.push(("app data", ack_rx));
-        }
+        let (ack, _ignored) = mpsc::channel();
+        let _ = tx.send(AppDataReq::DropState { ack });
     }
-
     if let Some(tx) = usage_pricing_req_tx {
-        let (ack_tx, ack_rx) = mpsc::channel();
-        if tx.send(UsagePricingReq::DropState { ack: ack_tx }).is_ok() {
-            acks.push(("usage/pricing", ack_rx));
-        }
+        let (ack, _ignored) = mpsc::channel();
+        let _ = tx.send(UsagePricingReq::DropState { ack });
     }
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for (name, ack_rx) in acks {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match ack_rx.recv_timeout(remaining) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err(AppError::Message(format!(
-                    "timed out waiting for {name} worker to release cached app state"
-                )));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn apply_current_app_data_changed(
@@ -2409,7 +2388,21 @@ fn apply_cache_invalidation(
     invalidation: CacheInvalidation,
 ) -> Result<(), AppError> {
     if matches!(invalidation, CacheInvalidation::AppStateRecreated) {
-        drop_cached_worker_state(app_data_req_tx, usage_pricing_req_tx)?;
+        // Never block the event loop on worker acknowledgements. FIFO ordering
+        // makes DropState a barrier for the fresh loads queued below.
+        request_cached_worker_state_drop(app_data_req_tx, usage_pricing_req_tx);
+        data_cache.clear_after_app_state_recreated();
+        apply_loaded_data_cache_invalidation(
+            app,
+            data,
+            data_cache,
+            quota_req_tx,
+            usage_pricing_req_tx,
+            CacheInvalidation::CurrentAppReloaded,
+        )?;
+        let current_app_type = app.app_type.clone();
+        let _ = data_cache.queue_current_app_data_refresh(app_data_req_tx, &current_app_type);
+        return Ok(());
     }
 
     if matches!(invalidation, CacheInvalidation::CurrentAppDataChanged) {
@@ -2431,6 +2424,128 @@ fn apply_cache_invalidation(
         usage_pricing_req_tx,
         invalidation,
     )
+}
+
+fn apply_completed_config_restore(
+    app: &mut App,
+    data: &mut data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+    app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+    done: runtime_systems::ConfigRestoreDone,
+) -> Result<(), AppError> {
+    apply_completed_config_restore_with_token_check(
+        app,
+        data,
+        data_cache,
+        quota_req_tx,
+        app_data_req_tx,
+        usage_pricing_req_tx,
+        done,
+        |publication| publication.is_current(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_completed_config_restore_with_token_check(
+    app: &mut App,
+    data: &mut data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+    app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+    done: runtime_systems::ConfigRestoreDone,
+    token_is_current: impl FnOnce(&crate::services::RestorePublicationToken) -> Result<bool, AppError>,
+) -> Result<(), AppError> {
+    let runtime_systems::ConfigRestoreDone {
+        kind,
+        pre_backup_id,
+        restored,
+    } = done;
+    let publication_state = token_is_current(&restored.publication);
+
+    // The restore worker materializes the post-publication projection before it
+    // reports success. Retire cached AppStates asynchronously; channel FIFO
+    // makes each DropState a barrier for any later refresh request.
+    request_cached_worker_state_drop(app_data_req_tx, usage_pricing_req_tx);
+    data_cache.clear_after_app_state_recreated();
+
+    let current_app_type = app.app_type.clone();
+    let stale_detail = match publication_state {
+        Ok(true) => None,
+        Ok(false) => Some("a newer restore was published".to_string()),
+        Err(error) => Some(format!("publication validation failed: {error}")),
+    };
+    if let Some(detail) = stale_detail {
+        *data = data.app_switch_loading_projection(&current_app_type);
+        let queued = data_cache.queue_current_app_data_refresh(app_data_req_tx, &current_app_type);
+        return Err(AppError::Message(format!(
+            "Ignored stale restore completion ({detail}); background recovery: {queued:?}"
+        )));
+    }
+
+    if let Some(pending) = restored.status.pending_retry() {
+        *data = data.app_switch_loading_projection(&current_app_type);
+        let _ = data_cache.queue_current_app_data_refresh(app_data_req_tx, &current_app_type);
+        app.push_toast(pending.message(), ToastKind::Warning);
+        return Ok(());
+    }
+
+    match kind {
+        ConfigRestoreKind::ImportFile if pre_backup_id.is_empty() => {
+            app.push_toast(texts::tui_toast_imported_config(), ToastKind::Success);
+        }
+        ConfigRestoreKind::ImportFile => {
+            app.push_toast(
+                texts::tui_toast_imported_with_backup(&pre_backup_id),
+                ToastKind::Success,
+            );
+        }
+        ConfigRestoreKind::Backup if pre_backup_id.is_empty() => {
+            app.push_toast(texts::tui_toast_restored_from_backup(), ToastKind::Success);
+        }
+        ConfigRestoreKind::Backup => {
+            app.push_toast(
+                texts::tui_toast_restored_with_pre_backup(&pre_backup_id),
+                ToastKind::Success,
+            );
+        }
+    }
+
+    if restored.app_type == current_app_type {
+        match restored.loaded {
+            Ok(loaded) => {
+                *data = *loaded;
+                return apply_loaded_data_cache_invalidation(
+                    app,
+                    data,
+                    data_cache,
+                    quota_req_tx,
+                    usage_pricing_req_tx,
+                    CacheInvalidation::CurrentAppReloaded,
+                );
+            }
+            Err(error) => {
+                *data = data.app_switch_loading_projection(&current_app_type);
+                let queued =
+                    data_cache.queue_current_app_data_refresh(app_data_req_tx, &current_app_type);
+                return Err(AppError::Message(format!(
+                    "Configuration restored, but refreshing the TUI snapshot failed ({error}); background recovery: {queued:?}"
+                )));
+            }
+        }
+    }
+
+    // The loading overlay prevents app switches, but retain a safe recovery
+    // path for synthetic/stale events rather than applying the wrong app view.
+    *data = data.app_switch_loading_projection(&current_app_type);
+    let queued = data_cache.queue_current_app_data_refresh(app_data_req_tx, &current_app_type);
+    Err(AppError::Message(format!(
+        "Configuration restored for {}, but the visible app changed to {}; background recovery: {queued:?}",
+        restored.app_type.as_str(),
+        current_app_type.as_str()
+    )))
 }
 
 fn apply_loaded_data_cache_invalidation(
@@ -2634,9 +2749,6 @@ fn handle_tui_action(
         )),
         other => {
             let candidate = cache_invalidation_for_action(&other);
-            if matches!(candidate, CacheInvalidation::AppStateRecreated) {
-                drop_cached_worker_state(app_data_req_tx, usage_pricing_req_tx)?;
-            }
             let before_token = data.reload_token;
             handle_action(
                 terminal,
@@ -2675,6 +2787,83 @@ fn handle_tui_action(
     }
 
     result
+}
+
+fn queue_config_restore_action(
+    app: &mut App,
+    req_tx: Option<&mpsc::Sender<ConfigRestoreReq>>,
+    tracker: &mut RequestTracker,
+    cloud_restore_active: bool,
+    action: Action,
+) -> Action {
+    let (source, title, message) = match action {
+        Action::ConfigImport { path } => {
+            let path = std::path::PathBuf::from(path);
+            if !path.exists() {
+                app.push_toast(
+                    texts::tui_error_import_file_not_found(&path.display().to_string()),
+                    ToastKind::Error,
+                );
+                return Action::None;
+            }
+            (
+                ConfigRestoreSource::File(path),
+                texts::tui_config_import_title().to_string(),
+                texts::tui_config_import_loading_message().to_string(),
+            )
+        }
+        Action::ConfigRestoreBackup { id } => (
+            ConfigRestoreSource::Backup(id),
+            texts::tui_confirm_restore_backup_title().to_string(),
+            texts::tui_config_restore_loading_message().to_string(),
+        ),
+        _ => return action,
+    };
+
+    if tracker.active.is_some() || cloud_restore_active {
+        app.push_toast(
+            texts::tui_toast_config_import_in_progress(),
+            ToastKind::Info,
+        );
+        return Action::None;
+    }
+
+    let Some(tx) = req_tx else {
+        app.push_toast(
+            texts::tui_toast_config_import_worker_unavailable("worker is not running"),
+            ToastKind::Warning,
+        );
+        return Action::None;
+    };
+
+    let request_id = tracker.start();
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::ConfigRestore,
+        title,
+        message,
+    };
+    if let Err(error) = tx.send(ConfigRestoreReq {
+        request_id,
+        source,
+        app_type: app.app_type.clone(),
+    }) {
+        tracker.cancel();
+        if matches!(
+            app.overlay,
+            Overlay::Loading {
+                kind: LoadingKind::ConfigRestore,
+                ..
+            }
+        ) {
+            app.overlay = Overlay::None;
+        }
+        app.push_toast(
+            texts::tui_toast_config_import_request_failed(&error.to_string()),
+            ToastKind::Error,
+        );
+    }
+
+    Action::None
 }
 
 fn queue_codex_history_action(
@@ -3041,6 +3230,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let mut proxy_open_flash = ProxyOpenFlash::default();
     let mut proxy_loading = RequestTracker::default();
     let mut proxy_snapshot_refresh = RequestTracker::default();
+    let mut config_restore_loading = RequestTracker::default();
     let mut webdav_loading = RequestTracker::default();
     let mut update_check = RequestTracker::default();
     let mut session_usage_sync = RequestTracker::default();
@@ -3175,6 +3365,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         Err(err) => {
             app.push_toast(
                 texts::tui_toast_webdav_worker_unavailable(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
+    let config_restore = match start_config_restore_system() {
+        Ok(system) => Some(system),
+        Err(error) => {
+            app.push_toast(
+                texts::tui_toast_config_import_worker_unavailable(&error.to_string()),
                 ToastKind::Warning,
             );
             None
@@ -3603,6 +3804,27 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             }
         }
 
+        if let Some(config_restore) = config_restore.as_ref() {
+            while let Ok(msg) = config_restore.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
+                if let Some(done) =
+                    handle_config_restore_msg(&mut app, &mut config_restore_loading, msg)
+                {
+                    if let Err(error) = apply_completed_config_restore(
+                        &mut app,
+                        &mut data,
+                        &mut data_cache,
+                        quota.as_ref().map(|system| &system.req_tx),
+                        app_data.as_ref().map(|system| &system.req_tx),
+                        usage_pricing.as_ref().map(|system| &system.req_tx),
+                        done,
+                    ) {
+                        app.push_toast(error.to_string(), ToastKind::Error);
+                    }
+                }
+            }
+        }
+
         if let Some(webdav) = webdav.as_ref() {
             while let Ok(msg) = webdav.result_rx.try_recv() {
                 frame_scheduler.mark_dirty();
@@ -3688,6 +3910,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         &mut codex_history_save,
                         action,
                     );
+                    let action = queue_config_restore_action(
+                        &mut app,
+                        config_restore.as_ref().map(|system| &system.req_tx),
+                        &mut config_restore_loading,
+                        webdav_loading.active.is_some(),
+                        action,
+                    );
                     let action_result = handle_tui_action(
                         &mut terminal,
                         &mut app,
@@ -3743,6 +3972,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         &mut app,
                         codex_history.as_ref().map(|system| &system.req_tx),
                         &mut codex_history_save,
+                        action,
+                    );
+                    let action = queue_config_restore_action(
+                        &mut app,
+                        config_restore.as_ref().map(|system| &system.req_tx),
+                        &mut config_restore_loading,
+                        webdav_loading.active.is_some(),
                         action,
                     );
                     let action_result = handle_tui_action(

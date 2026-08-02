@@ -1014,7 +1014,7 @@ fn scrub_leaked_gemini_common_config_if_needed(
                 .collect()
         })
         .unwrap_or_default();
-    crate::gemini_config::remove_gemini_env_entries(&poison_env)?;
+    remove_gemini_env_entries_for_scrub(&poison_env)?;
 
     // The snippet is the only source that identifies injected values, so it is
     // deliberately updated after providers, backups, and the live env.
@@ -1034,14 +1034,70 @@ fn scrub_leaked_gemini_common_config_if_needed(
     Ok(())
 }
 
+fn remove_gemini_env_entries_for_scrub(
+    poison_env: &HashMap<String, String>,
+) -> Result<bool, AppError> {
+    #[cfg(test)]
+    if TEST_GEMINI_SCRUB_LIVE_FAILURE.with(std::cell::Cell::get) {
+        return Err(AppError::Message(
+            "forced Gemini live credential scrub failure".to_string(),
+        ));
+    }
+    crate::gemini_config::remove_gemini_env_entries(poison_env)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GEMINI_SCRUB_LIVE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) struct GeminiScrubLiveFailureGuard;
+
+#[cfg(test)]
+impl GeminiScrubLiveFailureGuard {
+    pub(crate) fn activate() -> Self {
+        TEST_GEMINI_SCRUB_LIVE_FAILURE.with(|flag| {
+            assert!(!flag.replace(true), "Gemini scrub failure seam is nested");
+        });
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for GeminiScrubLiveFailureGuard {
+    fn drop(&mut self) {
+        TEST_GEMINI_SCRUB_LIVE_FAILURE.with(|flag| flag.set(false));
+    }
+}
+
 pub(crate) fn migrate_common_config_upstream_semantics_if_needed(
     db: &Database,
     config: &mut MultiAppConfig,
+) -> Result<(), AppError> {
+    migrate_common_config_upstream_semantics(db, config, false)
+}
+
+pub(crate) fn migrate_common_config_upstream_semantics_for_restore(
+    db: &Database,
+    config: &mut MultiAppConfig,
+) -> Result<(), AppError> {
+    migrate_common_config_upstream_semantics(db, config, true)
+}
+
+fn migrate_common_config_upstream_semantics(
+    db: &Database,
+    config: &mut MultiAppConfig,
+    fail_on_incomplete_scrub: bool,
 ) -> Result<(), AppError> {
     if let Err(error) = scrub_leaked_gemini_common_config_if_needed(db, config) {
         log::warn!(
             "skip incomplete Gemini common-config credential cleanup; it will retry: {error}"
         );
+        if fail_on_incomplete_scrub {
+            return Err(error);
+        }
     }
 
     if db

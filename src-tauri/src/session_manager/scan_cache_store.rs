@@ -65,6 +65,9 @@ pub struct SyncResumeHint {
     /// （非严格保证，会话日志 app 不会原地重写自己的历史）。inode 变化的
     /// rename-replace 类重写另由 `file_identity` 关闭。None 视为无指纹。
     pub tail_hash: Option<i64>,
+    /// 保存提示时同一文件描述符观察到的物理文件长度。mtime 未前进时，
+    /// 长度变化仍能可靠识别同一时间戳粒度内的追加或截断。
+    pub file_size: Option<i64>,
     /// 上轮结束时"边界之后未终结尾部"的字节数（None = 无待确认尾部）。
     /// 与 `pending_tail_hash` 一起做尾部稳定性确认：对"永远不带换行的最终
     /// 行"，两轮之间尾部字节不变即可收敛，不再每周期复查（见驱动）。
@@ -153,7 +156,8 @@ impl ScanCacheStore {
                 tail_hash INTEGER,
                 pending_tail_len INTEGER,
                 pending_tail_hash INTEGER,
-                file_identity INTEGER
+                file_identity INTEGER,
+                file_size INTEGER
             )",
             [],
         )
@@ -173,6 +177,10 @@ impl ScanCacheStore {
         );
         let _ = conn.execute(
             "ALTER TABLE session_sync_resume ADD COLUMN file_identity INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE session_sync_resume ADD COLUMN file_size INTEGER",
             [],
         );
 
@@ -708,7 +716,7 @@ impl ScanCacheStore {
         let mut stmt = conn
             .prepare(
                 "SELECT file_path, last_modified, last_line_offset, byte_offset, state, tail_hash,
-                        pending_tail_len, pending_tail_hash, file_identity
+                        pending_tail_len, pending_tail_hash, file_identity, file_size
                  FROM session_sync_resume",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -727,6 +735,7 @@ impl ScanCacheStore {
                         pending_tail_len: row.get(6)?,
                         pending_tail_hash: row.get(7)?,
                         file_identity: row.get(8)?,
+                        file_size: row.get(9)?,
                     },
                 ))
             })
@@ -747,7 +756,7 @@ impl ScanCacheStore {
         let mut stmt = conn
             .prepare_cached(
                 "SELECT last_modified, last_line_offset, byte_offset, state, tail_hash,
-                        pending_tail_len, pending_tail_hash, file_identity
+                        pending_tail_len, pending_tail_hash, file_identity, file_size
                  FROM session_sync_resume WHERE file_path = ?1",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -763,6 +772,7 @@ impl ScanCacheStore {
                     pending_tail_len: row.get(5)?,
                     pending_tail_hash: row.get(6)?,
                     file_identity: row.get(7)?,
+                    file_size: row.get(8)?,
                 })
             })
             .map(Some)
@@ -782,8 +792,8 @@ impl ScanCacheStore {
         conn.execute(
             "INSERT INTO session_sync_resume
                 (file_path, last_modified, last_line_offset, byte_offset, state, tail_hash,
-                 pending_tail_len, pending_tail_hash, file_identity)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 pending_tail_len, pending_tail_hash, file_identity, file_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(file_path) DO UPDATE SET
                 last_modified = excluded.last_modified,
                 last_line_offset = excluded.last_line_offset,
@@ -792,7 +802,8 @@ impl ScanCacheStore {
                 tail_hash = excluded.tail_hash,
                 pending_tail_len = excluded.pending_tail_len,
                 pending_tail_hash = excluded.pending_tail_hash,
-                file_identity = excluded.file_identity
+                file_identity = excluded.file_identity,
+                file_size = excluded.file_size
              WHERE excluded.last_modified > session_sync_resume.last_modified
                 OR (excluded.last_modified = session_sync_resume.last_modified
                     AND excluded.byte_offset >= session_sync_resume.byte_offset)",
@@ -806,6 +817,7 @@ impl ScanCacheStore {
                 hint.pending_tail_len,
                 hint.pending_tail_hash,
                 hint.file_identity,
+                hint.file_size,
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -1170,6 +1182,7 @@ mod tests {
             pending_tail_len: None,
             pending_tail_hash: None,
             file_identity: None,
+            file_size: Some(byte),
         };
 
         store.save_sync_resume(&hint(5, 120)).expect("save");
@@ -1204,6 +1217,7 @@ mod tests {
             pending_tail_len: Some(5),
             pending_tail_hash: Some(1234),
             file_identity: Some(9988),
+            file_size: Some(25),
         };
         store.save_sync_resume(&hint).expect("save");
         let loaded = store
@@ -1217,6 +1231,7 @@ mod tests {
             Some(9988),
             "file_identity 应随提示往返"
         );
+        assert_eq!(loaded.file_size, Some(25), "file_size 应随提示往返");
 
         // 收敛写回：更大的 mtime 覆盖，pending_tail 清空为 NULL。
         let cleared = SyncResumeHint {
@@ -1248,6 +1263,7 @@ mod tests {
             pending_tail_len: None,
             pending_tail_hash: None,
             file_identity: Some(4242),
+            file_size: Some(20),
         };
         store
             .save_sync_resume(&hint("/a.jsonl", 10))

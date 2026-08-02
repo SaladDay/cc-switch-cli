@@ -24,18 +24,29 @@
 //! ```
 
 mod backup;
+mod canonical_import;
 mod dao;
 mod migration;
+mod migration_source;
+mod restore_policy;
+mod restore_state;
 mod schema;
+mod sql_import;
 
 #[cfg(test)]
 mod tests;
 
 // DAO 类型导出供外部使用
 pub(crate) use backup::run_sqlite_backup_to_completion;
+pub(crate) use backup::PreparedDatabaseRestore;
+#[cfg(test)]
+pub(crate) use canonical_import::CanonicalPublicationFailureGuard;
 pub(crate) use dao::model_pricing::ModelPricingUpdate;
 pub(crate) use dao::providers_seed::is_official_seed_id;
 pub use dao::FailoverQueueItem;
+pub(crate) use restore_state::RestorePostcommitState;
+pub(crate) use schema::MigrationRunContext;
+pub(crate) use sql_import::MAX_SQL_IMPORT_BYTES;
 
 use crate::config::{
     get_app_config_dir, resolve_config_dir_without_following_user_symlinks,
@@ -799,6 +810,10 @@ impl Database {
             db_path: None,
         };
         db.create_tables()?;
+        // Keep test databases structurally identical to a fresh production
+        // database. Stamping the base DDL as current without running the
+        // migration chain creates a false-current schema.
+        db.apply_schema_migrations()?;
         db.ensure_model_pricing_seeded()?;
 
         Ok(db)
@@ -841,7 +856,13 @@ impl Database {
                 let task_context = context.to_string();
                 let log_context = task_context.clone();
                 match tokio::task::spawn_blocking(move || {
-                    db.run_usage_maintenance(&task_context);
+                    match crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                    {
+                        Ok(_permit) => db.run_usage_maintenance(&task_context),
+                        Err(error) => log::warn!(
+                            "Periodic usage maintenance could not acquire state permit ({task_context}): {error}"
+                        ),
+                    }
                 })
                 .await
                 {

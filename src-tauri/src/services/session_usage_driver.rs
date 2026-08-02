@@ -25,8 +25,9 @@
 //! 二次读取，杜绝"提交后同路径被替换、save 阶段读到异源文件"的错配。
 //!
 //! mtime skip 与身份校验的顺序：mtime skip 发生在身份校验之前，但跳过前会用那次
-//! （本就为 mtime 复查而做的）stat 比对预载提示的 size/inode——保留旧 mtime 的
-//! 异源 replace（备份恢复 / rsync -t / 低精度 fs 同 tick）因此不会被永久漏过。跨
+//! （本就为 mtime 复查而做的）stat 比对预载提示可推导的物理长度与 inode——
+//! 保留旧 mtime 的 append/异源 replace（低精度 fs 同 tick、备份恢复、rsync -t）
+//! 因此不会被永久漏过。跨
 //! 机器场景（只同步 cc-switch.db + sidecar、不同步会话文件本身）没有匹配提示或
 //! 会话文件由本机 app 写入（mtime 必然前进），走各自既有路径，不受影响。
 //!
@@ -98,6 +99,8 @@ pub(crate) struct JsonlScanOutcome {
     /// 的 fd（`file.metadata()`），而非保存阶段按 path 二次 stat——保证 sidecar 存的
     /// inode 与 offset/tail_hash 描述的是同一个物理文件。
     file_identity: Option<i64>,
+    /// 被扫描文件在同一 fd 上观察到的物理长度。
+    file_size: u64,
 }
 
 /// 基础校验：提示与主库权威行完全一致、且文件未被截断。
@@ -151,12 +154,29 @@ pub(crate) fn unchanged_jsonl_identity_is_suspicious(
     let Some(hint) = matched_hint else {
         return false;
     };
-    let shrunk = hint.byte_offset > 0 && (metadata.len() as i64) < hint.byte_offset;
+    // `byte_offset` is the last newline boundary and `pending_tail_len`, when
+    // present, is every byte between that boundary and the previous EOF.
+    // Together they are the exact physical length observed by the prior scan.
+    // A size change is therefore proof of an append/truncate even when a
+    // low-resolution filesystem preserves the same mtime and inode.
+    let previous_len = hint
+        .file_size
+        .and_then(|size| u64::try_from(size).ok())
+        .or_else(|| {
+            // Compatibility for hints written before `file_size` existed.
+            // The first non-skipped scan writes the explicit value.
+            u64::try_from(hint.byte_offset).ok().and_then(|boundary| {
+                u64::try_from(hint.pending_tail_len.unwrap_or(0))
+                    .ok()
+                    .and_then(|pending| boundary.checked_add(pending))
+            })
+        });
+    let size_changed = previous_len.is_some_and(|previous| metadata.len() != previous);
     let inode_changed = match hint.file_identity {
         Some(expected) => file_identity(metadata).is_some_and(|current| current != expected),
         None => false,
     };
-    shrunk || inode_changed
+    size_changed || inode_changed
 }
 
 /// 续传决策：区分"能续传"、"文件身份失效需全量重扫"、"沿用行 offset 跳过"。
@@ -347,8 +367,8 @@ where
         // 保留旧 mtime 的异源 replace（备份恢复 / rsync -t / 低精度 fs 同 tick）会让
         // 本机 mtime 不前进 → 单纯 mtime-skip 会把异源文件永久视作未变化。跳过前用
         // 已读到的 metadata（零额外 IO：这次 stat 本就为 mtime 复查而做）比对匹配
-        // 提示的身份：文件比权威 offset 短（截断/异源）或 Unix inode 变化
-        // （rename-replace / 跨机器异源）都证明这不是权威 offset 描述的那个文件 →
+        // 提示的身份：文件物理长度变化（同 tick 追加/截断/异源）或 Unix inode
+        // 变化（rename-replace / 跨机器异源）都证明文件不能按 mtime 直接跳过 →
         // 不 skip，继续扫描（decide_resume 会 RescanFromZero，request_id 去重兜底）。
         // 无匹配提示或无 metadata（读取失败）时无从证伪 → 维持既有 mtime-skip
         // （跨机器只同步 db、不同步会话文件，是记录在案的已知边界）。
@@ -364,7 +384,7 @@ where
             return Ok(None);
         }
         log::debug!(
-            "[SYNC-DRIVER] mtime 未前进但身份可疑（截断/inode 变化），不 skip 继续扫描: {file_path_str}"
+            "[SYNC-DRIVER] mtime 未前进但文件长度/inode 变化，不 skip 继续扫描: {file_path_str}"
         );
     }
 
@@ -513,6 +533,10 @@ where
     // 真正扫描的那个物理文件的身份，不会出现"旧进度 + 新身份"的错配。
     let file = reader.get_mut();
     let file_identity_val = file.metadata().ok().and_then(|m| file_identity(&m));
+    let observed_file_size = file
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(byte_pos);
     let tail_hash_val = tail_hash_from_file(file, committed_byte_pos);
 
     log::debug!(
@@ -528,6 +552,7 @@ where
         pending_tail_hash,
         tail_hash: tail_hash_val,
         file_identity: file_identity_val,
+        file_size: observed_file_size,
     }))
 }
 
@@ -580,6 +605,7 @@ fn try_converge_stable_tail<S: Serialize>(
                 pending_tail_hash: None,
                 tail_hash: tail_hash_val,
                 file_identity: file_identity_val,
+                file_size: file_len,
             })
         }
         // 尾部变了或读取抖动：复位游标，按普通续传处理（本轮若仍以不完整
@@ -615,6 +641,7 @@ pub(crate) fn save_resume_hint(
         pending_tail_len: outcome.pending_tail_len,
         pending_tail_hash: outcome.pending_tail_hash,
         file_identity: outcome.file_identity,
+        file_size: i64::try_from(outcome.file_size).ok(),
     };
     if let Err(err) = store.save_sync_resume(&hint) {
         log::debug!("[SESSION-SYNC] 写入字节续传提示失败 ({file_path_str}): {err}");
@@ -703,6 +730,46 @@ mod tests {
         // 文件真实 mtime：复查读到相同的真实 mtime，仍判定未变化 → 跳过。
         let real = real_mtime(&path);
         assert!(scan_at(&path, real, real, 1, None).outcome.is_none());
+    }
+
+    #[test]
+    fn same_mtime_append_is_detected_from_resume_boundary_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "l1\n").expect("write");
+        let store = ScanCacheStore::in_memory().expect("store");
+        let original_modified = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
+        let original_mtime = real_mtime(&path);
+
+        let first = scan_at(&path, original_mtime, 0, 0, Some(&store));
+        save_resume_hint(Some(&store), &path.to_string_lossy(), first.out());
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open append");
+        file.write_all(b"l2\n").expect("append");
+        file.flush().expect("flush append");
+        file.set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .expect("restore original mtime");
+        drop(file);
+        assert_eq!(
+            real_mtime(&path),
+            original_mtime,
+            "fixture must preserve mtime while growing"
+        );
+
+        let second = scan_at(
+            &path,
+            original_mtime,
+            first.out().file_modified,
+            first.out().line_offset,
+            Some(&store),
+        );
+        assert_eq!(second.seen, vec![("l2".to_string(), true)]);
     }
 
     #[test]

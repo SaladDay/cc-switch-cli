@@ -56,7 +56,7 @@ toml_edit = "0.22"
 serde_yaml = "0.9"
 base64 = "0.22"
 indexmap = { version = "2", features = ["serde"] }
-rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks", "limits"] }
 rust_decimal = "1.33"
 json5 = "0.4"
 json-five = "0.3.1"
@@ -88,15 +88,20 @@ rquickjs = { version = "0.8", features = ["array-buffer", "classes"] }
 zip = "2.2"
 url = "2.5"
 unicode-width = "0.1"
+unicode-normalization = "0.1"
 tachyonfx = "0.25"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"
 self-replace = "1"
 windows-sys = { version = "0.61", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

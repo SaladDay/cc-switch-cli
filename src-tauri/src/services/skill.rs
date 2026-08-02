@@ -606,9 +606,17 @@ impl SkillService {
 
     pub fn load_index() -> Result<SkillsIndex, AppError> {
         let db = Database::init()?;
+        Self::load_index_from_database(&db, true)
+    }
 
-        // Ensure default repos exist (insert-missing only).
-        let _ = db.init_default_skill_repos();
+    fn load_index_from_database(
+        db: &Database,
+        seed_default_repos: bool,
+    ) -> Result<SkillsIndex, AppError> {
+        if seed_default_repos {
+            // Ordinary startup behavior: insert missing default repos.
+            let _ = db.init_default_skill_repos();
+        }
 
         let repos = db.get_skill_repos()?;
         let installed = db.get_all_installed_skills()?;
@@ -865,15 +873,23 @@ impl SkillService {
         app: &AppType,
         method: SyncMethod,
     ) -> Result<(), AppError> {
+        let directory =
+            crate::skill_directory::SkillDirectory::parse(directory).map_err(|error| {
+                AppError::InvalidInput(format!(
+                    "invalid Skill directory component {directory:?}: {}",
+                    error.reason()
+                ))
+            })?;
         if !Self::app_supports_skills(app) {
             return Ok(());
         }
 
         let ssot_dir = Self::get_ssot_dir()?;
-        let source = ssot_dir.join(directory);
+        let source = ssot_dir.join(directory.as_str());
         if !source.exists() {
             return Err(AppError::Message(format!(
-                "Skill 不存在于 SSOT: {directory}"
+                "Skill 不存在于 SSOT: {}",
+                directory.as_str()
             )));
         }
 
@@ -881,7 +897,7 @@ impl SkillService {
         // D5: allow creating target app dirs during skills sync.
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
 
-        let dest = app_dir.join(directory);
+        let dest = app_dir.join(directory.as_str());
         if dest.exists() || Self::is_symlink(&dest) {
             Self::remove_path(&dest)?;
         }
@@ -904,12 +920,19 @@ impl SkillService {
     }
 
     pub fn remove_from_app(directory: &str, app: &AppType) -> Result<(), AppError> {
+        let directory =
+            crate::skill_directory::SkillDirectory::parse(directory).map_err(|error| {
+                AppError::InvalidInput(format!(
+                    "invalid Skill directory component {directory:?}: {}",
+                    error.reason()
+                ))
+            })?;
         if !Self::app_supports_skills(app) {
             return Ok(());
         }
 
         let app_dir = Self::get_app_skills_dir(app)?;
-        let path = app_dir.join(directory);
+        let path = app_dir.join(directory.as_str());
         if path.exists() || Self::is_symlink(&path) {
             Self::remove_path(&path)?;
         }
@@ -930,7 +953,9 @@ impl SkillService {
     }
 
     /// Best-effort sync for live-flow triggers (provider switch etc).
-    pub fn sync_all_enabled_best_effort() -> Result<(), AppError> {
+    pub(crate) fn sync_all_enabled_best_effort_with_permit(
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index);
         for app in Self::supported_skill_apps() {
@@ -939,6 +964,24 @@ impl SkillService {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn sync_all_enabled_for_restore(
+        db: &Database,
+        _permit: &crate::services::state_coordination::RestoreExclusivePermit,
+    ) -> Result<(), AppError> {
+        // Restore owns an exact, already-normalized Skills tree. Scanning host
+        // application directories here would turn post-commit projection into
+        // a second import path and make retries non-idempotent.
+        let index = Self::load_index_from_database(db, false)?;
+        let mut failures = crate::services::live_projection::LiveProjectionFailures::default();
+        for app in Self::supported_skill_apps() {
+            failures.record(
+                format!("{} skills", app.as_str()),
+                Self::sync_to_app(&index, &app),
+            );
+        }
+        failures.finish("live skill projection")
     }
 
     pub fn sync_all_enabled(app: Option<&AppType>) -> Result<(), AppError> {
@@ -1792,6 +1835,33 @@ mod tests {
         assert_eq!(
             SkillService::repos_fingerprint(&repos),
             "a/repo@dev|b/repo@main"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn runtime_skill_remove_and_sync_reject_paths_before_touching_files() {
+        let temp = tempfile::tempdir().expect("create isolated skill home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let victim = temp.path().join("victim");
+        std::fs::create_dir_all(&victim).expect("create victim directory");
+        std::fs::write(victim.join("keep.txt"), b"keep").expect("write victim sentinel");
+
+        for directory in ["../victim", r"..\victim", "/absolute", r"C:\victim", "CON"] {
+            assert!(
+                SkillService::remove_from_app(directory, &AppType::Claude).is_err(),
+                "remove accepted unsafe directory {directory:?}"
+            );
+            assert!(
+                SkillService::sync_to_app_dir(directory, &AppType::Claude, SyncMethod::Copy)
+                    .is_err(),
+                "sync accepted unsafe directory {directory:?}"
+            );
+        }
+
+        assert!(
+            victim.join("keep.txt").exists(),
+            "unsafe directory input escaped the managed skill root"
         );
     }
 }

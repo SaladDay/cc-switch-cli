@@ -2,8 +2,9 @@
 //!
 //! 包含 Schema 迁移和基本功能的测试。
 
+use super::schema::MigrationRunContext;
 use super::*;
-use crate::app_config::MultiAppConfig;
+use crate::app_config::{InstalledSkill, MultiAppConfig, SkillApps};
 use crate::prompt::Prompt;
 use crate::provider::{Provider, ProviderManager};
 use indexmap::IndexMap;
@@ -264,13 +265,15 @@ fn index_exists(conn: &Connection, index: &str) -> bool {
 fn schema_migration_sets_user_version_when_missing() {
     let conn = Connection::open_in_memory().expect("open memory db");
 
-    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables");
     assert_eq!(
         Database::get_user_version(&conn).expect("read version before"),
         0
     );
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migration");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migration");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("read version after"),
@@ -281,11 +284,12 @@ fn schema_migration_sets_user_version_when_missing() {
 #[test]
 fn schema_migration_rejects_future_version() {
     let conn = Connection::open_in_memory().expect("open memory db");
-    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables");
     Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
 
-    let err =
-        Database::apply_schema_migrations_on_conn(&conn).expect_err("should reject higher version");
+    let err = Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect_err("should reject higher version");
     let message = err.to_string();
     assert!(message.contains("由较新版本的 CC Switch 创建"));
     assert!(message.contains(&format!("数据库版本: {}", SCHEMA_VERSION + 1)));
@@ -367,7 +371,8 @@ fn daemon_owned_pidfile_can_initialize_and_run_v16_migration_without_self_deadlo
     std::fs::create_dir_all(&config_dir).expect("create config dir");
     let db_path = config_dir.join("cc-switch.db");
     let conn = Connection::open(&db_path).expect("seed database");
-    Database::create_tables_on_conn(&conn).expect("create current tables");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create current tables");
     conn.execute_batch(
         "INSERT INTO proxy_request_logs (
             request_id, provider_id, app_type, model, input_tokens,
@@ -568,7 +573,8 @@ fn schema_migration_adds_missing_columns_for_providers() {
     conn.execute_batch(LEGACY_SCHEMA_SQL)
         .expect("seed old schema");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     // 验证关键新增列已补齐
     for (table, column) in [
@@ -607,7 +613,8 @@ fn schema_migration_aligns_column_defaults_and_types() {
     conn.execute_batch(LEGACY_SCHEMA_SQL)
         .expect("seed old schema");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     let is_current = get_column_info(&conn, "providers", "is_current");
     assert_eq!(is_current.r#type, "BOOLEAN");
@@ -648,7 +655,8 @@ fn schema_migration_aligns_column_defaults_and_types() {
 #[test]
 fn schema_create_tables_include_pricing_model_columns() {
     let conn = Connection::open_in_memory().expect("open memory db");
-    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables");
 
     let multiplier = get_column_info(&conn, "proxy_config", "default_cost_multiplier");
     assert_eq!(multiplier.r#type, "TEXT");
@@ -716,7 +724,8 @@ fn schema_migration_v4_adds_pricing_model_columns() {
     .expect("seed v4 schema");
 
     Database::set_user_version(&conn, 4).expect("set user_version=4");
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     let multiplier = get_column_info(&conn, "proxy_config", "default_cost_multiplier");
     assert_eq!(multiplier.r#type, "TEXT");
@@ -755,7 +764,8 @@ fn startup_migration_repairs_legacy_request_logs_before_session_index() {
     .expect("seed legacy request logs table");
     Database::set_user_version(&conn, 4).expect("set user_version=4");
 
-    Database::create_tables_on_conn(&conn).expect("create tables should tolerate legacy logs");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables should tolerate legacy logs");
     assert!(
         !Database::has_column(&conn, "proxy_request_logs", "session_id")
             .expect("check session_id before migration"),
@@ -766,7 +776,8 @@ fn startup_migration_repairs_legacy_request_logs_before_session_index() {
         "session index should wait until the session_id column exists"
     );
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     for column in [
         "provider_id",
@@ -797,7 +808,8 @@ fn startup_migration_repairs_legacy_request_logs_before_session_index() {
 #[test]
 fn schema_create_tables_include_usage_daily_rollups() {
     let conn = Connection::open_in_memory().expect("open memory db");
-    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables");
 
     assert!(
         Database::table_exists(&conn, "usage_daily_rollups").expect("check table"),
@@ -1133,7 +1145,8 @@ fn schema_migration_v5_adds_usage_daily_rollups() {
     .expect("seed v5 schema");
     Database::set_user_version(&conn, 5).expect("set user_version=5");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     assert!(
         Database::table_exists(&conn, "usage_daily_rollups").expect("check table"),
@@ -1237,7 +1250,8 @@ fn schema_migration_v6_adds_skill_update_columns() {
     .expect("seed v6 schema");
 
     Database::set_user_version(&conn, 6).expect("set user_version=6");
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     assert!(
         Database::has_column(&conn, "skills", "content_hash").expect("check content_hash"),
@@ -1352,7 +1366,8 @@ fn schema_migration_v7_adds_session_log_tracking_and_corrects_pricing() {
     .expect("seed v7 schema");
 
     Database::set_user_version(&conn, 7).expect("set user_version=7");
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     assert!(
         Database::has_column(&conn, "proxy_request_logs", "data_source")
@@ -1489,7 +1504,8 @@ fn schema_migration_v8_refreshes_model_pricing_and_reaches_current_schema() {
     .expect("seed v8 schema");
 
     Database::set_user_version(&conn, 8).expect("set user_version=8");
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("version after migration"),
@@ -1604,7 +1620,8 @@ fn schema_migration_v10_to_v11_preserves_rollup_rows_with_empty_new_dimensions()
     .expect("seed v10 schema");
 
     Database::set_user_version(&conn, 10).expect("set user_version=10");
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply v11 migration");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply v11 migration");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("version after migration"),
@@ -1701,7 +1718,8 @@ fn schema_migration_v11_to_current_preserves_data_and_adds_upstream_schema() {
     .expect("seed schema v11");
     Database::set_user_version(&conn, 11).expect("set user_version=11");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v11 to v13");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("migrate v11 to v13");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("read migrated version"),
@@ -1751,7 +1769,8 @@ fn schema_migration_v11_to_current_preserves_data_and_adds_upstream_schema() {
         )
     );
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("migration should be idempotent");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("migration should be idempotent");
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM profiles", [], |row| row
             .get::<_, i64>(0))
@@ -1772,7 +1791,8 @@ fn schema_v13_to_current_repairs_missing_usage_semantics_columns() {
     .expect("seed partial v13 schema");
     Database::set_user_version(&conn, 13).expect("set user_version=13");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("repair current schema");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("repair current schema");
 
     assert!(
         Database::has_column(&conn, "proxy_request_logs", "input_token_semantics")
@@ -1809,7 +1829,7 @@ fn schema_migration_v11_to_v13_rolls_back_both_steps_on_v13_failure() {
         } => Authorization::Deny,
         _ => Authorization::Allow,
     }));
-    let error = Database::apply_schema_migrations_on_conn(&conn)
+    let error = Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
         .expect_err("denied v13 ALTER should fail migration");
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
 
@@ -1841,7 +1861,8 @@ fn schema_migration_v11_to_v13_rolls_back_both_steps_on_v13_failure() {
 #[test]
 fn schema_migration_v13_adds_grokbuild_proxy_row_and_preserves_values() {
     let conn = Connection::open_in_memory().expect("open memory db");
-    Database::create_tables_on_conn(&conn).expect("create v13-compatible schema");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create v13-compatible schema");
     conn.execute("DELETE FROM proxy_config WHERE app_type = 'grokbuild'", [])
         .expect("remove future proxy row");
     conn.execute(
@@ -1851,7 +1872,8 @@ fn schema_migration_v13_adds_grokbuild_proxy_row_and_preserves_values() {
     .expect("customize codex proxy config");
     Database::set_user_version(&conn, 13).expect("set user_version=13");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v13 to current");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("migrate v13 to current");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("read migrated version"),
@@ -1893,7 +1915,8 @@ fn schema_migration_v14_adds_grokbuild_skill_and_mcp_flags() {
     .expect("seed schema v14");
     Database::set_user_version(&conn, 14).expect("set user_version=14");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v14 to current");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("migrate v14 to current");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("read migrated version"),
@@ -1924,7 +1947,8 @@ fn schema_migration_v14_adds_grokbuild_skill_and_mcp_flags() {
 #[test]
 fn schema_migration_v15_resets_only_codex_session_usage() {
     let conn = Connection::open_in_memory().expect("open memory db");
-    Database::create_tables_on_conn(&conn).expect("create schema");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create schema");
     conn.execute_batch(
         "INSERT INTO proxy_request_logs (
             request_id, provider_id, app_type, model, input_tokens,
@@ -1946,7 +1970,8 @@ fn schema_migration_v15_resets_only_codex_session_usage() {
     .expect("seed usage rows and cursors");
     Database::set_user_version(&conn, 15).expect("set user_version=15");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v15 to current");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("migrate v15 to current");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("read migrated version"),
@@ -1967,6 +1992,73 @@ fn schema_migration_v15_resets_only_codex_session_usage() {
 }
 
 #[test]
+fn untrusted_v15_restore_migration_is_host_independent_and_clears_device_cursors() {
+    let temp = tempfile::tempdir().expect("create isolated migration home");
+    let _environment = crate::test_support::TestEnvGuard::isolated(temp.path());
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create exact v15 source schema");
+    conn.execute_batch(
+        "ALTER TABLE providers
+             ADD COLUMN cost_multiplier TEXT NOT NULL DEFAULT '1.0';
+         ALTER TABLE providers ADD COLUMN limit_daily_usd TEXT;
+         ALTER TABLE providers ADD COLUMN limit_monthly_usd TEXT;
+         ALTER TABLE providers ADD COLUMN provider_type TEXT;",
+    )
+    .expect("apply provider columns already present in the historical v15 schema");
+    conn.execute_batch(
+        "INSERT INTO proxy_request_logs (
+            request_id, provider_id, app_type, model, input_tokens,
+            output_tokens, cache_read_tokens, latency_ms, status_code,
+            created_at, data_source
+         ) VALUES
+            ('codex-row', '_codex_session', 'codex', 'gpt', 1, 1, 0, 0, 200, 1, 'codex_session'),
+            ('gemini-row', '_gemini_session', 'gemini', 'gemini', 1, 1, 0, 0, 200, 1, 'gemini_session');
+         INSERT INTO session_log_sync
+            (file_path, last_modified, last_line_offset, last_synced_at)
+         VALUES
+            ('/host-a/sessions/rollout-a.jsonl', 1, 1, 1),
+            ('/host-b/gemini/session.json', 1, 1, 1);",
+    )
+    .expect("seed untrusted v15 rows");
+    Database::set_user_version(&conn, 15).expect("set user_version=15");
+
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::UntrustedRestore)
+        .expect("untrusted migration must use only database contents");
+
+    let counts: (i64, i64, i64) = conn
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'codex_session'),
+                (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'gemini_session'),
+                (SELECT COUNT(*) FROM session_log_sync)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read untrusted migration result");
+    assert_eq!(counts, (0, 1, 0));
+}
+
+#[test]
+fn canonical_restore_factory_uses_the_current_trusted_schema_factory() {
+    let stage = Database::current_canonical_stage().expect("create canonical restore stage");
+    let locally_seeded_rows: i64 = stage
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_config
+             WHERE app_type IN ('claude', 'codex', 'gemini')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count locally seeded proxy rows");
+    assert_eq!(locally_seeded_rows, 3);
+    assert_eq!(
+        Database::get_user_version(stage.connection()).expect("read canonical version"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn create_tables_migrates_legacy_global_profile_marker_once() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute(
@@ -1980,8 +2072,10 @@ fn create_tables_migrates_legacy_global_profile_marker_once() {
     )
     .expect("seed profile markers");
 
-    Database::create_tables_on_conn(&conn).expect("create canonical schema");
-    Database::create_tables_on_conn(&conn).expect("repeat canonical schema");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create canonical schema");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("repeat canonical schema");
 
     let scoped: String = conn
         .query_row(
@@ -2032,7 +2126,8 @@ fn schema_migration_v9_adds_hermes_columns() {
     .expect("seed v9 schema");
 
     Database::set_user_version(&conn, 9).expect("set user_version=9");
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("version after migration"),
@@ -2141,6 +2236,64 @@ fn skill_dao_save_preserves_unknown_grokbuild_enablement() {
     );
 }
 
+fn installed_skill_with_directory(id: &str, directory: &str) -> InstalledSkill {
+    InstalledSkill {
+        id: id.to_string(),
+        name: id.to_string(),
+        description: None,
+        directory: directory.to_string(),
+        repo_owner: None,
+        repo_name: None,
+        repo_branch: None,
+        readme_url: None,
+        apps: SkillApps::default(),
+        installed_at: 1,
+    }
+}
+
+#[test]
+fn skill_dao_rejects_non_portable_directory_components() {
+    let db = Database::memory().expect("create memory db");
+    let invalid = [
+        "",
+        ".",
+        "..",
+        "../escape",
+        r"..\escape",
+        "/absolute",
+        r"C:\absolute",
+        r"\\server\share",
+        "contains:colon",
+        "CON",
+        "con.txt",
+        "trailing.",
+        "trailing ",
+    ];
+
+    for (index, directory) in invalid.into_iter().enumerate() {
+        let skill = installed_skill_with_directory(&format!("invalid-{index}"), directory);
+        assert!(
+            db.save_skill(&skill).is_err(),
+            "save_skill accepted unsafe directory component {directory:?}"
+        );
+    }
+}
+
+#[test]
+fn skill_dao_rejects_normalized_directory_collisions() {
+    let db = Database::memory().expect("create memory db");
+    db.save_skill(&installed_skill_with_directory("first", "Résumé"))
+        .expect("save first canonical directory");
+
+    for (id, colliding) in [("case", "RÉSUMÉ"), ("unicode", "Re\u{301}sume\u{301}")] {
+        assert!(
+            db.save_skill(&installed_skill_with_directory(id, colliding))
+                .is_err(),
+            "save_skill accepted normalized collision {colliding:?}"
+        );
+    }
+}
+
 #[test]
 fn schema_create_tables_repairs_legacy_proxy_config_singleton_to_per_app() {
     let conn = Connection::open_in_memory().expect("open memory db");
@@ -2166,7 +2319,8 @@ fn schema_create_tables_repairs_legacy_proxy_config_singleton_to_per_app() {
     )
     .expect("seed legacy proxy_config");
 
-    Database::create_tables_on_conn(&conn).expect("create tables should repair proxy_config");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables should repair proxy_config");
 
     assert!(
         Database::has_column(&conn, "proxy_config", "app_type").expect("check app_type"),
@@ -2219,8 +2373,10 @@ fn schema_migration_masks_legacy_failover_without_takeover() {
     )
     .expect("seed legacy proxy state");
 
-    Database::create_tables_on_conn(&conn).expect("create tables");
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     let claude: (i64, i64) = conn
         .query_row(
@@ -2245,7 +2401,8 @@ fn schema_migration_masks_legacy_failover_without_takeover() {
 fn schema_migration_clears_current_failover_without_takeover() {
     let conn = Connection::open_in_memory().expect("open memory db");
 
-    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables");
     Database::set_user_version(&conn, SCHEMA_VERSION).expect("set current user_version");
     conn.execute(
         "UPDATE proxy_config
@@ -2255,7 +2412,8 @@ fn schema_migration_clears_current_failover_without_takeover() {
     )
     .expect("seed invalid current proxy config");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     let auto_failover_enabled: i64 = conn
         .query_row(
@@ -2309,8 +2467,10 @@ fn migration_from_v3_8_schema_v1_to_current_schema_v3() {
     .expect("seed legacy skill");
 
     // 按应用启动流程：先 create_tables（补齐新增表），再 apply_schema_migrations（按 user_version 迁移）
-    Database::create_tables_on_conn(&conn).expect("create tables");
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     assert_eq!(
         Database::get_user_version(&conn).expect("user_version after migration"),
@@ -2433,7 +2593,8 @@ fn schema_migration_v10_adds_failover_live_snapshots() {
     .expect("seed v10 schema");
     Database::set_user_version(&conn, 10).expect("set user_version=10");
 
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+    Database::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("apply migrations");
 
     assert!(
         Database::table_exists(&conn, "proxy_failover_live_snapshots").expect("check table"),
@@ -3412,7 +3573,8 @@ fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
     let conn = Connection::open(&path).expect("open temp db");
     conn.execute("PRAGMA auto_vacuum = NONE;", [])
         .expect("set none auto_vacuum");
-    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)
+        .expect("create tables");
 
     assert_eq!(
         Database::get_auto_vacuum_mode(&conn).expect("auto_vacuum before rebuild"),

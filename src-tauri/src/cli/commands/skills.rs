@@ -127,6 +127,11 @@ pub enum SkillReposCommand {
 }
 
 pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError> {
+    // A Skills command may update SQLite, the SSOT tree, and multiple live
+    // application directories. Keep those steps in one ordinary workflow so
+    // restore cannot publish between them.
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let app_type = app.clone().unwrap_or(AppType::Claude);
 
     match cmd {

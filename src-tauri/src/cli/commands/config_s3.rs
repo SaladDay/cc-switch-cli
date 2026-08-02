@@ -2,7 +2,7 @@ use clap::Subcommand;
 
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
-use crate::services::{ProviderService, S3SyncService};
+use crate::services::S3SyncService;
 use crate::settings::{get_s3_sync_settings, set_s3_sync_settings, S3SyncSettings};
 
 #[derive(Subcommand, Debug, Clone)]
@@ -144,6 +144,8 @@ fn set(
     enable: bool,
     disable: bool,
 ) -> Result<(), AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let settings = merged_settings(
         get_s3_sync_settings(),
         region,
@@ -165,6 +167,8 @@ fn set(
 }
 
 fn clear() -> Result<(), AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     set_s3_sync_settings(None)?;
     println!(
         "{}",
@@ -190,20 +194,16 @@ fn upload() -> Result<(), AppError> {
 
 fn download() -> Result<(), AppError> {
     let summary = S3SyncService::download()?;
-    sync_live_config_after_s3();
-    println!("{}", success(&summary.message));
-    Ok(())
-}
-
-fn sync_live_config_after_s3() {
-    let Ok(state) = crate::AppState::try_new() else {
-        return;
-    };
-    if let Err(error) = ProviderService::sync_current_to_live(&state) {
-        let en = format!("Live config sync after S3 restore failed: {error}");
-        let zh = format!("S3 恢复后同步 live 配置失败: {error}");
-        println!("{}", warning(crate::t!(&en, &zh)));
+    if let Some(pending) = summary
+        .publication
+        .as_ref()
+        .and_then(|publication| publication.status.pending_retry())
+    {
+        println!("{}", warning(&pending.message()));
+    } else {
+        println!("{}", success(&summary.message));
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -3,12 +3,42 @@ use crate::app_config::{AppType, MultiAppConfig};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::services::{RestoreCompletion, RestoreCoordinator, RestorePostCommitStatus};
 use crate::store::AppState;
 use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_BACKUPS: usize = 10;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackupRestoreFormat {
+    Sql,
+    Sqlite,
+}
+
+impl BackupRestoreFormat {
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Sql => "sql",
+            Self::Sqlite => "db",
+        }
+    }
+}
+
+fn validate_backup_id(value: &str) -> Result<(), AppError> {
+    crate::skill_directory::validate_portable_component(value).map_err(|error| {
+        AppError::InvalidInput(format!("无效的备份 ID {value:?}: {}", error.reason()))
+    })
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool, AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AppError::io(path, error)),
+    }
+}
 
 /// 备份信息
 #[derive(Debug, Clone)]
@@ -25,6 +55,12 @@ pub struct BackupInfo {
 
 /// 配置导入导出相关业务逻辑
 pub struct ConfigService;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConfigRestoreResult {
+    pub(crate) pre_restore_backup_id: String,
+    pub(crate) status: RestorePostCommitStatus,
+}
 
 impl ConfigService {
     /// 为当前数据库创建 SQL 备份，返回备份 ID（若数据库不存在则返回空字符串）。
@@ -47,10 +83,12 @@ impl ConfigService {
 
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
         let backup_id = if let Some(name) = custom_name {
+            validate_backup_id(&name)?;
             format!("{}_{}", name, timestamp)
         } else {
             format!("backup_{}", timestamp)
         };
+        validate_backup_id(&backup_id)?;
 
         let backup_dir = config_path
             .parent()
@@ -87,11 +125,9 @@ impl ConfigService {
         let mut backups: Vec<BackupInfo> = entries
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .map(|ext| ext == "sql")
-                    .unwrap_or(false)
+                entry.path().extension().is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("sql") || extension.eq_ignore_ascii_case("db")
+                })
             })
             .filter_map(|entry| {
                 let path = entry.path();
@@ -119,32 +155,72 @@ impl ConfigService {
     }
 
     /// 根据备份 ID 恢复配置
-    pub fn restore_from_backup_id(backup_id: &str, state: &AppState) -> Result<String, AppError> {
+    pub fn restore_from_backup_id(backup_id: &str) -> Result<String, AppError> {
+        Self::restore_from_backup_id_with_status(backup_id)
+            .map(|result| result.pre_restore_backup_id)
+    }
+
+    pub(crate) fn restore_from_backup_id_with_status(
+        backup_id: &str,
+    ) -> Result<ConfigRestoreResult, AppError> {
+        Self::restore_from_backup_id_and_then(backup_id, |_| ()).map(ConfigRestoreResult::from)
+    }
+
+    pub(crate) fn restore_from_backup_id_and_then<T>(
+        backup_id: &str,
+        after_restore: impl FnOnce(&AppState) -> T,
+    ) -> Result<RestoreCompletion<T>, AppError> {
+        validate_backup_id(backup_id)?;
         let config_path = crate::config::get_app_config_path();
         let backup_dir = config_path
             .parent()
             .ok_or_else(|| AppError::Config("Invalid config path".into()))?
             .join("backups");
+        crate::config::create_managed_config_dir_all(&backup_dir)?;
 
-        let backup_path = backup_dir.join(format!("{}.sql", backup_id));
+        let sql_path = backup_dir.join(format!(
+            "{backup_id}.{}",
+            BackupRestoreFormat::Sql.extension()
+        ));
+        let sqlite_path = backup_dir.join(format!(
+            "{backup_id}.{}",
+            BackupRestoreFormat::Sqlite.extension()
+        ));
+        let sql_exists = path_entry_exists(&sql_path)?;
+        let sqlite_exists = path_entry_exists(&sqlite_path)?;
+        let (backup_path, format) = match (sql_exists, sqlite_exists) {
+            (true, false) => (sql_path, BackupRestoreFormat::Sql),
+            (false, true) => (sqlite_path, BackupRestoreFormat::Sqlite),
+            (false, false) => {
+                return Err(AppError::Message(format!("备份文件不存在: {backup_id}")));
+            }
+            (true, true) => {
+                return Err(AppError::InvalidInput(format!(
+                    "备份 ID 同时匹配 SQL 和 SQLite 文件，拒绝歧义恢复: {backup_id}"
+                )));
+            }
+        };
 
-        if !backup_path.exists() {
-            return Err(AppError::Message(format!("备份文件不存在: {}", backup_id)));
-        }
-
-        Self::import_config_from_path(&backup_path, state)
+        Self::restore_database_path_and_then(&backup_path, format, after_restore)
     }
 
     /// 从文件名提取时间戳字符串
     fn extract_timestamp(filename: &str) -> Option<String> {
-        // 尝试匹配格式：xxx_YYYYMMDD_HHMMSS
-        let parts: Vec<&str> = filename.rsplitn(3, '_').collect();
-        if parts.len() >= 2 {
-            // parts 顺序是反的：[HHMMSS, YYYYMMDD, ...]
-            Some(format!("{}_{}", parts[1], parts[0]))
-        } else {
-            None
-        }
+        // Manual SQL backups end at the timestamp; SQLite safety snapshots
+        // append subsecond/process uniqueness fields. Find the date/time pair
+        // instead of assuming it is the final pair.
+        filename
+            .split('_')
+            .collect::<Vec<_>>()
+            .windows(2)
+            .rev()
+            .find(|parts| {
+                parts[0].len() == 8
+                    && parts[1].len() == 6
+                    && parts[0].bytes().all(|byte| byte.is_ascii_digit())
+                    && parts[1].bytes().all(|byte| byte.is_ascii_digit())
+            })
+            .map(|parts| format!("{}_{}", parts[0], parts[1]))
     }
 
     /// 格式化显示名称
@@ -231,20 +307,41 @@ impl ConfigService {
         db.export_sql(target_path)
     }
 
-    pub fn import_config_from_path(file_path: &Path, state: &AppState) -> Result<String, AppError> {
+    pub fn import_config_from_path(file_path: &Path) -> Result<String, AppError> {
+        Self::import_config_from_path_with_status(file_path)
+            .map(|result| result.pre_restore_backup_id)
+    }
+
+    pub(crate) fn import_config_from_path_with_status(
+        file_path: &Path,
+    ) -> Result<ConfigRestoreResult, AppError> {
+        Self::import_config_from_path_and_then(file_path, |_| ()).map(ConfigRestoreResult::from)
+    }
+
+    pub(crate) fn import_config_from_path_and_then<T>(
+        file_path: &Path,
+        after_import: impl FnOnce(&AppState) -> T,
+    ) -> Result<RestoreCompletion<T>, AppError> {
+        Self::restore_database_path_and_then(file_path, BackupRestoreFormat::Sql, after_import)
+    }
+
+    fn restore_database_path_and_then<T>(
+        file_path: &Path,
+        format: BackupRestoreFormat,
+        after_import: impl FnOnce(&AppState) -> T,
+    ) -> Result<RestoreCompletion<T>, AppError> {
+        let restore = RestoreCoordinator::acquire_blocking()?;
+        let state = restore.load_state()?;
         let db_path = crate::config::get_app_config_dir().join("cc-switch.db");
         if !db_path.exists() {
             return Err(AppError::Config("数据库不存在，无法导入".to_string()));
         }
 
-        // Pre-import backup (SQL).
-        let backup_id = Self::create_backup(&db_path, None)?;
-
-        // Import SQL into DB (also performs an internal binary snapshot backup).
-        state.db.import_sql(file_path)?;
-        state.refresh_config_from_db()?;
-
-        Ok(backup_id)
+        let prepared = match format {
+            BackupRestoreFormat::Sql => Database::prepare_sql_restore(file_path)?,
+            BackupRestoreFormat::Sqlite => Database::prepare_binary_restore(file_path)?,
+        };
+        restore.publish(&state, prepared, None, after_import)
     }
 
     /// 同步当前供应商到对应的 live 配置。
@@ -445,6 +542,151 @@ impl ConfigService {
             }
         }
 
+        Ok(())
+    }
+}
+
+impl ConfigRestoreResult {
+    pub(crate) fn pending_retry_message(&self) -> Option<String> {
+        self.status.pending_retry().map(|pending| pending.message())
+    }
+}
+
+impl From<RestoreCompletion<()>> for ConfigRestoreResult {
+    fn from(completion: RestoreCompletion<()>) -> Self {
+        Self {
+            pre_restore_backup_id: completion.pre_restore_backup_id,
+            status: completion.status,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_backup_id, ConfigService};
+    use crate::app_config::AppType;
+    use crate::provider::Provider;
+    use crate::services::state_coordination::acquire_restore_exclusive_permit;
+    use crate::store::AppState;
+    use crate::{AppError, Database};
+    use serde_json::json;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn backup_ids_are_portable_single_path_components() {
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            r"..\outside",
+            "/absolute",
+            r"C:\absolute",
+            "CON",
+            "trailing.",
+            "trailing ",
+        ] {
+            assert!(
+                validate_backup_id(invalid).is_err(),
+                "{invalid:?} must not become a backup path"
+            );
+        }
+        validate_backup_id("db_backup_20260802_073831_1_2_3")
+            .expect("generated safety backup id is portable");
+    }
+
+    #[test]
+    fn local_config_import_waits_for_the_shared_restore_mutation_guard() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create isolated config import home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let state = AppState::try_new()?;
+        let import_db = Database::memory()?;
+        import_db.save_provider(
+            AppType::Claude.as_str(),
+            &Provider::with_id(
+                "imported-provider".to_string(),
+                "Imported Provider".to_string(),
+                json!({"env": {"ANTHROPIC_AUTH_TOKEN": "sandbox-token"}}),
+                None,
+            ),
+        )?;
+        let import_path = temp.path().join("import.sql");
+        import_db.export_sql(&import_path)?;
+        drop(state);
+
+        let restore_guard = futures::executor::block_on(acquire_restore_exclusive_permit())
+            .map_err(AppError::Message)?;
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                started_tx.send(()).expect("signal import start");
+                let result = ConfigService::import_config_from_path(&import_path);
+                finished_tx.send(result).expect("report import result");
+            });
+
+            started_rx.recv().expect("import worker should start");
+            assert!(
+                matches!(
+                    finished_rx.recv_timeout(Duration::from_secs(2)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ),
+                "local imports must serialize behind the same guard as cloud restores"
+            );
+
+            drop(restore_guard);
+            finished_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("import should resume after releasing the restore guard")
+                .expect("guarded import should succeed");
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn local_config_import_reuses_cloud_restore_proxy_preflight() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create isolated config import home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let state = AppState::try_new()?;
+        let mut proxy_config = futures::executor::block_on(
+            state.db.get_proxy_config_for_app(AppType::Claude.as_str()),
+        )?;
+        proxy_config.enabled = true;
+        futures::executor::block_on(state.db.update_proxy_config_for_app(proxy_config))?;
+
+        let import_db = Database::memory()?;
+        import_db.save_provider(
+            AppType::Claude.as_str(),
+            &Provider::with_id(
+                "must-not-publish".to_string(),
+                "Blocked Restore".to_string(),
+                json!({"env": {"ANTHROPIC_AUTH_TOKEN": "sandbox-token"}}),
+                None,
+            ),
+        )?;
+        let import_path = temp.path().join("blocked-import.sql");
+        import_db.export_sql(&import_path)?;
+        drop(state);
+
+        let error = ConfigService::import_config_from_path(&import_path)
+            .expect_err("local restore must reject an active proxy takeover");
+        assert!(
+            error.to_string().contains("proxy") || error.to_string().contains("代理"),
+            "the common restore preflight should explain the active proxy boundary: {error}"
+        );
+        let state = AppState::try_new()?;
+        assert!(
+            state
+                .db
+                .get_provider_by_id("must-not-publish", AppType::Claude.as_str())?
+                .is_none(),
+            "preflight rejection must happen before canonical publication"
+        );
         Ok(())
     }
 }

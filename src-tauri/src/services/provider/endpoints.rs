@@ -42,6 +42,9 @@ impl ProviderService {
         provider_id: &str,
         url: String,
     ) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         let normalized = url.trim().trim_end_matches('/').to_string();
         if normalized.is_empty() {
             return Err(AppError::localized(
@@ -73,7 +76,7 @@ impl ProviderService {
             meta.custom_endpoints.insert(normalized, endpoint);
         }
 
-        state.save()?;
+        state.save_with_permit(&permit)?;
         Ok(())
     }
 
@@ -84,6 +87,9 @@ impl ProviderService {
         provider_id: &str,
         url: String,
     ) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         let normalized = url.trim().trim_end_matches('/').to_string();
 
         {
@@ -97,7 +103,7 @@ impl ProviderService {
             }
         }
 
-        state.save()?;
+        state.save_with_permit(&permit)?;
         Ok(())
     }
 
@@ -108,6 +114,9 @@ impl ProviderService {
         provider_id: &str,
         url: String,
     ) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         let normalized = url.trim().trim_end_matches('/').to_string();
 
         {
@@ -123,7 +132,7 @@ impl ProviderService {
             }
         }
 
-        state.save()?;
+        state.save_with_permit(&permit)?;
         Ok(())
     }
 }

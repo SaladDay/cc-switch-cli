@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -511,10 +512,28 @@ pub(crate) enum WebDavReqKind {
     S3Download,
 }
 
+impl WebDavReqKind {
+    pub(crate) fn is_restore_mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::Download | Self::MigrateV1ToV2 | Self::S3Download
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WebDavReq {
     pub(crate) request_id: u64,
     pub(crate) kind: WebDavReqKind,
+    pub(crate) app_type: AppType,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RestoreUiSnapshot {
+    pub(crate) publication: crate::services::RestorePublicationToken,
+    pub(crate) status: crate::services::RestorePostCommitStatus,
+    pub(crate) app_type: AppType,
+    pub(crate) loaded: Result<Box<crate::cli::tui::data::UiData>, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -527,10 +546,12 @@ pub(crate) enum WebDavDone {
     Downloaded {
         decision: SyncDecision,
         message: String,
+        restored: Option<RestoreUiSnapshot>,
     },
     #[allow(dead_code)]
     V1Migrated {
         message: String,
+        restored: RestoreUiSnapshot,
     },
     JianguoyunConfigured,
     S3ConnectionChecked,
@@ -545,6 +566,7 @@ pub(crate) enum WebDavDone {
     S3Downloaded {
         decision: SyncDecision,
         message: String,
+        restored: RestoreUiSnapshot,
     },
 }
 
@@ -560,6 +582,40 @@ pub(crate) enum WebDavMsg {
         request_id: u64,
         req: WebDavReqKind,
         result: Result<WebDavDone, WebDavErr>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigRestoreKind {
+    ImportFile,
+    Backup,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConfigRestoreSource {
+    File(PathBuf),
+    Backup(String),
+}
+
+#[derive(Debug)]
+pub(crate) struct ConfigRestoreReq {
+    pub(crate) request_id: u64,
+    pub(crate) source: ConfigRestoreSource,
+    pub(crate) app_type: AppType,
+}
+
+#[derive(Debug)]
+pub(crate) struct ConfigRestoreDone {
+    pub(crate) kind: ConfigRestoreKind,
+    pub(crate) pre_backup_id: String,
+    pub(crate) restored: RestoreUiSnapshot,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConfigRestoreMsg {
+    Finished {
+        request_id: u64,
+        result: Result<ConfigRestoreDone, String>,
     },
 }
 
@@ -755,6 +811,12 @@ pub(crate) struct SkillsSystem {
 pub(crate) struct WebDavSystem {
     pub(crate) req_tx: mpsc::Sender<WebDavReq>,
     pub(crate) result_rx: mpsc::Receiver<WebDavMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct ConfigRestoreSystem {
+    pub(crate) req_tx: mpsc::Sender<ConfigRestoreReq>,
+    pub(crate) result_rx: mpsc::Receiver<ConfigRestoreMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 

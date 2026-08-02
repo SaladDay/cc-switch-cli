@@ -10,15 +10,47 @@ use super::super::app::{
     model_fetch_filter, App, CloudSyncBackend, CloudSyncTransferIntent, ConfirmAction,
     ConfirmOverlay, LoadingKind, Overlay, SessionsPane, ToastKind,
 };
-use super::super::data::{load_state, ProviderRuntimeSnapshot, UiData};
+use super::super::data::{ProviderRuntimeSnapshot, UiData};
 use super::super::runtime_actions::app_display_name;
 use super::super::CacheInvalidation;
 use super::types::{
-    build_stream_check_result_lines, CodexHistoryMsg, LoadedMessagePage, LocalEnvMsg,
-    ManagedAuthMsg, ManagedSessionOutcome, ModelFetchMsg, ProxyMsg, QuotaMsg, RequestTracker,
-    SessionMsg, SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg, WebDavDone, WebDavErr,
-    WebDavMsg, WebDavReqKind,
+    build_stream_check_result_lines, CodexHistoryMsg, ConfigRestoreMsg, LoadedMessagePage,
+    LocalEnvMsg, ManagedAuthMsg, ManagedSessionOutcome, ModelFetchMsg, ProxyMsg, QuotaMsg,
+    RequestTracker, SessionMsg, SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg, WebDavDone,
+    WebDavErr, WebDavMsg, WebDavReqKind,
 };
+
+pub(crate) fn handle_config_restore_msg(
+    app: &mut App,
+    tracker: &mut RequestTracker,
+    msg: ConfigRestoreMsg,
+) -> Option<super::types::ConfigRestoreDone> {
+    let ConfigRestoreMsg::Finished { request_id, result } = msg;
+    if !tracker.finish_if_active(request_id) {
+        return None;
+    }
+
+    if matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::ConfigRestore,
+            ..
+        }
+    ) {
+        app.overlay = Overlay::None;
+    }
+
+    match result {
+        Ok(done) => Some(done),
+        Err(error) => {
+            app.push_toast(
+                texts::tui_toast_config_import_failed(&error),
+                ToastKind::Error,
+            );
+            None
+        }
+    }
+}
 
 pub(crate) fn handle_codex_history_msg(
     app: &mut App,
@@ -1366,7 +1398,7 @@ fn is_webdav_loading_overlay(app: &App) -> bool {
     matches!(
         &app.overlay,
         Overlay::Loading {
-            kind: LoadingKind::WebDav | LoadingKind::S3,
+            kind: LoadingKind::WebDav | LoadingKind::S3 | LoadingKind::CloudRestore,
             ..
         }
     )
@@ -1397,6 +1429,21 @@ fn s3_display_target(data: &UiData, remote_path: Option<&str>) -> String {
     format!("{}/{}", settings.bucket.trim_matches('/'), relative_path)
 }
 
+fn webdav_completion_invalidation(done: &WebDavDone) -> CacheInvalidation {
+    match done {
+        WebDavDone::Downloaded { decision, .. }
+            if !matches!(decision, SyncDecision::V1MigrationNeeded) =>
+        {
+            CacheInvalidation::AppStateRecreated
+        }
+        WebDavDone::V1Migrated { .. } | WebDavDone::S3Downloaded { .. } => {
+            CacheInvalidation::AppStateRecreated
+        }
+        WebDavDone::S3RemoteInfoFetched { .. } => CacheInvalidation::None,
+        _ => CacheInvalidation::DataReloaded,
+    }
+}
+
 pub(crate) fn handle_webdav_msg(
     app: &mut App,
     data: &mut UiData,
@@ -1410,25 +1457,19 @@ pub(crate) fn handle_webdav_msg(
             result,
         } => match result {
             Ok(done) => {
+                let done_invalidation = webdav_completion_invalidation(&done);
                 if webdav_loading.is_stale(request_id) {
-                    return Ok(CacheInvalidation::None);
+                    return Ok(match done_invalidation {
+                        CacheInvalidation::AppStateRecreated => {
+                            CacheInvalidation::AppStateRecreated
+                        }
+                        _ => CacheInvalidation::None,
+                    });
                 }
 
                 if webdav_loading.finish_if_active(request_id) && is_webdav_loading_overlay(app) {
                     app.overlay = Overlay::None;
                 }
-
-                let done_invalidation = match &done {
-                    WebDavDone::Downloaded { decision, .. }
-                        if !matches!(decision, SyncDecision::V1MigrationNeeded) =>
-                    {
-                        CacheInvalidation::AppStateRecreated
-                    }
-                    WebDavDone::V1Migrated { .. } => CacheInvalidation::AppStateRecreated,
-                    WebDavDone::S3Downloaded { .. } => CacheInvalidation::AppStateRecreated,
-                    WebDavDone::S3RemoteInfoFetched { .. } => CacheInvalidation::None,
-                    _ => CacheInvalidation::DataReloaded,
-                };
 
                 match done {
                     WebDavDone::ConnectionChecked => {
@@ -1442,48 +1483,59 @@ pub(crate) fn handle_webdav_msg(
                         };
                         app.push_toast(msg, ToastKind::Success);
                     }
-                    WebDavDone::Downloaded { decision, message } => {
-                        match decision {
-                            SyncDecision::V1MigrationNeeded => {
-                                app.overlay = Overlay::Confirm(ConfirmOverlay {
-                                    title: texts::tui_webdav_v1_migration_title().to_string(),
-                                    message: texts::tui_webdav_v1_migration_message().to_string(),
-                                    action: ConfirmAction::WebDavMigrateV1ToV2,
-                                });
-                            }
-                            _ => {
-                                let msg = match decision {
-                                    SyncDecision::Download => {
-                                        texts::tui_toast_webdav_download_ok().to_string()
+                    WebDavDone::Downloaded {
+                        decision,
+                        message,
+                        restored,
+                    } => match decision {
+                        SyncDecision::V1MigrationNeeded => {
+                            app.overlay = Overlay::Confirm(ConfirmOverlay {
+                                title: texts::tui_webdav_v1_migration_title().to_string(),
+                                message: texts::tui_webdav_v1_migration_message().to_string(),
+                                action: ConfirmAction::WebDavMigrateV1ToV2,
+                            });
+                        }
+                        _ => match restored {
+                            Some(restored) => {
+                                match apply_restore_ui_snapshot(app, data, restored) {
+                                    Ok(RestoreUiApply::Applied) => {
+                                        let msg = match decision {
+                                            SyncDecision::Download => {
+                                                texts::tui_toast_webdav_download_ok().to_string()
+                                            }
+                                            _ => message,
+                                        };
+                                        app.push_toast(msg, ToastKind::Success);
                                     }
-                                    _ => message,
-                                };
-                                if let Ok(state) = load_state() {
-                                    if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(
-                                    &state,
-                                ) {
-                                    log::warn!("WebDAV 下载后同步 live 配置失败: {e}");
+                                    Ok(RestoreUiApply::PendingRetry(message)) => {
+                                        app.push_toast(message, ToastKind::Warning);
+                                    }
+                                    Err(error) => {
+                                        app.push_toast(error.to_string(), ToastKind::Error);
+                                    }
                                 }
-                                }
-                                app.push_toast(msg, ToastKind::Success);
                             }
+                            None => app.push_toast(
+                                "cloud restore completion is missing its publication".to_string(),
+                                ToastKind::Error,
+                            ),
+                        },
+                    },
+                    WebDavDone::V1Migrated {
+                        message: _,
+                        restored,
+                    } => match apply_restore_ui_snapshot(app, data, restored) {
+                        Ok(RestoreUiApply::Applied) => {
+                            app.push_toast(
+                                texts::tui_toast_webdav_v1_migration_ok(),
+                                ToastKind::Success,
+                            );
                         }
-                    }
-                    WebDavDone::V1Migrated { message: _ } => {
-                        if let Ok(state) = load_state() {
-                            if let Err(e) =
-                                crate::services::provider::ProviderService::sync_current_to_live(
-                                    &state,
-                                )
-                            {
-                                log::warn!("WebDAV V1 迁移后同步 live 配置失败: {e}");
-                            }
+                        Ok(RestoreUiApply::PendingRetry(message)) => {
+                            app.push_toast(message, ToastKind::Warning);
                         }
-                        app.push_toast(
-                            texts::tui_toast_webdav_v1_migration_ok(),
-                            ToastKind::Success,
-                        );
-                    }
+                        Err(error) => app.push_toast(error.to_string(), ToastKind::Error),
+                    },
                     WebDavDone::JianguoyunConfigured => {
                         app.push_toast(
                             texts::tui_toast_webdav_jianguoyun_configured(),
@@ -1549,27 +1601,26 @@ pub(crate) fn handle_webdav_msg(
                         };
                         app.push_toast(message, ToastKind::Success);
                     }
-                    WebDavDone::S3Downloaded { decision, message } => {
-                        if let Ok(state) = load_state() {
-                            if let Err(error) =
-                                crate::services::provider::ProviderService::sync_current_to_live(
-                                    &state,
-                                )
-                            {
-                                log::warn!(
-                                    "S3 restore completed but live config sync failed: {error}"
-                                );
-                            }
+                    WebDavDone::S3Downloaded {
+                        decision,
+                        message,
+                        restored,
+                    } => match apply_restore_ui_snapshot(app, data, restored) {
+                        Ok(RestoreUiApply::Applied) => {
+                            let message = if matches!(decision, SyncDecision::Download) {
+                                texts::tui_toast_s3_restore_ok().to_string()
+                            } else {
+                                message
+                            };
+                            app.push_toast(message, ToastKind::Success);
                         }
-                        let message = if matches!(decision, SyncDecision::Download) {
-                            texts::tui_toast_s3_restore_ok().to_string()
-                        } else {
-                            message
-                        };
-                        app.push_toast(message, ToastKind::Success);
-                    }
+                        Ok(RestoreUiApply::PendingRetry(message)) => {
+                            app.push_toast(message, ToastKind::Warning);
+                        }
+                        Err(error) => app.push_toast(error.to_string(), ToastKind::Error),
+                    },
                 }
-                if !matches!(done_invalidation, CacheInvalidation::None) {
+                if matches!(done_invalidation, CacheInvalidation::DataReloaded) {
                     *data = UiData::load(&app.app_type)?;
                 }
                 Ok(done_invalidation)
@@ -1684,6 +1735,52 @@ pub(crate) fn handle_webdav_msg(
             }
         },
     }
+}
+
+enum RestoreUiApply {
+    Applied,
+    PendingRetry(String),
+}
+
+fn apply_restore_ui_snapshot(
+    app: &App,
+    data: &mut UiData,
+    restored: super::types::RestoreUiSnapshot,
+) -> Result<RestoreUiApply, AppError> {
+    apply_restore_ui_snapshot_with_token_check(app, data, restored, |publication| {
+        publication.is_current()
+    })
+}
+
+fn apply_restore_ui_snapshot_with_token_check(
+    app: &App,
+    data: &mut UiData,
+    restored: super::types::RestoreUiSnapshot,
+    token_is_current: impl FnOnce(&crate::services::RestorePublicationToken) -> Result<bool, AppError>,
+) -> Result<RestoreUiApply, AppError> {
+    if !token_is_current(&restored.publication)? {
+        return Err(AppError::Message(
+            "Ignored a stale cloud-restore completion because a newer restore was published"
+                .to_string(),
+        ));
+    }
+    if restored.app_type != app.app_type {
+        return Err(AppError::Message(format!(
+            "Cloud restore completed for {}, but the visible app is {}",
+            restored.app_type.as_str(),
+            app.app_type.as_str()
+        )));
+    }
+    if let Some(pending) = restored.status.pending_retry() {
+        return Ok(RestoreUiApply::PendingRetry(pending.message()));
+    }
+    let loaded = restored.loaded.map_err(|error| {
+        AppError::Message(format!(
+            "Cloud restore was published, but its TUI snapshot failed: {error}"
+        ))
+    })?;
+    *data = *loaded;
+    Ok(RestoreUiApply::Applied)
 }
 
 pub(crate) enum ProxyMsgEffect {
@@ -1827,12 +1924,24 @@ pub(crate) fn update_webdav_last_error_with<FGet, FSet>(
 }
 
 fn update_webdav_last_error(last_error: Option<String>) {
+    let Ok(_permit) =
+        crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+    else {
+        log::warn!("failed to acquire WebDAV status mutation capability");
+        return;
+    };
     update_webdav_last_error_with(last_error, get_webdav_sync_settings, |cfg| {
         set_webdav_sync_settings(Some(cfg))
     });
 }
 
 fn update_s3_last_error(last_error: Option<String>) {
+    let Ok(_permit) =
+        crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+    else {
+        log::warn!("failed to acquire S3 status mutation capability");
+        return;
+    };
     let Some(mut settings) = get_s3_sync_settings() else {
         return;
     };
@@ -2139,6 +2248,41 @@ mod tests {
         assert!(message.contains("test-device"));
         assert!(message.contains("db.sql"));
         assert!(message.contains("skills.zip"));
+    }
+
+    #[test]
+    fn stale_cloud_restore_completion_still_invalidates_recreated_app_state() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        let mut requests = RequestTracker {
+            seq: 2,
+            active: Some(2),
+        };
+        let restored = super::super::types::RestoreUiSnapshot {
+            publication: crate::services::RestorePublicationToken::for_test("published-restore"),
+            status: crate::services::RestorePostCommitStatus::Applied,
+            app_type: AppType::Claude,
+            loaded: Ok(Box::new(UiData::default())),
+        };
+
+        let invalidation = handle_webdav_msg(
+            &mut app,
+            &mut data,
+            &mut requests,
+            WebDavMsg::Finished {
+                request_id: 1,
+                req: WebDavReqKind::Download,
+                result: Ok(WebDavDone::Downloaded {
+                    decision: SyncDecision::Download,
+                    message: "restored".to_string(),
+                    restored: Some(restored),
+                }),
+            },
+        )
+        .expect("stale committed restore must still report invalidation");
+
+        assert_eq!(invalidation, CacheInvalidation::AppStateRecreated);
+        assert_eq!(requests.active, Some(2));
     }
 
     #[test]

@@ -13,12 +13,18 @@ use super::super::runtime_skills::{
 };
 use super::RuntimeActionContext;
 
+fn run_skill_mutation<T>(operation: impl FnOnce() -> Result<T, AppError>) -> Result<T, AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
+    operation()
+}
+
 pub(super) fn toggle(
     ctx: &mut RuntimeActionContext<'_>,
     directory: String,
     enabled: bool,
 ) -> Result<(), AppError> {
-    SkillService::toggle_app(&directory, &ctx.app.app_type, enabled)?;
+    run_skill_mutation(|| SkillService::toggle_app(&directory, &ctx.app.app_type, enabled))?;
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         texts::tui_toast_skill_toggled(&directory, enabled),
@@ -45,15 +51,18 @@ pub(super) fn set_apps(
         return Ok(());
     };
 
-    let mut changed = false;
-    for app_type in AppType::all() {
-        let next_enabled = apps.is_enabled_for(&app_type);
-        if before.is_enabled_for(&app_type) == next_enabled {
-            continue;
+    let changed = run_skill_mutation(|| {
+        let mut changed = false;
+        for app_type in AppType::all() {
+            let next_enabled = apps.is_enabled_for(&app_type);
+            if before.is_enabled_for(&app_type) == next_enabled {
+                continue;
+            }
+            changed = true;
+            SkillService::toggle_app(&directory, &app_type, next_enabled)?;
         }
-        changed = true;
-        SkillService::toggle_app(&directory, &app_type, next_enabled)?;
-    }
+        Ok(changed)
+    })?;
 
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     if changed {
@@ -86,7 +95,7 @@ pub(super) fn uninstall(
     ctx: &mut RuntimeActionContext<'_>,
     directory: String,
 ) -> Result<(), AppError> {
-    SkillService::uninstall(&directory)?;
+    run_skill_mutation(|| SkillService::uninstall(&directory))?;
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         texts::tui_toast_skill_uninstalled(&directory),
@@ -106,7 +115,7 @@ pub(super) fn sync(
     ctx: &mut RuntimeActionContext<'_>,
     scope: Option<AppType>,
 ) -> Result<(), AppError> {
-    SkillService::sync_all_enabled(scope.as_ref())?;
+    run_skill_mutation(|| SkillService::sync_all_enabled(scope.as_ref()))?;
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app
         .push_toast(texts::tui_toast_skills_synced(), ToastKind::Success);
@@ -117,7 +126,7 @@ pub(super) fn set_sync_method(
     ctx: &mut RuntimeActionContext<'_>,
     method: SyncMethod,
 ) -> Result<(), AppError> {
-    SkillService::set_sync_method(method)?;
+    run_skill_mutation(|| SkillService::set_sync_method(method))?;
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         texts::tui_toast_skills_sync_method_set(texts::tui_skills_sync_method_name(method)),
@@ -176,7 +185,7 @@ pub(super) fn discover(
 
 pub(super) fn repo_add(ctx: &mut RuntimeActionContext<'_>, spec: String) -> Result<(), AppError> {
     let repo = parse_repo_spec(&spec)?;
-    SkillService::upsert_repo(repo)?;
+    run_skill_mutation(|| SkillService::upsert_repo(repo))?;
     clear_repo_discover_state(ctx);
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app
@@ -189,7 +198,7 @@ pub(super) fn repo_remove(
     owner: String,
     name: String,
 ) -> Result<(), AppError> {
-    SkillService::remove_repo(&owner, &name)?;
+    run_skill_mutation(|| SkillService::remove_repo(&owner, &name))?;
     clear_repo_discover_state(ctx);
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app
@@ -203,14 +212,22 @@ pub(super) fn repo_toggle_enabled(
     name: String,
     enabled: bool,
 ) -> Result<(), AppError> {
-    let mut index = SkillService::load_index()?;
-    if let Some(repo) = index
-        .repos
-        .iter_mut()
-        .find(|r| r.owner == owner && r.name == name)
-    {
-        repo.enabled = enabled;
-        SkillService::save_index(&index)?;
+    let changed = run_skill_mutation(|| {
+        let mut index = SkillService::load_index()?;
+        let changed = if let Some(repo) = index
+            .repos
+            .iter_mut()
+            .find(|r| r.owner == owner && r.name == name)
+        {
+            repo.enabled = enabled;
+            SkillService::save_index(&index)?;
+            true
+        } else {
+            false
+        };
+        Ok(changed)
+    })?;
+    if changed {
         clear_repo_discover_state(ctx);
     }
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
@@ -249,7 +266,7 @@ pub(super) fn import_from_apps(
     finish_skills_import_with(
         ctx.app,
         ctx.data,
-        || SkillService::import_from_apps(imports),
+        || run_skill_mutation(|| SkillService::import_from_apps(imports)),
         super::super::data::UiData::load,
     )?;
     ctx.app.skills_unmanaged_results = SkillService::scan_unmanaged()?;

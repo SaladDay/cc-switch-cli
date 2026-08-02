@@ -858,7 +858,11 @@ impl App {
                 }
                 Some(SettingsItem::Theme) => {
                     let next = crate::cli::tui::theme::configured_theme_mode().next();
-                    match crate::settings::set_theme_mode(next.code()) {
+                    let update = crate::services::state_coordination::
+                        acquire_ordinary_mutation_permit_blocking()
+                        .map_err(crate::error::AppError::Message)
+                        .and_then(|_permit| crate::settings::set_theme_mode(next.code()));
+                    match update {
                         Ok(()) => {
                             self.push_toast(
                                 texts::tui_toast_theme_changed(
@@ -883,7 +887,11 @@ impl App {
                         .and_then(crate::cli::tui::icons::IconMode::parse)
                         .unwrap_or_default();
                     let next = current.next();
-                    match crate::settings::set_icon_mode(next.code()) {
+                    let update = crate::services::state_coordination::
+                        acquire_ordinary_mutation_permit_blocking()
+                        .map_err(crate::error::AppError::Message)
+                        .and_then(|_permit| crate::settings::set_icon_mode(next.code()));
+                    match update {
                         Ok(()) => {
                             self.push_toast(
                                 texts::tui_toast_icons_changed(texts::tui_settings_icon_mode_name(

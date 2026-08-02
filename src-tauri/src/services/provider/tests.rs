@@ -60,6 +60,66 @@ approval_policy = "never"
 }
 
 #[test]
+fn provider_switch_waits_for_the_shared_restore_mutation_guard() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    let state = AppState::try_new().expect("create app state");
+    ProviderService::add(
+        &state,
+        AppType::Claude,
+        Provider::with_id(
+            "p1".to_string(),
+            "P1".to_string(),
+            json!({"env": {"ANTHROPIC_AUTH_TOKEN": "one"}}),
+            None,
+        ),
+    )
+    .expect("seed p1");
+    ProviderService::add(
+        &state,
+        AppType::Claude,
+        Provider::with_id(
+            "p2".to_string(),
+            "P2".to_string(),
+            json!({"env": {"ANTHROPIC_AUTH_TOKEN": "two"}}),
+            None,
+        ),
+    )
+    .expect("seed p2");
+    drop(state);
+
+    let restore_guard = futures::executor::block_on(
+        crate::services::state_coordination::acquire_restore_exclusive_permit(),
+    )
+    .expect("hold restore mutation guard");
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            started_tx.send(()).expect("signal switch start");
+            let result = AppState::try_new()
+                .and_then(|state| ProviderService::switch(&state, AppType::Claude, "p2"));
+            finished_tx.send(result).expect("report switch result");
+        });
+
+        started_rx.recv().expect("switch worker should start");
+        assert!(
+            matches!(
+                finished_rx.recv_timeout(std::time::Duration::from_millis(250)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "provider switching must serialize behind an active restore"
+        );
+        drop(restore_guard);
+        finished_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("switch should resume after restore")
+            .expect("guarded provider switch should succeed");
+    });
+}
+
+#[test]
 fn extract_claude_common_config_excludes_all_provider_model_fields() {
     let settings = json!({
         "env": {

@@ -105,14 +105,16 @@ fn set_proxy_enabled(app_type: AppType, enabled: bool) -> Result<(), AppError> {
             app_type.as_str()
         )));
     }
+    let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let state = get_state()?;
     let runtime = create_runtime()?;
     runtime
-        .block_on(
-            state
-                .proxy_service
-                .set_managed_session_for_app(app_type.as_str(), enabled),
-        )
+        .block_on(state.proxy_service.set_managed_session_for_app_with_permit(
+            &permit,
+            app_type.as_str(),
+            enabled,
+        ))
         .map_err(AppError::Message)?;
 
     println!(
@@ -155,6 +157,8 @@ fn configure_proxy(
             app_type.as_str()
         )));
     }
+    let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let state = get_state()?;
     let runtime = create_runtime()?;
     let status = runtime.block_on(state.proxy_service.get_status());
@@ -177,7 +181,11 @@ fn configure_proxy(
     if let Some(address) = listen_address {
         let mut config = runtime.block_on(state.proxy_service.get_config())?;
         config.listen_address = address.clone();
-        runtime.block_on(state.proxy_service.update_config(&config))?;
+        runtime.block_on(
+            state
+                .proxy_service
+                .update_config_with_permit(&permit, &config),
+        )?;
         println!(
             "{}",
             success(&format!(
@@ -210,6 +218,9 @@ fn serve_proxy(
     listen_port: Option<u16>,
     takeovers: Vec<AppType>,
 ) -> Result<(), AppError> {
+    let startup_permit =
+        crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+            .map_err(AppError::Message)?;
     let state = get_state()?;
     let runtime = create_runtime()?;
 
@@ -229,7 +240,7 @@ fn serve_proxy(
 
         let result = async {
             let server_info = service
-                .start_with_runtime_config(effective_config)
+                .start_with_runtime_config_with_permit(&startup_permit, effective_config)
                 .await
                 .map_err(AppError::Message)?;
 
@@ -239,7 +250,9 @@ fn serve_proxy(
                     match announce_to_daemon_if_managed(&server_info) {
                         Ok(announced) => announced,
                         Err(err) => {
-                            let _ = service.stop_with_restore().await;
+                            let _ = service
+                                .stop_with_restore_with_permit(&startup_permit)
+                                .await;
                             return Err(AppError::Message(err));
                         }
                     }
@@ -250,18 +263,22 @@ fn serve_proxy(
                 }
             };
 
-            if let Err(err) = apply_takeovers(&service, &takeovers).await {
-                let _ = service.stop_with_restore().await;
+            if let Err(err) = apply_takeovers(&service, &startup_permit, &takeovers).await {
+                let _ = service
+                    .stop_with_restore_with_permit(&startup_permit)
+                    .await;
                 return Err(AppError::Message(err));
             }
 
             if !announced_to_daemon {
                 if let Err(err) = service.publish_runtime_session_if_needed(&server_info) {
-                    let _ = service.stop_with_restore().await;
+                    let _ = service
+                        .stop_with_restore_with_permit(&startup_permit)
+                        .await;
                     return Err(AppError::Message(err));
                 }
             }
-            crate::services::state_coordination::clear_restore_mutation_guard_bypass_env();
+            drop(startup_permit);
             let session_sync_task =
                 crate::services::session_usage::spawn_periodic_session_usage_sync(
                     state.db.clone(),
@@ -320,8 +337,12 @@ fn serve_proxy(
             session_sync_task.abort();
             usage_maintenance_task.abort();
 
+            let stop_permit =
+                crate::services::state_coordination::acquire_ordinary_mutation_permit()
+                    .await
+                    .map_err(AppError::Message)?;
             service
-                .stop_with_restore()
+                .stop_with_restore_with_permit(&stop_permit)
                 .await
                 .map_err(AppError::Message)?;
             println!(
@@ -368,12 +389,15 @@ fn announce_to_daemon_if_managed(
 
 async fn apply_takeovers(
     service: &crate::ProxyService,
+    permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     takeovers: &[AppType],
 ) -> Result<(), String> {
     for app in takeovers {
         match app {
             AppType::Claude | AppType::Codex | AppType::Gemini => {
-                service.set_takeover_for_app(app.as_str(), true).await?;
+                service
+                    .set_takeover_for_app_with_permit(permit, app.as_str(), true)
+                    .await?;
             }
             _ => {
                 return Err(format!(
@@ -640,11 +664,11 @@ fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
 
     use crate::{
         proxy::types::{ActiveWorker, ProxyStatus, ProxyTakeoverStatus},
-        Database, MultiAppConfig, ProxyService,
+        Database, MultiAppConfig,
     };
 
     use super::{apply_overrides, build_proxy_overview_lines, load_proxy_app_ports};
@@ -678,11 +702,8 @@ mod tests {
     #[test]
     fn proxy_overview_lines_include_runtime_status_and_takeover_state() {
         let db = Arc::new(Database::memory().expect("create database"));
-        let state = crate::AppState {
-            db: db.clone(),
-            config: RwLock::new(MultiAppConfig::default()),
-            proxy_service: ProxyService::new(db.clone()),
-        };
+        let state = crate::AppState::from_test_parts(db.clone(), MultiAppConfig::default())
+            .expect("construct test state");
         let config = crate::ProxyConfig {
             listen_port: 15721,
             ..Default::default()
@@ -782,11 +803,8 @@ mod tests {
             .expect("queue codex failover provider");
         db.set_proxy_flags_sync("codex", true, true)
             .expect("enable codex auto failover");
-        let state = crate::AppState {
-            db: db.clone(),
-            config: RwLock::new(MultiAppConfig::default()),
-            proxy_service: ProxyService::new(db.clone()),
-        };
+        let state = crate::AppState::from_test_parts(db.clone(), MultiAppConfig::default())
+            .expect("construct test state");
         let config = crate::ProxyConfig::default();
         let status = ProxyStatus::default();
         let takeover = ProxyTakeoverStatus::default();

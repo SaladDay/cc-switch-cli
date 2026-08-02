@@ -1,30 +1,33 @@
+mod config_restore;
 mod handlers;
 pub(crate) mod session_cost;
 mod types;
 mod workers;
 
+pub(crate) use config_restore::start_config_restore_system;
 #[cfg(test)]
 pub(crate) use handlers::{apply_webdav_jianguoyun_quick_setup, update_webdav_last_error_with};
 pub(crate) use handlers::{
-    handle_codex_history_msg, handle_local_env_msg, handle_managed_auth_msg,
-    handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg, handle_session_msg,
-    handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg, handle_update_msg,
-    handle_webdav_msg, ProxyMsgEffect,
+    handle_codex_history_msg, handle_config_restore_msg, handle_local_env_msg,
+    handle_managed_auth_msg, handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg,
+    handle_session_msg, handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg,
+    handle_update_msg, handle_webdav_msg, ProxyMsgEffect,
 };
 #[cfg(test)]
 pub(crate) use types::{
     build_model_fetch_candidate_urls, model_fetch_strategy_for_field,
-    parse_model_ids_from_response, ManagedAuthMsg, ManagedSessionOutcome, ProxyMsg, QuotaMsg,
-    UpdateMsg,
+    parse_model_ids_from_response, ConfigRestoreMsg, ManagedAuthMsg, ManagedSessionOutcome,
+    ProxyMsg, QuotaMsg, RestoreUiSnapshot, UpdateMsg,
 };
 pub(crate) use types::{
     build_stream_check_result_lines, fetch_provider_models_for_tui, ModelFetchStrategy,
 };
 pub(crate) use types::{
     next_model_fetch_request_id, AppDataLoadKind, AppDataMsg, AppDataReq, CodexHistoryReq,
-    LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq,
-    SkillsReq, StreamCheckReq, UpdateReq, UsageLogLoadError, UsagePricingLoadError,
-    UsagePricingMsg, UsagePricingReq, WebDavReq, WebDavReqKind,
+    ConfigRestoreDone, ConfigRestoreKind, ConfigRestoreReq, ConfigRestoreSource, LocalEnvReq,
+    ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq, SkillsReq,
+    StreamCheckReq, UpdateReq, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg,
+    UsagePricingReq, WebDavReq, WebDavReqKind,
 };
 pub(crate) use types::{SessionUsageSyncMsg, SessionUsageSyncReq};
 #[cfg(test)]
