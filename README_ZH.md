@@ -6,7 +6,7 @@
 
 **通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes 和 OpenClaw。**
 
-[![Version](https://img.shields.io/badge/version-5.9.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.10.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -346,7 +346,7 @@ cc-switch auth remove <account-id>   # 移除账号
 
 跨 Claude、Codex、Gemini、OpenCode 与 Hermes 管理模型上下文协议服务器。
 
-**功能：** 统一管理、多应用支持、三种传输类型（stdio/http/sse）、自动同步，以及面向 TOML / JSON live 配置的格式适配。
+**功能：** 统一管理、多应用支持、stdio/http/sse 传输、远程服务器认证 headers、自动同步，以及 TOML/JSON live 配置适配。
 
 ```bash
 cc-switch mcp list                   # 列出所有 MCP 服务器
@@ -403,11 +403,15 @@ cc-switch skills repos enable <repo> # 启用仓库但保留当前分支
 cc-switch skills repos disable <repo> # 禁用仓库但保留当前分支
 ```
 
+### 📊 用量概览
+
+TUI 首页按应用与模型展示响应式的 30 天视图，包括 token/cost 明细、代理状态和后台刷新。
+
 ### 🕘 历史会话与用量统计
 
 查看历史会话，一键 resume，删除旧会话，并将本地会话日志导入 token / cost 统计，方便管理用量。
 
-**功能：** 跨应用扫描会话、消息预览、一键恢复、删除确认、JSON 输出，以及 Claude、Codex、Gemini、OpenCode 的用量同步。
+**功能：** 完整历史分页、跨应用扫描、消息预览、可复制的 resume 命令、安全删除、JSON 输出、当前页 token/cost，以及 Claude、Codex、Gemini、OpenCode 的用量同步。Hermes cost 可用时也会显示。
 
 ```bash
 cc-switch sessions list --all        # 列出支持应用的历史会话
@@ -465,7 +469,7 @@ cc-switch config reset               # 重置为默认配置
 
 **功能：** 每个应用可独立启用/禁用代理、每个应用可配置监听端口、由 daemon 管理 worker、当前路由检查、首页遥测、token 统计，以及用于调试的前台运行模式。
 
-本地代理可将 Claude Code、Codex、Gemini 路由到 CC-Switch，适配 OpenAI Responses API 与 Chat Completions 供应商，并在目标应用支持的路径下接入 DeepSeek、Kimi、Qwen、OpenRouter、xAI、Groq、Mistral 等主流 OpenAI-compatible 模型。
+本地代理可将 Claude Code、Codex、Gemini 路由到 CC-Switch，适配 OpenAI Responses API 与 Chat Completions 供应商，让 Codex 使用 Anthropic Messages-compatible 供应商，并在支持的路径下接入 DeepSeek、Kimi、Qwen、OpenRouter、xAI、Groq、Mistral 等主流 OpenAI-compatible 模型。
 
 ```bash
 cc-switch proxy show                              # 显示代理配置、路由和 daemon worker 状态

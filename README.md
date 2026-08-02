@@ -6,7 +6,7 @@
 
 **Manage Claude Code, Codex, Gemini, OpenCode, Hermes, and OpenClaw from one interactive TUI or scriptable CLI.**
 
-[![Version](https://img.shields.io/badge/version-5.9.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.10.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -342,7 +342,7 @@ cc-switch auth remove <account-id>   # Remove an account
 
 Manage Model Context Protocol servers across Claude, Codex, Gemini, OpenCode, and Hermes.
 
-**Features:** Unified management, multi-app support, three transport types (stdio/http/sse), automatic sync, and live-config adapters for TOML and JSON targets.
+**Features:** Unified management, multi-app support, stdio/http/sse transports, authenticated remote-server headers, automatic sync, and TOML/JSON live-config adapters.
 
 ```bash
 cc-switch mcp list                   # List all MCP servers
@@ -400,11 +400,15 @@ cc-switch skills repos enable <repo> # Enable repo without changing branch
 cc-switch skills repos disable <repo> # Disable repo without changing branch
 ```
 
+### 📊 Usage Overview
+
+The TUI home page shows a responsive 30-day view by app and model, including token/cost breakdowns, proxy state, and background refresh.
+
 ### 🕘 Session History & Usage Statistics
 
 Review saved assistant sessions, resume a session with one command, delete old records, and import local session logs into token/cost statistics.
 
-**Features:** cross-app session scanning, message preview, one-command resume, safe delete confirmation, JSON output, and usage sync for Claude, Codex, Gemini, and OpenCode.
+**Features:** complete paged history, cross-app scanning, message preview, copyable resume commands, safe deletion, JSON output, visible-page token/cost details, and usage sync for Claude, Codex, Gemini, and OpenCode. Hermes cost is shown when available.
 
 ```bash
 cc-switch sessions list --all        # List saved sessions across supported apps
@@ -462,7 +466,7 @@ Inspect and control daemon-managed per-app proxy routes for supported apps.
 
 **Features:** independent enable/disable per app, per-app listen ports, daemon-managed workers, current route inspection, dashboard telemetry, token accounting, and foreground serve mode for debugging.
 
-The local proxy can route Claude Code, Codex, and Gemini through CC-Switch, adapt OpenAI Responses API and Chat Completions providers, and connect mainstream OpenAI-compatible models such as DeepSeek, Kimi, Qwen, OpenRouter, xAI, Groq, and Mistral where the target app supports that route.
+The local proxy can route Claude Code, Codex, and Gemini through CC-Switch, adapt OpenAI Responses API and Chat Completions providers, let Codex use Anthropic Messages-compatible providers, and connect mainstream OpenAI-compatible models such as DeepSeek, Kimi, Qwen, OpenRouter, xAI, Groq, and Mistral where supported.
 
 ```bash
 cc-switch proxy show                              # Show proxy configuration, routes, and daemon worker status
