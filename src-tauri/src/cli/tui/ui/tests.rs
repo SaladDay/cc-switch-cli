@@ -4715,15 +4715,30 @@ fn settings_section_rows_do_not_shift_selection_or_break_narrow_scrolling() {
         .expect("CheckForUpdates missing from SettingsItem::ALL");
 
     let buf = render_with_size(&app, &minimal_data(&app.app_type), 50, 18);
-    let update_value = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let content_x = content_origin_x(&app, &buf);
+    let version_major = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .next()
+        .expect("package version should have a major component");
+    let version_prefix = format!("v{version_major}");
     let selected_y = (0..buf.area.height)
-        .find(|y| line_at(&buf, *y).contains(&update_value))
+        .find(|y| {
+            line_at(&buf, *y).contains(&version_prefix)
+                && (content_x..buf.area.width)
+                    .any(|x| buf[(x, *y)].modifier.contains(Modifier::REVERSED))
+        })
         .unwrap_or_else(|| {
             panic!(
                 "selected setting should scroll into view:\n{}",
                 all_text(&buf)
             )
         });
+    let selected_line = line_at(&buf, selected_y);
+    assert!(
+        selected_line.contains("Check"),
+        "selected update row should remain identifiable when truncated:\n{}",
+        all_text(&buf)
+    );
     let divider_y = (0..buf.area.height)
         .filter(|y| contains_continuous_divider_row(&line_at(&buf, *y)))
         .next_back()
