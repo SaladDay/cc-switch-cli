@@ -1,6 +1,7 @@
 // Core modules
 mod app_config;
 mod claude_mcp;
+mod claude_model_config;
 mod claude_plugin;
 mod codex_config;
 mod codex_history_migration;
@@ -26,6 +27,8 @@ mod prompt;
 mod prompt_files;
 mod provider;
 mod provider_defaults;
+mod provider_preset_models;
+mod provider_preset_sponsors;
 mod proxy;
 mod services;
 mod session_manager;

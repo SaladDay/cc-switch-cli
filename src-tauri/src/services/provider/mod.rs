@@ -1530,35 +1530,7 @@ impl ProviderService {
 
     fn extract_claude_common_config(settings: &Value) -> Result<String, AppError> {
         let mut config = settings.clone();
-
-        const ENV_EXCLUDES: &[&str] = &[
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_MODEL",
-            "ANTHROPIC_REASONING_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_BASE_URL",
-        ];
-        const TOP_LEVEL_EXCLUDES: &[&str] = &["apiBaseUrl", "primaryModel", "smallFastModel"];
-
-        if let Some(env) = config.get_mut("env").and_then(Value::as_object_mut) {
-            for key in ENV_EXCLUDES {
-                env.remove(*key);
-            }
-            if env.is_empty() {
-                if let Some(obj) = config.as_object_mut() {
-                    obj.remove("env");
-                }
-            }
-        }
-
-        if let Some(obj) = config.as_object_mut() {
-            for key in TOP_LEVEL_EXCLUDES {
-                obj.remove(*key);
-            }
-        }
+        common_config::sanitize_extracted_claude_common_config(&mut config);
 
         if config.as_object().is_none_or(|obj| obj.is_empty()) {
             return Ok("{}".to_string());
@@ -1582,7 +1554,7 @@ impl ProviderService {
         let mut snippet = serde_json::Map::new();
         if let Some(env) = env {
             for (key, value) in env {
-                if key == "GOOGLE_GEMINI_BASE_URL" || key == "GEMINI_API_KEY" {
+                if key == "GOOGLE_GEMINI_BASE_URL" || common_config::is_sensitive_config_key(key) {
                     continue;
                 }
                 let Value::String(v) = value else {

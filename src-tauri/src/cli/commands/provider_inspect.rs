@@ -47,6 +47,8 @@ struct ClaudeConfig {
     haiku_model: Option<String>,
     sonnet_model: Option<String>,
     opus_model: Option<String>,
+    fable_model: Option<String>,
+    subagent_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,7 +131,7 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
     );
 
     if matches!(app_type, AppType::Claude) {
-        let config = extract_claude_config(&provider.settings_config);
+        let config = extract_claude_config(provider);
 
         println!("\n{}", highlight(texts::api_config_section_header()));
         println!(
@@ -159,10 +161,26 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
             "  Opus:     {}",
             config.opus_model.unwrap_or_else(|| "default".to_string())
         );
+        println!(
+            "  Fable:    {}",
+            config.fable_model.unwrap_or_else(|| "default".to_string())
+        );
+        println!(
+            "  Subagent: {}",
+            config
+                .subagent_model
+                .unwrap_or_else(|| "default".to_string())
+        );
     } else {
         println!("\n{}", highlight("API 配置 / API Configuration"));
         let api_url = extract_api_url(provider, &app_type).unwrap_or_else(|| "N/A".to_string());
         println!("  API URL:  {}", api_url);
+        println!(
+            "  API Key:  {}",
+            provider
+                .configured_api_key(&app_type)
+                .unwrap_or_else(|| "N/A".to_string())
+        );
     }
 
     println!("\n{}", "─".repeat(60));
@@ -1011,18 +1029,15 @@ fn extract_api_url(provider: &Provider, app_type: &AppType) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn extract_claude_config(settings_config: &Value) -> ClaudeConfig {
-    let env = settings_config
+fn extract_claude_config(provider: &Provider) -> ClaudeConfig {
+    let env = provider
+        .settings_config
         .get("env")
         .and_then(|value| value.as_object());
 
     if let Some(env) = env {
         ClaudeConfig {
-            api_key: env
-                .get("ANTHROPIC_AUTH_TOKEN")
-                .or_else(|| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|value| value.as_str())
-                .map(mask_api_key),
+            api_key: provider.configured_api_key(&AppType::Claude),
             base_url: env
                 .get("ANTHROPIC_BASE_URL")
                 .and_then(|value| value.as_str())
@@ -1043,17 +1058,17 @@ fn extract_claude_config(settings_config: &Value) -> ClaudeConfig {
                 .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|value| value.as_str())
                 .map(simplify_model_name),
+            fable_model: env
+                .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+                .and_then(|value| value.as_str())
+                .map(simplify_model_name),
+            subagent_model: env
+                .get("CLAUDE_CODE_SUBAGENT_MODEL")
+                .and_then(|value| value.as_str())
+                .map(simplify_model_name),
         }
     } else {
         ClaudeConfig::default()
-    }
-}
-
-fn mask_api_key(key: &str) -> String {
-    if key.len() > 8 {
-        format!("{}...", &key[..8])
-    } else {
-        key.to_string()
     }
 }
 

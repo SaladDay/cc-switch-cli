@@ -358,9 +358,11 @@ fn parse_session_lines(path: &Path, head: &[String], tail: &[String]) -> Option<
         summary,
         project_dir,
         created_at: created_at.or(fallback_time),
+        source_mtime_ns: None,
         last_active_at: last_active_at.or(fallback_time).or(created_at),
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("claude --resume {session_id}")),
+        usage: None,
     })
 }
 

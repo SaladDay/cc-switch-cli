@@ -1,4 +1,5 @@
 mod handlers;
+pub(crate) mod session_cost;
 mod types;
 mod workers;
 
@@ -8,12 +9,13 @@ pub(crate) use handlers::{
     handle_codex_history_msg, handle_local_env_msg, handle_managed_auth_msg,
     handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg, handle_session_msg,
     handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg, handle_update_msg,
-    handle_webdav_msg,
+    handle_webdav_msg, ProxyMsgEffect,
 };
 #[cfg(test)]
 pub(crate) use types::{
     build_model_fetch_candidate_urls, model_fetch_strategy_for_field,
-    parse_model_ids_from_response, ManagedAuthMsg, ProxyMsg, UpdateMsg,
+    parse_model_ids_from_response, ManagedAuthMsg, ManagedSessionOutcome, ProxyMsg, QuotaMsg,
+    UpdateMsg,
 };
 pub(crate) use types::{
     build_stream_check_result_lines, fetch_provider_models_for_tui, ModelFetchStrategy,

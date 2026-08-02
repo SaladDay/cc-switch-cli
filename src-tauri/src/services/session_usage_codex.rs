@@ -1997,6 +1997,7 @@ fn insert_codex_session_entry(
 
     // model 在调用处已 normalize_codex_model，缓存键直接使用归一化后的名字。
     let pricing = cached_model_pricing(conn, pricing_cache, model);
+    let pricing_model = if pricing.is_some() { model } else { "" };
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -2022,12 +2023,12 @@ fn insert_codex_session_entry(
     let mut stmt = conn
         .prepare_cached(
             "INSERT OR IGNORE INTO proxy_request_logs (
-            request_id, provider_id, app_type, model, request_model,
+            request_id, provider_id, app_type, model, request_model, pricing_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         )
         .map_err(|e| AppError::Database(format!("插入 Codex 会话日志失败: {e}")))?;
     let inserted_rows = stmt
@@ -2037,6 +2038,7 @@ fn insert_codex_session_entry(
             "codex",          // app_type
             model,
             model, // request_model = model
+            pricing_model,
             delta.input,
             delta.output,
             delta.cached_input,
@@ -2202,6 +2204,48 @@ mod tests {
             resolve_codex_created_at(timestamp),
             suspected_duplicates,
         )
+    }
+
+    #[test]
+    fn codex_session_import_records_write_time_pricing_evidence() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT OR REPLACE INTO model_pricing (
+                     model_id, display_name, input_cost_per_million,
+                     output_cost_per_million, cache_read_cost_per_million,
+                     cache_creation_cost_per_million
+                 ) VALUES ('codex-writer-free', 'Codex Writer Free', '0', '0', '0', '0')",
+                [],
+            )?;
+        }
+        let delta = DeltaTokens {
+            input: 10,
+            cached_input: 0,
+            output: 1,
+        };
+        let mut suspected_duplicates = 0;
+        assert!(insert_test_codex_session_entry(
+            &db,
+            "codex-priced-evidence",
+            &delta,
+            "codex-writer-free",
+            Some("codex-priced-evidence"),
+            Some("1970-01-01T00:16:40Z"),
+            &mut suspected_duplicates,
+        )?);
+
+        let conn = lock_conn!(db.conn);
+        let pricing_model: Option<String> = conn.query_row(
+            "SELECT pricing_model FROM proxy_request_logs
+             WHERE request_id = 'codex-priced-evidence'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(pricing_model.as_deref(), Some("codex-writer-free"));
+
+        Ok(())
     }
 
     #[test]

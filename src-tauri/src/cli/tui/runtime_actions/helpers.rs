@@ -76,6 +76,7 @@ pub(crate) fn queue_managed_proxy_action(
     proxy_loading: &mut RequestTracker,
     app_type: AppType,
     enabled: bool,
+    base_reload_token: super::super::data::UiDataReloadToken,
 ) -> Result<(), AppError> {
     let Some(tx) = proxy_req_tx else {
         app.push_toast(
@@ -100,6 +101,7 @@ pub(crate) fn queue_managed_proxy_action(
         request_id,
         app_type,
         enabled,
+        base_reload_token,
     }) {
         proxy_loading.cancel();
         app.overlay = Overlay::None;

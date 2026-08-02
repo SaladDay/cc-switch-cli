@@ -99,13 +99,13 @@
   </tr>
   <tr>
     <td width="180">
-      <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
+      <a href="https://www.aicodemirror.ai/register?invitecode=9915W3">
         <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
       </a>
     </td>
     <td>
       感谢 <b>AICodeMirror</b> 赞助本项目！<b>AICodeMirror</b> 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级并发、快速开票与 7x24 专属技术支持。Claude Code / Codex / Gemini 官方通道价格低至原价的 <b>38% / 2% / 9%</b>，充值另有折上折！<br/>
-      <b>AICodeMirror</b> 为 cc-switch-cli 用户提供专属福利：通过<a href="https://www.aicodemirror.com/register?invitecode=77V9EA">此链接</a>注册，首充可享 <b>8 折</b>，即 <b>20% off</b>，企业客户最高可享 <b>75 折</b>，即 <b>25% off</b>。
+      <b>AICodeMirror</b> 为 cc-switch-cli 用户提供专属福利：通过<a href="https://www.aicodemirror.ai/register?invitecode=9915W3">此链接</a>注册，首充可享 <b>8 折</b>，即 <b>20% off</b>，企业客户最高可享 <b>75 折</b>，即 <b>25% off</b>。
     </td>
   </tr>
   <tr>

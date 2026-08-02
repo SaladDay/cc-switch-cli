@@ -766,8 +766,8 @@ fn set_codex_model_catalog_json_field(
     Ok(doc.to_string())
 }
 
-const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
-const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
+pub(crate) const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
+pub(crate) const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
 
 /// Disable the hosted web-search tool for protocol paths that cannot carry it.
 /// Only remove values previously written by cc-switch, preserving user-owned

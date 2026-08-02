@@ -1625,6 +1625,31 @@ pub(super) fn format_token_compact(total: u64) -> String {
     format!("{:.1}M", total as f64 / 1_000_000.0)
 }
 
+pub(super) fn token_breakdown_separator() -> &'static str {
+    if icons::use_emoji() {
+        " • "
+    } else {
+        " - "
+    }
+}
+
+/// Locale-neutral compact form shared by the home and Sessions surfaces.
+pub(super) fn format_token_breakdown_compact(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+) -> String {
+    let separator = token_breakdown_separator();
+    format!(
+        "In: {input}{separator}Out: {output}{separator}CR: {read}{separator}CW: {write}",
+        input = format_token_compact(input_tokens),
+        output = format_token_compact(output_tokens),
+        read = format_token_compact(cache_read_tokens),
+        write = format_token_compact(cache_creation_tokens),
+    )
+}
+
 fn format_percent(value: Option<f64>) -> String {
     value
         .map(|value| format!("{:.0}%", value.clamp(0.0, 100.0)))

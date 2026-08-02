@@ -299,9 +299,11 @@ impl HermesStreamPlan {
             summary: None,
             project_dir: cwd,
             created_at: started_at,
+            source_mtime_ns: None,
             last_active_at: ended_at.or(started_at),
             source_path: Some(format!("{db_source}#{session_id}")),
             resume_command: None,
+            usage: None,
         })
     }
 
@@ -740,9 +742,11 @@ fn parse_jsonl_session_lines(path: &Path, head: &[String], tail: &[String]) -> O
         summary: first_user_msg,
         project_dir: cwd,
         created_at: first_ts.or(fallback_time),
+        source_mtime_ns: None,
         last_active_at: last_ts.or(first_ts).or(fallback_time),
         source_path: Some(source_path),
         resume_command: None,
+        usage: None,
     })
 }
 

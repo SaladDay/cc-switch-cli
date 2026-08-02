@@ -3,20 +3,22 @@ use std::{collections::HashSet, path::PathBuf};
 
 use super::{provider_inspect, provider_usage_query};
 use crate::app_config::AppType;
+use crate::claude_model_config::{ClaudeModelRole, CLAUDE_DEFAULT_MODEL_ENV_KEY};
 use crate::cli::commands::provider_input::{
-    build_claude_settings_config_from_prompt, build_codex_settings_config_from_prompt,
-    build_gemini_api_key_settings_config, build_gemini_oauth_settings_config,
-    build_provider_from_add_template, codex_current_base_url_model,
-    common_snippet_has_effective_config, current_timestamp, display_provider_summary,
-    generate_provider_id_for_app, prompt_basic_fields, prompt_optional_fields,
-    prompt_settings_config, provider_uses_common_config, set_provider_common_config_meta,
-    supports_common_config, validate_provider_add_template, validate_provider_id_for_add,
-    OptionalFields, ProviderAddTemplate, SettingsConfigPromptResult,
+    apply_additive_template_field_overrides, build_claude_settings_config_from_prompt,
+    build_codex_settings_config_from_prompt, build_gemini_api_key_settings_config,
+    build_gemini_oauth_settings_config, build_provider_from_add_template,
+    codex_current_base_url_model, common_snippet_has_effective_config, current_timestamp,
+    display_provider_summary, generate_provider_id_for_app, prompt_basic_fields,
+    prompt_optional_fields, prompt_settings_config, provider_uses_common_config,
+    set_provider_common_config_meta, supports_common_config, validate_provider_add_template,
+    validate_provider_id_for_add, OptionalFields, ProviderAddTemplate, SettingsConfigPromptResult,
 };
 use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
+use crate::provider_preset_models::GEMINI_DEFAULT_MODEL;
 use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
 use indexmap::IndexMap;
@@ -698,6 +700,21 @@ pub enum ProviderCommand {
         /// Default model (Claude/Codex/Gemini field mode, optional)
         #[arg(long, conflicts_with_all = ["config", "config_file"])]
         model: Option<String>,
+        /// Claude Haiku role model ([1M] is ignored because Haiku does not support it)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        haiku_model: Option<String>,
+        /// Claude Sonnet role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        sonnet_model: Option<String>,
+        /// Claude Opus role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        opus_model: Option<String>,
+        /// Claude Fable role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        fable_model: Option<String>,
+        /// Claude Subagent role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        subagent_model: Option<String>,
         /// Raw settings_config as a JSON string (any app, advanced use)
         #[arg(long, conflicts_with = "config_file")]
         config: Option<String>,
@@ -829,6 +846,11 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
             base_url,
             api_key,
             model,
+            haiku_model,
+            sonnet_model,
+            opus_model,
+            fable_model,
+            subagent_model,
             config,
             config_file,
             website_url,
@@ -850,6 +872,11 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                 base_url,
                 api_key,
                 model,
+                haiku_model,
+                sonnet_model,
+                opus_model,
+                fable_model,
+                subagent_model,
                 config,
                 config_file,
                 website_url,
@@ -1036,6 +1063,7 @@ fn delete_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 }
 
 /// Parsed flags for the non-interactive `provider add`.
+#[derive(Default)]
 struct AddProviderArgs {
     template: Option<ProviderAddTemplate>,
     name: Option<String>,
@@ -1043,6 +1071,11 @@ struct AddProviderArgs {
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+    haiku_model: Option<String>,
+    sonnet_model: Option<String>,
+    opus_model: Option<String>,
+    fable_model: Option<String>,
+    subagent_model: Option<String>,
     config: Option<String>,
     config_file: Option<PathBuf>,
     website_url: Option<String>,
@@ -1055,6 +1088,49 @@ struct AddProviderArgs {
     common_config: bool,
     account_id: Option<String>,
     fast_mode: bool,
+}
+
+impl AddProviderArgs {
+    fn has_claude_role_models(&self) -> bool {
+        [
+            &self.haiku_model,
+            &self.sonnet_model,
+            &self.opus_model,
+            &self.fable_model,
+            &self.subagent_model,
+        ]
+        .into_iter()
+        .any(Option::is_some)
+    }
+
+    fn claude_model_fields(&self) -> Vec<(&'static str, Option<String>)> {
+        [
+            (CLAUDE_DEFAULT_MODEL_ENV_KEY, self.model.clone()),
+            (
+                ClaudeModelRole::Haiku.model_env_key(),
+                self.haiku_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Sonnet.model_env_key(),
+                self.sonnet_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Opus.model_env_key(),
+                self.opus_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Fable.model_env_key(),
+                self.fable_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Subagent.model_env_key(),
+                self.subagent_model.clone(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| non_empty(value).map(|value| (key, Some(value))))
+        .collect()
+    }
 }
 
 /// Trim a flag value and drop it when empty.
@@ -1089,6 +1165,20 @@ fn add_additive_requires_config_error(app_type: &AppType) -> AppError {
     } else {
         format!(
             "provider add for {} requires raw config via --config or --config-file (or use the TUI)",
+            app_type.as_str()
+        )
+    })
+}
+
+fn add_claude_role_models_unsupported_error(app_type: &AppType) -> AppError {
+    AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
+        format!(
+            "Haiku、Sonnet、Opus、Fable 和 Subagent 模型参数仅适用于 Claude，当前应用为 {}",
+            app_type.as_str()
+        )
+    } else {
+        format!(
+            "Haiku, Sonnet, Opus, Fable, and Subagent model flags are only valid for Claude; current app is {}",
             app_type.as_str()
         )
     })
@@ -1236,6 +1326,10 @@ fn build_add_settings_config(
         return Ok(raw.clone());
     }
 
+    if !matches!(app_type, AppType::Claude) && args.has_claude_role_models() {
+        return Err(add_claude_role_models_unsupported_error(app_type));
+    }
+
     match app_type {
         AppType::Claude => {
             let base_url = non_empty(args.base_url.clone())
@@ -1244,7 +1338,7 @@ fn build_add_settings_config(
             let api_key = non_empty(args.api_key.clone())
                 .ok_or_else(|| add_missing_field_error("--api-key"))?;
             let field = args.api_key_field.unwrap_or(ClaudeApiKeyField::AuthToken);
-            let model_fields = vec![("ANTHROPIC_MODEL", non_empty(args.model.clone()))];
+            let model_fields = args.claude_model_fields();
             let settings = build_claude_settings_config_from_prompt(
                 current,
                 field,
@@ -1286,7 +1380,7 @@ fn build_add_settings_config(
                     .unwrap_or_default();
                 let model = non_empty(args.model.clone())
                     .or_else(|| gemini_current_env(current, &["GEMINI_MODEL"]))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| GEMINI_DEFAULT_MODEL.to_string());
                 Ok(build_gemini_api_key_settings_config(
                     current, &api_key, &base_url, &model,
                 ))
@@ -1294,7 +1388,17 @@ fn build_add_settings_config(
             None => Ok(build_gemini_oauth_settings_config(current)),
         },
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
-            Err(add_additive_requires_config_error(app_type))
+            let current = current.ok_or_else(|| add_additive_requires_config_error(app_type))?;
+            let api_key = non_empty(args.api_key.clone());
+            let base_url = non_empty(args.base_url.clone());
+            let model = non_empty(args.model.clone());
+            apply_additive_template_field_overrides(
+                app_type,
+                current,
+                api_key.as_deref(),
+                base_url.as_deref(),
+                model.as_deref(),
+            )
         }
     }
 }
@@ -1454,8 +1558,9 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
         let has_field_input = raw_config.is_some()
             || args.base_url.is_some()
             || args.api_key.is_some()
-            || args.model.is_some();
-        if template.requires_settings_prompt() {
+            || args.model.is_some()
+            || args.has_claude_role_models();
+        if template.supports_field_overrides() {
             // Sponsor / third-party templates: fold the CLI field values into the
             // template's prefilled settings_config (base_url is inherited when
             // --base-url is omitted).
@@ -2005,6 +2110,46 @@ mod tests {
             settings_config,
             None,
         )
+    }
+
+    #[test]
+    fn noninteractive_add_uses_upstream_defaults_when_model_is_omitted() {
+        let mut prompt_result = None;
+        let codex = build_add_settings_config(
+            &AppType::Codex,
+            &AddProviderArgs {
+                base_url: Some("https://codex.example/v1".to_string()),
+                api_key: Some("sk-codex".to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            "Custom Codex",
+            &mut prompt_result,
+        )
+        .expect("build Codex settings");
+        assert!(codex["config"]
+            .as_str()
+            .expect("Codex config should be TOML")
+            .contains("model = \"gpt-5.6-sol\""));
+
+        let gemini = build_add_settings_config(
+            &AppType::Gemini,
+            &AddProviderArgs {
+                base_url: Some("https://gemini.example".to_string()),
+                api_key: Some("sk-gemini".to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            "Custom Gemini",
+            &mut prompt_result,
+        )
+        .expect("build Gemini settings");
+        assert_eq!(
+            gemini["env"]["GEMINI_MODEL"],
+            crate::provider_preset_models::GEMINI_DEFAULT_MODEL
+        );
     }
 
     #[test]

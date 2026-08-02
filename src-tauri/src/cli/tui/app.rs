@@ -11,9 +11,9 @@ use crate::services::skill::SyncMethod;
 
 use super::data::UiData;
 use super::form::{
-    ClaudeModelPickerColumn, CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType,
-    McpAddField, McpAddFormState, McpTransport, PromptMetaField, PromptMetaFormState,
-    ProviderAddField, ProviderAddFormState,
+    ClaudeModelPickerColumn, ClaudeModelRole, CodexWireApi, FormFocus, FormMode, FormState,
+    GeminiAuthType, McpAddField, McpAddFormState, McpKeyValueKind, McpTransport, PromptMetaField,
+    PromptMetaFormState, ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};
 use super::text_edit::{TextEditCommand, TextInput, TextInputPolicy};
@@ -58,7 +58,7 @@ pub use types::{
     ToastActionScope, ToastKind, UsageMetric, UsagePane, UsageState,
 };
 #[cfg(test)]
-pub(crate) use types::{McpEnvEditorField, McpEnvEntryEditorState};
+pub(crate) use types::{McpKeyValueEditorField, McpKeyValueEntryEditorState};
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {
     app_type.supports_failover()

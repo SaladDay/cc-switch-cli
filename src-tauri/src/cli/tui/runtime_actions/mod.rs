@@ -89,8 +89,10 @@ pub(crate) fn apply_preloaded_app_switch(
     next: AppType,
     next_data: UiData,
 ) {
+    let changing_app = app.app_type != next;
+    let was_sessions = matches!(app.route, super::route::Route::Sessions);
     app.clear_openclaw_daily_memory_search_state();
-    if app.app_type != next {
+    if changing_app {
         // A log-detail snapshot is scoped to one application. Clearing the
         // browsing source here prevents a matching request id in another app
         // from rendering the previous app's row.
@@ -99,6 +101,9 @@ pub(crate) fn apply_preloaded_app_switch(
     app.app_type = next;
     let original_route = app.route.clone();
     app.route = normalize_route_for_app(&app.app_type, &app.route);
+    if was_sessions && (changing_app || !matches!(app.route, super::route::Route::Sessions)) {
+        app.sessions.request_cost_cancel();
+    }
     app.clear_out_of_scope_action_toast();
     for route in &mut app.route_stack {
         *route = normalize_route_for_app(&app.app_type, route);
@@ -615,6 +620,7 @@ pub(crate) fn handle_action(
             };
             if ctx.app.sessions.scan_active.is_none() {
                 let request_id = ctx.app.sessions.start_scan(provider_id.clone());
+                ctx.app.sessions.mark_manual_refresh(request_id);
                 if let Err(err) = tx.send(SessionReq::Refresh {
                     request_id,
                     scope_epoch: ctx.app.sessions.scope_epoch,
@@ -784,6 +790,13 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SwitchRoute(route) => {
+            let entering_sessions = !matches!(ctx.app.route, super::route::Route::Sessions)
+                && matches!(route, super::route::Route::Sessions);
+            let leaving_sessions = matches!(ctx.app.route, super::route::Route::Sessions)
+                && !matches!(route, super::route::Route::Sessions);
+            if leaving_sessions {
+                ctx.app.sessions.request_cost_cancel();
+            }
             if !matches!(route, super::route::Route::Sessions) {
                 ctx.app.sessions.deep_search_active = None;
                 ctx.app.sessions.deep_search_pending = None;
@@ -802,6 +815,12 @@ pub(crate) fn handle_action(
                 }
             }
             ctx.app.route = route;
+            if entering_sessions
+                && ctx.app.sessions.page_token().is_some()
+                && !ctx.app.sessions.rows.is_empty()
+            {
+                ctx.app.sessions.request_cost_overlay();
+            }
             ctx.app.maybe_prompt_import_candidate(ctx.data);
             if matches!(ctx.app.route, super::route::Route::SkillsDiscover)
                 && ctx.app.skills_discover_results.is_empty()
@@ -1026,6 +1045,7 @@ pub(crate) fn handle_action(
             ctx.proxy_loading,
             app_type,
             enabled,
+            ctx.data.reload_token,
         ),
         Action::SetLanguage(lang) => {
             set_language(lang)?;
@@ -1246,6 +1266,58 @@ mod tests {
             published.reader,
         ));
         (app, manifest_dir)
+    }
+
+    #[test]
+    fn returning_to_loaded_sessions_requests_a_fresh_cost_overlay() {
+        let (mut app, _manifest_dir) = app_with_base_session_manifest();
+        app.route = Route::Main;
+        let mut data = UiData::default();
+
+        run_action(&mut app, &mut data, Action::SwitchRoute(Route::Sessions))
+            .expect("return to Sessions");
+
+        assert!(matches!(app.route, Route::Sessions));
+        assert!(
+            app.sessions.take_cost_overlay_request(),
+            "route re-entry must recover discarded or stale background cost results"
+        );
+    }
+
+    #[test]
+    fn leaving_sessions_invalidates_the_active_cost_overlay() {
+        let (mut app, _manifest_dir) = app_with_base_session_manifest();
+        app.route = Route::Sessions;
+        let mut data = UiData::default();
+        app.sessions
+            .start_cost_overlay()
+            .expect("visible page cost request");
+        assert!(app.sessions.has_active_cost_overlay());
+
+        run_action(&mut app, &mut data, Action::SwitchRoute(Route::Main)).expect("leave Sessions");
+
+        assert!(
+            !app.sessions.has_active_cost_overlay(),
+            "leaving Sessions must invalidate the running projection immediately"
+        );
+    }
+
+    #[test]
+    fn switching_apps_from_sessions_invalidates_the_active_cost_overlay() {
+        let (mut app, _manifest_dir) = app_with_base_session_manifest();
+        app.route = Route::Sessions;
+        app.sessions
+            .start_cost_overlay()
+            .expect("visible page cost request");
+        assert!(app.sessions.has_active_cost_overlay());
+
+        let mut data = UiData::default();
+        apply_preloaded_app_switch(&mut app, &mut data, AppType::Codex, UiData::default());
+
+        assert!(
+            !app.sessions.has_active_cost_overlay(),
+            "an app switch must immediately retire the old app's projection"
+        );
     }
 
     #[test]

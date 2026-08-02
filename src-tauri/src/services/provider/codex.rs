@@ -110,6 +110,13 @@ impl ProviderService {
         }
         root.remove("experimental_bearer_token");
         root.remove("model_catalog_json");
+        if root
+            .get(crate::codex_config::CODEX_WEB_SEARCH_FIELD)
+            .and_then(|item| item.as_str())
+            == Some(crate::codex_config::CODEX_WEB_SEARCH_DISABLED)
+        {
+            root.remove(crate::codex_config::CODEX_WEB_SEARCH_FIELD);
+        }
 
         if let Some(profiles) = root
             .get_mut("profiles")

@@ -357,6 +357,7 @@ fn insert_gemini_session_entry(
     };
 
     let pricing = cached_model_pricing(conn, pricing_cache, model);
+    let pricing_model = if pricing.is_some() { model } else { "" };
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -383,15 +384,16 @@ fn insert_gemini_session_entry(
     let mut stmt = conn
         .prepare_cached(
             "INSERT INTO proxy_request_logs (
-            request_id, provider_id, app_type, model, request_model,
+            request_id, provider_id, app_type, model, request_model, pricing_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
         ON CONFLICT(request_id) DO UPDATE SET
             model = excluded.model,
             request_model = excluded.request_model,
+            pricing_model = excluded.pricing_model,
             input_tokens = excluded.input_tokens,
             output_tokens = excluded.output_tokens,
             cache_read_tokens = excluded.cache_read_tokens,
@@ -407,7 +409,8 @@ fn insert_gemini_session_entry(
            OR output_tokens != excluded.output_tokens
            OR cache_read_tokens != excluded.cache_read_tokens
            OR cache_creation_tokens != excluded.cache_creation_tokens
-           OR model != excluded.model",
+           OR model != excluded.model
+           OR COALESCE(pricing_model, '') != excluded.pricing_model",
         )
         .map_err(|e| AppError::Database(format!("插入 Gemini 会话日志失败: {e}")))?;
     // execute 返回值即本条语句改动的行数：INSERT 或命中 WHERE 的 UPDATE 返回 >0，
@@ -419,6 +422,7 @@ fn insert_gemini_session_entry(
             "gemini",          // app_type
             model,
             model, // request_model = model
+            pricing_model,
             tokens.input,
             output_tokens,
             tokens.cached,
@@ -453,6 +457,49 @@ mod tests {
     fn test_collect_gemini_session_files_nonexistent() {
         let files = collect_gemini_session_files(Path::new("/nonexistent/path"));
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn gemini_session_import_records_write_time_pricing_evidence() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let mut pricing_cache = PricingCache::new();
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT OR REPLACE INTO model_pricing (
+                     model_id, display_name, input_cost_per_million,
+                     output_cost_per_million, cache_read_cost_per_million,
+                     cache_creation_cost_per_million
+                 ) VALUES ('gemini-writer-free', 'Gemini Writer Free', '0', '0', '0', '0')",
+                [],
+            )?;
+            let tokens = GeminiTokens {
+                input: 10,
+                output: 1,
+                cached: 0,
+                thoughts: 0,
+            };
+            assert!(insert_gemini_session_entry(
+                &conn,
+                &mut pricing_cache,
+                "gemini-priced-evidence",
+                &tokens,
+                "gemini-writer-free",
+                Some("gemini-priced-evidence"),
+                Some("1970-01-01T00:16:40Z"),
+            )?);
+        }
+
+        let conn = lock_conn!(db.conn);
+        let pricing_model: Option<String> = conn.query_row(
+            "SELECT pricing_model FROM proxy_request_logs
+             WHERE request_id = 'gemini-priced-evidence'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(pricing_model.as_deref(), Some("gemini-writer-free"));
+
+        Ok(())
     }
 
     /// 收集函数返回按 mtime 降序：用显式 set_modified 控制两个文件的先后，断言

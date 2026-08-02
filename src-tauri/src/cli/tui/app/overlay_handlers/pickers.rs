@@ -750,7 +750,7 @@ impl App {
                 column,
                 editing,
             } => {
-                *selected = (*selected).min(2);
+                *selected = (*selected).min(ClaudeModelRole::COUNT.saturating_sub(1));
                 if !*editing {
                     return Action::None;
                 }
@@ -768,7 +768,7 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Enter => {
                 if provider.normalize_claude_model_input(selected) {
-                    provider.mark_claude_model_config_touched();
+                    provider.mark_claude_model_role_touched(selected);
                 }
                 if let Overlay::ClaudeModelPicker { editing, .. } = &mut self.overlay {
                     *editing = false;
@@ -778,7 +778,7 @@ impl App {
             _ => {
                 if let Some(input) = provider.claude_model_input_mut(selected) {
                     if input.apply_key(key).is_some_and(|edit| edit.changed) {
-                        provider.mark_claude_model_config_touched();
+                        provider.mark_claude_model_role_touched(selected);
                     }
                 }
                 Action::None
@@ -793,7 +793,7 @@ impl App {
                 column,
                 editing,
             } => {
-                *selected = (*selected).min(2);
+                *selected = (*selected).min(ClaudeModelRole::COUNT.saturating_sub(1));
                 if *editing {
                     return Action::None;
                 }
@@ -828,7 +828,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                let next = (selected + 1).min(2);
+                let next = (selected + 1).min(ClaudeModelRole::COUNT.saturating_sub(1));
                 if let Overlay::ClaudeModelPicker {
                     selected, column, ..
                 } = &mut self.overlay

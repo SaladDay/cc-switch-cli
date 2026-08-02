@@ -522,55 +522,7 @@ impl CodexAdapter {
     }
 
     fn extract_key(&self, provider: &Provider) -> Option<String> {
-        if let Some(env) = provider.settings_config.get("env") {
-            if let Some(key) = env
-                .get("OPENAI_API_KEY")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-            {
-                return Some(key.to_string());
-            }
-        }
-
-        if let Some(auth) = provider.settings_config.get("auth") {
-            if let Some(key) = crate::codex_config::extract_codex_auth_api_key(auth) {
-                return Some(key);
-            }
-        }
-
-        if let Some(key) = provider
-            .settings_config
-            .get("apiKey")
-            .or_else(|| provider.settings_config.get("api_key"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-        {
-            return Some(key.to_string());
-        }
-
-        if let Some(config) = provider.settings_config.get("config") {
-            if let Some(key) = config
-                .get("api_key")
-                .or_else(|| config.get("apiKey"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-            {
-                return Some(key.to_string());
-            }
-
-            if let Some(config_str) = config.as_str() {
-                if let Some(key) =
-                    crate::codex_config::extract_codex_experimental_bearer_token(config_str)
-                {
-                    return Some(key);
-                }
-            }
-        }
-
-        None
+        provider.configured_api_key(&crate::app_config::AppType::Codex)
     }
 }
 

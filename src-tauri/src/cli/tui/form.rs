@@ -35,9 +35,9 @@ pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_json::{normalize_usage_interval, normalize_usage_timeout};
 pub(crate) use provider_request_overrides::{
     format_local_proxy_body_override, format_local_proxy_header_overrides,
-    normalize_local_proxy_header_overrides, parse_local_proxy_body_override,
-    parse_local_proxy_header_overrides, user_agent_picker_option_count,
-    user_agent_picker_selection, USER_AGENT_PICKER_CUSTOM_INDEX,
+    is_valid_http_header_name, is_valid_http_header_value, normalize_local_proxy_header_overrides,
+    parse_local_proxy_body_override, parse_local_proxy_header_overrides,
+    user_agent_picker_option_count, user_agent_picker_selection, USER_AGENT_PICKER_CUSTOM_INDEX,
     USER_AGENT_PICKER_NO_OVERRIDE_INDEX, USER_AGENT_PICKER_PRESET_OFFSET, USER_AGENT_PRESETS,
 };
 pub(crate) use provider_state::resolve_provider_id_for_submit;
@@ -47,10 +47,12 @@ pub(crate) use provider_state::{
 pub(crate) use s3::{S3Preset, S3SyncField, S3SyncFormState};
 pub(crate) use webdav::{WebDavSyncField, WebDavSyncFormState};
 
+pub(crate) use crate::claude_model_config::ClaudeModelRole;
 pub(crate) use crate::hermes_config::{HERMES_API_MODES, HERMES_DEFAULT_API_MODE};
 pub(crate) use crate::openclaw_config::{
     OPENCLAW_API_PROTOCOLS, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
+pub(crate) use crate::usage_script::UsageQueryTemplate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiAuthType {
@@ -339,16 +341,6 @@ pub enum HermesModelField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsageQueryTemplate {
-    Custom,
-    General,
-    NewApi,
-    GitHubCopilot,
-    TokenPlan,
-    Balance,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageQueryField {
     Enabled,
     Template,
@@ -473,6 +465,7 @@ pub enum McpAddField {
     Args,
     Url,
     Env,
+    Headers,
     AppClaude,
     AppCodex,
     AppGemini,
@@ -494,8 +487,14 @@ pub enum McpTransport {
     Sse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpKeyValueKind {
+    Env,
+    Headers,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpEnvVarRow {
+pub struct McpKeyValueRow {
     pub key: String,
     pub value: String,
 }
@@ -530,7 +529,8 @@ pub struct ProviderAddFormState {
     pub codex_preview_section: CodexPreviewSection,
     pub codex_auth_scroll: usize,
     pub codex_config_scroll: usize,
-    claude_model_config_touched: bool,
+    claude_fallback_model_touched: bool,
+    claude_model_role_touched: [bool; ClaudeModelRole::COUNT],
 
     pub claude_api_key: TextInput,
     pub claude_api_key_field: ClaudeApiKeyField,
@@ -540,8 +540,12 @@ pub struct ProviderAddFormState {
     pub claude_haiku_model: TextInput,
     pub claude_sonnet_model: TextInput,
     pub claude_opus_model: TextInput,
+    pub claude_fable_model: TextInput,
+    pub claude_subagent_model: TextInput,
     claude_sonnet_one_m: bool,
     claude_opus_one_m: bool,
+    claude_fable_one_m: bool,
+    claude_subagent_one_m: bool,
     pub claude_hide_attribution: bool,
     claude_hide_attribution_touched: bool,
     pub claude_teammates: bool,
@@ -589,6 +593,7 @@ pub struct ProviderAddFormState {
     pub openclaw_user_agent: bool,
     pub openclaw_models: Vec<Value>,
     pub usage_query_enabled: bool,
+    pub usage_query_official_subscription: bool,
     pub usage_query_template: UsageQueryTemplate,
     pub usage_query_api_key: TextInput,
     pub usage_query_base_url: TextInput,
@@ -635,7 +640,8 @@ struct McpFormSnapshot {
     command: String,
     args_state: McpArgsState,
     url: String,
-    env_rows: Vec<McpEnvVarRow>,
+    env_rows: Vec<McpKeyValueRow>,
+    header_rows: Vec<McpKeyValueRow>,
     apps: McpApps,
 }
 
@@ -655,7 +661,8 @@ pub struct McpAddFormState {
     pub args: TextInput,
     args_state: McpArgsState,
     pub url: TextInput,
-    pub env_rows: Vec<McpEnvVarRow>,
+    pub env_rows: Vec<McpKeyValueRow>,
+    pub header_rows: Vec<McpKeyValueRow>,
     pub apps: McpApps,
     pub json_scroll: usize,
     initial_snapshot: Option<McpFormSnapshot>,

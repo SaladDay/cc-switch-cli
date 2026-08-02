@@ -51,6 +51,18 @@ fn next_reload_token() -> UiDataReloadToken {
     UiDataReloadToken(NEXT_RELOAD_TOKEN.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Process-local version for asynchronous quota results. Rotating it invalidates
+/// replies that were started with credentials from an older provider snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QuotaSnapshotGeneration(u64);
+
+impl Default for QuotaSnapshotGeneration {
+    fn default() -> Self {
+        static NEXT_QUOTA_GENERATION: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_QUOTA_GENERATION.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// Content version of a [`UsageSnapshot`], so render-time projections over it
 /// can be memoized instead of rebuilt every frame.
 ///
@@ -100,10 +112,20 @@ pub(crate) struct ProviderQuotaState {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QuotaSnapshot {
+    generation: QuotaSnapshotGeneration,
     by_provider: HashMap<String, ProviderQuotaState>,
 }
 
 impl QuotaSnapshot {
+    pub(crate) fn generation(&self) -> QuotaSnapshotGeneration {
+        self.generation
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.generation = QuotaSnapshotGeneration::default();
+        self.by_provider.clear();
+    }
+
     pub(crate) fn mark_loading(&mut self, target: QuotaTarget, manual: bool) {
         let provider_id = target.provider_id.clone();
         match self.by_provider.get_mut(&provider_id) {
@@ -179,10 +201,16 @@ impl QuotaSnapshot {
             .is_some_and(|state| &state.target == target && state.loading && state.manual)
     }
 
-    pub(crate) fn target_is_current(&self, target: &QuotaTarget) -> bool {
-        self.by_provider
-            .get(&target.provider_id)
-            .is_some_and(|state| &state.target == target)
+    pub(crate) fn target_is_current(
+        &self,
+        generation: QuotaSnapshotGeneration,
+        target: &QuotaTarget,
+    ) -> bool {
+        self.generation == generation
+            && self
+                .by_provider
+                .get(&target.provider_id)
+                .is_some_and(|state| &state.target == target)
     }
 }
 
@@ -333,6 +361,23 @@ pub struct ProxySnapshot {
     pub last_error: Option<String>,
     pub current_app_target: Option<ProxyTargetSnapshot>,
     pub provider_health: Arc<HashMap<String, ProviderHealthSnapshot>>,
+}
+
+/// Minimal TUI projection affected by enabling or disabling a managed proxy
+/// session. Provider data is included because takeover setup may persist live
+/// credentials back to the selected provider before rewriting the live config.
+///
+/// Keep this process-local and opaque: provider snapshots can contain secrets.
+pub(crate) struct ProviderRuntimeSnapshot {
+    providers: ProvidersSnapshot,
+    proxy: ProxySnapshot,
+}
+
+impl ProviderRuntimeSnapshot {
+    #[cfg(test)]
+    pub(crate) fn new(providers: ProvidersSnapshot, proxy: ProxySnapshot) -> Self {
+        Self { providers, proxy }
+    }
 }
 
 impl ProxySnapshot {
@@ -1145,6 +1190,12 @@ pub(crate) fn load_snapshot_state() -> Result<AppState, AppError> {
 impl UiData {
     pub(crate) fn mark_current_app_data_changed(&mut self) {
         self.reload_token = next_reload_token();
+    }
+
+    pub(crate) fn apply_provider_runtime_snapshot(&mut self, snapshot: ProviderRuntimeSnapshot) {
+        self.providers = snapshot.providers;
+        self.proxy = snapshot.proxy;
+        self.mark_current_app_data_changed();
     }
 
     pub(crate) fn refresh_current_app_provider_data(
@@ -2369,7 +2420,7 @@ fn local_end_of_day_timestamp(date: NaiveDate) -> i64 {
         .unwrap_or(0)
 }
 
-fn load_usage_summary(
+pub(crate) fn load_usage_summary(
     conn: &rusqlite::Connection,
     app_key: &str,
     start: i64,
@@ -3552,6 +3603,20 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
     })
 }
 
+pub(crate) async fn load_provider_runtime_snapshot_from_state_async(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<ProviderRuntimeSnapshot, AppError> {
+    // The managed proxy operation runs through the daemon, so the AppState
+    // created by the foreground worker predates any provider token persisted by
+    // takeover setup. Refresh its in-memory provider projection only after the
+    // daemon call has completed.
+    state.reload_config_snapshot_from_db()?;
+    let providers = load_providers_with_mode(state, app_type, ProviderLoadMode::SyncLive)?;
+    let proxy = load_proxy_snapshot_from_state_async(state, app_type).await?;
+    Ok(ProviderRuntimeSnapshot { providers, proxy })
+}
+
 fn proxy_target_snapshot_for_app(
     runtime_status: &crate::proxy::types::ProxyStatus,
     app_type: &str,
@@ -3593,7 +3658,7 @@ fn load_skills_snapshot_from_state(state: &AppState) -> Result<SkillsSnapshot, A
 mod tests {
     use super::*;
     use crate::prompt::Prompt;
-    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta, UsageScript};
     use serde_json::json;
     use serial_test::serial;
     use std::path::Path;
@@ -5572,112 +5637,41 @@ mod tests {
     }
 
     #[test]
-    fn quota_target_detects_official_claude_by_explicit_category() {
+    fn quota_target_requires_official_subscription_opt_in() {
         let mut official = test_provider_row("official", "Claude Official", json!({"env": {}}));
         official.provider.category = Some("official".to_string());
-        let stripped_custom = test_provider_row("stripped-custom", "Custom", json!({"env": {}}));
-        let custom = test_provider_row(
-            "custom",
-            "Claude Custom",
-            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
-        );
 
+        assert!(quota_target_for_provider(&AppType::Claude, &official).is_none());
+
+        official.provider.meta = Some(ProviderMeta {
+            usage_script: Some(UsageScript {
+                enabled: false,
+                language: "javascript".to_string(),
+                code: String::new(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("official_subscription".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..ProviderMeta::default()
+        });
+        assert!(quota_target_for_provider(&AppType::Claude, &official).is_none());
+
+        official
+            .provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.usage_script.as_mut())
+            .expect("usage script")
+            .enabled = true;
         assert!(matches!(
             quota_target_for_provider(&AppType::Claude, &official).map(|target| target.kind),
             Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "claude"
         ));
-        assert!(quota_target_for_provider(&AppType::Claude, &stripped_custom).is_none());
-        assert!(quota_target_for_provider(&AppType::Claude, &custom).is_none());
-    }
-
-    #[test]
-    fn quota_target_detects_codex_official_and_skips_api_key_providers() {
-        let missing_key = test_provider_row("official", "OpenAI Official", json!({"auth": {}}));
-        let no_key_custom_base_url = test_provider_row(
-            "base-url",
-            "OpenAI Official",
-            json!({
-                "auth": {},
-                "config": r#"base_url = "https://api.example.com/v1""#
-            }),
-        );
-        let mut metadata_official = test_provider_row(
-            "metadata",
-            "Codex Official",
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-        );
-        metadata_official.provider.meta = Some(ProviderMeta {
-            codex_official: Some(true),
-            ..ProviderMeta::default()
-        });
-        let api_key = test_provider_row(
-            "api-key",
-            "Custom OpenAI",
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-        );
-
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Codex, &missing_key).map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Codex, &metadata_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
-        ));
-        assert!(quota_target_for_provider(&AppType::Codex, &no_key_custom_base_url).is_none());
-        assert!(quota_target_for_provider(&AppType::Codex, &api_key).is_none());
-    }
-
-    #[test]
-    fn quota_target_detects_gemini_official_and_skips_api_key_providers() {
-        let mut explicit_official =
-            test_provider_row("google-official", "Google Official", json!({"env": {}}));
-        explicit_official.provider.category = Some("official".to_string());
-
-        let google_oauth = test_provider_row(
-            "google-oauth",
-            "Google OAuth",
-            json!({"env": {}, "config": {}}),
-        );
-        let mut partner_official = test_provider_row(
-            "partner",
-            "Gemini",
-            json!({"env": {"GEMINI_API_KEY": "sk"}}),
-        );
-        partner_official.provider.meta = Some(ProviderMeta {
-            partner_promotion_key: Some("google-official".to_string()),
-            ..ProviderMeta::default()
-        });
-        let api_key = test_provider_row(
-            "api-key",
-            "Google OAuth",
-            json!({"env": {"GEMINI_API_KEY": "sk-custom"}}),
-        );
-        let base_url = test_provider_row(
-            "base-url",
-            "Google OAuth",
-            json!({"env": {"GOOGLE_GEMINI_BASE_URL": "https://api.example.com"}}),
-        );
-        let stripped_custom = test_provider_row("custom", "Custom Gemini", json!({"env": {}}));
-
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &explicit_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &google_oauth).map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &partner_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(quota_target_for_provider(&AppType::Gemini, &api_key).is_none());
-        assert!(quota_target_for_provider(&AppType::Gemini, &base_url).is_none());
-        assert!(quota_target_for_provider(&AppType::Gemini, &stripped_custom).is_none());
     }
 
     #[test]

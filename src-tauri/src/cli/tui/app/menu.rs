@@ -406,10 +406,60 @@ impl App {
         }
     }
 
+    /// Usage projection consumed by the current route.
+    ///
+    /// Fixed presets share one aggregate cache entry. Main deliberately asks
+    /// for that fixed projection even if the Usage page was left on a custom
+    /// range, while Usage routes keep following the user's active range.
+    pub(crate) fn usage_projection_for_current_route(&self) -> Option<data::UsageRangePreset> {
+        match &self.route {
+            Route::Main => Some(data::UsageRangePreset::ThirtyDays),
+            Route::Usage | Route::UsageLogs | Route::UsageLogDetail { .. } => {
+                Some(self.usage.range)
+            }
+            _ => None,
+        }
+    }
+
+    /// Range needed by the shared Usage/Pricing worker for the current route.
+    /// Pricing participates in on-demand and manual loads, but keeps its
+    /// existing refresh policy.
+    pub(crate) fn usage_pricing_load_range_for_current_route(
+        &self,
+    ) -> Option<data::UsageRangePreset> {
+        match &self.route {
+            Route::Pricing => Some(data::UsageRangePreset::SevenDays),
+            _ => self.usage_projection_for_current_route(),
+        }
+    }
+
+    /// Fixed projections that can refresh from proxy activity without
+    /// interrupting an interactive log query. Custom windows and nested log
+    /// routes retain the existing session-sync and manual-refresh paths.
+    pub(crate) fn proxy_refreshed_usage_projection_for_current_route(
+        &self,
+    ) -> Option<data::UsageRangePreset> {
+        match &self.route {
+            Route::Main => Some(data::UsageRangePreset::ThirtyDays),
+            Route::Usage if !matches!(self.usage.range, data::UsageRangePreset::Custom(_)) => {
+                Some(self.usage.range)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn should_poll_proxy_activity(&self) -> bool {
-        (matches!(self.route, Route::Main)
+        let fast_poll_due = (matches!(self.route, Route::Main)
             || matches!(self.overlay, Overlay::FailoverQueueManager { .. }))
-            && self.tick.is_multiple_of(PROXY_ACTIVITY_POLL_INTERVAL_TICKS)
+            && self.tick.is_multiple_of(PROXY_ACTIVITY_POLL_INTERVAL_TICKS);
+        let usage_poll_due = matches!(self.route, Route::Usage)
+            && self
+                .proxy_refreshed_usage_projection_for_current_route()
+                .is_some()
+            && self
+                .tick
+                .is_multiple_of(super::super::USAGE_PROXY_REFRESH_INTERVAL_TICKS);
+        fast_poll_due || usage_poll_due
     }
 
     pub(crate) fn reset_proxy_activity(&mut self, input_tokens: u64, output_tokens: u64) {
@@ -450,7 +500,8 @@ impl App {
         // A proxy restart can reset its in-memory counters after it has already
         // persisted usage that the current aggregate has not seen. Treat the
         // rollback as activity: one conservative refresh is cheaper than
-        // leaving the home snapshot stale until another request arrives.
+        // leaving the visible fixed Usage projection stale until another
+        // request arrives.
         self.usage_proxy_activity_dirty |= counters_reset || input_delta > 0 || output_delta > 0;
 
         if self.proxy_input_activity_samples.len() > PROXY_ACTIVITY_WINDOW {

@@ -98,7 +98,10 @@ fn command_requires_startup_state(command: &Option<Commands>) -> bool {
         | Some(Commands::Auth(_))
         | Some(Commands::Update(_))
         | Some(Commands::Internal(_))
-        | Some(Commands::Sessions(_)) => false,
+        | Some(Commands::Sessions(_))
+        | Some(Commands::Settings(
+            cc_switch_lib::cli::commands::settings::SettingsCommand::CodexAuthPreservation(_),
+        )) => false,
         #[cfg(unix)]
         Some(Commands::Daemon(_)) => false,
         _ => true,
@@ -219,6 +222,8 @@ mod tests {
         ]);
         let sessions = Cli::parse_from(["cc-switch", "sessions", "list"]);
         let auth = Cli::parse_from(["cc-switch", "auth", "status"]);
+        let codex_auth_preservation =
+            Cli::parse_from(["cc-switch", "settings", "codex-auth-preservation", "show"]);
         let provider = Cli::parse_from(["cc-switch", "provider", "list"]);
 
         assert!(!command_requires_startup_state(&update.command));
@@ -235,6 +240,9 @@ mod tests {
         assert!(!command_requires_startup_state(&internal_capture.command));
         assert!(!command_requires_startup_state(&sessions.command));
         assert!(!command_requires_startup_state(&auth.command));
+        assert!(!command_requires_startup_state(
+            &codex_auth_preservation.command
+        ));
         assert!(command_requires_startup_state(&provider.command));
     }
 
@@ -298,6 +306,18 @@ mod tests {
         ]);
         initialize_startup_state_if_needed(&cli.command)
             .expect("internal commands should not touch startup state");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_auth_preservation_bypasses_future_schema_database_gate() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        seed_future_schema_database(temp.path());
+        let _guard = ConfigDirEnvGuard::set(temp.path());
+
+        let cli = Cli::parse_from(["cc-switch", "settings", "codex-auth-preservation", "show"]);
+        initialize_startup_state_if_needed(&cli.command)
+            .expect("Codex auth preservation should not touch startup state");
     }
 
     #[test]

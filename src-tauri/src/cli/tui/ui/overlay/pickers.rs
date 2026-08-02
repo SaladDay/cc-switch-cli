@@ -2,7 +2,7 @@ use super::super::theme;
 use super::super::*;
 use super::frame::{overlay_frame, overlay_frame_at, OverlaySize};
 use crate::cli::tui::form;
-use crate::cli::tui::form::{HermesModelField, ProviderAddFormState};
+use crate::cli::tui::form::{ClaudeModelRole, HermesModelField, ProviderAddFormState};
 use crate::cli::tui::text_edit::TextInput;
 
 const OPENCLAW_AGENTS_MODEL_PICKER_MAX_VISIBLE_ROWS: usize = 32;
@@ -21,11 +21,12 @@ pub(super) fn render_claude_model_picker_overlay(
     column: ClaudeModelPickerColumn,
     editing: bool,
 ) {
-    // Keep the percentage-based width, but cap the height to the three role rows
+    // Keep the percentage-based width, but cap the height to the role rows
     // rather than filling 62% of the screen (which left a large empty table).
-    // Height = outer borders(2) + key bar(1) + top gap(1) + table[border(2)+header(1)+3 rows] + hint(3).
+    // Height = outer borders(2) + key bar(1) + top gap(1)
+    // + table[border(2)+header(1)+5 rows] + hint(3).
     let wide = centered_rect(OVERLAY_MD.0, OVERLAY_MD.1, content_area);
-    let desired_h = 13u16.min(content_area.height);
+    let desired_h = 15u16.min(content_area.height);
     let area = Rect {
         x: wide.x,
         width: wide.width,
@@ -73,11 +74,13 @@ pub(super) fn render_claude_model_picker_overlay(
     let hint_area = chunks[1];
 
     if let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() {
-        let labels = [
-            texts::tui_claude_default_haiku_model_label(),
-            texts::tui_claude_default_sonnet_model_label(),
-            texts::tui_claude_default_opus_model_label(),
-        ];
+        let labels = ClaudeModelRole::ALL.map(|role| match role {
+            ClaudeModelRole::Haiku => texts::tui_claude_default_haiku_model_label(),
+            ClaudeModelRole::Sonnet => texts::tui_claude_default_sonnet_model_label(),
+            ClaudeModelRole::Opus => texts::tui_claude_default_opus_model_label(),
+            ClaudeModelRole::Fable => texts::tui_claude_default_fable_model_label(),
+            ClaudeModelRole::Subagent => texts::tui_claude_subagent_model_label(),
+        });
 
         let raw_label_col_width = field_label_column_width(
             labels

@@ -906,12 +906,9 @@ fn format_share(share: f64) -> String {
 }
 
 /// Separator between the four counters of a model's detail line.
+#[cfg(test)]
 fn detail_separator() -> &'static str {
-    if icons::use_emoji() {
-        " • "
-    } else {
-        " - "
-    }
+    super::usage::token_breakdown_separator()
 }
 
 /// `In: 2.5M • Out: 6.1M • CR: 975.9M • CW: 109.7M`, indented under the name.
@@ -920,14 +917,15 @@ fn detail_separator() -> &'static str {
 /// Input/Output/Cache Read/Cache Write metrics, which the list has no room to
 /// spell out and which read the same in every language.
 pub(super) fn model_detail_text(breakdown: &UsageModelTokenBreakdown) -> String {
-    let separator = detail_separator();
     format!(
-        "{indent}In: {input}{separator}Out: {output}{separator}CR: {read}{separator}CW: {write}",
-        indent = " ".repeat(LIST_DETAIL_INDENT),
-        input = format_token_compact(breakdown.input_tokens),
-        output = format_token_compact(breakdown.output_tokens),
-        read = format_token_compact(breakdown.cache_read_tokens),
-        write = format_token_compact(breakdown.cache_creation_tokens),
+        "{}{}",
+        " ".repeat(LIST_DETAIL_INDENT),
+        super::usage::format_token_breakdown_compact(
+            breakdown.input_tokens,
+            breakdown.output_tokens,
+            breakdown.cache_read_tokens,
+            breakdown.cache_creation_tokens,
+        )
     )
 }
 

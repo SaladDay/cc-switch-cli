@@ -1002,8 +1002,10 @@ mod tests {
             summary: None,
             project_dir: None,
             created_at: None,
+            source_mtime_ns: None,
             last_active_at: None,
             source_path: Some(format!("/tmp/{provider_id}/{session_id}.jsonl")),
+            usage: None,
             resume_command: Some(format!("{provider_id} resume {session_id}")),
         }
     }

@@ -7,7 +7,8 @@ use super::*;
 )]
 mod tests {
     use super::types::{
-        McpEnvEditorField, McpEnvEntryEditorState, UsageLogPager, MODEL_FETCH_FILTER_MAX_MATCHES,
+        McpKeyValueEditorField, McpKeyValueEntryEditorState, UsageLogPager,
+        MODEL_FETCH_FILTER_MAX_MATCHES,
     };
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
@@ -20,9 +21,9 @@ mod tests {
     use crate::cli::i18n::{texts, use_test_language, Language};
     use crate::cli::tui::data::ProviderRow;
     use crate::cli::tui::form::{
-        CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, McpEnvVarRow,
-        McpTransport, PromptCacheRoutingMode, ProviderAddFormState, TextInput, UsageQueryField,
-        UsageQueryTemplate,
+        CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, McpKeyValueKind,
+        McpKeyValueRow, McpTransport, PromptCacheRoutingMode, ProviderAddFormState, TextInput,
+        UsageQueryField, UsageQueryTemplate,
     };
     use crate::cli::tui::runtime_actions::{
         handle_action, run_external_editor_for_prompt_form_content,
@@ -187,14 +188,17 @@ mod tests {
             selection_active: false,
         }
         .is_editing());
-        assert!(Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
-            row: None,
-            return_selected: 0,
-            field: McpEnvEditorField::Key,
-            key: TextInput::new(""),
-            value: TextInput::new(""),
-        })
-        .is_editing());
+        assert!(
+            Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+                kind: McpKeyValueKind::Env,
+                row: None,
+                return_selected: 0,
+                field: McpKeyValueEditorField::Key,
+                key: TextInput::new(""),
+                value: TextInput::new(""),
+            })
+            .is_editing()
+        );
     }
 
     fn select_provider_common_snippet_row(app: &mut App) {
@@ -401,6 +405,11 @@ mod tests {
         } else {
             panic!("expected ProviderAdd form");
         }
+    }
+
+    fn mark_claude_usage_query_provider_non_official(form: &mut ProviderAddFormState) {
+        assert_eq!(form.app_type, AppType::Claude);
+        form.claude_base_url.set("https://relay.example.test");
     }
 
     fn help_text(app: &App) -> String {
@@ -1368,17 +1377,57 @@ mod tests {
     }
 
     #[test]
-    fn proxy_activity_poll_interval_stays_at_one_second_with_200ms_tick() {
+    fn proxy_activity_poll_interval_is_route_aware() {
+        let fast_poll_interval_ticks = 1_000 / 200;
+        let usage_poll_interval_ticks = 10 * 1_000 / 200;
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Main;
 
-        app.tick = 4;
+        app.tick = fast_poll_interval_ticks - 1;
         assert!(!app.should_poll_proxy_activity());
 
-        app.tick = 5;
+        app.tick = fast_poll_interval_ticks;
         assert!(app.should_poll_proxy_activity());
 
+        app.route = Route::Usage;
+        app.tick = fast_poll_interval_ticks;
+        assert!(
+            !app.should_poll_proxy_activity(),
+            "Usage does not need the home's one-second snapshot cadence"
+        );
+        app.tick = usage_poll_interval_ticks - 1;
+        assert!(!app.should_poll_proxy_activity());
+        app.tick = usage_poll_interval_ticks;
+        assert!(
+            app.should_poll_proxy_activity(),
+            "fixed Usage polls at its ten-second refresh cadence"
+        );
+
+        for route in [Route::UsageLogs, Route::UsageLogDetail { rowid: 7 }] {
+            app.route = route;
+            assert!(
+                !app.should_poll_proxy_activity(),
+                "nested log routes must not interrupt interactive log queries"
+            );
+        }
+
+        app.usage.range = data::UsageRangePreset::Custom(data::UsageCustomRange {
+            start: 100,
+            end: 200,
+        });
+        assert!(
+            !app.should_poll_proxy_activity(),
+            "custom Usage windows stay outside the fast proxy polling loop"
+        );
+
+        app.route = Route::Pricing;
+        assert!(
+            !app.should_poll_proxy_activity(),
+            "Pricing keeps the existing upstream refresh policy"
+        );
+
         app.route = Route::Providers;
+        app.tick = usage_poll_interval_ticks + fast_poll_interval_ticks;
         app.overlay = Overlay::FailoverQueueManager {
             selected_provider_id: None,
         };
@@ -1386,6 +1435,64 @@ mod tests {
 
         app.overlay = Overlay::None;
         assert!(!app.should_poll_proxy_activity());
+    }
+
+    #[test]
+    fn usage_projection_is_owned_by_the_current_consumer_route() {
+        let mut app = App::new(Some(AppType::Claude));
+        let custom = data::UsageRangePreset::Custom(data::UsageCustomRange {
+            start: 100,
+            end: 200,
+        });
+        app.usage.range = custom;
+
+        app.route = Route::Main;
+        assert_eq!(
+            app.usage_projection_for_current_route(),
+            Some(data::UsageRangePreset::ThirtyDays)
+        );
+        assert_eq!(
+            app.proxy_refreshed_usage_projection_for_current_route(),
+            Some(data::UsageRangePreset::ThirtyDays)
+        );
+
+        for route in [
+            Route::Usage,
+            Route::UsageLogs,
+            Route::UsageLogDetail { rowid: 7 },
+        ] {
+            app.route = route;
+            assert_eq!(app.usage_projection_for_current_route(), Some(custom));
+            assert_eq!(
+                app.proxy_refreshed_usage_projection_for_current_route(),
+                None
+            );
+        }
+
+        app.route = Route::Usage;
+        app.usage.range = data::UsageRangePreset::Today;
+        assert_eq!(
+            app.proxy_refreshed_usage_projection_for_current_route(),
+            Some(data::UsageRangePreset::Today)
+        );
+        for route in [Route::UsageLogs, Route::UsageLogDetail { rowid: 7 }] {
+            app.route = route;
+            assert_eq!(
+                app.proxy_refreshed_usage_projection_for_current_route(),
+                None
+            );
+        }
+
+        app.route = Route::Pricing;
+        assert_eq!(app.usage_projection_for_current_route(), None);
+        assert_eq!(
+            app.usage_pricing_load_range_for_current_route(),
+            Some(data::UsageRangePreset::SevenDays)
+        );
+
+        app.route = Route::Providers;
+        assert_eq!(app.usage_projection_for_current_route(), None);
+        assert_eq!(app.usage_pricing_load_range_for_current_route(), None);
     }
 
     #[test]
@@ -1857,10 +1964,11 @@ mod tests {
     fn mcp_env_entry_editor_supports_readline_shortcuts() {
         let mut app = App::new(Some(AppType::Claude));
         app.form = Some(FormState::McpAdd(McpAddFormState::new()));
-        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            field: McpEnvEditorField::Key,
+            field: McpKeyValueEditorField::Key,
             key: TextInput::new("alpha beta"),
             value: TextInput::new(""),
         });
@@ -1872,7 +1980,7 @@ mod tests {
 
         assert!(matches!(
             app.overlay,
-            Overlay::McpEnvEntryEditor(McpEnvEntryEditorState { key, .. })
+            Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState { key, .. })
                 if key.value == ">alpha " && key.cursor == ">alpha ".chars().count()
         ));
     }
@@ -2667,6 +2775,22 @@ mod tests {
             None,
         );
         provider.category = Some("official".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            usage_script: Some(crate::provider::UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: String::new(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("official_subscription".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..Default::default()
+        });
         data.providers.rows.push(super::super::data::ProviderRow {
             id: "official".to_string(),
             provider,
@@ -3837,7 +3961,14 @@ mod tests {
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
 
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 0 }));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3845,12 +3976,15 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
         form.focus = FormFocus::Fields;
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "API_KEY".to_string(),
             value: "old".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 0 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 0,
+        };
 
         app.on_key(key(KeyCode::Enter), &UiData::default());
         app.on_key(key(KeyCode::Tab), &UiData::default());
@@ -3875,20 +4009,30 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
         form.focus = FormFocus::Fields;
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "FIRST".to_string(),
             value: "one".to_string(),
         });
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "SECOND".to_string(),
             value: "two".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 1 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 1,
+        };
 
         app.on_key(key(KeyCode::Backspace), &UiData::default());
 
-        assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 0 }));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected: 0,
+                ..
+            }
+        ));
         let FormState::McpAdd(form) = app.form.expect("mcp form should remain open") else {
             panic!("expected MCP form");
         };
@@ -3905,12 +4049,15 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
         form.focus = FormFocus::Fields;
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "A_KEY".to_string(),
             value: "a".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 0 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 0,
+        };
 
         app.on_key(key(KeyCode::Char('a')), &UiData::default());
         for c in ['B', '_', 'K', 'E', 'Y'] {
@@ -3923,7 +4070,11 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &UiData::default());
 
         let selected = match &app.overlay {
-            Overlay::McpEnvPicker { selected } => *selected,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected,
+                ..
+            } => *selected,
             other => panic!("expected MCP env picker, got {other:?}"),
         };
         let form = match app.form.as_ref() {
@@ -3942,52 +4093,54 @@ mod tests {
     fn mcp_env_editor_rejects_blank_and_duplicate_keys() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "API_KEY".to_string(),
             value: "secret".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            field: McpEnvEditorField::Key,
+            field: McpKeyValueEditorField::Key,
             key: TextInput::new(""),
             value: TextInput::new(""),
         });
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
 
-        if let Overlay::McpEnvEntryEditor(editor) = &mut app.overlay {
+        if let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay {
             editor.key.set("API_KEY");
         }
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
     }
 
     #[test]
     fn mcp_env_editor_rejects_duplicate_key_when_existing_has_whitespace() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: " KEY".to_string(),
             value: "secret".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            field: McpEnvEditorField::Key,
+            field: McpKeyValueEditorField::Key,
             key: TextInput::new("KEY"),
             value: TextInput::new("new"),
         });
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
 
         let form = match app.form.as_ref() {
             Some(FormState::McpAdd(form)) => form,
@@ -4000,24 +4153,34 @@ mod tests {
     fn mcp_env_picker_edit_reorder_keeps_selection_on_edited_row() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "A_KEY".to_string(),
             value: "a".to_string(),
         });
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "Z_KEY".to_string(),
             value: "z".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 1 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 1,
+        };
 
         app.on_key(key(KeyCode::Enter), &UiData::default());
-        if let Overlay::McpEnvEntryEditor(editor) = &mut app.overlay {
+        if let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay {
             editor.key.set("0_KEY");
         }
         app.on_key(key(KeyCode::Enter), &UiData::default());
 
-        assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 0 }));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected: 0,
+                ..
+            }
+        ));
 
         app.on_key(key(KeyCode::Delete), &UiData::default());
         let FormState::McpAdd(form) = app.form.expect("mcp form should remain open") else {
@@ -4031,32 +4194,43 @@ mod tests {
     fn mcp_env_editor_esc_restores_previous_picker_selection() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "A_KEY".to_string(),
             value: "a".to_string(),
         });
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "B_KEY".to_string(),
             value: "b".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 1 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 1,
+        };
 
         app.on_key(key(KeyCode::Char('a')), &UiData::default());
-        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
 
         app.on_key(key(KeyCode::Esc), &UiData::default());
-        assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 1 }));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn mcp_env_editor_esc_without_form_closes_overlay() {
         let mut app = App::new(Some(AppType::Claude));
         app.form = None;
-        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            field: McpEnvEditorField::Key,
+            field: McpKeyValueEditorField::Key,
             key: TextInput::new("K"),
             value: TextInput::new("V"),
         });
@@ -4064,6 +4238,89 @@ mod tests {
         let action = app.on_key(key(KeyCode::Esc), &UiData::default());
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn mcp_headers_picker_enter_from_remote_form() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.server_type = McpTransport::Http;
+        form.focus = FormFocus::Fields;
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|field| *field == McpAddField::Headers)
+            .expect("Headers field should exist");
+        app.form = Some(FormState::McpAdd(form));
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Headers,
+                selected: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn mcp_header_editor_validates_http_rules_and_case_insensitive_duplicates() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.header_rows.push(McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: "Bearer existing".to_string(),
+        });
+        app.form = Some(FormState::McpAdd(form));
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Headers,
+            row: None,
+            return_selected: 0,
+            field: McpKeyValueEditorField::Key,
+            key: TextInput::new("authorization"),
+            value: TextInput::new("Bearer duplicate"),
+        });
+
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
+
+        let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay else {
+            panic!("header editor should remain open");
+        };
+        editor.key.set("bad name");
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
+
+        let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay else {
+            panic!("header editor should remain open");
+        };
+        editor.key.set("X-Test");
+        editor.value.set("line\nbreak");
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
+
+        let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay else {
+            panic!("header editor should remain open");
+        };
+        editor.value.set("valid");
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Headers,
+                ..
+            }
+        ));
+        let Some(FormState::McpAdd(form)) = app.form.as_ref() else {
+            panic!("MCP form should remain open");
+        };
+        assert!(form
+            .header_rows
+            .iter()
+            .any(|row| row.key == "X-Test" && row.value == "valid"));
     }
 
     #[test]
@@ -13791,6 +14048,23 @@ mod tests {
                 editing: false,
             }
         ));
+
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 2,
+            column: ClaudeModelPickerColumn::Model,
+            editing: false,
+        };
+        app.on_key(key(KeyCode::Down), &data());
+        app.on_key(key(KeyCode::Down), &data());
+        app.on_key(key(KeyCode::Right), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 4,
+                column: ClaudeModelPickerColumn::OneM,
+                editing: false,
+            }
+        ));
     }
 
     #[test]
@@ -15114,6 +15388,48 @@ mod tests {
     }
 
     #[test]
+    fn context_help_mcp_headers_explains_mapping() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.server_type = McpTransport::Http;
+        form.focus = FormFocus::Fields;
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|field| *field == McpAddField::Headers)
+            .expect("Headers field");
+        app.form = Some(FormState::McpAdd(form));
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        let text = help_text(&app);
+        assert!(text.contains("Authorization: Bearer <token>"), "{text}");
+        assert!(!text.contains("hidden in the list"), "{text}");
+        assert!(text.contains("Codex uses `http_headers`"), "{text}");
+    }
+
+    #[test]
+    fn context_help_mcp_without_specialized_field_keeps_global_help() {
+        let _lang = use_test_language(Language::English);
+
+        for focus in [FormFocus::Fields, FormFocus::JsonPreview] {
+            let mut app = App::new(Some(AppType::Claude));
+            let mut form = McpAddFormState::new();
+            form.focus = focus;
+            form.field_idx = 0;
+            app.form = Some(FormState::McpAdd(form));
+
+            app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+            let text = help_text(&app);
+            assert!(text.contains("Help follows the focused item"), "{text}");
+            assert!(text.contains("↑↓ or h/j/k/l  move"), "{text}");
+            assert!(!text.contains("No help here"), "{text}");
+        }
+    }
+
+    #[test]
     fn context_help_provider_field_tracks_focused_codex_base_url() {
         let _lang = use_test_language(Language::English);
         let mut app = App::new(Some(AppType::Codex));
@@ -15330,6 +15646,7 @@ mod tests {
             AppType::Claude,
         )));
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
         }
@@ -15358,6 +15675,7 @@ mod tests {
             AppType::Claude,
         )));
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.set_usage_query_template(UsageQueryTemplate::Custom);
@@ -15397,6 +15715,7 @@ mod tests {
             AppType::Claude,
         )));
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.focus = FormFocus::Content;
@@ -15431,6 +15750,7 @@ mod tests {
             AppType::Claude,
         )));
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
         }
@@ -15459,6 +15779,7 @@ mod tests {
     fn usage_query_template_picker_space_is_noop() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = ProviderAddFormState::new(AppType::Claude);
+        mark_claude_usage_query_provider_non_official(&mut form);
         form.open_usage_query_page();
         form.toggle_usage_query_enabled();
         app.form = Some(FormState::ProviderAdd(form));
@@ -15476,6 +15797,7 @@ mod tests {
     fn usage_query_template_picker_enter_applies_selection() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = ProviderAddFormState::new(AppType::Claude);
+        mark_claude_usage_query_provider_non_official(&mut form);
         form.open_usage_query_page();
         form.toggle_usage_query_enabled();
         app.form = Some(FormState::ProviderAdd(form));
@@ -15839,6 +16161,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &data);
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
         } else {
@@ -15915,6 +16238,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &data);
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.focus = FormFocus::JsonPreview;
@@ -15943,6 +16267,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &data);
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.focus = FormFocus::Content;
@@ -15977,6 +16302,7 @@ mod tests {
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
             form.name.set("Provider One");
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
         } else {
             panic!("expected ProviderAdd form");
@@ -16104,6 +16430,7 @@ mod tests {
         let Some(FormState::ProviderAdd(form)) = app.form.as_mut() else {
             panic!("expected ProviderAdd form");
         };
+        mark_claude_usage_query_provider_non_official(form);
         form.open_usage_query_page();
 
         select_usage_query_field(&mut app, UsageQueryField::Enabled);
@@ -16136,6 +16463,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &data);
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.focus = FormFocus::JsonPreview;
@@ -16193,8 +16521,10 @@ mod tests {
             summary: Some("Review routing".to_string()),
             project_dir: Some(project_dir.to_string()),
             created_at: Some(1_735_689_600_000),
+            source_mtime_ns: None,
             last_active_at: Some(1_735_732_800_000),
             source_path: Some(source_path.to_string()),
+            usage: None,
             resume_command: Some(resume_command.to_string()),
         }
     }

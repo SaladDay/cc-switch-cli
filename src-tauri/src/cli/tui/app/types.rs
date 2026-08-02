@@ -1066,7 +1066,7 @@ struct PurgeTombstoneRevision {
 
 const MAX_SESSION_UI_TOMBSTONES: usize = 4_096;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SessionRowIdentity {
     pub(crate) provider_id: String,
     pub(crate) session_id: String,
@@ -1163,9 +1163,15 @@ pub struct SessionsState {
     pub last_error: Option<String>,
     pub scan_seq: u64,
     pub scan_active: Option<u64>,
-    /// Scope of the most recent scan attempt, successful or failed. The event
-    /// loop uses this terminal marker to avoid restarting a failed automatic
-    /// entry scan on every tick. Explicit refresh still calls `start_scan`
+    cost_seq: u64,
+    active_cost_overlay: Option<crate::cli::tui::runtime_systems::session_cost::ActiveCostOverlay>,
+    cost_request_pending: bool,
+    cost_cancel_pending: Option<u64>,
+    manual_refresh_scan: Option<u64>,
+    manual_usage_sync_pending: bool,
+    /// Scope of the most recent open/bootstrap attempt, successful or failed.
+    /// The event loop uses this terminal marker to avoid retrying a failed
+    /// entry request on every tick. Explicit refresh still calls `start_scan`
     /// directly, and a different scope naturally records a new attempt.
     scan_attempted_scope: Option<String>,
     pub detail_key: Option<String>,
@@ -1268,6 +1274,12 @@ impl Default for SessionsState {
             last_error: None,
             scan_seq: 0,
             scan_active: None,
+            cost_seq: 0,
+            active_cost_overlay: None,
+            cost_request_pending: false,
+            cost_cancel_pending: None,
+            manual_refresh_scan: None,
+            manual_usage_sync_pending: false,
             scan_attempted_scope: None,
             detail_key: None,
             messages_key: None,
@@ -2317,7 +2329,10 @@ impl SessionRemotePager {
             .min(active_rows.len().saturating_sub(1));
     }
 
-    fn insert_cached(&mut self, page: usize, rows: Vec<crate::session_manager::SessionMeta>) {
+    fn insert_cached(&mut self, page: usize, mut rows: Vec<crate::session_manager::SessionMeta>) {
+        for row in &mut rows {
+            row.usage = None;
+        }
         if rows.is_empty() || page == self.current_page {
             retire_session_rows(rows);
             return;
@@ -2438,6 +2453,145 @@ impl SessionsState {
 
     pub(crate) fn page_token(&self) -> Option<&SessionPageToken> {
         self.remote.token()
+    }
+
+    pub(crate) fn start_cost_overlay(
+        &mut self,
+    ) -> Option<crate::cli::tui::runtime_systems::session_cost::SessionCostRequest> {
+        if self.page_token().is_none() || self.rows.is_empty() {
+            self.request_cost_cancel();
+            return None;
+        }
+        let page_token = self
+            .page_token()
+            .expect("page token checked before cost projection")
+            .clone();
+        let page_index = self.remote.current_page();
+        let identities = self
+            .rows
+            .iter()
+            .map(SessionRowIdentity::capture)
+            .collect::<Vec<_>>();
+        let cost_identities = self
+            .rows
+            .iter()
+            .map(crate::services::session_cost::SessionCostIdentity::from)
+            .collect::<Vec<_>>();
+        self.cost_seq = self.cost_seq.wrapping_add(1);
+        self.cost_cancel_pending = None;
+        self.active_cost_overlay = Some(
+            crate::cli::tui::runtime_systems::session_cost::ActiveCostOverlay::new(
+                self.cost_seq,
+                page_token.clone(),
+                page_index,
+                identities,
+            ),
+        );
+        Some(
+            crate::cli::tui::runtime_systems::session_cost::SessionCostRequest {
+                cost_seq: self.cost_seq,
+                page_token,
+                page_index,
+                identities: cost_identities,
+            },
+        )
+    }
+
+    pub(crate) fn request_cost_overlay(&mut self) {
+        self.cost_request_pending = true;
+    }
+
+    pub(crate) fn take_cost_overlay_request(&mut self) -> bool {
+        std::mem::take(&mut self.cost_request_pending)
+    }
+
+    pub(crate) fn request_cost_cancel(&mut self) {
+        self.cost_seq = self.cost_seq.wrapping_add(1);
+        self.cost_cancel_pending = Some(self.cost_seq);
+        self.active_cost_overlay = None;
+        self.cost_request_pending = false;
+        let mut changed = false;
+        for row in &mut self.rows {
+            if row.usage.take().is_some() {
+                changed = true;
+            }
+        }
+        if changed {
+            self.rows_revision = self.rows_revision.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn take_cost_cancel_request(&mut self) -> Option<u64> {
+        self.cost_cancel_pending.take()
+    }
+
+    pub(crate) fn fail_cost_overlay(&mut self) {
+        self.active_cost_overlay = None;
+        self.cost_request_pending = false;
+        self.cost_cancel_pending = None;
+        let mut changed = false;
+        for row in &mut self.rows {
+            if row.usage.take().is_some() {
+                changed = true;
+            }
+        }
+        if changed {
+            self.rows_revision = self.rows_revision.wrapping_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_active_cost_overlay(&self) -> bool {
+        self.active_cost_overlay.is_some()
+    }
+
+    pub(crate) fn request_manual_usage_sync(&mut self) {
+        self.manual_usage_sync_pending = true;
+    }
+
+    pub(crate) fn take_manual_usage_sync_request(&mut self) -> bool {
+        std::mem::take(&mut self.manual_usage_sync_pending)
+    }
+
+    pub(crate) fn apply_cost_overlay(
+        &mut self,
+        cost_seq: u64,
+        page_token: &SessionPageToken,
+        page_index: usize,
+        requested_identities: &[SessionRowIdentity],
+        overlays: &HashMap<
+            crate::services::session_cost::SessionCostIdentity,
+            crate::session_manager::SessionUsageSummary,
+        >,
+    ) -> bool {
+        let current_identities = self
+            .rows
+            .iter()
+            .map(SessionRowIdentity::capture)
+            .collect::<Vec<_>>();
+        let accepted = self.active_cost_overlay.as_ref().is_some_and(|active| {
+            active.accepts(cost_seq, page_token, page_index, requested_identities)
+                && self.page_token() == Some(page_token)
+                && self.remote.current_page() == page_index
+                && current_identities == requested_identities
+        });
+        if !accepted {
+            return false;
+        }
+        self.active_cost_overlay = None;
+        let mut changed = false;
+        for row in &mut self.rows {
+            let identity = crate::services::session_cost::SessionCostIdentity::from(&*row);
+            let usage = overlays.get(&identity).copied();
+            if row.usage != usage {
+                row.usage = usage;
+                changed = true;
+            }
+        }
+        if changed {
+            self.rows_revision = self.rows_revision.wrapping_add(1);
+        }
+        true
     }
 
     pub(crate) fn remember_base_manifest(
@@ -3458,6 +3612,7 @@ impl SessionsState {
         ) {
             self.rows_revision = self.rows_revision.wrapping_add(1);
             self.clear_detail();
+            self.request_cost_overlay();
             return true;
         }
         let target_gate = self.pagination.clone();
@@ -3527,6 +3682,7 @@ impl SessionsState {
     pub(crate) fn start_scan(&mut self, provider_id: String) -> u64 {
         let changing_scope = self.provider_id.as_deref() != Some(provider_id.as_str());
         if changing_scope {
+            self.request_cost_cancel();
             self.scope_epoch = self.scope_epoch.wrapping_add(1);
             self.view_epoch = self.view_epoch.wrapping_add(1);
             self.remote.reset_scope();
@@ -3557,6 +3713,7 @@ impl SessionsState {
         self.time_anchor_ms = chrono::Utc::now().timestamp_millis();
         self.scan_seq = self.scan_seq.wrapping_add(1);
         self.scan_active = Some(self.scan_seq);
+        self.manual_refresh_scan = None;
         self.scan_tombstones_to_clear = Some((
             self.scan_seq,
             provider_id,
@@ -3568,12 +3725,60 @@ impl SessionsState {
         self.scan_seq
     }
 
+    pub(crate) fn mark_manual_refresh(&mut self, request_id: u64) {
+        if self.scan_active == Some(request_id) {
+            self.manual_refresh_scan = Some(request_id);
+        }
+    }
+
+    pub(crate) fn take_manual_refresh_publication(&mut self, request_id: u64) -> bool {
+        if self.manual_refresh_scan == Some(request_id) {
+            self.manual_refresh_scan = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn scan_attempted_for_scope(&self, scope: &str) -> bool {
         self.scan_attempted_scope.as_deref() == Some(scope)
     }
 
+    /// Complete an entry request satisfied entirely by the persisted manifest.
+    ///
+    /// Unlike an authoritative source rebuild this must not clear deletion
+    /// tombstones; it only settles the loading state for the already-installed
+    /// immutable generation.
+    pub(crate) fn finish_cached_open(&mut self, request_id: u64) {
+        if self.scan_active != Some(request_id) {
+            return;
+        }
+        self.scan_active = None;
+        self.loading = false;
+        self.loaded_once = true;
+        self.scan_tombstones_to_clear = None;
+        self.last_error = None;
+    }
+
+    /// A delete barrier can invalidate a persisted generation after the worker
+    /// opened it. Turn that terminal cache-open into one authoritative recovery
+    /// request on the next scheduler pass instead of leaving the UI loading.
+    pub(crate) fn reject_invalidated_cached_open(&mut self, request_id: u64) {
+        if self.scan_active != Some(request_id) {
+            return;
+        }
+        self.scan_active = None;
+        self.loading = false;
+        self.scan_tombstones_to_clear = None;
+        self.scan_attempted_scope = None;
+        self.purge_refresh_required = true;
+    }
+
     pub(crate) fn fail_scan(&mut self, request_id: u64, error: String) {
         if self.scan_active == Some(request_id) {
+            if self.manual_refresh_scan == Some(request_id) {
+                self.manual_refresh_scan = None;
+            }
             if self
                 .scan_tombstones_to_clear
                 .as_ref()
@@ -4341,27 +4546,28 @@ pub enum LoadingKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpEnvEditorField {
+pub enum McpKeyValueEditorField {
     Key,
     Value,
 }
 
 #[derive(Debug, Clone)]
-pub struct McpEnvEntryEditorState {
+pub struct McpKeyValueEntryEditorState {
+    pub kind: crate::cli::tui::form::McpKeyValueKind,
     pub row: Option<usize>,
     pub return_selected: usize,
-    pub field: McpEnvEditorField,
+    pub field: McpKeyValueEditorField,
     pub key: crate::cli::tui::form::TextInput,
     pub value: crate::cli::tui::form::TextInput,
 }
 
-impl McpEnvEntryEditorState {
+impl McpKeyValueEntryEditorState {
     pub fn key_active(&self) -> bool {
-        matches!(self.field, McpEnvEditorField::Key)
+        matches!(self.field, McpKeyValueEditorField::Key)
     }
 
     pub fn value_active(&self) -> bool {
-        matches!(self.field, McpEnvEditorField::Value)
+        matches!(self.field, McpKeyValueEditorField::Value)
     }
 
     pub fn is_editing(&self) -> bool {
@@ -4486,13 +4692,14 @@ pub enum Overlay {
     SkillsSyncMethodPicker {
         selected: usize,
     },
-    McpEnvPicker {
+    McpKeyValuePicker {
+        kind: crate::cli::tui::form::McpKeyValueKind,
         selected: usize,
     },
     McpTypePicker {
         selected: usize,
     },
-    McpEnvEntryEditor(McpEnvEntryEditorState),
+    McpKeyValueEntryEditor(McpKeyValueEntryEditorState),
     Loading {
         kind: LoadingKind,
         title: String,
@@ -4650,7 +4857,7 @@ impl Overlay {
                 | Overlay::SkillsAppsPicker { .. }
                 | Overlay::SkillsImportPicker { .. }
                 | Overlay::SkillsSyncMethodPicker { .. }
-                | Overlay::McpEnvPicker { .. }
+                | Overlay::McpKeyValuePicker { .. }
                 | Overlay::McpTypePicker { .. }
                 | Overlay::SpeedtestResult { .. }
                 | Overlay::StreamCheckResult { .. }
@@ -4668,7 +4875,7 @@ impl Overlay {
             Overlay::HermesModelsPicker { editing } => *editing,
             Overlay::ModelFetchPicker { .. } => true,
             Overlay::SessionProjectPicker(_) => true,
-            Overlay::McpEnvEntryEditor(editor) => editor.is_editing(),
+            Overlay::McpKeyValueEntryEditor(editor) => editor.is_editing(),
             Overlay::None
             | Overlay::Help(_)
             | Overlay::Confirm(_)
@@ -4692,7 +4899,7 @@ impl Overlay {
             | Overlay::SkillsAppsPicker { .. }
             | Overlay::SkillsImportPicker { .. }
             | Overlay::SkillsSyncMethodPicker { .. }
-            | Overlay::McpEnvPicker { .. }
+            | Overlay::McpKeyValuePicker { .. }
             | Overlay::McpTypePicker { .. }
             | Overlay::Loading { .. }
             | Overlay::SpeedtestRunning { .. }
@@ -4848,7 +5055,7 @@ mod sessions_state_tests {
     }
 
     #[test]
-    fn session_page_switch_retains_the_previous_page_for_instant_back_navigation() {
+    fn session_page_switch_retains_metadata_but_drops_runtime_cost() {
         let directory = tempfile::tempdir().expect("manifest fixture directory");
         let store =
             crate::session_manager::paged_manifest::PagedManifestStore::open_at(directory.path())
@@ -4867,6 +5074,10 @@ mod sessions_state_tests {
             reader,
         ));
         let first_page_first_id = state.rows[0].session_id.clone();
+        state.rows[0].usage = Some(crate::session_manager::SessionUsageSummary {
+            estimated_cost_usd: Some(1.25),
+            ..crate::session_manager::SessionUsageSummary::default()
+        });
 
         let previous_gate = state.pagination.clone();
         state.pagination.select(100);
@@ -4883,6 +5094,46 @@ mod sessions_state_tests {
         assert!(state.begin_page_cross(0, previous_gate, None));
         assert_eq!(state.remote.current_page(), 0);
         assert_eq!(state.rows[0].session_id, first_page_first_id);
+        assert!(
+            state.rows.iter().all(|row| row.usage.is_none()),
+            "runtime Cost must return to '-' until the cached page's fresh overlay arrives"
+        );
+    }
+
+    #[test]
+    fn activating_a_prefetched_session_page_requests_its_cost_overlay() {
+        let directory = tempfile::tempdir().expect("manifest fixture directory");
+        let store =
+            crate::session_manager::paged_manifest::PagedManifestStore::open_at(directory.path())
+                .expect("manifest fixture store");
+        let (published, reader) = publish_rows(&store, "claude", "row", 101);
+        let mut state = SessionsState::default();
+        let _request_id = state.start_scan("claude".to_string());
+        let scope_epoch = state.scope_epoch;
+        assert!(state.apply_opened_manifest(
+            scope_epoch,
+            "claude",
+            published.generation,
+            published.total_rows,
+            published.first_page.page_index,
+            published.first_page.rows,
+            reader,
+        ));
+
+        let (request_id, token, reader) = state.next_page_request(1).expect("prefetch second page");
+        let page = reader.load_page(1).expect("second page");
+        assert!(state.finish_page_request(request_id, &token, 1, page.rows));
+        assert_eq!(state.remote.current_page(), 0);
+        assert!(!state.take_cost_overlay_request());
+
+        let previous_gate = state.pagination.clone();
+        state.pagination.select(100);
+        assert!(state.begin_page_cross(1, previous_gate, None));
+        assert_eq!(state.remote.current_page(), 1);
+        assert!(
+            state.take_cost_overlay_request(),
+            "an input-only cached page activation must queue the newly visible page"
+        );
     }
 
     #[test]

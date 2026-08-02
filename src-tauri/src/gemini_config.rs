@@ -154,8 +154,58 @@ pub fn read_gemini_env() -> Result<HashMap<String, String>, AppError> {
     Ok(parse_env_file(&content))
 }
 
+/// Remove exact `key=value` matches while preserving every unrelated byte of
+/// the env file, including comments, blank lines, ordering, and invalid lines.
+pub fn remove_env_entries_preserving_layout(
+    content: &str,
+    doomed: &HashMap<String, String>,
+) -> Option<String> {
+    let mut removed = false;
+    let mut kept = Vec::new();
+
+    for line in content.split('\n') {
+        let trimmed = line.trim();
+        let hit = !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+            && trimmed.split_once('=').is_some_and(|(key, value)| {
+                doomed
+                    .get(key.trim())
+                    .is_some_and(|doomed_value| doomed_value == value.trim())
+            });
+
+        if hit {
+            removed = true;
+        } else {
+            kept.push(line);
+        }
+    }
+
+    removed.then(|| kept.join("\n"))
+}
+
+/// Remove only leaked Gemini env entries whose key and value both match.
+pub fn remove_gemini_env_entries(doomed: &HashMap<String, String>) -> Result<bool, AppError> {
+    let path = get_gemini_env_path();
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
+    match remove_env_entries_preserving_layout(&content, doomed) {
+        Some(cleaned) => {
+            write_gemini_env_text_atomic(&cleaned)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 /// 写入 Gemini .env 文件（原子操作）
 pub fn write_gemini_env_atomic(map: &HashMap<String, String>) -> Result<(), AppError> {
+    write_gemini_env_text_atomic(&serialize_env_file(map))
+}
+
+fn write_gemini_env_text_atomic(content: &str) -> Result<(), AppError> {
     let path = get_gemini_env_path();
 
     // 确保目录存在
@@ -174,8 +224,7 @@ pub fn write_gemini_env_atomic(map: &HashMap<String, String>) -> Result<(), AppE
         }
     }
 
-    let content = serialize_env_file(map);
-    write_text_file(&path, &content)?;
+    write_text_file(&path, content)?;
 
     // 设置文件权限为 600（仅所有者可读写）
     #[cfg(unix)]
@@ -431,6 +480,18 @@ GEMINI_MODEL=gemini-3-pro-preview
 
         assert!(content.contains("GEMINI_API_KEY=sk-test"));
         assert!(content.contains("GEMINI_MODEL=gemini-3-pro-preview"));
+    }
+
+    #[test]
+    fn remove_env_entries_preserves_layout_and_differently_valued_keys() {
+        let content =
+            "# keep this comment\nGOOGLE_API_KEY=leaked\nGOOGLE_API_KEY=owned\n\nINVALID\n";
+        let doomed = HashMap::from([("GOOGLE_API_KEY".to_string(), "leaked".to_string())]);
+
+        assert_eq!(
+            remove_env_entries_preserving_layout(content, &doomed),
+            Some("# keep this comment\nGOOGLE_API_KEY=owned\n\nINVALID\n".to_string())
+        );
     }
 
     #[test]

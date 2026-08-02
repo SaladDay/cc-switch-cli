@@ -6,8 +6,8 @@ use super::app::{App, Focus, Overlay, SettingsItem};
 use super::data::UiData;
 use super::form::{
     CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, FormFocus, FormMode,
-    FormState, LocalProxySettingsField, ProviderAddField, ProviderFormPage, S3SyncField,
-    UsageQueryField, UsageQueryTemplate, WebDavSyncField,
+    FormState, LocalProxySettingsField, McpAddField, McpKeyValueKind, ProviderAddField,
+    ProviderFormPage, S3SyncField, UsageQueryField, UsageQueryTemplate, WebDavSyncField,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +86,9 @@ enum HelpTarget {
     WebDavField {
         field: WebDavSyncField,
     },
+    McpField {
+        field: McpAddField,
+    },
     Empty,
 }
 
@@ -118,6 +121,18 @@ fn current_help_target(app: &App) -> HelpTarget {
             }
             Overlay::FailoverQueueManager { .. } => HelpTarget::FailoverQueue,
             Overlay::SessionProjectPicker(_) => HelpTarget::Sessions,
+            Overlay::McpKeyValuePicker { kind, .. } => HelpTarget::McpField {
+                field: match kind {
+                    McpKeyValueKind::Env => McpAddField::Env,
+                    McpKeyValueKind::Headers => McpAddField::Headers,
+                },
+            },
+            Overlay::McpKeyValueEntryEditor(editor) => HelpTarget::McpField {
+                field: match editor.kind {
+                    McpKeyValueKind::Env => McpAddField::Env,
+                    McpKeyValueKind::Headers => McpAddField::Headers,
+                },
+            },
             Overlay::S3PresetPicker { .. } => HelpTarget::S3Field {
                 field: S3SyncField::Preset,
             },
@@ -155,6 +170,22 @@ fn current_help_target(app: &App) -> HelpTarget {
     if let Some(FormState::WebDavSync(form)) = app.form.as_ref() {
         return HelpTarget::WebDavField {
             field: form.selected_field(),
+        };
+    }
+
+    if let Some(FormState::McpAdd(form)) = app.form.as_ref() {
+        return match form.focus {
+            FormFocus::Fields => {
+                let fields = form.fields();
+                fields
+                    .get(form.field_idx.min(fields.len().saturating_sub(1)))
+                    .copied()
+                    .map_or(HelpTarget::Global, |field| match field {
+                        McpAddField::Env | McpAddField::Headers => HelpTarget::McpField { field },
+                        _ => HelpTarget::Global,
+                    })
+            }
+            _ => HelpTarget::Global,
         };
     }
 
@@ -275,8 +306,8 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         HelpTarget::Sessions => HelpContent::new(
             texts::tui_sessions_title(),
             help_lines(
-                "会话始终只显示当前应用，结果由项目范围 × / 搜索共同决定。\n←/→ 切换列表和详情，h/l 是备用键；↑/↓ 逐项移动，PgUp/PgDn 按页移动。p 打开项目选择器；Home/End 在当前会话列表或消息历史中跳到首尾，Shift+←/→ 查看完整目录，Shift+Home/End 直达目录两端。\n详情中的消息按需分页，覆盖完整逻辑历史；为保持响应速度，超长单条正文只显示有界预览。详情内的 / 只过滤当前消息页，保留筛选时仍可用 PgUp/PgDn/Home/End 浏览其他历史页。\n“未知目录”位于项目列表末尾，只包含缺少项目目录的旧会话；精确项目按词法规范化后的完整目录匹配。",
-                "Sessions always show the current app; results combine Project scope × / Search.\nUse ←/→ to switch between the list and details; h/l are aliases. Use ↑/↓ to move one item and PgUp/PgDn to move by a page. Press p to choose a project; Home/End jumps to either end of the active session list or message history, Shift+←/→ reveals the complete directory, and Shift+Home/End jumps to either path end.\nDetail messages are paged on demand across the complete logical history. To stay responsive, an unusually long individual body is shown as a bounded preview. In details, / filters the current message page only; PgUp/PgDn/Home/End still browse other history pages while the filter is retained.\nUnknown directory is last and contains only legacy sessions without a project directory; exact projects match the complete lexically normalized directory.",
+                "会话始终只显示当前应用，结果由项目范围 × / 搜索共同决定。\n←/→ 切换列表和详情，h/l 是备用键；↑/↓ 逐项移动，PgUp/PgDn 按页移动。p 打开项目选择器；Home/End 在当前会话列表或消息历史中跳到首尾，Shift+←/→ 查看完整目录，Shift+Home/End 直达目录两端。\n详情中的消息按需分页，覆盖完整逻辑历史；为保持响应速度，超长单条正文只显示有界预览。详情内的 / 只过滤当前消息页，保留筛选时仍可用 PgUp/PgDn/Home/End 浏览其他历史页。\nClaude、Codex、Gemini 和 OpenCode 的费用与 token 来自当前仍保留在 proxy_request_logs 中、经有效过滤去重后能以确定性 ID 归属到该会话的本地 usage 记录；Hermes 使用其 state.db 提供的估算。Cost 是根据这些本地可用记录和模型定价得出的尽力估算，不是账单，也不代表历史上曾发生的全部费用。“-”表示没有可归属的 usage、身份有歧义、查询不可用，或存在无法可靠计价的 token 行。Codex 根会话费用不含独立 subagent 线程的费用。\n日志被删除或归档、数据源写入失败、malformed 行、无法归属的代理 Generated ID、尚未触发重查的实时日志及浮点求和误差，都可能让估算与实际费用不同。\n“未知目录”位于项目列表末尾，只包含缺少项目目录的旧会话；精确项目按词法规范化后的完整目录匹配。",
+                "Sessions always show the current app; results combine Project scope × / Search.\nUse ←/→ to switch between the list and details; h/l are aliases. Use ↑/↓ to move one item and PgUp/PgDn to move by a page. Press p to choose a project; Home/End jumps to either end of the active session list or message history, Shift+←/→ reveals the complete directory, and Shift+Home/End jumps to either path end.\nDetail messages are paged on demand across the complete logical history. To stay responsive, an unusually long individual body is shown as a bounded preview. In details, / filters the current message page only; PgUp/PgDn/Home/End still browse other history pages while the filter is retained.\nFor Claude, Codex, Gemini, and OpenCode, Cost and tokens come from locally available usage rows that remain in proxy_request_logs after effective deduplication and can be deterministically attributed to this session. Hermes uses estimates supplied by its state.db. Cost is a best-effort estimate based on these local records and model pricing; it is not a bill and does not represent every historical charge. \"-\" means there is no attributable usage, the identity is ambiguous, the query is unavailable, or at least one token-bearing row cannot be priced reliably. A Codex root session excludes costs from independent subagent threads.\nDeleted or archived logs, source write failures, malformed rows, unattributable proxy Generated IDs, live rows awaiting a requery, and floating-point summation can all make the estimate differ from actual charges.\nUnknown directory is last and contains only legacy sessions without a project directory; exact projects match the complete lexically normalized directory.",
             ),
         ),
         HelpTarget::FailoverQueue => HelpContent::new(
@@ -324,7 +355,28 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         ),
         HelpTarget::S3Field { field } => s3_field_help(field),
         HelpTarget::WebDavField { field } => webdav_field_help(field),
+        HelpTarget::McpField { field } => mcp_field_help(field),
         HelpTarget::Empty => HelpContent::empty(),
+    }
+}
+
+fn mcp_field_help(field: McpAddField) -> HelpContent {
+    match field {
+        McpAddField::Headers => HelpContent::new(
+            texts::tui_label_headers(),
+            help_lines(
+                "为 HTTP/SSE MCP 请求配置静态 HTTP Headers，例如 `Authorization: Bearer <token>` 或 `X-API-Key`。\nHeaders 保存在 cc-switch 的统一 MCP 配置中，并投影到所选应用。Codex 使用 `http_headers`，其余受支持应用使用 `headers`。",
+                "Configure static HTTP headers for HTTP/SSE MCP requests, such as `Authorization: Bearer <token>` or `X-API-Key`.\nHeaders are stored in cc-switch's unified MCP config and projected to selected apps. Codex uses `http_headers`; other supported apps use `headers`.",
+            ),
+        ),
+        McpAddField::Env => HelpContent::new(
+            texts::tui_label_env(),
+            help_lines(
+                "为 stdio MCP 进程设置环境变量。环境变量名大小写敏感，并按名称排序保存。",
+                "Set environment variables for the stdio MCP process. Names are case-sensitive and saved in sorted order.",
+            ),
+        ),
+        _ => HelpContent::empty(),
     }
 }
 
@@ -586,8 +638,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::ClaudeModelConfig => HelpContent::new(
             texts::tui_label_claude_model_config(),
             help_lines(
-                "配置 Claude 的模型分层。在模型列按 Enter 编辑，按 Space 从 API 自动获取。Sonnet 和 Opus 可用 ←→ 移到 1M 列并按 Enter 切换；1M 只向 Claude Code 声明百万上下文能力，不会检测上游是否真正支持。底层继续使用模型 ID 的 [1M] 后缀，以兼容现有配置。次要快捷键 a 可将当前模型填充到全部角色。",
-                "Configures Claude model tiers. In the model column, press Enter to edit or Space to fetch from the API. For Sonnet and Opus, use ←→ to focus the 1M column and Enter to toggle it. 1M only declares million-token context support to Claude Code; it does not detect upstream capability. The existing [1M] model-ID suffix remains the storage format. The secondary a shortcut fills every role from the current model.",
+                "配置 Claude 的模型分层。在模型列按 Enter 编辑，按 Space 从 API 自动获取。Sonnet、Opus、Fable 和 Subagent 可用 ←→ 移到 1M 列并按 Enter 切换；1M 只向 Claude Code 声明百万上下文能力，不会检测上游是否真正支持。Fable 留空时依次回退到 Opus 和默认模型；Subagent 控制后台代理任务使用的模型。底层继续使用模型 ID 的 [1M] 后缀，以兼容现有配置。次要快捷键 a 可将当前模型填充到全部角色。",
+                "Configures Claude model tiers. In the model column, press Enter to edit or Space to fetch from the API. Sonnet, Opus, Fable, and Subagent support the 1M column; use ←→ to focus it and Enter to toggle. 1M only declares million-token context support to Claude Code and does not detect upstream capability. An unset Fable falls back to Opus and then the default model; Subagent controls the model used by background agents. The existing [1M] model-ID suffix remains the storage format. The secondary a shortcut fills every role from the current model.",
             ),
         ),
         ProviderAddField::ClaudeApiFormat if matches!(app_type, AppType::Codex) => {
@@ -630,8 +682,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::ClaudeFallbackModel => HelpContent::new(
             texts::tui_label_claude_fallback_model(),
             help_lines(
-                "用于未明确落到具体角色模型（Haiku、Sonnet、Opus 等）的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。",
-                "A fallback for requests that don't clearly map to a specific role model (Haiku, Sonnet, Opus, etc.). Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints.",
+                "用于未明确落到具体角色模型（Haiku、Sonnet、Opus 等）的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。可在模型名末尾追加 [1M] 声明百万上下文支持；此标记不会验证上游能力。",
+                "A fallback for requests that don't clearly map to a specific role model (Haiku, Sonnet, Opus, etc.). Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints. Append [1M] to declare million-token context support; this marker does not verify upstream capability.",
             ),
         ),
         ProviderAddField::ClaudeQuickConfig => HelpContent::new(
@@ -947,13 +999,20 @@ fn usage_query_field_help(template: UsageQueryTemplate, field: UsageQueryField) 
                 "When enabled, cc-switch queries provider balance or quota using the selected template. When disabled, no automatic query runs.",
             ),
         ),
-        UsageQueryField::Template => HelpContent::new(
-            texts::tui_usage_query_template(),
-            help_lines(
-                "TUI 只提供自定义、通用、NewAPI、余额四种模板。\n计费计划模板不在 TUI 中显示；模板会决定哪些字段可见，以及提取器代码是否可编辑。",
-                "The TUI exposes only custom, general, newapi, and balance.\nToken Plan is not shown in the TUI. The template controls visible fields and whether extractor code can be edited.",
-            ),
-        ),
+        UsageQueryField::Template => {
+            let body = if matches!(template, UsageQueryTemplate::OfficialSubscription) {
+                help_lines(
+                    "官方 Claude、Codex 和 Gemini 供应商只提供官方订阅模板。该模板读取本机 CLI 的 OAuth 凭据，不需要脚本或额外凭据。",
+                    "Official Claude, Codex, and Gemini providers expose only the official subscription template. It uses local CLI OAuth credentials and needs no script or extra credentials.",
+                )
+            } else {
+                help_lines(
+                    "TUI 只提供自定义、通用、NewAPI、余额四种模板。\n计费计划模板不在 TUI 中显示；模板会决定哪些字段可见，以及提取器代码是否可编辑。",
+                    "The TUI exposes only custom, general, newapi, and balance.\nToken Plan is not shown in the TUI. The template controls visible fields and whether extractor code can be edited.",
+                )
+            };
+            HelpContent::new(texts::tui_usage_query_template(), body)
+        }
         UsageQueryField::ApiKey => HelpContent::new(
             texts::tui_usage_query_credentials_config(),
             help_lines(
@@ -1021,7 +1080,9 @@ fn usage_query_extractor_help(template: UsageQueryTemplate) -> HelpContent {
             "余额模板使用内置查询逻辑。通常不需要脚本字段；如果显示提取器预览，只用于说明当前模板行为。",
             "The balance template uses built-in query logic. It usually does not need script fields; any extractor preview only explains template behavior.",
         ),
-        UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::TokenPlan => {
+        UsageQueryTemplate::GitHubCopilot
+        | UsageQueryTemplate::TokenPlan
+        | UsageQueryTemplate::OfficialSubscription => {
             vec![tr("此处无提示", "No help here").to_string()]
         }
     };

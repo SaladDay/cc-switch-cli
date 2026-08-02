@@ -7,6 +7,7 @@ use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta, UsageScript};
 use crate::services::ProviderService;
 use crate::store::AppState;
+use crate::usage_script::UsageQueryTemplate as UsageQueryTemplateKind;
 
 const DEFAULT_USAGE_LANGUAGE: &str = "javascript";
 const DEFAULT_USAGE_TIMEOUT: u64 = 10;
@@ -132,6 +133,7 @@ pub enum UsageQueryTemplate {
     General,
     Newapi,
     Balance,
+    OfficialSubscription,
 }
 
 impl UsageQueryTemplate {
@@ -141,6 +143,7 @@ impl UsageQueryTemplate {
             Self::General => "general",
             Self::Newapi => "newapi",
             Self::Balance => "balance",
+            Self::OfficialSubscription => "official_subscription",
         }
     }
 }
@@ -189,7 +192,10 @@ fn show(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
     println!("  Provider: {id}");
     println!("  Enabled: {}", script.enabled);
     println!("  Language: {}", script.language);
-    println!("  Template: {}", effective_template_type(script, &provider));
+    println!(
+        "  Template: {}",
+        effective_template_type(script, &app_type, &provider)
+    );
     println!(
         "  Timeout: {}",
         script.timeout.unwrap_or(DEFAULT_USAGE_TIMEOUT)
@@ -200,9 +206,9 @@ fn show(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
             .auto_query_interval
             .unwrap_or(DEFAULT_USAGE_AUTO_QUERY_INTERVAL)
     );
-    print_optional_masked("API Key", script.api_key.as_deref());
+    print_optional("API Key", script.api_key.as_deref());
     print_optional("Base URL", script.base_url.as_deref());
-    print_optional_masked("Access Token", script.access_token.as_deref());
+    print_optional("Access Token", script.access_token.as_deref());
     print_optional("User ID", script.user_id.as_deref());
     print_optional(
         "Coding Plan Provider",
@@ -230,8 +236,15 @@ fn set(app_type: AppType, command: ProviderUsageQuerySetCommand) -> Result<(), A
         .cloned();
     let existing_template = existing
         .as_ref()
-        .map(|script| effective_template_type(script, &provider));
-    let mut script = existing.unwrap_or_else(|| default_usage_script_for_provider(&provider));
+        .map(|script| effective_template_type(script, &app_type, &provider));
+    let official_subscription = provider.official_subscription_tool(&app_type).is_some();
+    validate_usage_template_compatibility(
+        official_subscription,
+        command.template,
+        existing_template.as_deref(),
+    )?;
+
+    let mut script = initial_usage_script_for_update(&app_type, &provider, existing);
 
     if command.enabled {
         script.enabled = true;
@@ -239,12 +252,16 @@ fn set(app_type: AppType, command: ProviderUsageQuerySetCommand) -> Result<(), A
         script.enabled = false;
     }
 
-    let explicit_template = command.template;
+    let explicit_template = if official_subscription {
+        Some(UsageQueryTemplate::OfficialSubscription)
+    } else {
+        command.template
+    };
     let template = explicit_template
         .map(|template| template.as_str().to_string())
         .or(existing_template)
         .unwrap_or_else(|| {
-            default_usage_template_for_provider(&provider)
+            default_usage_template_for_provider(&app_type, &provider)
                 .as_str()
                 .to_string()
         });
@@ -282,6 +299,33 @@ fn set(app_type: AppType, command: ProviderUsageQuerySetCommand) -> Result<(), A
     Ok(())
 }
 
+fn validate_usage_template_compatibility(
+    official_subscription: bool,
+    requested_template: Option<UsageQueryTemplate>,
+    existing_template: Option<&str>,
+) -> Result<(), AppError> {
+    if let Some(template) = requested_template {
+        let selecting_official = template == UsageQueryTemplate::OfficialSubscription;
+        if official_subscription != selecting_official {
+            return Err(AppError::InvalidInput(if official_subscription {
+                "Official providers only support the official-subscription Usage Query template"
+                    .to_string()
+            } else {
+                "The official-subscription Usage Query template is only available for official providers"
+                    .to_string()
+            }));
+        }
+    } else if !official_subscription
+        && existing_template == Some(UsageQueryTemplate::OfficialSubscription.as_str())
+    {
+        return Err(AppError::InvalidInput(
+            "The saved official-subscription Usage Query template is incompatible with this custom provider; select a different template"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn clear(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
     let mut provider = find_provider(&state, &app_type, id)?;
@@ -313,8 +357,25 @@ fn default_usage_script() -> UsageScript {
     usage_script_for_template(UsageQueryTemplate::General)
 }
 
-fn default_usage_script_for_provider(provider: &Provider) -> UsageScript {
-    usage_script_for_template(default_usage_template_for_provider(provider))
+fn default_usage_script_for_provider(app_type: &AppType, provider: &Provider) -> UsageScript {
+    usage_script_for_template(default_usage_template_for_provider(app_type, provider))
+}
+
+fn initial_usage_script_for_update(
+    app_type: &AppType,
+    provider: &Provider,
+    existing: Option<UsageScript>,
+) -> UsageScript {
+    let reset_incompatible_official = provider.official_subscription_tool(app_type).is_some()
+        && existing.as_ref().is_some_and(|script| {
+            script.template_type.as_deref()
+                != Some(UsageQueryTemplate::OfficialSubscription.as_str())
+        });
+    if reset_incompatible_official {
+        usage_script_for_template(UsageQueryTemplate::OfficialSubscription)
+    } else {
+        existing.unwrap_or_else(|| default_usage_script_for_provider(app_type, provider))
+    }
 }
 
 fn usage_script_for_template(template: UsageQueryTemplate) -> UsageScript {
@@ -333,7 +394,14 @@ fn usage_script_for_template(template: UsageQueryTemplate) -> UsageScript {
     }
 }
 
-fn default_usage_template_for_provider(provider: &Provider) -> UsageQueryTemplate {
+fn default_usage_template_for_provider(
+    app_type: &AppType,
+    provider: &Provider,
+) -> UsageQueryTemplate {
+    if provider.official_subscription_tool(app_type).is_some() {
+        return UsageQueryTemplate::OfficialSubscription;
+    }
+
     let base_url = provider_base_url(provider).unwrap_or_default();
     if detect_balance_provider(&base_url) {
         UsageQueryTemplate::Balance
@@ -342,7 +410,11 @@ fn default_usage_template_for_provider(provider: &Provider) -> UsageQueryTemplat
     }
 }
 
-fn effective_template_type(script: &UsageScript, provider: &Provider) -> String {
+fn effective_template_type(
+    script: &UsageScript,
+    app_type: &AppType,
+    provider: &Provider,
+) -> String {
     if let Some(template) = script
         .template_type
         .as_deref()
@@ -353,7 +425,7 @@ fn effective_template_type(script: &UsageScript, provider: &Provider) -> String 
     }
 
     infer_usage_template(script)
-        .unwrap_or_else(|| default_usage_template_for_provider(provider))
+        .unwrap_or_else(|| default_usage_template_for_provider(app_type, provider))
         .as_str()
         .to_string()
 }
@@ -390,6 +462,7 @@ fn default_code_for_template(template: UsageQueryTemplate) -> &'static str {
         UsageQueryTemplate::General => DEFAULT_USAGE_GENERAL_PRESET,
         UsageQueryTemplate::Newapi => DEFAULT_USAGE_NEWAPI_PRESET,
         UsageQueryTemplate::Balance => "",
+        UsageQueryTemplate::OfficialSubscription => "",
     }
 }
 
@@ -443,7 +516,7 @@ fn normalize_usage_interval(value: u64) -> u64 {
 }
 
 fn template_requires_script(template: &str) -> bool {
-    !matches!(template, "github_copilot" | "token_plan" | "balance")
+    UsageQueryTemplateKind::from_str(template).is_none_or(UsageQueryTemplateKind::requires_script)
 }
 
 fn validate_usage_script_for_save(script: &UsageScript) -> Result<(), AppError> {
@@ -491,7 +564,7 @@ fn apply_template_credentials(
             script.api_key = None;
             script.coding_plan_provider = None;
         }
-        "custom" | "balance" => {
+        "custom" | "balance" | "official_subscription" => {
             script.api_key = None;
             script.base_url = None;
             script.access_token = None;
@@ -519,24 +592,6 @@ fn print_optional(label: &str, value: Option<&str>) {
             println!("  {label}: {value}");
         }
     }
-}
-
-fn print_optional_masked(label: &str, value: Option<&str>) {
-    if let Some(value) = value {
-        if !value.is_empty() {
-            println!("  {label}: {}", mask_secret(value));
-        }
-    }
-}
-
-fn mask_secret(value: &str) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= 8 {
-        return "***".to_string();
-    }
-    let prefix: String = chars.iter().take(4).collect();
-    let suffix: String = chars[chars.len() - 4..].iter().collect();
-    format!("{prefix}...{suffix}")
 }
 
 fn detect_balance_provider(base_url: &str) -> bool {
@@ -737,7 +792,7 @@ mod tests {
         );
 
         assert_eq!(
-            default_usage_template_for_provider(&provider),
+            default_usage_template_for_provider(&AppType::Claude, &provider),
             UsageQueryTemplate::Balance
         );
     }
@@ -751,10 +806,87 @@ mod tests {
             None,
         );
 
-        let script = default_usage_script_for_provider(&provider);
+        let script = default_usage_script_for_provider(&AppType::Claude, &provider);
 
         assert_eq!(script.template_type.as_deref(), Some("balance"));
         assert!(script.code.is_empty());
+    }
+
+    #[test]
+    fn default_usage_script_for_official_provider_uses_native_subscription() {
+        let mut provider = Provider::with_id(
+            "official".into(),
+            "Official".into(),
+            serde_json::json!({}),
+            None,
+        );
+        provider.category = Some("official".to_string());
+
+        let script = default_usage_script_for_provider(&AppType::Codex, &provider);
+
+        assert_eq!(
+            script.template_type.as_deref(),
+            Some("official_subscription")
+        );
+        assert!(script.code.is_empty());
+    }
+
+    #[test]
+    fn updating_official_provider_resets_incompatible_script_to_disabled_defaults() {
+        let mut provider = Provider::with_id(
+            "official".into(),
+            "Official".into(),
+            serde_json::json!({}),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        let existing = UsageScript {
+            enabled: true,
+            language: "javascript".to_string(),
+            code: "return { remaining: 1 }".to_string(),
+            timeout: Some(99),
+            api_key: Some("sk-old".to_string()),
+            base_url: Some("https://relay.example.test".to_string()),
+            access_token: None,
+            user_id: None,
+            template_type: Some("general".to_string()),
+            auto_query_interval: Some(60),
+            coding_plan_provider: None,
+        };
+
+        let script = initial_usage_script_for_update(&AppType::Claude, &provider, Some(existing));
+
+        assert!(!script.enabled);
+        assert_eq!(
+            script.template_type.as_deref(),
+            Some("official_subscription")
+        );
+        assert_eq!(script.timeout, Some(10));
+        assert_eq!(script.auto_query_interval, Some(5));
+        assert!(script.code.is_empty());
+        assert!(script.api_key.is_none());
+        assert!(script.base_url.is_none());
+    }
+
+    #[test]
+    fn usage_template_compatibility_rejects_cross_provider_native_templates() {
+        assert!(validate_usage_template_compatibility(
+            true,
+            Some(UsageQueryTemplate::General),
+            None,
+        )
+        .is_err());
+        assert!(validate_usage_template_compatibility(
+            false,
+            Some(UsageQueryTemplate::OfficialSubscription),
+            None,
+        )
+        .is_err());
+        assert!(
+            validate_usage_template_compatibility(false, None, Some("official_subscription"),)
+                .is_err()
+        );
+        assert!(validate_usage_template_compatibility(true, None, Some("general"),).is_ok());
     }
 
     #[test]
@@ -790,15 +922,24 @@ mod tests {
             ..default_usage_script()
         };
 
-        assert_eq!(effective_template_type(&script, &provider), "newapi");
+        assert_eq!(
+            effective_template_type(&script, &AppType::Claude, &provider),
+            "newapi"
+        );
 
         script.access_token = None;
         script.api_key = Some("sk-demo".to_string());
-        assert_eq!(effective_template_type(&script, &provider), "general");
+        assert_eq!(
+            effective_template_type(&script, &AppType::Claude, &provider),
+            "general"
+        );
 
         script.api_key = None;
         script.base_url = None;
-        assert_eq!(effective_template_type(&script, &provider), "balance");
+        assert_eq!(
+            effective_template_type(&script, &AppType::Claude, &provider),
+            "balance"
+        );
     }
 
     #[test]
@@ -816,6 +957,9 @@ mod tests {
 
         script.template_type = Some("balance".to_string());
         script.code.clear();
+        assert!(validate_usage_script_for_save(&script).is_ok());
+
+        script.template_type = Some("official_subscription".to_string());
         assert!(validate_usage_script_for_save(&script).is_ok());
     }
 
@@ -873,11 +1017,36 @@ mod tests {
     }
 
     #[test]
+    fn official_subscription_template_removes_script_credentials() {
+        let mut script = UsageScript {
+            api_key: Some("sk-old".to_string()),
+            base_url: Some("https://old.example.com".to_string()),
+            access_token: Some("old-token".to_string()),
+            user_id: Some("old-user".to_string()),
+            coding_plan_provider: Some("kimi".to_string()),
+            ..default_usage_script()
+        };
+        let command = set_command(Some(UsageQueryTemplate::OfficialSubscription));
+
+        apply_template_credentials(&mut script, "official_subscription", &command);
+
+        assert_eq!(script.api_key, None);
+        assert_eq!(script.base_url, None);
+        assert_eq!(script.access_token, None);
+        assert_eq!(script.user_id, None);
+        assert_eq!(script.coding_plan_provider, None);
+    }
+
+    #[test]
     fn default_code_tracks_template_selection() {
         assert!(default_code_for_template(UsageQueryTemplate::General).contains("{{apiKey}}"));
         assert!(default_code_for_template(UsageQueryTemplate::Newapi).contains("{{accessToken}}"));
         assert!(default_code_for_template(UsageQueryTemplate::Custom).contains("remaining: 0"));
         assert_eq!(default_code_for_template(UsageQueryTemplate::Balance), "");
+        assert_eq!(
+            default_code_for_template(UsageQueryTemplate::OfficialSubscription),
+            ""
+        );
     }
 
     #[test]
@@ -933,6 +1102,9 @@ mod tests {
             "Codex".to_string(),
             serde_json::json!({
                 "base_url": "https://stale.example.com/v1",
+                "auth": {
+                    "OPENAI_API_KEY": "sk-test"
+                },
                 "config": r#"model_provider = "current"
 
 [model_providers.current]
@@ -943,7 +1115,7 @@ base_url = "https://api.deepseek.com"
         );
 
         assert_eq!(
-            default_usage_template_for_provider(&provider),
+            default_usage_template_for_provider(&AppType::Codex, &provider),
             UsageQueryTemplate::Balance
         );
     }
@@ -1130,13 +1302,6 @@ base_url = "https://api.deepseek.com"
         );
 
         assert_eq!(script.code, "return { remaining: 42 };");
-    }
-
-    #[test]
-    fn masks_usage_query_secrets_for_text_output() {
-        assert_eq!(mask_secret("sk-1234567890"), "sk-1...7890");
-        assert_eq!(mask_secret("密钥一二三四五六七八九"), "密钥一二...六七八九");
-        assert_eq!(mask_secret("short"), "***");
     }
 
     #[test]

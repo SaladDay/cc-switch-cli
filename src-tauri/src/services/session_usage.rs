@@ -963,6 +963,11 @@ fn insert_session_log_entry(
     };
 
     let pricing = cached_model_pricing(conn, pricing_cache, &msg.model);
+    let pricing_model = if pricing.is_some() {
+        msg.model.as_str()
+    } else {
+        ""
+    };
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -988,12 +993,12 @@ fn insert_session_log_entry(
     let mut stmt = conn
         .prepare_cached(
             "INSERT OR IGNORE INTO proxy_request_logs (
-            request_id, provider_id, app_type, model, request_model,
+            request_id, provider_id, app_type, model, request_model, pricing_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         )
         .map_err(|e| AppError::Database(format!("插入会话日志失败: {e}")))?;
     let inserted_rows = stmt
@@ -1003,6 +1008,7 @@ fn insert_session_log_entry(
             "claude",   // app_type
             msg.model,
             msg.model, // request_model = model
+            pricing_model,
             msg.input_tokens,
             msg.output_tokens,
             msg.cache_read_tokens,
@@ -1208,6 +1214,73 @@ mod tests {
             assert_eq!(sync_progress::snapshot(), Some((1, 3)));
         }
         assert!(sync_progress::snapshot().is_none());
+    }
+
+    #[test]
+    fn claude_session_import_records_explicit_pricing_evidence() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+        conn.execute(
+            "INSERT OR REPLACE INTO model_pricing (
+                 model_id, display_name, input_cost_per_million,
+                 output_cost_per_million, cache_read_cost_per_million,
+                 cache_creation_cost_per_million
+             ) VALUES ('writer-priced-free', 'Writer Priced Free', '0', '0', '0', '0')",
+            [],
+        )?;
+
+        let mut pricing_cache = PricingCache::new();
+        for (request_id, model, timestamp) in [
+            (
+                "claude-priced-evidence",
+                "writer-priced-free",
+                "1970-01-01T00:16:40Z",
+            ),
+            (
+                "claude-unpriced-evidence",
+                "writer-unknown",
+                "1970-01-01T00:33:20Z",
+            ),
+        ] {
+            let message = ParsedAssistantUsage {
+                message_id: request_id.to_string(),
+                model: model.to_string(),
+                input_tokens: 10,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                stop_reason: Some("end_turn".to_string()),
+                timestamp: Some(timestamp.to_string()),
+                session_id: Some(request_id.to_string()),
+            };
+            assert!(insert_session_log_entry(
+                &conn,
+                &mut pricing_cache,
+                request_id,
+                &message
+            )?);
+        }
+
+        let priced: Option<String> = conn.query_row(
+            "SELECT pricing_model FROM proxy_request_logs
+             WHERE request_id = 'claude-priced-evidence'",
+            [],
+            |row| row.get(0),
+        )?;
+        let unpriced: Option<String> = conn.query_row(
+            "SELECT pricing_model FROM proxy_request_logs
+             WHERE request_id = 'claude-unpriced-evidence'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(priced.as_deref(), Some("writer-priced-free"));
+        assert_eq!(
+            unpriced.as_deref(),
+            Some(""),
+            "new unpriced rows must be explicit rather than legacy NULL"
+        );
+
+        Ok(())
     }
 
     #[cfg(unix)]

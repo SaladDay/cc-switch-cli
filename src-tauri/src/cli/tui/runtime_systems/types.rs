@@ -7,8 +7,9 @@ use serde_json::Value;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::cli::tui::data::ProxySnapshot;
-use crate::cli::tui::data::QuotaTarget;
+use crate::cli::tui::data::{
+    ProviderRuntimeSnapshot, ProxySnapshot, QuotaSnapshotGeneration, QuotaTarget, UiDataReloadToken,
+};
 use crate::provider::Provider;
 use crate::services::{EndpointLatency, HealthStatus, StreamCheckResult, SyncDecision};
 
@@ -74,9 +75,9 @@ pub(crate) enum SessionReq {
         request_id: u64,
         scope_epoch: u64,
         provider_id: String,
-        /// When true (manual `r` reload), ignore the cached `(mtime, size)`
-        /// snapshot and re-parse every file; the fresh results still refresh the
-        /// persistent cache.
+        /// Manual `r` (and delete-recovery) rebuilds from provider sources and
+        /// ignores cached `(mtime, size)` metadata. False opens the persisted
+        /// manifest only, falling back to one bootstrap build when none exists.
         force: bool,
     },
     LoadPage {
@@ -176,6 +177,10 @@ pub(crate) enum SessionMsg {
         request_id: u64,
         scope_epoch: u64,
         scope: String,
+        /// True when a valid persisted manifest satisfied this request and no
+        /// source revalidation follows. A cache miss keeps the scan active
+        /// while the same worker performs the one-time bootstrap build.
+        complete: bool,
         result: Result<
             Option<(
                 crate::session_manager::paged_manifest::ManifestReader,
@@ -202,6 +207,16 @@ pub(crate) enum SessionMsg {
                 crate::session_manager::paged_manifest::ManifestReader,
             ),
             String,
+        >,
+    },
+    CostOverlayReady {
+        cost_seq: u64,
+        page_token: crate::cli::tui::app::SessionPageToken,
+        page_index: usize,
+        identities: Vec<crate::cli::tui::app::SessionRowIdentity>,
+        overlays: std::collections::HashMap<
+            crate::services::session_cost::SessionCostIdentity,
+            crate::session_manager::SessionUsageSummary,
         >,
     },
     PageLoaded {
@@ -288,11 +303,15 @@ pub(crate) enum SessionMsg {
 }
 
 pub(crate) enum QuotaReq {
-    Refresh { target: QuotaTarget },
+    Refresh {
+        generation: QuotaSnapshotGeneration,
+        target: QuotaTarget,
+    },
 }
 
 pub(crate) enum QuotaMsg {
     Finished {
+        generation: QuotaSnapshotGeneration,
         target: QuotaTarget,
         result: Result<crate::cli::tui::data::ProviderUsageQuota, String>,
     },
@@ -630,6 +649,8 @@ impl Drop for LocalEnvSystem {
 
 pub(crate) struct SessionSystem {
     pub(crate) req_tx: mpsc::Sender<SessionReq>,
+    pub(crate) cost_req_tx:
+        crate::cli::tui::runtime_systems::session_cost::SessionCostRequestSender,
     pub(crate) result_rx: mpsc::Receiver<SessionMsg>,
     pub(crate) _handles: Vec<std::thread::JoinHandle<()>>,
 }
@@ -664,10 +685,18 @@ pub(crate) enum ProxyReq {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
+        base_reload_token: UiDataReloadToken,
     },
     RefreshSnapshot {
         request_id: u64,
         app_type: AppType,
+    },
+}
+
+pub(crate) enum ManagedSessionOutcome {
+    Failed(String),
+    Applied {
+        snapshot: Result<Box<ProviderRuntimeSnapshot>, String>,
     },
 }
 
@@ -676,7 +705,8 @@ pub(crate) enum ProxyMsg {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
-        result: Result<(), String>,
+        base_reload_token: UiDataReloadToken,
+        outcome: ManagedSessionOutcome,
     },
     SnapshotRefreshed {
         request_id: u64,

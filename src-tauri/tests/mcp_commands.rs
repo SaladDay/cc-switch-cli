@@ -449,6 +449,83 @@ fn set_mcp_enabled_for_codex_writes_remote_headers_once_as_http_headers() {
 }
 
 #[test]
+fn codex_single_server_sync_preserves_invalid_live_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+    let config_path = codex_dir.join("config.toml");
+    let invalid = b"model = \"gpt-5\"\n[broken\n";
+    fs::write(&config_path, invalid).expect("seed invalid Codex config");
+
+    let error = cc_switch_lib::sync_single_server_to_codex(
+        &MultiAppConfig::default(),
+        "remote",
+        &json!({
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "headers": {
+                "Authorization": "Bearer token"
+            }
+        }),
+    )
+    .expect_err("invalid config must abort the write");
+
+    assert!(
+        matches!(&error, AppError::McpValidation(message) if message.contains("解析 config.toml 失败")),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        fs::read(&config_path).expect("read Codex config after failed sync"),
+        invalid,
+        "failed parsing must leave the complete live config unchanged"
+    );
+}
+
+#[test]
+fn import_codex_legacy_headers_canonicalizes_to_headers() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+[mcp_servers.remote]
+type = "http"
+url = "https://example.com/mcp"
+
+[mcp_servers.remote.headers]
+Authorization = "Bearer legacy-token"
+"#,
+    )
+    .expect("seed Codex config with legacy headers");
+
+    let state = state_from_config(MultiAppConfig::default());
+    McpService::import_from_codex(&state).expect("import Codex MCP");
+
+    let guard = state.config.read().expect("lock config");
+    let remote = guard
+        .mcp
+        .servers
+        .as_ref()
+        .and_then(|servers| servers.get("remote"))
+        .expect("remote MCP imported");
+    assert_eq!(
+        remote.server["headers"]["Authorization"],
+        "Bearer legacy-token"
+    );
+    assert!(
+        remote.server.get("http_headers").is_none(),
+        "unified config must keep only canonical headers"
+    );
+}
+
+#[test]
 fn upsert_server_skips_live_sync_when_gemini_uninitialized() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -656,6 +733,70 @@ fn sync_all_enabled_removes_disabled_gemini_server_from_live_config() {
     assert!(
         !remove_me_present,
         "sync_all_enabled should remove disabled Gemini binding from live config, got: {settings_text}"
+    );
+}
+
+#[test]
+fn sync_all_enabled_continues_after_another_app_fails() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    fs::create_dir_all(home.join(".claude")).expect("create Claude dir");
+    fs::write(get_claude_mcp_path(), "{\"mcpServers\":").expect("seed invalid Claude MCP config");
+
+    let gemini_dir = home.join(".gemini");
+    fs::create_dir_all(&gemini_dir).expect("create Gemini dir");
+    let gemini_path = gemini_dir.join("settings.json");
+    fs::write(
+        &gemini_path,
+        json!({
+            "mcpServers": {
+                "remove_me": {
+                    "httpUrl": "http://localhost:1234"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("seed Gemini settings");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers = Some(HashMap::from([(
+        "remove_me".to_string(),
+        McpServer {
+            id: "remove_me".to_string(),
+            name: "Remove Me".to_string(),
+            server: json!({
+                "type": "http",
+                "url": "http://localhost:1234"
+            }),
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    )]));
+    let state = state_from_config(config);
+
+    let error = McpService::sync_all_enabled(&state)
+        .expect_err("the invalid Claude file should be reported");
+    assert!(
+        error.to_string().contains("claude"),
+        "aggregate error should identify the failed app: {error}"
+    );
+
+    let gemini: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&gemini_path).expect("read Gemini settings after sync"),
+    )
+    .expect("parse Gemini settings after sync");
+    assert!(
+        gemini
+            .get("mcpServers")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(|servers| !servers.contains_key("remove_me")),
+        "Gemini projection must still run after Claude fails: {gemini}"
     );
 }
 

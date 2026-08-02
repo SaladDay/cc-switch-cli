@@ -543,7 +543,7 @@ fn insert_opencode_message(
     }
 
     // 如果 opencode 已经提供了费用，直接使用；否则从模型定价计算
-    let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) =
+    let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost, pricing_model) =
         if msg.cost > 0.0 {
             // opencode 已计算费用，直接使用
             // 简化处理：全部放入 total_cost（opencode 的 cost 是聚合值，无法精确拆分）
@@ -553,6 +553,7 @@ fn insert_opencode_message(
                 "0".to_string(),
                 "0".to_string(),
                 msg.cost.to_string(),
+                msg.model_id.as_str(),
             )
         } else {
             // opencode 费用为 0（如免费模型），尝试用 cc-switch 自带的模型定价计算
@@ -579,6 +580,7 @@ fn insert_opencode_message(
                         cost.cache_read_cost.to_string(),
                         cost.cache_creation_cost.to_string(),
                         cost.total_cost.to_string(),
+                        msg.model_id.as_str(),
                     )
                 }
                 None => (
@@ -587,6 +589,7 @@ fn insert_opencode_message(
                     "0".to_string(),
                     "0".to_string(),
                     "0".to_string(),
+                    "",
                 ),
             }
         };
@@ -594,12 +597,12 @@ fn insert_opencode_message(
     let mut stmt = conn
         .prepare_cached(
             "INSERT OR IGNORE INTO proxy_request_logs (
-            request_id, provider_id, app_type, model, request_model,
+            request_id, provider_id, app_type, model, request_model, pricing_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         )
         .map_err(|e| AppError::Database(format!("插入 OpenCode 会话日志失败: {e}")))?;
     let inserted_rows = stmt
@@ -609,6 +612,7 @@ fn insert_opencode_message(
             "opencode",          // app_type
             msg.model_id,
             msg.model_id, // request_model = model
+            pricing_model,
             msg.input_tokens,
             output_with_reasoning,
             msg.cache_read_tokens,
@@ -670,6 +674,43 @@ mod tests {
         assert_eq!(data.model_id, "deepseek-v4-pro");
         // created_at 在解析阶段定死：time.created(ms) / 1000
         assert_eq!(data.created_at, 1_779_755_333);
+    }
+
+    #[test]
+    fn opencode_upstream_cost_records_pricing_evidence() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let mut pricing_cache = PricingCache::new();
+        let message = OpenCodeMessageData {
+            input_tokens: 10,
+            output_tokens: 1,
+            reasoning_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost: 0.25,
+            model_id: "opencode-upstream-priced".to_string(),
+            created_at: 1_000,
+        };
+        {
+            let conn = lock_conn!(db.conn);
+            assert!(insert_opencode_message(
+                &conn,
+                &mut pricing_cache,
+                "opencode-priced-evidence",
+                &message,
+                "opencode-priced-evidence",
+            )?);
+        }
+
+        let conn = lock_conn!(db.conn);
+        let pricing_model: Option<String> = conn.query_row(
+            "SELECT pricing_model FROM proxy_request_logs
+             WHERE request_id = 'opencode-priced-evidence'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(pricing_model.as_deref(), Some("opencode-upstream-priced"));
+
+        Ok(())
     }
 
     #[test]

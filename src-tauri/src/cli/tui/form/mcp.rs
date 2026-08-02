@@ -3,8 +3,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::{
-    FormFocus, FormMode, McpAddField, McpAddFormState, McpEnvVarRow, McpTransport, TextEditSession,
-    TextInput,
+    FormFocus, FormMode, McpAddField, McpAddFormState, McpKeyValueKind, McpKeyValueRow,
+    McpTransport, TextEditSession, TextInput,
 };
 
 const MCP_TEMPLATES: [&str; 2] = ["Custom", "Filesystem (npx)"];
@@ -83,6 +83,7 @@ impl McpAddFormState {
             args_state: super::McpArgsState::Materialized(Vec::new()),
             url: TextInput::new(""),
             env_rows: Vec::new(),
+            header_rows: Vec::new(),
             apps: Default::default(),
             json_scroll: 0,
             initial_snapshot: None,
@@ -118,7 +119,8 @@ impl McpAddFormState {
         if let Some(url) = server.server.get("url").and_then(|value| value.as_str()) {
             form.url.set(url);
         }
-        form.env_rows = load_env_rows(&server);
+        form.env_rows = load_string_map_rows(&server.server, McpKeyValueKind::Env);
+        form.header_rows = load_string_map_rows(&server.server, McpKeyValueKind::Headers);
         form.capture_initial_snapshot();
 
         form
@@ -134,6 +136,7 @@ impl McpAddFormState {
             args_state: self.args_state.clone(),
             url: self.url.value.trim().to_string(),
             env_rows: self.env_rows.clone(),
+            header_rows: self.header_rows.clone(),
             apps: self.apps.clone(),
         });
     }
@@ -155,32 +158,60 @@ impl McpAddFormState {
             || self.args_changed_since(initial)
             || self.url.value.trim() != initial.url
             || self.env_rows != initial.env_rows
+            || self.header_rows != initial.header_rows
             || self.apps != initial.apps
             || !self.args_text_is_canonical()
     }
 
-    pub fn upsert_env_row(&mut self, row: Option<usize>, key: String, value: String) {
-        let next = McpEnvVarRow { key, value };
-        if let Some(idx) = row.filter(|idx| *idx < self.env_rows.len()) {
-            self.env_rows[idx] = next;
+    pub fn key_value_rows(&self, kind: McpKeyValueKind) -> &[McpKeyValueRow] {
+        match kind {
+            McpKeyValueKind::Env => &self.env_rows,
+            McpKeyValueKind::Headers => &self.header_rows,
+        }
+    }
+
+    fn key_value_rows_mut(&mut self, kind: McpKeyValueKind) -> &mut Vec<McpKeyValueRow> {
+        match kind {
+            McpKeyValueKind::Env => &mut self.env_rows,
+            McpKeyValueKind::Headers => &mut self.header_rows,
+        }
+    }
+
+    pub fn upsert_key_value_row(
+        &mut self,
+        kind: McpKeyValueKind,
+        row: Option<usize>,
+        key: String,
+        value: String,
+    ) {
+        let rows = self.key_value_rows_mut(kind);
+        let next = McpKeyValueRow { key, value };
+        if let Some(idx) = row.filter(|idx| *idx < rows.len()) {
+            rows[idx] = next;
         } else {
-            self.env_rows.push(next);
+            rows.push(next);
         }
-        self.env_rows
-            .sort_by(|left, right| left.key.cmp(&right.key));
+        rows.sort_by(|left, right| match kind {
+            McpKeyValueKind::Env => left.key.cmp(&right.key),
+            McpKeyValueKind::Headers => left
+                .key
+                .to_ascii_lowercase()
+                .cmp(&right.key.to_ascii_lowercase()),
+        });
     }
 
-    pub fn remove_env_row(&mut self, row: usize) {
-        if row < self.env_rows.len() {
-            self.env_rows.remove(row);
+    pub fn remove_key_value_row(&mut self, kind: McpKeyValueKind, row: usize) {
+        let rows = self.key_value_rows_mut(kind);
+        if row < rows.len() {
+            rows.remove(row);
         }
     }
 
-    pub fn env_summary(&self) -> String {
-        match self.env_rows.len() {
+    pub fn key_value_summary(&self, kind: McpKeyValueKind) -> String {
+        match self.key_value_rows(kind).len() {
             0 => texts::none().to_string(),
-            1 => texts::tui_mcp_env_entry_count(1),
-            count => texts::tui_mcp_env_entry_count(count),
+            1 => texts::tui_mcp_key_value_entry_count(1),
+            count => texts::tui_mcp_key_value_entry_count(count),
         }
     }
 
@@ -203,7 +234,7 @@ impl McpAddFormState {
         let mut fields = vec![McpAddField::Id, McpAddField::Name, McpAddField::Type];
 
         if self.server_type.is_remote() {
-            fields.push(McpAddField::Url);
+            fields.extend([McpAddField::Url, McpAddField::Headers]);
         } else {
             fields.extend([McpAddField::Command, McpAddField::Args, McpAddField::Env]);
         }
@@ -228,6 +259,7 @@ impl McpAddFormState {
             McpAddField::Url => Some(&self.url),
             McpAddField::Type
             | McpAddField::Env
+            | McpAddField::Headers
             | McpAddField::AppClaude
             | McpAddField::AppCodex
             | McpAddField::AppGemini
@@ -245,6 +277,7 @@ impl McpAddFormState {
             McpAddField::Url => Some(&mut self.url),
             McpAddField::Type
             | McpAddField::Env
+            | McpAddField::Headers
             | McpAddField::AppClaude
             | McpAddField::AppCodex
             | McpAddField::AppGemini
@@ -349,6 +382,7 @@ impl McpAddFormState {
                 self.args_state = defaults.args_state;
                 self.url = defaults.url;
                 self.env_rows = defaults.env_rows;
+                self.header_rows = defaults.header_rows;
                 self.json_scroll = defaults.json_scroll;
             }
             return;
@@ -580,12 +614,25 @@ impl McpAddFormState {
             server_obj.remove("cwd");
         } else {
             server_obj.remove("headers");
+            server_obj.remove("http_headers");
         }
 
         server_obj.insert("type".to_string(), json!(self.server_type.as_str()));
         if self.server_type.is_remote() {
             server_obj.remove("args");
             server_obj.insert("url".to_string(), json!(self.url.value.trim()));
+            let headers = self
+                .header_rows
+                .iter()
+                .fold(serde_json::Map::new(), |mut map, row| {
+                    map.insert(row.key.clone(), Value::String(row.value.clone()));
+                    map
+                });
+            server_obj.remove("headers");
+            server_obj.remove("http_headers");
+            if !headers.is_empty() {
+                server_obj.insert("headers".to_string(), Value::Object(headers));
+            }
         } else {
             server_obj.insert("command".to_string(), json!(self.command.value.trim()));
             if let super::McpArgsState::Materialized(values) = &self.args_state {
@@ -623,20 +670,30 @@ fn server_args_equal(server: &Value, current: &[String]) -> bool {
             .all(|(left, right)| left.as_str() == Some(right.as_str()))
 }
 
-fn load_env_rows(server: &McpServer) -> Vec<McpEnvVarRow> {
-    let mut rows = server
-        .server
-        .get("env")
+fn load_string_map_rows(server: &Value, kind: McpKeyValueKind) -> Vec<McpKeyValueRow> {
+    let values = match kind {
+        McpKeyValueKind::Env => server.get("env"),
+        // `headers` is the unified schema. Accept Codex's live-only key at
+        // this UI boundary so legacy rows are editable, then save canonically.
+        McpKeyValueKind::Headers => server.get("headers").or_else(|| server.get("http_headers")),
+    };
+    let mut rows = values
         .and_then(|value| value.as_object())
         .into_iter()
         .flat_map(|env| env.iter())
         .filter_map(|(key, value)| {
-            value.as_str().map(|value| McpEnvVarRow {
+            value.as_str().map(|value| McpKeyValueRow {
                 key: key.clone(),
                 value: value.to_string(),
             })
         })
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| left.key.cmp(&right.key));
+    rows.sort_by(|left, right| match kind {
+        McpKeyValueKind::Env => left.key.cmp(&right.key),
+        McpKeyValueKind::Headers => left
+            .key
+            .to_ascii_lowercase()
+            .cmp(&right.key.to_ascii_lowercase()),
+    });
     rows
 }

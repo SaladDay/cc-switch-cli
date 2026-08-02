@@ -235,8 +235,10 @@ mod tests {
             summary: Some(format!("summary {id}")),
             project_dir: Some(format!("/tmp/project-{id}")),
             created_at: Some(recency.saturating_sub(1)),
+            source_mtime_ns: None,
             last_active_at: Some(recency),
             source_path: Some(source_path),
+            usage: None,
             resume_command: Some(format!("codex resume {id}")),
         }
     }

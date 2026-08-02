@@ -18,7 +18,7 @@ use crate::test_support::{
     lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
 };
 use crate::{AppError, AppType};
-use runtime_systems::ProxyMsg;
+use runtime_systems::{ManagedSessionOutcome, ProxyMsg};
 
 #[test]
 fn codex_history_action_is_forwarded_to_the_dedicated_worker() {
@@ -136,6 +136,123 @@ fn app_with_pending_purge_manifest() -> (App, TempDir, u64, String) {
         deleted_key.clone(),
     ));
     (app, manifest_dir, delete_request_id, deleted_key)
+}
+
+fn app_with_costed_session_page() -> (App, TempDir) {
+    let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
+    let store =
+        crate::session_manager::paged_manifest::PagedManifestStore::open_at(manifest_dir.path())
+            .expect("manifest fixture store");
+    let mut builder = store.begin_build("claude").expect("manifest builder");
+    builder
+        .push(crate::session_manager::SessionMeta {
+            provider_id: "claude".to_string(),
+            session_id: "costed".to_string(),
+            source_path: Some("/tmp/costed.jsonl".to_string()),
+            usage: Some(crate::session_manager::SessionUsageSummary {
+                input_tokens: 10,
+                output_tokens: 2,
+                estimated_cost_usd: Some(0.25),
+                ..crate::session_manager::SessionUsageSummary::default()
+            }),
+            ..crate::session_manager::SessionMeta::default()
+        })
+        .expect("manifest row");
+    let published = builder.publish().expect("publish manifest");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Sessions;
+    let _ = app.sessions.start_scan("claude".to_string());
+    let scope_epoch = app.sessions.scope_epoch;
+    assert!(app.sessions.apply_opened_manifest(
+        scope_epoch,
+        "claude",
+        published.generation,
+        published.total_rows,
+        published.first_page.page_index,
+        published.first_page.rows,
+        published.reader,
+    ));
+    (app, manifest_dir)
+}
+
+#[test]
+fn unavailable_cost_worker_clears_stale_values_and_active_request() {
+    let (mut app, _manifest_dir) = app_with_costed_session_page();
+
+    assert!(!queue_current_session_cost(&mut app, None));
+
+    assert_eq!(app.sessions.rows[0].usage, None);
+    assert!(!app.sessions.has_active_cost_overlay());
+}
+
+#[test]
+fn disconnected_cost_worker_clears_stale_values_and_active_request() {
+    let (mut app, _manifest_dir) = app_with_costed_session_page();
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (sender, receiver) = runtime_systems::session_cost::session_cost_mailbox(active);
+    drop(receiver);
+
+    assert!(!queue_current_session_cost(&mut app, Some(&sender)));
+
+    assert_eq!(app.sessions.rows[0].usage, None);
+    assert!(!app.sessions.has_active_cost_overlay());
+}
+
+#[test]
+fn empty_visible_page_cancels_the_previous_cost_query_without_a_replacement() {
+    let (mut app, _manifest_dir) = app_with_costed_session_page();
+    app.sessions
+        .start_cost_overlay()
+        .expect("initial visible-page request");
+
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let (sender, _receiver) =
+        runtime_systems::session_cost::session_cost_mailbox(std::sync::Arc::clone(&active));
+    let old_control = crate::services::session_cost::QueryControl {
+        active_cost_seq: active,
+        cost_seq: 1,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+    };
+    assert!(!old_control.is_cancelled());
+
+    app.sessions.rows.clear();
+    app.sessions.request_cost_overlay();
+    let _ = queue_pending_session_cost(&mut app, Some(&sender));
+
+    assert!(
+        old_control.is_cancelled(),
+        "an empty search/page transition must interrupt the old read transaction"
+    );
+    assert!(!app.sessions.has_active_cost_overlay());
+}
+
+#[test]
+fn sessions_help_describes_costs_as_local_estimates_without_ui_prefixes() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Sessions;
+    let data = UiData::default();
+
+    let _english = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+    let english = help::context_help_for_app(&app, &data).lines.join("\n");
+    assert!(english.contains("proxy_request_logs"), "{english}");
+    assert!(english.contains("Hermes"), "{english}");
+    assert!(english.contains("state.db"), "{english}");
+    assert!(english.to_lowercase().contains("estimate"), "{english}");
+    assert!(english.to_lowercase().contains("not a bill"), "{english}");
+    assert!(!english.contains('≥'), "{english}");
+    assert!(!english.contains('~'), "{english}");
+
+    drop(_english);
+    let _chinese = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::Chinese);
+    let chinese = help::context_help_for_app(&app, &data).lines.join("\n");
+    assert!(chinese.contains("proxy_request_logs"), "{chinese}");
+    assert!(chinese.contains("Hermes"), "{chinese}");
+    assert!(chinese.contains("state.db"), "{chinese}");
+    assert!(chinese.contains("估算"), "{chinese}");
+    assert!(chinese.contains("不是账单"), "{chinese}");
+    assert!(!chinese.contains('≥'), "{chinese}");
+    assert!(!chinese.contains('~'), "{chinese}");
 }
 
 struct EnvGuard {
@@ -585,7 +702,11 @@ fn stale_app_data_result_does_not_overwrite_current_app() {
 #[test]
 fn app_data_result_preserves_usage_pricing_that_finished_first() {
     let mut app = App::new(Some(AppType::Codex));
+    let custom =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid custom range");
+    app.usage.range = data::UsageRangePreset::Custom(custom);
     let mut data = UiData::default();
+    data.usage.begin_custom_range(custom);
     let mut cache = UiDataByAppCache::default();
     cache
         .pending_by_app
@@ -655,6 +776,7 @@ fn app_data_result_preserves_usage_pricing_that_finished_first() {
 
     assert_eq!(data.providers.current_id, "codex-base");
     assert_eq!(data.usage.summary_7d.total_cost_usd, 12.5);
+    assert_eq!(data.usage.custom_range, Some(custom));
     assert_eq!(data.pricing.rows.len(), 1);
 }
 
@@ -754,7 +876,7 @@ fn current_app_data_changed_queues_full_load_without_caching_stale_data() {
 }
 
 #[test]
-fn current_app_data_changed_full_load_requeues_custom_usage_and_invalidates_old_usage_loads() {
+fn current_app_data_changed_full_load_requeues_the_visible_home_projection() {
     let mut app = App::new(Some(AppType::Claude));
     let mut data = UiData::default();
     let custom_range =
@@ -847,20 +969,24 @@ fn current_app_data_changed_full_load_requeues_custom_usage_and_invalidates_old_
     assert_eq!(data.usage.summary_7d.total_requests, 11);
     assert_eq!(data.usage.summary_custom.total_requests, 0);
     assert!(data.usage.recent_logs_custom.is_empty());
-    assert!(app.usage.is_loading_for(
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::ThirtyDays));
+    assert!(!app.usage.is_loading_for(
         &AppType::Claude,
         data::UsageRangePreset::Custom(custom_range)
     ));
+    assert_eq!(data.usage.custom_range, Some(custom_range));
     assert!(matches!(
         usage_rx
             .recv()
-            .expect("custom usage/pricing request should be queued"),
+            .expect("visible home usage/pricing request should be queued"),
         UsagePricingReq::Load {
             request_id: 1,
             app_type: AppType::Claude,
-            range: data::UsageRangePreset::Custom(range),
+            range: data::UsageRangePreset::SevenDays,
             ..
-        } if range == custom_range
+        }
     ));
 }
 
@@ -1052,7 +1178,7 @@ fn no_op_reload_candidate_preserves_pending_app_data_load() {
 }
 
 #[test]
-fn switch_to_sessions_queues_scan_without_waiting_for_next_tick() {
+fn switch_to_sessions_queues_cached_open_without_forcing_source_refresh() {
     let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
     let mut app = App::new(Some(AppType::Codex));
     let mut data = UiData::default();
@@ -1096,10 +1222,12 @@ fn switch_to_sessions_queues_scan_without_waiting_for_next_tick() {
         SessionReq::Refresh {
             request_id: queued_request_id,
             provider_id,
+            force,
             ..
         } => {
             assert_eq!(queued_request_id, request_id);
             assert_eq!(provider_id, "codex");
+            assert!(!force);
         }
         other => panic!("unexpected sessions request: {other:?}"),
     }
@@ -1314,6 +1442,9 @@ fn switching_app_on_sessions_route_queues_scan_for_next_app() {
     let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
     let mut app = App::new(Some(AppType::Claude));
     app.route = route::Route::Sessions;
+    app.usage.range = data::UsageRangePreset::Custom(
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid custom range"),
+    );
     let mut data = UiData::default();
     let mut cache = UiDataByAppCache::default();
     cache.by_app.insert(AppType::Codex, UiData::default());
@@ -1321,6 +1452,7 @@ fn switching_app_on_sessions_route_queues_scan_for_next_app() {
     let mut webdav_loading = RequestTracker::default();
     let mut update_check = RequestTracker::default();
     let (session_tx, session_rx) = mpsc::channel();
+    let (usage_tx, usage_rx) = mpsc::channel();
 
     handle_tui_action(
         &mut terminal,
@@ -1342,7 +1474,7 @@ fn switching_app_on_sessions_route_queues_scan_for_next_app() {
         None,
         None,
         None,
-        None,
+        Some(&usage_tx),
         None,
         Action::SetAppType(AppType::Codex),
     )
@@ -1391,6 +1523,20 @@ fn switching_app_on_sessions_route_queues_scan_for_next_app() {
         }
         other => panic!("unexpected sessions request: {other:?}"),
     }
+    assert!(matches!(
+        usage_rx
+            .recv()
+            .expect("non-Usage app switch should preload only the fixed projection"),
+        UsagePricingReq::Load {
+            app_type: AppType::Codex,
+            range: data::UsageRangePreset::SevenDays,
+            ..
+        }
+    ));
+    assert!(
+        usage_rx.try_recv().is_err(),
+        "a parked custom range must not run ahead of future fixed consumers"
+    );
 }
 
 #[test]
@@ -2108,6 +2254,54 @@ fn background_session_usage_sync_queues_once() {
 }
 
 #[test]
+fn manual_session_cost_sync_requeries_once_and_periodic_terminals_do_not() {
+    let mut pending = ManualSessionCostSyncState::Idle;
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), true,),
+        ManualSessionCostSyncAction::None,
+        "an ordinary periodic sync terminal must not refresh Sessions cost"
+    );
+
+    pending = ManualSessionCostSyncState::AwaitingManualRun;
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), true,),
+        ManualSessionCostSyncAction::RequeryVisiblePage
+    );
+    assert_eq!(pending, ManualSessionCostSyncState::Idle);
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), true,),
+        ManualSessionCostSyncAction::None,
+        "the manual terminal is consumed exactly once"
+    );
+
+    pending = ManualSessionCostSyncState::NeedsRunAfterCurrent;
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), true,),
+        ManualSessionCostSyncAction::QueueRun,
+        "a Run that predates metadata publication must be followed by a new incremental run"
+    );
+    assert_eq!(pending, ManualSessionCostSyncState::AwaitingManualRun);
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), false,),
+        ManualSessionCostSyncAction::None,
+        "leaving Sessions suppresses only the terminal requery"
+    );
+    assert_eq!(pending, ManualSessionCostSyncState::Idle);
+
+    pending = ManualSessionCostSyncState::AwaitingManualRun;
+    assert_eq!(
+        manual_session_cost_sync_action(
+            &mut pending,
+            Some(SessionUsageSyncTerminal::CodexRebuild),
+            true,
+        ),
+        ManualSessionCostSyncAction::QueueRun,
+        "an unexpected rebuild terminal must still lead to the promised incremental run"
+    );
+    assert_eq!(pending, ManualSessionCostSyncState::AwaitingManualRun);
+}
+
+#[test]
 fn manual_usage_refresh_syncs_sessions_before_requerying() {
     let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
     let mut app = App::new(Some(AppType::Claude));
@@ -2512,6 +2706,50 @@ fn completed_session_sync_requeries_only_the_active_custom_range() {
     ));
     assert!(rx.try_recv().is_err(), "fixed range should not be warmed");
     assert!(cache.usage_pricing_dirty_by_key.is_empty());
+}
+
+#[test]
+fn completed_session_sync_prioritizes_visible_fixed_data_over_a_parked_custom_range() {
+    for route in [route::Route::Main, route::Route::Pricing] {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = route;
+        let custom =
+            data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid custom range");
+        app.usage.range = data::UsageRangePreset::Custom(custom);
+        let mut data = UiData::default();
+        data.usage.begin_custom_range(custom);
+        let mut cache = UiDataByAppCache::default();
+        let mut tracker = RequestTracker::default();
+        let request_id = tracker.start();
+        let (tx, rx) = mpsc::channel();
+
+        handle_session_usage_sync_msg(
+            &mut app,
+            &mut data,
+            &mut cache,
+            &mut tracker,
+            Some(&tx),
+            SessionUsageSyncMsg::Finished {
+                request_id,
+                result: Ok(()),
+            },
+        );
+
+        assert!(matches!(
+            rx.recv()
+                .expect("the visible fixed projection should refresh first"),
+            UsagePricingReq::Load {
+                app_type: AppType::Claude,
+                range: data::UsageRangePreset::SevenDays,
+                ..
+            }
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "the hidden custom range must not run ahead of visible fixed data"
+        );
+        assert!(cache.usage_pricing_dirty_by_key.is_empty());
+    }
 }
 
 #[test]
@@ -2979,6 +3217,7 @@ fn usage_custom_range_app_switch_does_not_show_stale_custom_cache() {
 #[test]
 fn usage_fixed_result_does_not_replace_active_custom_logs() {
     let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Usage;
     let mut data = UiData::default();
     let mut cache = UiDataByAppCache::default();
     let active_range =
@@ -3046,6 +3285,54 @@ fn usage_fixed_result_does_not_replace_active_custom_logs() {
             .request_id,
         "fixed-log"
     );
+}
+
+#[test]
+fn selected_custom_result_is_retained_while_home_consumes_the_fixed_projection() {
+    let custom =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid custom range");
+    let range = data::UsageRangePreset::Custom(custom);
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Main;
+    app.usage.range = range;
+    let mut data = UiData::default();
+    data.usage.begin_custom_range(custom);
+    data.usage.summary_30d.total_requests = 30;
+    let mut cache = UiDataByAppCache::default();
+    cache.pending_usage_pricing_by_key.insert(
+        (AppType::Claude, range),
+        PendingDataLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    let mut custom_usage = data::UsageSnapshot {
+        custom_range: Some(custom),
+        ..data::UsageSnapshot::default()
+    };
+    custom_usage.summary_custom.total_requests = 5;
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range,
+            result: Box::new(Ok(data::UsagePricingData {
+                usage: custom_usage,
+                pricing: None,
+            })),
+        },
+    );
+
+    assert_eq!(data.usage.summary_30d.total_requests, 30);
+    assert_eq!(data.usage.custom_range, Some(custom));
+    assert_eq!(data.usage.summary_custom.total_requests, 5);
 }
 
 #[test]
@@ -3610,8 +3897,15 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
     let mut loading = RequestTracker::default();
     let (tx, rx) = mpsc::channel();
 
-    queue_managed_proxy_action(&mut app, Some(&tx), &mut loading, AppType::Claude, true)
-        .expect("queue proxy action should succeed");
+    queue_managed_proxy_action(
+        &mut app,
+        Some(&tx),
+        &mut loading,
+        AppType::Claude,
+        true,
+        data::UiDataReloadToken::default(),
+    )
+    .expect("queue proxy action should succeed");
 
     let req = rx.recv().expect("proxy request should be queued");
     assert!(matches!(
@@ -3620,6 +3914,7 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
             request_id: 1,
             app_type: AppType::Claude,
             enabled: true,
+            base_reload_token: _,
         }
     ));
     assert_eq!(loading.active, Some(1));
@@ -3630,6 +3925,684 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
             ..
         }
     ));
+}
+
+#[test]
+fn managed_proxy_actions_queue_serially_and_latest_owns_loading_state() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut loading = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+
+    queue_managed_proxy_action(
+        &mut app,
+        Some(&tx),
+        &mut loading,
+        AppType::Claude,
+        true,
+        data::UiDataReloadToken::default(),
+    )
+    .expect("first proxy action should be queued");
+    queue_managed_proxy_action(
+        &mut app,
+        Some(&tx),
+        &mut loading,
+        AppType::Codex,
+        false,
+        data::UiDataReloadToken::default(),
+    )
+    .expect("second proxy action should be queued");
+
+    assert!(matches!(
+        rx.recv().expect("first proxy request"),
+        ProxyReq::SetManagedSessionForCurrentApp {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token: _,
+        }
+    ));
+    assert!(matches!(
+        rx.recv().expect("second proxy request"),
+        ProxyReq::SetManagedSessionForCurrentApp {
+            request_id: 2,
+            app_type: AppType::Codex,
+            enabled: false,
+            base_reload_token: _,
+        }
+    ));
+    assert_eq!(loading.active, Some(2));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::Proxy,
+            ..
+        }
+    ));
+}
+
+fn provider_runtime_snapshot(
+    current_provider: &str,
+    running: bool,
+) -> data::ProviderRuntimeSnapshot {
+    data::ProviderRuntimeSnapshot::new(
+        data::ProvidersSnapshot {
+            current_id: current_provider.to_string(),
+            ..data::ProvidersSnapshot::default()
+        },
+        data::ProxySnapshot {
+            running,
+            estimated_input_tokens_total: 12,
+            estimated_output_tokens_total: 34,
+            ..data::ProxySnapshot::default()
+        },
+    )
+}
+
+fn official_claude_providers() -> data::ProvidersSnapshot {
+    let mut provider = crate::provider::Provider::with_id(
+        "official".to_string(),
+        "Claude Official".to_string(),
+        json!({"env": {}}),
+        None,
+    );
+    provider.category = Some("official".to_string());
+    provider.meta = Some(crate::provider::ProviderMeta {
+        usage_script: Some(crate::provider::UsageScript {
+            enabled: true,
+            language: "javascript".to_string(),
+            code: String::new(),
+            timeout: Some(10),
+            api_key: None,
+            base_url: None,
+            access_token: None,
+            user_id: None,
+            template_type: Some("official_subscription".to_string()),
+            auto_query_interval: Some(5),
+            coding_plan_provider: None,
+        }),
+        ..Default::default()
+    });
+    data::ProvidersSnapshot {
+        current_id: "official".to_string(),
+        rows: vec![data::ProviderRow {
+            id: "official".to_string(),
+            provider,
+            api_url: None,
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }],
+        ..data::ProvidersSnapshot::default()
+    }
+}
+
+#[test]
+fn managed_proxy_result_applies_only_provider_runtime_data() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::Proxy,
+        title: "Starting".to_string(),
+        message: "Loading".to_string(),
+    };
+    let mut data = UiData::default();
+    data.providers.current_id = "old-provider".to_string();
+    data.usage.summary_30d.total_requests = 77;
+    data.pricing.rows.push(data::ModelPricingRow {
+        model_id: "sentinel-model".to_string(),
+        ..data::ModelPricingRow::default()
+    });
+    let old_reload_token = data.reload_token;
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Claude, data.clone());
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 4,
+        active: Some(4),
+    };
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token: old_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("fresh-provider", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert!(data.proxy.running);
+    assert_eq!(data.usage.summary_30d.total_requests, 77);
+    assert_eq!(data.pricing.rows[0].model_id, "sentinel-model");
+    assert_ne!(data.reload_token, old_reload_token);
+    assert_eq!(proxy_loading.active, None);
+    assert_eq!(proxy_snapshot_refresh.active, None);
+    assert!(matches!(app.overlay, Overlay::None));
+    let expected_toast = texts::tui_toast_proxy_managed_current_app_updated("Claude", true);
+    assert_eq!(
+        app.toast
+            .as_ref()
+            .map(|toast| (toast.kind, toast.message.as_str())),
+        Some((ToastKind::Success, expected_toast.as_str()))
+    );
+    assert!(app_data_rx.try_recv().is_err());
+    assert!(proxy_rx.try_recv().is_err());
+}
+
+#[test]
+fn superseded_managed_proxy_result_updates_origin_cache_after_app_change() {
+    let mut app = App::new(Some(AppType::Codex));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::Proxy,
+        title: "Starting newer request".to_string(),
+        message: "Loading".to_string(),
+    };
+    let mut data = UiData::default();
+    data.providers.current_id = "visible-codex".to_string();
+    let mut cached_claude = UiData::default();
+    cached_claude.providers.current_id = "old-claude".to_string();
+    let base_reload_token = cached_claude.reload_token;
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Claude, cached_claude);
+    let mut proxy_loading = RequestTracker {
+        seq: 2,
+        active: Some(2),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 3,
+        active: Some(3),
+    };
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("fresh-claude", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "visible-codex");
+    let cached = cache
+        .by_app
+        .get(&AppType::Claude)
+        .expect("origin app should remain cached");
+    assert_eq!(cached.providers.current_id, "fresh-claude");
+    assert!(cached.proxy.running);
+    assert_eq!(proxy_loading.active, Some(2));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::Proxy,
+            ..
+        }
+    ));
+    assert!(matches!(
+        proxy_rx.recv().expect("visible app proxy refresh"),
+        ProxyReq::RefreshSnapshot {
+            request_id: 4,
+            app_type: AppType::Codex,
+        }
+    ));
+    assert!(app_data_rx.try_recv().is_err());
+}
+
+#[test]
+fn managed_proxy_result_supersedes_older_app_data_request() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "old-provider".to_string();
+    let base_reload_token = data.reload_token;
+    let mut cache = UiDataByAppCache {
+        next_app_data_request_id: 7,
+        ..UiDataByAppCache::default()
+    };
+    cache
+        .pending_by_app
+        .insert(AppType::Claude, pending_snapshot_app_data(7));
+    cache.incomplete_by_app.insert(AppType::Claude);
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("fresh-provider", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert!(matches!(
+        app_data_rx.recv().expect("fresh successor app-data load"),
+        AppDataReq::Load {
+            request_id: 8,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+    assert!(proxy_rx.try_recv().is_err());
+
+    let mut stale = UiData::default();
+    stale.providers.current_id = "stale-provider".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&app_data_tx),
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 7,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Ok(stale),
+        },
+    );
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert_eq!(
+        cache
+            .pending_by_app
+            .get(&AppType::Claude)
+            .map(|pending| pending.request_id),
+        Some(8)
+    );
+}
+
+#[test]
+fn managed_proxy_result_reloads_previously_incomplete_app_data() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "old-provider".to_string();
+    let base_reload_token = data.reload_token;
+    let mut cache = UiDataByAppCache::default();
+    cache.incomplete_by_app.insert(AppType::Claude);
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("fresh-provider", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: None,
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert!(matches!(
+        app_data_rx.recv().expect("incomplete app successor load"),
+        AppDataReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+    assert!(cache.incomplete_by_app.contains(&AppType::Claude));
+}
+
+#[test]
+fn managed_proxy_result_does_not_overwrite_newer_ui_data() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "before-request".to_string();
+    let base_reload_token = data.reload_token;
+    data.providers.current_id = "newer-provider".to_string();
+    data.mark_current_app_data_changed();
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Claude, data.clone());
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("stale-provider", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "newer-provider");
+    assert!(matches!(
+        app_data_rx.recv().expect("version mismatch successor load"),
+        AppDataReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+    assert!(matches!(
+        proxy_rx.recv().expect("fresh visible proxy snapshot"),
+        ProxyReq::RefreshSnapshot {
+            request_id: 1,
+            app_type: AppType::Claude,
+        }
+    ));
+}
+
+#[test]
+fn managed_proxy_result_invalidates_quota_generation_and_refreshes_same_provider() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData {
+        providers: official_claude_providers(),
+        ..UiData::default()
+    };
+    let target =
+        data::quota_target_for_current_provider(&AppType::Claude, &data).expect("quota target");
+    let stale_generation = data.quota.generation();
+    data.quota.mark_loading(target.clone(), false);
+    let base_reload_token = data.reload_token;
+    let snapshot = data::ProviderRuntimeSnapshot::new(
+        official_claude_providers(),
+        data::ProxySnapshot {
+            running: true,
+            ..data::ProxySnapshot::default()
+        },
+    );
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (quota_tx, quota_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(snapshot)),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: None,
+            proxy: None,
+            quota: Some(&quota_tx),
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    let QuotaReq::Refresh {
+        generation: fresh_generation,
+        target: refreshed_target,
+    } = quota_rx
+        .recv()
+        .expect("quota refresh after credential change");
+    assert_ne!(fresh_generation, stale_generation);
+    assert_eq!(refreshed_target, target);
+
+    handle_quota_msg(
+        &mut app,
+        &mut data,
+        runtime_systems::QuotaMsg::Finished {
+            generation: stale_generation,
+            target: target.clone(),
+            result: Ok(data::ProviderUsageQuota::Script(
+                crate::provider::UsageResult {
+                    success: true,
+                    data: None,
+                    error: None,
+                },
+            )),
+        },
+    );
+    let state = data
+        .quota
+        .state_for(&target.provider_id)
+        .expect("fresh quota request remains active");
+    assert!(state.loading);
+    assert!(state.quota.is_none());
+}
+
+#[test]
+fn quota_auto_refresh_respects_usage_query_interval_and_zero_disables_repoll() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData {
+        providers: official_claude_providers(),
+        ..UiData::default()
+    };
+    let script = data.providers.rows[0]
+        .provider
+        .meta
+        .as_mut()
+        .and_then(|meta| meta.usage_script.as_mut())
+        .expect("official usage script");
+    script.auto_query_interval = Some(2);
+    let (quota_tx, quota_rx) = mpsc::channel();
+
+    queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&quota_tx));
+    quota_rx.recv().expect("initial quota refresh");
+
+    app.tick = 2 * TUI_TICKS_PER_MINUTE - 1;
+    queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&quota_tx));
+    assert!(quota_rx.try_recv().is_err());
+
+    app.tick = 2 * TUI_TICKS_PER_MINUTE;
+    queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&quota_tx));
+    quota_rx.recv().expect("provider interval quota refresh");
+
+    data.providers.rows[0]
+        .provider
+        .meta
+        .as_mut()
+        .and_then(|meta| meta.usage_script.as_mut())
+        .expect("official usage script")
+        .auto_query_interval = Some(0);
+    app.tick = 100 * TUI_TICKS_PER_MINUTE;
+    queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&quota_tx));
+    assert!(
+        quota_rx.try_recv().is_err(),
+        "zero interval must disable periodic quota refresh"
+    );
+}
+
+#[test]
+fn managed_proxy_snapshot_failure_recovers_in_background_without_false_failure() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::Proxy,
+        title: "Starting".to_string(),
+        message: "Loading".to_string(),
+    };
+    let mut data = UiData::default();
+    data.providers.current_id = "still-visible".to_string();
+    let base_reload_token = data.reload_token;
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Claude, data.clone());
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Err("snapshot boom".to_string()),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "still-visible");
+    assert!(matches!(
+        app_data_rx.recv().expect("background app-data recovery"),
+        AppDataReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+    assert!(matches!(
+        proxy_rx.recv().expect("background proxy recovery"),
+        ProxyReq::RefreshSnapshot {
+            request_id: 1,
+            app_type: AppType::Claude,
+        }
+    ));
+    let toast = app.toast.as_ref().expect("refresh warning");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert_eq!(
+        toast.message,
+        texts::tui_toast_proxy_managed_updated_refresh_failed("Claude", true, "snapshot boom")
+    );
+    assert!(matches!(app.overlay, Overlay::None));
 }
 
 #[test]
@@ -3752,7 +4725,7 @@ fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
     };
     app.reset_proxy_activity(0, 0);
 
-    let invalidation = handle_proxy_msg(
+    let effect = handle_proxy_msg(
         &mut app,
         &mut data,
         &mut proxy_loading,
@@ -3762,10 +4735,9 @@ fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
             app_type: AppType::Claude,
             result: Ok(proxy),
         },
-    )
-    .expect("snapshot result should be handled");
+    );
 
-    assert_eq!(invalidation, CacheInvalidation::None);
+    assert!(matches!(effect, ProxyMsgEffect::None));
     assert!(data.proxy.running);
     assert_eq!(data.proxy.estimated_input_tokens_total, 12);
     assert_eq!(data.proxy.estimated_output_tokens_total, 34);
@@ -3797,8 +4769,7 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
                 ..data::ProxySnapshot::default()
             }),
         },
-    )
-    .expect("stale snapshot result should be ignored");
+    );
     assert!(!data.proxy.running);
     assert_eq!(proxy_snapshot_refresh.active, Some(2));
 
@@ -3815,8 +4786,7 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
                 ..data::ProxySnapshot::default()
             }),
         },
-    )
-    .expect("wrong-app snapshot result should be ignored");
+    );
     assert!(!data.proxy.running);
     assert_eq!(proxy_snapshot_refresh.active, None);
 }
@@ -3852,8 +4822,15 @@ fn managed_proxy_action_warns_when_worker_is_unavailable() {
     let mut app = App::new(Some(AppType::Claude));
     let mut loading = RequestTracker::default();
 
-    queue_managed_proxy_action(&mut app, None, &mut loading, AppType::Claude, true)
-        .expect("missing worker should not crash");
+    queue_managed_proxy_action(
+        &mut app,
+        None,
+        &mut loading,
+        AppType::Claude,
+        true,
+        data::UiDataReloadToken::default(),
+    )
+    .expect("missing worker should not crash");
 
     let toast = app.toast.as_ref().expect("warning toast should be shown");
     assert_eq!(toast.kind, ToastKind::Warning);
@@ -4622,6 +5599,116 @@ fn proxy_activity_refreshes_home_usage_on_its_own_throttled_cadence() {
     assert!(app
         .usage
         .is_loading_for(&AppType::Claude, data::UsageRangePreset::ThirtyDays));
+}
+
+#[test]
+fn proxy_activity_refreshes_the_usage_pages_active_fixed_projection() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Usage;
+    app.usage.range = data::UsageRangePreset::Today;
+    app.tick = 0;
+    app.reset_proxy_activity(10, 20);
+    let mut cache = UiDataByAppCache::default();
+    cache.usage_pricing_by_key.insert(
+        (AppType::Claude, data::UsageRangePreset::SevenDays),
+        data::UsagePricingData::default(),
+    );
+    let (tx, rx) = mpsc::channel();
+
+    app.observe_proxy_token_activity(15, 27);
+    app.tick = USAGE_PROXY_REFRESH_INTERVAL_TICKS;
+    queue_usage_proxy_refresh_if_due(&mut app, &mut cache, Some(&tx));
+
+    assert!(cache.usage_pricing_by_key.is_empty());
+    assert!(matches!(
+        rx.recv()
+            .expect("the visible Usage projection should refresh"),
+        UsagePricingReq::Load {
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            ..
+        }
+    ));
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::Today));
+}
+
+#[test]
+fn custom_usage_stays_outside_the_fast_proxy_refresh_loop() {
+    let now = chrono::Utc::now().timestamp();
+    for custom in [
+        data::UsageCustomRange {
+            start: now.saturating_sub(3_600),
+            end: now.saturating_add(3_600),
+        },
+        data::UsageCustomRange {
+            start: now.saturating_sub(7_200),
+            end: now.saturating_sub(3_600),
+        },
+        data::UsageCustomRange {
+            start: now.saturating_add(3_600),
+            end: now.saturating_add(7_200),
+        },
+    ] {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = route::Route::Usage;
+        app.usage.range = data::UsageRangePreset::Custom(custom);
+        app.tick = 0;
+        app.reset_proxy_activity(10, 20);
+        app.observe_proxy_token_activity(15, 27);
+        app.tick = USAGE_AUTO_SYNC_INTERVAL_TICKS;
+        assert!(!app.should_poll_proxy_activity());
+
+        let mut cache = UiDataByAppCache::default();
+        let (tx, rx) = mpsc::channel();
+        queue_usage_proxy_refresh_if_due(&mut app, &mut cache, Some(&tx));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "custom ranges use session sync or manual refresh instead"
+        );
+        assert!(app.usage_proxy_activity_dirty);
+    }
+}
+
+#[test]
+fn immutable_custom_usage_defers_proxy_activity_until_a_live_projection_is_visible() {
+    let now = chrono::Utc::now().timestamp();
+    let historical = data::UsageRangePreset::Custom(data::UsageCustomRange {
+        start: now.saturating_sub(7_200),
+        end: now.saturating_sub(3_600),
+    });
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Usage;
+    app.usage.range = historical;
+    app.tick = 0;
+    app.reset_proxy_activity(10, 20);
+    app.observe_proxy_token_activity(15, 27);
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    app.tick = USAGE_AUTO_SYNC_INTERVAL_TICKS;
+    queue_usage_proxy_refresh_if_due(&mut app, &mut cache, Some(&tx));
+    assert!(rx.try_recv().is_err());
+    assert!(
+        app.usage_proxy_activity_dirty,
+        "activity must remain pending for the next mutable projection"
+    );
+
+    app.route = route::Route::Main;
+    queue_usage_proxy_refresh_if_due(&mut app, &mut cache, Some(&tx));
+    assert!(matches!(
+        rx.recv()
+            .expect("the pending activity should refresh the home projection"),
+        UsagePricingReq::Load {
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            ..
+        }
+    ));
+    assert!(!app.usage_proxy_activity_dirty);
 }
 
 #[test]

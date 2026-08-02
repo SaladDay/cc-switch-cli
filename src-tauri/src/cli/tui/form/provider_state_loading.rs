@@ -4,10 +4,14 @@ use super::{
     claude_disable_auto_upgrade_enabled, claude_hide_attribution_enabled, claude_teammates_enabled,
     claude_tool_search_enabled, detect_balance_provider_for_usage_query,
     detect_coding_plan_provider_for_usage_query, normalize_local_proxy_header_overrides,
-    ClaudeApiFormat, CodexWireApi, PromptCacheRoutingMode, ProviderAddFormState,
+    ClaudeApiFormat, ClaudeModelRole, CodexWireApi, PromptCacheRoutingMode, ProviderAddFormState,
     UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 use crate::app_config::AppType;
+use crate::claude_model_config::{
+    CLAUDE_DEFAULT_MODEL_ENV_KEY, CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY,
+    CLAUDE_SUBAGENT_MODEL_ENV_KEY,
+};
 use crate::provider::Provider;
 use serde_json::Value;
 
@@ -60,6 +64,10 @@ fn populate_local_proxy_settings_form(form: &mut ProviderAddFormState, provider:
 }
 
 fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    form.usage_query_official_subscription = provider
+        .official_subscription_tool(&form.app_type)
+        .is_some();
+
     let Some(script) = provider
         .meta
         .as_ref()
@@ -68,6 +76,20 @@ fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provide
         form.refresh_default_usage_query_template();
         return;
     };
+
+    if form.usage_query_official_subscription
+        && script.template_type.as_deref()
+            != Some(UsageQueryTemplate::OfficialSubscription.as_str())
+    {
+        // The desktop UI resets incompatible saved templates when an official
+        // Claude/Codex/Gemini provider opens its Usage Query editor.
+        form.usage_query_enabled = false;
+        form.usage_query_template = UsageQueryTemplate::OfficialSubscription;
+        form.usage_query_timeout.set("10");
+        form.usage_query_auto_interval.set("5");
+        form.usage_query_code.clear();
+        return;
+    }
 
     form.usage_query_enabled = script.enabled;
     form.usage_query_timeout
@@ -164,37 +186,41 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
         {
             form.claude_base_url.set(url);
         }
-        if let Some(model) = env.get("ANTHROPIC_MODEL").and_then(|value| value.as_str()) {
+        if let Some(model) = env
+            .get(CLAUDE_DEFAULT_MODEL_ENV_KEY)
+            .and_then(|value| value.as_str())
+        {
             form.claude_model.set(model);
         }
-        let model = env.get("ANTHROPIC_MODEL").and_then(|value| value.as_str());
-        let small_fast = env
-            .get("ANTHROPIC_SMALL_FAST_MODEL")
+        let model = env
+            .get(CLAUDE_DEFAULT_MODEL_ENV_KEY)
             .and_then(|value| value.as_str());
+        let small_fast = env
+            .get(CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY)
+            .and_then(|value| value.as_str());
+        let role_model = |role: ClaudeModelRole| {
+            env.get(role.model_env_key())
+                .and_then(|value| value.as_str())
+        };
 
-        if let Some(haiku) = env
-            .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
-            .and_then(|value| value.as_str())
-            .or(small_fast)
-            .or(model)
-        {
-            form.claude_haiku_model.set(haiku);
+        if let Some(haiku) = role_model(ClaudeModelRole::Haiku).or(small_fast).or(model) {
+            form.set_claude_model_from_config(ClaudeModelRole::Haiku.index(), haiku);
         }
-        if let Some(sonnet) = env
-            .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
-            .and_then(|value| value.as_str())
-            .or(model)
-            .or(small_fast)
-        {
-            form.set_claude_model_from_config(1, sonnet);
+        if let Some(sonnet) = role_model(ClaudeModelRole::Sonnet).or(model).or(small_fast) {
+            form.set_claude_model_from_config(ClaudeModelRole::Sonnet.index(), sonnet);
         }
-        if let Some(opus) = env
-            .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+        let opus = role_model(ClaudeModelRole::Opus).or(model).or(small_fast);
+        if let Some(opus) = opus {
+            form.set_claude_model_from_config(ClaudeModelRole::Opus.index(), opus);
+        }
+        if let Some(fable) = role_model(ClaudeModelRole::Fable).or(opus) {
+            form.set_claude_model_from_config(ClaudeModelRole::Fable.index(), fable);
+        }
+        if let Some(subagent) = env
+            .get(CLAUDE_SUBAGENT_MODEL_ENV_KEY)
             .and_then(|value| value.as_str())
-            .or(model)
-            .or(small_fast)
         {
-            form.set_claude_model_from_config(2, opus);
+            form.set_claude_model_from_config(ClaudeModelRole::Subagent.index(), subagent);
         }
     }
 }
@@ -283,6 +309,10 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
 }
 
 fn populate_gemini_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    // The upstream model is an add-form default only. Existing providers that
+    // intentionally omit GEMINI_MODEL must remain unset when edited or copied.
+    form.gemini_model.set("");
+
     if let Some(env) = provider
         .settings_config
         .get("env")

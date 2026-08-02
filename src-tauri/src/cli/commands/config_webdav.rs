@@ -145,7 +145,7 @@ fn show() -> Result<(), AppError> {
     println!("Remote Root:  {}", settings.remote_root);
     println!("Profile:      {}", settings.profile);
     println!("Username:     {}", blank_as_na(&settings.username));
-    println!("Password:     {}", masked_secret(&settings.password));
+    println!("Password:     {}", blank_as_na(&settings.password));
     println!("Auto Sync:    {}", yes_no(settings.auto_sync));
     println!(
         "Last Sync:    {}",
@@ -355,13 +355,6 @@ fn blank_as_na(value: &str) -> &str {
     } else {
         trimmed
     }
-}
-
-fn masked_secret(value: &str) -> String {
-    if value.trim().is_empty() {
-        return "N/A".to_string();
-    }
-    "********".to_string()
 }
 
 #[cfg(test)]

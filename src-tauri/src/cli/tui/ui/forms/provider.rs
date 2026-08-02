@@ -109,6 +109,8 @@ fn provider_json_preview_source_fits(
         provider.claude_haiku_model.value.as_str(),
         provider.claude_sonnet_model.value.as_str(),
         provider.claude_opus_model.value.as_str(),
+        provider.claude_fable_model.value.as_str(),
+        provider.claude_subagent_model.value.as_str(),
         provider.codex_base_url.value.as_str(),
         provider.codex_model.value.as_str(),
         provider.codex_env_key.value.as_str(),
@@ -1655,6 +1657,9 @@ fn render_usage_query_info_panel(
             texts::tui_usage_query_copilot_auto_auth()
         }
         super::form::UsageQueryTemplate::TokenPlan => texts::tui_usage_query_token_plan_hint(),
+        super::form::UsageQueryTemplate::OfficialSubscription => {
+            texts::tui_usage_query_official_subscription_hint()
+        }
         super::form::UsageQueryTemplate::Custom
         | super::form::UsageQueryTemplate::General
         | super::form::UsageQueryTemplate::NewApi

@@ -13,20 +13,21 @@ use crate::services::{S3SyncService, SkillService, StreamCheckService, WebDavSyn
 use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 
 use super::super::data::{
-    load_proxy_snapshot_from_state_async, load_snapshot_state, load_state,
-    load_usage_pricing_data_from_state_for_range, UiData, UsageRangePreset,
+    load_provider_runtime_snapshot_from_state_async, load_proxy_snapshot_from_state_async,
+    load_snapshot_state, load_state, load_usage_pricing_data_from_state_for_range, UiData,
+    UsageRangePreset,
 };
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
     AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem,
     LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
-    ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq,
-    ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages, SessionMsg, SessionReq,
-    SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg,
-    SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq,
-    StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem, UsageLogLoadError,
-    UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem, WebDavDone,
-    WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchSystem,
+    ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages,
+    SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
+    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
+    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
+    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
+    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -188,12 +189,14 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                         request_id,
                         app_type,
                         enabled,
+                        base_reload_token,
                     } => {
                         let _ = tx.send(ProxyMsg::ManagedSessionFinished {
                             request_id,
                             app_type,
                             enabled,
-                            result: Err(err.clone()),
+                            base_reload_token,
+                            outcome: ManagedSessionOutcome::Failed(err.clone()),
                         });
                     }
                     ProxyReq::RefreshSnapshot {
@@ -218,20 +221,33 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                 request_id,
                 app_type,
                 enabled,
+                base_reload_token,
             } => {
-                let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
-                    rt.block_on(
+                let outcome = match load_state().map_err(|e| e.to_string()) {
+                    Err(error) => ManagedSessionOutcome::Failed(error),
+                    Ok(state) => match rt.block_on(
                         state
                             .proxy_service
                             .set_managed_session_for_app(app_type.as_str(), enabled),
-                    )
-                });
+                    ) {
+                        Err(error) => ManagedSessionOutcome::Failed(error),
+                        Ok(()) => ManagedSessionOutcome::Applied {
+                            snapshot: rt
+                                .block_on(load_provider_runtime_snapshot_from_state_async(
+                                    &state, &app_type,
+                                ))
+                                .map(Box::new)
+                                .map_err(|error| error.to_string()),
+                        },
+                    },
+                };
 
                 let _ = tx.send(ProxyMsg::ManagedSessionFinished {
                     request_id,
                     app_type,
                     enabled,
-                    result,
+                    base_reload_token,
+                    outcome,
                 });
             }
             ProxyReq::RefreshSnapshot {
@@ -811,6 +827,11 @@ pub(crate) fn start_session_system() -> Result<SessionSystem, AppError> {
     let (req_tx, req_rx) = mpsc::channel::<SessionReq>();
     let (control_tx, control_rx) = mpsc::channel::<SessionReq>();
     let (locate_tx, locate_rx) = session_locate_mailbox();
+    let active_cost_seq = Arc::new(AtomicU64::new(0));
+    let cost_req_tx = super::session_cost::lazy_session_cost_sender(
+        Arc::clone(&active_cost_seq),
+        result_tx.clone(),
+    );
     let search_generation = Arc::new(AtomicU64::new(0));
     let message_generation = Arc::new(AtomicU64::new(0));
     let locate_generation = Arc::new(AtomicU64::new(0));
@@ -869,6 +890,7 @@ pub(crate) fn start_session_system() -> Result<SessionSystem, AppError> {
 
     Ok(SessionSystem {
         req_tx,
+        cost_req_tx,
         result_rx,
         _handles: vec![dispatcher_handle, control_handle, locate_handle],
     })
@@ -1937,20 +1959,27 @@ fn run_session_scan(
         }
     };
 
-    // Opening a scope reads one immutable page only. It happens before any
-    // revalidation work and therefore remains fixed-cost for very large stores.
+    // Opening a scope reads one immutable page only. Sessions is intentionally
+    // manual-refresh-only: a valid persisted generation completes an ordinary
+    // entry request here, without walking or statting provider sources. A
+    // missing manifest falls through to the unavoidable one-time bootstrap.
     let mut needs_provisional = false;
     if !force {
         let opened = manifest_store
             .open_reader(&provider_id)
             .and_then(|reader| reader.load_page(0).map(|page| (reader, page)));
         needs_provisional = opened.is_none();
+        let complete = opened.is_some();
         let _ = tx.send(SessionMsg::ScopeOpened {
             request_id,
             scope_epoch,
             scope: provider_id.clone(),
+            complete,
             result: Ok(opened),
         });
+        if complete {
+            return;
+        }
     }
 
     let store = match crate::session_manager::scan_cache_store::ScanCacheStore::open() {
@@ -2043,15 +2072,24 @@ fn run_session_scan(
     if is_cancelled() {
         return;
     }
-    let result = result.map(|published| {
-        let reader = published.reader.clone();
-        (published, reader)
-    });
+    let published = match result {
+        Ok(published) => published,
+        Err(error) => {
+            let _ = tx.send(SessionMsg::ManifestPublished {
+                request_id,
+                scope_epoch,
+                scope: provider_id,
+                result: Err(error),
+            });
+            return;
+        }
+    };
+    let reader = published.reader.clone();
     let _ = tx.send(SessionMsg::ManifestPublished {
         request_id,
         scope_epoch,
         scope: provider_id,
-        result,
+        result: Ok((published, reader)),
     });
 }
 
@@ -2362,8 +2400,9 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
         Err(e) => {
             let err = e.to_string();
             while let Ok(req) = rx.recv() {
-                let QuotaReq::Refresh { target } = req;
+                let QuotaReq::Refresh { generation, target } = req;
                 let _ = tx.send(QuotaMsg::Finished {
+                    generation,
                     target,
                     result: Err(err.clone()),
                 });
@@ -2373,10 +2412,14 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
     };
 
     while let Ok(req) = rx.recv() {
-        let QuotaReq::Refresh { target } = req;
+        let QuotaReq::Refresh { generation, target } = req;
         let result = rt.block_on(crate::cli::provider_quota::query_quota(&target));
 
-        let _ = tx.send(QuotaMsg::Finished { target, result });
+        let _ = tx.send(QuotaMsg::Finished {
+            generation,
+            target,
+            result,
+        });
     }
 }
 
@@ -4064,6 +4107,93 @@ mod tests {
             rx.recv().expect("purge completion"),
             SessionMsg::ManifestsPurged { request_id: 41, .. }
         ));
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn session_entry_uses_valid_manifest_without_source_revalidation() {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let config_dir = home.path().join(".cc-switch");
+        std::fs::create_dir(&config_dir).expect("create private config directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+                .expect("secure config directory");
+        }
+        let store = crate::session_manager::paged_manifest::PagedManifestStore::open()
+            .expect("open manifest store");
+        let mut builder = store.begin_build("claude").expect("begin manifest");
+        builder
+            .push(crate::session_manager::SessionMeta {
+                provider_id: "claude".to_string(),
+                session_id: "cached-session".to_string(),
+                usage: Some(crate::session_manager::SessionUsageSummary {
+                    input_tokens: 42,
+                    estimated_cost_usd: Some(0.125),
+                    ..crate::session_manager::SessionUsageSummary::default()
+                }),
+                ..crate::session_manager::SessionMeta::default()
+            })
+            .expect("stage cached session");
+        builder.publish().expect("publish cached manifest");
+
+        let (tx, rx) = mpsc::channel();
+        run_session_scan(17, 3, "claude".to_string(), false, 0, &tx);
+
+        assert!(matches!(
+            rx.recv().expect("cached-open result"),
+            SessionMsg::ScopeOpened {
+                request_id: 17,
+                scope_epoch: 3,
+                complete: true,
+                result: Ok(Some((_, page))),
+                ..
+            } if page.rows.first().is_some_and(|row| row.session_id == "cached-session")
+                && page.rows.first().and_then(|row| row.usage).is_none()
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "a valid cached open must not publish a rebuilt manifest"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn manual_session_refresh_ends_with_metadata_publication() {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let config_dir = home.path().join(".cc-switch");
+        std::fs::create_dir(&config_dir).expect("create private config directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+                .expect("secure config directory");
+        }
+        let (tx, rx) = mpsc::channel();
+        let generation = SESSION_SCAN_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+
+        run_session_scan(23, 5, "claude".to_string(), true, generation, &tx);
+
+        let metadata = rx.recv().expect("metadata publication");
+        match metadata {
+            SessionMsg::ManifestPublished {
+                request_id: 23,
+                scope_epoch: 5,
+                result: Ok((published, _)),
+                ..
+            } => assert_eq!(published.total_rows, 0),
+            SessionMsg::ManifestPublished {
+                result: Err(error), ..
+            } => panic!("metadata publication failed: {error}"),
+            _ => panic!("unexpected metadata message"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "manual refresh must not start a second cost-indexing phase"
+        );
     }
 
     #[test]

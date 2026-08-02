@@ -736,6 +736,16 @@ impl Database {
     ///
     /// 用于 TUI 后台热刷新等只读路径；不会创建目录、建表、迁移、seed 或执行启动维护。
     pub fn open_readonly_current_schema() -> Result<Self, AppError> {
+        Self::open_readonly_current_schema_with_busy_timeout(Duration::from_secs(5))
+    }
+
+    /// Open the same read-only snapshot with a caller-owned lock budget.
+    ///
+    /// Latency-sensitive overlays use this variant so even the schema-version
+    /// probe cannot inherit the general five-second database timeout.
+    pub(crate) fn open_readonly_current_schema_with_busy_timeout(
+        busy_timeout: Duration,
+    ) -> Result<Self, AppError> {
         let db_path = database_path()?;
         if !db_path.exists() {
             return Err(AppError::Database(format!(
@@ -749,6 +759,8 @@ impl Database {
         let conn = Connection::open_with_flags(&db_path, readonly_database_open_flags())
             .map_err(|e| AppError::Database(e.to_string()))?;
         Self::configure_connection(&conn)?;
+        conn.busy_timeout(busy_timeout)
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         let version = Self::get_user_version(&conn)?;
         if version > SCHEMA_VERSION {

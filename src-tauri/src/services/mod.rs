@@ -17,6 +17,7 @@ pub mod provider;
 pub mod proxy;
 pub(crate) mod s3;
 pub mod s3_sync;
+pub(crate) mod session_cost;
 pub mod session_usage;
 pub mod session_usage_codex;
 pub mod session_usage_driver;

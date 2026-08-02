@@ -5,6 +5,53 @@ use url::{Host, Url};
 
 use crate::error::AppError;
 
+/// Usage Query templates shared by the command layer, TUI, and query dispatcher.
+///
+/// Keep the serialized values aligned with the desktop application's
+/// `templateType` contract. Unknown values remain strings on `UsageScript`; this
+/// enum is only used when behavior for a known template is required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UsageQueryTemplate {
+    Custom,
+    General,
+    NewApi,
+    GitHubCopilot,
+    TokenPlan,
+    Balance,
+    OfficialSubscription,
+}
+
+impl UsageQueryTemplate {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::General => "general",
+            Self::NewApi => "newapi",
+            Self::GitHubCopilot => "github_copilot",
+            Self::TokenPlan => "token_plan",
+            Self::Balance => "balance",
+            Self::OfficialSubscription => "official_subscription",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "custom" => Some(Self::Custom),
+            "general" => Some(Self::General),
+            "newapi" => Some(Self::NewApi),
+            "github_copilot" => Some(Self::GitHubCopilot),
+            "token_plan" => Some(Self::TokenPlan),
+            "balance" => Some(Self::Balance),
+            "official_subscription" => Some(Self::OfficialSubscription),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn requires_script(self) -> bool {
+        matches!(self, Self::Custom | Self::General | Self::NewApi)
+    }
+}
+
 /// 执行用量查询脚本
 pub async fn execute_usage_script(
     script_code: &str,
