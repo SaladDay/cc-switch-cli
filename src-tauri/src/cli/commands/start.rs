@@ -479,11 +479,7 @@ mod tests {
         let db = std::sync::Arc::new(crate::Database::memory().expect("create memory database"));
         db.migrate_from_json(&config)
             .expect("seed memory database from config");
-        AppState {
-            db: db.clone(),
-            config: std::sync::RwLock::new(config),
-            proxy_service: crate::ProxyService::new(db),
-        }
+        AppState::from_test_parts(db, config).expect("construct test state")
     }
 
     #[test]

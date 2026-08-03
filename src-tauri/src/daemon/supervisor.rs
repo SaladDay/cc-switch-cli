@@ -19,6 +19,7 @@ use tokio::sync::{oneshot, Mutex, Notify};
 
 use crate::app_config::AppType;
 use crate::database::Database;
+use crate::services::state_coordination::OrdinaryMutationPermit;
 use crate::services::ProxyService;
 
 use super::ipc::protocol::{
@@ -30,7 +31,6 @@ use super::restart::{Decision, RestartPolicy};
 const PROXY_RUNTIME_SESSION_KEY: &str = "proxy_runtime_session";
 pub const DAEMON_SOCKET_ENV: &str = "CC_SWITCH_DAEMON_SOCKET";
 pub const SESSION_TOKEN_ENV: &str = "CC_SWITCH_PROXY_SESSION_TOKEN";
-pub const RESTORE_GUARD_BYPASS_ENV: &str = "CC_SWITCH_RESTORE_GUARD_BYPASS";
 /// Mirrors `services::proxy::PROXY_RUNTIME_KIND_ENV_KEY`. Setting this to
 /// `managed_external` makes the worker skip self-publishing the runtime
 /// session row — the daemon writes it after WorkerHello.
@@ -122,12 +122,28 @@ impl Supervisor {
         self.shutdown_notify.clone()
     }
 
-    pub async fn recover_on_startup(&self) -> Result<(), String> {
-        self.adopt_persisted_workers_on_startup().await?;
-        self.proxy.recover_takeovers_on_startup().await
+    pub(crate) async fn recover_on_startup_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
+        self.adopt_persisted_workers_on_startup_with_permit(permit)
+            .await?;
+        self.proxy
+            .recover_takeovers_on_startup_with_permit(permit)
+            .await
     }
 
+    #[cfg(test)]
     async fn adopt_persisted_workers_on_startup(&self) -> Result<(), String> {
+        let permit = OrdinaryMutationPermit::for_in_memory_test();
+        self.adopt_persisted_workers_on_startup_with_permit(&permit)
+            .await
+    }
+
+    async fn adopt_persisted_workers_on_startup_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
         let sessions = self
             .proxy
             .load_live_managed_runtime_sessions_for_recovery()
@@ -158,10 +174,20 @@ impl Supervisor {
                 session.pid
             );
         }
-        self.persist_runtime_session().await
+        self.persist_runtime_session_with_permit(permit).await
     }
 
+    #[cfg(test)]
     async fn ensure_worker_locked(&self, app: AppType) -> Result<WorkerInfo, String> {
+        let permit = OrdinaryMutationPermit::for_in_memory_test();
+        self.ensure_worker_locked_with_permit(&permit, app).await
+    }
+
+    async fn ensure_worker_locked_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app: AppType,
+    ) -> Result<WorkerInfo, String> {
         let app_key = app.as_str().to_string();
 
         let (session_token, hello_rx) = {
@@ -220,7 +246,6 @@ impl Supervisor {
             .arg(listen_port.to_string())
             .env(DAEMON_SOCKET_ENV, &self.socket_path)
             .env(SESSION_TOKEN_ENV, &session_token)
-            .env(RESTORE_GUARD_BYPASS_ENV, "1")
             .env(RUNTIME_KIND_ENV, RUNTIME_KIND_MANAGED_EXTERNAL)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -301,12 +326,24 @@ impl Supervisor {
             inner.pending_worker_pids.remove(&app);
             inner.shutdown_requested = false;
         }
-        self.persist_runtime_session().await?;
+        self.persist_runtime_session_with_permit(permit).await?;
         Ok(info)
     }
 
+    #[cfg(test)]
     async fn handle_ensure_worker(
         &self,
+        app_type: &str,
+        fallback_provider_id: Option<&str>,
+    ) -> Response {
+        let permit = OrdinaryMutationPermit::for_in_memory_test();
+        self.handle_ensure_worker_with_permit(&permit, app_type, fallback_provider_id)
+            .await
+    }
+
+    async fn handle_ensure_worker_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
         app_type: &str,
         fallback_provider_id: Option<&str>,
     ) -> Response {
@@ -328,18 +365,25 @@ impl Supervisor {
         }
 
         let _spawn_guard = self.spawn_lock.lock().await;
-        let info = match self.ensure_worker_locked(app.clone()).await {
+        let info = match self
+            .ensure_worker_locked_with_permit(permit, app.clone())
+            .await
+        {
             Ok(info) => info,
             Err(err) => return Response::Error { message: err },
         };
 
         let activation = async {
             self.proxy
-                .set_global_enabled(true)
+                .set_global_enabled_with_permit(permit, true)
                 .await
                 .map_err(|err| err.to_string())?;
             self.proxy
-                .enable_takeover_for_daemon_worker(app.as_str(), fallback_provider_id)
+                .enable_takeover_for_daemon_worker_with_permit(
+                    permit,
+                    app.as_str(),
+                    fallback_provider_id,
+                )
                 .await
         }
         .await;
@@ -349,7 +393,8 @@ impl Supervisor {
                 "[daemon] enabling {} takeover failed after worker start, cleaning up: {err}",
                 app.as_str()
             );
-            self.stop_worker_after_enable_failure(app.clone()).await;
+            self.stop_worker_after_enable_failure(permit, app.clone())
+                .await;
             return Response::Error { message: err };
         }
 
@@ -392,17 +437,25 @@ impl Supervisor {
         }
     }
 
-    async fn stop_worker_after_enable_failure(&self, app: AppType) {
+    async fn stop_worker_after_enable_failure(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app: AppType,
+    ) {
         let plan = self.plan_stop_for_app(app.clone()).await;
 
-        if let Err(err) = self.proxy.clear_daemon_takeover_for_app(app.as_str()).await {
+        if let Err(err) = self
+            .proxy
+            .clear_daemon_takeover_for_app_with_permit(permit, app.as_str())
+            .await
+        {
             log::warn!(
                 "[daemon] restoring {} takeover after enable failure failed: {err}",
                 app.as_str()
             );
         }
 
-        if let Err(err) = self.persist_runtime_session().await {
+        if let Err(err) = self.persist_runtime_session_with_permit(permit).await {
             log::warn!(
                 "[daemon] clearing runtime session after {} enable failure failed: {err}",
                 app.as_str()
@@ -412,7 +465,11 @@ impl Supervisor {
         let takeovers = self.read_takeover_flags().await;
         let has_active_takeover = takeovers.claude || takeovers.codex || takeovers.gemini;
         if !has_active_takeover {
-            if let Err(err) = self.proxy.set_global_enabled(false).await {
+            if let Err(err) = self
+                .proxy
+                .set_global_enabled_with_permit(permit, false)
+                .await
+            {
                 log::warn!(
                     "[daemon] clearing global proxy switch after {} enable failure failed: {err}",
                     app.as_str()
@@ -604,7 +661,11 @@ impl Supervisor {
         }
     }
 
-    async fn handle_drop_takeover(&self, app_type: &str) -> Response {
+    async fn handle_drop_takeover_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        app_type: &str,
+    ) -> Response {
         let app = match parse_app_type(app_type) {
             Some(a) => a,
             None => {
@@ -616,7 +677,11 @@ impl Supervisor {
 
         let _spawn_guard = self.spawn_lock.lock().await;
         let stop_plan = self.plan_stop_for_app(app.clone()).await;
-        if let Err(err) = self.proxy.clear_daemon_takeover_for_app(app.as_str()).await {
+        if let Err(err) = self
+            .proxy
+            .clear_daemon_takeover_for_app_with_permit(permit, app.as_str())
+            .await
+        {
             self.rollback_stop_plan_for_app(&app, stop_plan).await;
             return Response::Error { message: err };
         }
@@ -624,7 +689,11 @@ impl Supervisor {
         let has_active_takeover = takeovers.claude || takeovers.codex || takeovers.gemini;
         let mut global_disable_error = None;
         if !has_active_takeover {
-            if let Err(err) = self.proxy.set_global_enabled(false).await {
+            if let Err(err) = self
+                .proxy
+                .set_global_enabled_with_permit(permit, false)
+                .await
+            {
                 global_disable_error = Some(err.to_string());
             }
         }
@@ -632,7 +701,7 @@ impl Supervisor {
         self.stop_planned_workers(&stop_plan.pids, &stop_plan.adopted_pids)
             .await;
         if !stop_plan.adopted_pids.is_empty() {
-            let _ = self.persist_runtime_session().await;
+            let _ = self.persist_runtime_session_with_permit(permit).await;
         }
         let has_spawned_worker = stop_plan
             .pids
@@ -704,9 +773,17 @@ impl Supervisor {
         Response::Ok
     }
 
-    async fn handle_set_global_enabled(&self, enabled: bool) -> Response {
+    async fn handle_set_global_enabled_with_permit(
+        &self,
+        permit: &OrdinaryMutationPermit,
+        enabled: bool,
+    ) -> Response {
         if enabled {
-            match self.proxy.set_global_enabled(true).await {
+            match self
+                .proxy
+                .set_global_enabled_with_permit(permit, true)
+                .await
+            {
                 Ok(_) => return Response::Ok,
                 Err(err) => {
                     return Response::Error {
@@ -717,7 +794,11 @@ impl Supervisor {
         }
 
         let _spawn_guard = self.spawn_lock.lock().await;
-        if let Err(err) = self.proxy.set_global_enabled(false).await {
+        if let Err(err) = self
+            .proxy
+            .set_global_enabled_with_permit(permit, false)
+            .await
+        {
             return Response::Error {
                 message: err.to_string(),
             };
@@ -739,7 +820,11 @@ impl Supervisor {
             }
         }
         for app in &active {
-            if let Err(err) = self.proxy.clear_daemon_takeover_for_app(app.as_str()).await {
+            if let Err(err) = self
+                .proxy
+                .clear_daemon_takeover_for_app_with_permit(permit, app.as_str())
+                .await
+            {
                 log::warn!(
                     "[daemon] set_global_enabled(false): drop takeover for {} failed: {err}",
                     app.as_str()
@@ -751,7 +836,7 @@ impl Supervisor {
         self.stop_planned_workers(&stop_plan.pids, &stop_plan.adopted_pids)
             .await;
         if !stop_plan.adopted_pids.is_empty() {
-            let _ = self.persist_runtime_session().await;
+            let _ = self.persist_runtime_session_with_permit(permit).await;
         }
         let has_spawned_worker = stop_plan
             .pids
@@ -856,20 +941,27 @@ impl Supervisor {
     }
 
     pub async fn shutdown(&self) {
+        let permit =
+            match crate::services::state_coordination::acquire_ordinary_mutation_permit().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    log::warn!("[daemon] shutdown could not acquire state permit: {error}");
+                    return;
+                }
+            };
+        self.shutdown_with_permit(&permit).await;
+    }
+
+    async fn shutdown_with_permit(&self, permit: &OrdinaryMutationPermit) {
         let _spawn_guard = self.spawn_lock.lock().await;
         let stop_plan = self.plan_stop_all_workers(true).await;
         self.stop_planned_workers(&stop_plan.pids, &stop_plan.adopted_pids)
             .await;
-        if let Err(err) = self.proxy.stop_with_restore().await {
+        if let Err(err) = self.proxy.stop_with_restore_with_permit(permit).await {
             log::warn!("[daemon] shutdown: stop_with_restore failed: {err}");
         }
-        let _ = self.clear_runtime_session();
+        let _ = self.clear_runtime_session_with_permit(permit);
         self.shutdown_notify.notify_waiters();
-    }
-
-    async fn handle_shutdown(&self) -> Response {
-        self.shutdown().await;
-        Response::Ok
     }
 
     async fn read_takeover_flags(&self) -> TakeoverFlags {
@@ -918,7 +1010,16 @@ impl Supervisor {
         let (intentional, has_remaining_workers, teardown_in_progress) =
             self.record_worker_exit(&app, pid, startup_failure).await;
 
-        let _ = self.persist_runtime_session().await;
+        let permit = match crate::services::state_coordination::acquire_ordinary_mutation_permit()
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => {
+                log::error!("[daemon] worker-exit cleanup could not acquire state permit: {error}");
+                return;
+            }
+        };
+        let _ = self.persist_runtime_session_with_permit(&permit).await;
 
         if intentional {
             log::info!("[daemon] {app_key} worker exit was expected, not restarting");
@@ -929,7 +1030,11 @@ impl Supervisor {
             return;
         }
 
-        if let Err(err) = self.proxy.clear_daemon_takeover_for_app(app.as_str()).await {
+        if let Err(err) = self
+            .proxy
+            .clear_daemon_takeover_for_app_with_permit(&permit, app.as_str())
+            .await
+        {
             log::warn!("[daemon] restore takeover for {app_key} failed: {err}");
         }
 
@@ -937,6 +1042,7 @@ impl Supervisor {
             let mut inner = self.inner.lock().await;
             inner.restart.on_worker_exited(Instant::now())
         };
+        drop(permit);
 
         match decision {
             Decision::Restart { delay, attempt } => {
@@ -1031,6 +1137,8 @@ impl Supervisor {
         app: AppType,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
+            let permit =
+                crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
             let _spawn_guard = self.spawn_lock.lock().await;
             if !self.should_restart_after_crash(&app).await {
                 return Err(format!(
@@ -1038,7 +1146,9 @@ impl Supervisor {
                     app.as_str()
                 ));
             }
-            let _info = self.ensure_worker_locked(app.clone()).await?;
+            let _info = self
+                .ensure_worker_locked_with_permit(&permit, app.clone())
+                .await?;
             {
                 let inner = self.inner.lock().await;
                 if inner.shutdown_requested
@@ -1048,7 +1158,11 @@ impl Supervisor {
                     return Err("proxy daemon is shutting down".to_string());
                 }
             }
-            if let Err(err) = self.proxy.set_takeover_for_app(app.as_str(), true).await {
+            if let Err(err) = self
+                .proxy
+                .set_takeover_for_app_with_permit(&permit, app.as_str(), true)
+                .await
+            {
                 log::warn!(
                     "[daemon] re-applying takeover for {} after restart failed: {err}",
                     app.as_str()
@@ -1058,7 +1172,16 @@ impl Supervisor {
         })
     }
 
+    #[cfg(test)]
     async fn persist_runtime_session(&self) -> Result<(), String> {
+        let permit = OrdinaryMutationPermit::for_in_memory_test();
+        self.persist_runtime_session_with_permit(&permit).await
+    }
+
+    async fn persist_runtime_session_with_permit(
+        &self,
+        _permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
         let workers = {
             let inner = self.inner.lock().await;
             inner
@@ -1081,7 +1204,7 @@ impl Supervisor {
                 .collect::<serde_json::Map<_, _>>()
         };
         if workers.is_empty() {
-            return self.clear_runtime_session();
+            return self.clear_runtime_session_with_permit(_permit);
         }
         let payload = json!({ "workers": workers });
         let serialized = serde_json::to_string(&payload)
@@ -1091,7 +1214,10 @@ impl Supervisor {
             .map_err(|err| format!("persist runtime session failed: {err}"))
     }
 
-    fn clear_runtime_session(&self) -> Result<(), String> {
+    fn clear_runtime_session_with_permit(
+        &self,
+        _permit: &OrdinaryMutationPermit,
+    ) -> Result<(), String> {
         self.db
             .delete_setting(PROXY_RUNTIME_SESSION_KEY)
             .map_err(|err| format!("clear runtime session failed: {err}"))
@@ -1105,10 +1231,31 @@ impl Handler for Supervisor {
                 app_type,
                 fallback_provider_id,
             } => {
-                self.handle_ensure_worker(&app_type, fallback_provider_id.as_deref())
+                let permit =
+                    match crate::services::state_coordination::acquire_ordinary_mutation_permit()
+                        .await
+                    {
+                        Ok(permit) => permit,
+                        Err(message) => return Response::Error { message },
+                    };
+                self.handle_ensure_worker_with_permit(
+                    &permit,
+                    &app_type,
+                    fallback_provider_id.as_deref(),
+                )
+                .await
+            }
+            Request::DropTakeover { app_type } => {
+                let permit =
+                    match crate::services::state_coordination::acquire_ordinary_mutation_permit()
+                        .await
+                    {
+                        Ok(permit) => permit,
+                        Err(message) => return Response::Error { message },
+                    };
+                self.handle_drop_takeover_with_permit(&permit, &app_type)
                     .await
             }
-            Request::DropTakeover { app_type } => self.handle_drop_takeover(&app_type).await,
             Request::Status => self.handle_status().await,
             Request::WorkerHello {
                 pid,
@@ -1119,8 +1266,28 @@ impl Handler for Supervisor {
                 self.handle_worker_hello(pid, address, port, session_token)
                     .await
             }
-            Request::SetGlobalEnabled { enabled } => self.handle_set_global_enabled(enabled).await,
-            Request::Shutdown => self.handle_shutdown().await,
+            Request::SetGlobalEnabled { enabled } => {
+                let permit =
+                    match crate::services::state_coordination::acquire_ordinary_mutation_permit()
+                        .await
+                    {
+                        Ok(permit) => permit,
+                        Err(message) => return Response::Error { message },
+                    };
+                self.handle_set_global_enabled_with_permit(&permit, enabled)
+                    .await
+            }
+            Request::Shutdown => {
+                let permit =
+                    match crate::services::state_coordination::acquire_ordinary_mutation_permit()
+                        .await
+                    {
+                        Ok(permit) => permit,
+                        Err(message) => return Response::Error { message },
+                    };
+                self.shutdown_with_permit(&permit).await;
+                Response::Ok
+            }
         }
     }
 }
@@ -1287,6 +1454,37 @@ mod tests {
                 .expect("write fake status response");
         });
         (server, port)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(home_settings)]
+    async fn mutating_ipc_waits_while_restore_holds_exclusive_capability() {
+        let temp_home = tempfile::tempdir().expect("create isolated daemon home");
+        let _environment = TestEnvGuard::isolated(temp_home.path());
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, temp_home.path());
+        let exclusive = crate::services::state_coordination::acquire_restore_exclusive_permit()
+            .await
+            .expect("acquire restore capability");
+
+        let mut request = tokio::spawn(async move {
+            supervisor
+                .handle(Request::SetGlobalEnabled { enabled: true })
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut request)
+                .await
+                .is_err(),
+            "mutating daemon IPC must pause behind an exclusive restore"
+        );
+
+        drop(exclusive);
+        let response = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .expect("mutating IPC should resume after restore")
+            .expect("mutating IPC task should not panic");
+        assert!(matches!(response, Response::Ok));
     }
 
     #[tokio::test]

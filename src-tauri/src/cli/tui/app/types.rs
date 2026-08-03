@@ -4540,9 +4540,17 @@ pub struct ManagedAuthLoginState {
 pub enum LoadingKind {
     Generic,
     Proxy,
+    ConfigRestore,
+    CloudRestore,
     WebDav,
     S3,
     UpdateCheck,
+}
+
+impl LoadingKind {
+    pub(crate) fn is_restore_mutation(self) -> bool {
+        matches!(self, Self::ConfigRestore | Self::CloudRestore)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

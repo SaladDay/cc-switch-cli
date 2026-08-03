@@ -290,8 +290,10 @@ pub mod sync_progress {
 }
 
 pub fn sync_all_session_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
+    let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let _sync_guard = acquire_session_sync_guard(db)?;
-    sync_all_session_usage_unlocked(db)
+    sync_all_session_usage_with_permit(db, &permit)
 }
 
 /// Rebuild Codex session usage from its local rollout logs.
@@ -301,6 +303,8 @@ pub fn sync_all_session_usage(db: &Database) -> Result<SessionSyncResult, AppErr
 /// removed. Once reset succeeds, the Usage view must be notified even when
 /// the reimport is empty or fails so it never keeps rendering stale rows.
 pub(crate) fn rebuild_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let _sync_guard = acquire_session_sync_guard(db)?;
     db.backup_database_file()?;
     db.reset_codex_usage()?;
@@ -314,9 +318,11 @@ pub(crate) fn rebuild_codex_usage(db: &Database) -> Result<SessionSyncResult, Ap
     result
 }
 
-/// Synchronization core for callers that already hold [`session_sync_mutex`].
-pub(crate) fn sync_all_session_usage_unlocked(
+/// Synchronization core for callers that hold both the workflow capability
+/// and [`session_sync_mutex`].
+pub(crate) fn sync_all_session_usage_with_permit(
     db: &Database,
+    _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
 ) -> Result<SessionSyncResult, AppError> {
     let _progress = sync_progress::begin();
     // 导入周期内本连接临时 synchronous=NORMAL（守卫恢复 FULL）：批量事务
@@ -375,6 +381,8 @@ pub(crate) fn run_session_usage_sync_cycle(
     db: &Database,
     context: &str,
 ) -> Result<SessionSyncResult, AppError> {
+    let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let mut result = SessionSyncResult {
         imported: 0,
         skipped: 0,
@@ -396,7 +404,8 @@ pub(crate) fn run_session_usage_sync_cycle(
         }
     }
 
-    let sync_result = sync_all_session_usage(db)?;
+    let _sync_guard = acquire_session_sync_guard(db)?;
+    let sync_result = sync_all_session_usage_with_permit(db, &permit)?;
     result.merge(sync_result);
     log_session_usage_sync_result(&result, context);
     Ok(result)

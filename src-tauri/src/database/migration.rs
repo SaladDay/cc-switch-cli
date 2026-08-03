@@ -2,6 +2,7 @@
 //!
 //! 将旧版 config.json (MultiAppConfig) 数据迁移到 SQLite 数据库。
 
+use super::schema::MigrationRunContext;
 use super::{lock_conn, to_json_string, Database};
 use crate::app_config::MultiAppConfig;
 use crate::error::AppError;
@@ -28,8 +29,8 @@ impl Database {
     pub fn migrate_from_json_dry_run(config: &MultiAppConfig) -> Result<(), AppError> {
         let mut conn =
             Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
-        Self::create_tables_on_conn(&conn)?;
-        Self::apply_schema_migrations_on_conn(&conn)?;
+        Self::create_tables_on_conn(&conn, MigrationRunContext::LocalUpgrade)?;
+        Self::apply_schema_migrations_on_conn(&conn, MigrationRunContext::LocalUpgrade)?;
 
         let tx = conn
             .transaction()

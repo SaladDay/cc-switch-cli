@@ -128,7 +128,8 @@ fn provider_usage_query_set_writes_upstream_defaults_and_preserves_meta() {
             "Demo".to_string(),
             json!({
                 "env": {
-                    "ANTHROPIC_API_KEY": "sk-provider"
+                    "ANTHROPIC_API_KEY": "sk-provider",
+                    "ANTHROPIC_BASE_URL": "https://custom.example.com"
                 }
             }),
             None,
@@ -197,7 +198,8 @@ fn provider_usage_query_set_newapi_clears_general_credentials() {
             "Demo".to_string(),
             json!({
                 "env": {
-                    "ANTHROPIC_API_KEY": "sk-provider"
+                    "ANTHROPIC_API_KEY": "sk-provider",
+                    "ANTHROPIC_BASE_URL": "https://custom.example.com"
                 }
             }),
             None,
@@ -370,7 +372,8 @@ fn provider_usage_query_set_rejects_enabled_script_without_return() {
                 "Demo".to_string(),
                 json!({
                     "env": {
-                        "ANTHROPIC_API_KEY": "sk-provider"
+                        "ANTHROPIC_API_KEY": "sk-provider",
+                        "ANTHROPIC_BASE_URL": "https://custom.example.com"
                     }
                 }),
                 None,

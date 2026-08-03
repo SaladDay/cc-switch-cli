@@ -73,6 +73,16 @@ fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
+fn get_state_for_mutation() -> Result<
+    (
+        AppState,
+        crate::services::state_coordination::OrdinaryMutationPermit,
+    ),
+    AppError,
+> {
+    AppState::try_new_with_ordinary_workflow()
+}
+
 fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -131,7 +141,7 @@ fn show_failover(app_type: AppType) -> Result<(), AppError> {
 
 fn set_auto_failover(app_type: AppType, enabled: bool) -> Result<(), AppError> {
     ensure_failover_supported(&app_type)?;
-    let state = get_state()?;
+    let (state, permit) = get_state_for_mutation()?;
     let runtime = create_runtime()?;
     if enabled {
         let gate = runtime.block_on(inspect_auto_failover_gate(&state, &app_type))?;
@@ -145,7 +155,10 @@ fn set_auto_failover(app_type: AppType, enabled: bool) -> Result<(), AppError> {
                 .block_on(
                     state
                         .proxy_service
-                        .enable_proxy_and_auto_failover_for_app(app_type.as_str()),
+                        .enable_proxy_and_auto_failover_for_app_with_permit(
+                            &permit,
+                            app_type.as_str(),
+                        ),
                 )
                 .map_err(AppError::Message)?;
         } else {
@@ -153,17 +166,17 @@ fn set_auto_failover(app_type: AppType, enabled: bool) -> Result<(), AppError> {
                 .block_on(
                     state
                         .proxy_service
-                        .enable_auto_failover_for_app(app_type.as_str()),
+                        .enable_auto_failover_for_app_with_permit(&permit, app_type.as_str()),
                 )
                 .map_err(AppError::Message)?;
         }
     } else {
         runtime
-            .block_on(
-                state
-                    .proxy_service
-                    .set_auto_failover_for_app(app_type.as_str(), false),
-            )
+            .block_on(state.proxy_service.set_auto_failover_for_app_with_permit(
+                &permit,
+                app_type.as_str(),
+                false,
+            ))
             .map_err(AppError::Message)?;
     }
 
@@ -235,7 +248,7 @@ fn list_available(app_type: AppType) -> Result<(), AppError> {
 
 fn add_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     ensure_failover_supported(&app_type)?;
-    let state = get_state()?;
+    let (state, _permit) = get_state_for_mutation()?;
     ensure_provider_exists(&state, &app_type, id)?;
 
     if state.db.is_in_failover_queue(app_type.as_str(), id)? {
@@ -251,7 +264,7 @@ fn add_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 
 fn remove_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     ensure_failover_supported(&app_type)?;
-    let state = get_state()?;
+    let (state, _permit) = get_state_for_mutation()?;
     ensure_provider_exists(&state, &app_type, id)?;
 
     if !state.db.is_in_failover_queue(app_type.as_str(), id)? {
@@ -271,7 +284,7 @@ fn remove_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 
 fn clear_queue(app_type: AppType, yes: bool) -> Result<(), AppError> {
     ensure_failover_supported(&app_type)?;
-    let state = get_state()?;
+    let (state, _permit) = get_state_for_mutation()?;
     let queue = state.db.get_failover_queue(app_type.as_str())?;
 
     if queue.is_empty() {
@@ -301,9 +314,9 @@ fn move_provider(
     direction: FailoverMoveDirection,
 ) -> Result<(), AppError> {
     ensure_failover_supported(&app_type)?;
-    let state = get_state()?;
+    let (state, permit) = get_state_for_mutation()?;
     ensure_provider_exists(&state, &app_type, id)?;
-    let outcome = move_provider_in_state(&state, app_type, id, direction)?;
+    let outcome = move_provider_in_state_with_permit(&state, app_type, id, direction, &permit)?;
     match outcome {
         MoveOutcome::Updated => {
             println!("{}", success("Failover queue order updated."));
@@ -325,11 +338,23 @@ fn move_provider(
     Ok(())
 }
 
+#[cfg(test)]
 fn move_provider_in_state(
     state: &AppState,
     app_type: AppType,
     id: &str,
     direction: FailoverMoveDirection,
+) -> Result<MoveOutcome, AppError> {
+    let permit = crate::services::state_coordination::OrdinaryMutationPermit::for_in_memory_test();
+    move_provider_in_state_with_permit(state, app_type, id, direction, &permit)
+}
+
+fn move_provider_in_state_with_permit(
+    state: &AppState,
+    app_type: AppType,
+    id: &str,
+    direction: FailoverMoveDirection,
+    permit: &crate::services::state_coordination::OrdinaryMutationPermit,
 ) -> Result<MoveOutcome, AppError> {
     let mut queue = state.db.get_failover_queue(app_type.as_str())?;
     let Some(index) = queue.iter().position(|item| item.provider_id == id) else {
@@ -351,7 +376,7 @@ fn move_provider_in_state(
             sort_index,
         })
         .collect::<Vec<_>>();
-    ProviderService::update_sort_order(state, app_type, updates)?;
+    ProviderService::update_sort_order_with_permit(state, app_type, updates, permit)?;
     Ok(MoveOutcome::Updated)
 }
 
@@ -452,19 +477,15 @@ fn print_hot_update_note_if_running(state: &AppState) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
 
-    use crate::{Database, MultiAppConfig, ProxyService};
+    use crate::{Database, MultiAppConfig};
 
     use super::*;
 
     fn test_state() -> AppState {
         let db = Arc::new(Database::memory().expect("create memory database"));
-        AppState {
-            db: db.clone(),
-            config: RwLock::new(MultiAppConfig::default()),
-            proxy_service: ProxyService::new(db),
-        }
+        AppState::from_test_parts(db, MultiAppConfig::default()).expect("construct test state")
     }
 
     fn provider(id: &str, name: &str, sort_index: usize) -> crate::provider::Provider {

@@ -177,7 +177,10 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
     }
 }
 
-pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+pub(super) fn import_hermes_providers_from_live(
+    state: &AppState,
+    _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+) -> Result<usize, AppError> {
     let providers = crate::hermes_config::get_providers()?;
     if providers.is_empty() {
         return Ok(0);
@@ -225,7 +228,10 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
     Ok(imported)
 }
 
-pub fn sync_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+pub(super) fn sync_openclaw_providers_from_live(
+    state: &AppState,
+    permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+) -> Result<usize, AppError> {
     if !crate::openclaw_config::get_openclaw_config_path().exists() {
         return Ok(0);
     }
@@ -306,7 +312,7 @@ pub fn sync_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppE
     }
 
     if changed > 0 {
-        state.save()?;
+        state.save_with_permit(permit)?;
     }
 
     Ok(changed)
@@ -328,7 +334,9 @@ pub(super) fn is_auto_mirrored_openclaw_snapshot(provider: &Provider) -> bool {
 }
 
 fn is_default_openclaw_common_config_marker(meta: &ProviderMeta) -> bool {
-    meta.apply_common_config == Some(false)
+    // The provider DAO materializes an absent `meta` object as `ProviderMeta::default()`.
+    // Treat both the absent and explicit-false common-config marker as untouched.
+    meta.apply_common_config != Some(true)
         && meta.codex_official.is_none()
         && meta.custom_endpoints.is_empty()
         && meta.usage_script.is_none()
@@ -346,7 +354,10 @@ fn is_default_openclaw_common_config_marker(meta: &ProviderMeta) -> bool {
         && meta.live_config_managed.is_none()
 }
 
-pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+pub(super) fn import_openclaw_providers_from_live(
+    state: &AppState,
+    _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+) -> Result<usize, AppError> {
     let providers = crate::openclaw_config::get_typed_providers()?;
     if providers.is_empty() {
         return Ok(0);
@@ -407,7 +418,10 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
     Ok(imported)
 }
 
-pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+pub(super) fn import_opencode_providers_from_live(
+    state: &AppState,
+    _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+) -> Result<usize, AppError> {
     let providers = crate::opencode_config::get_typed_providers()?;
     if providers.is_empty() {
         return Ok(0);

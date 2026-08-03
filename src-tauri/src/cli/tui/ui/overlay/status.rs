@@ -18,9 +18,14 @@ pub(super) fn render_loading_overlay(
         _ => "|",
     };
     let full_title = format!("{spinner} {title}");
-    let esc_label = match kind {
-        LoadingKind::UpdateCheck => texts::tui_key_cancel(),
-        _ => texts::tui_key_close(),
+    let shortcuts = if kind.is_restore_mutation() {
+        Vec::new()
+    } else {
+        let esc_label = match kind {
+            LoadingKind::UpdateCheck => texts::tui_key_cancel(),
+            _ => texts::tui_key_close(),
+        };
+        vec![("Esc", esc_label)]
     };
 
     let body = overlay_frame(
@@ -28,7 +33,7 @@ pub(super) fn render_loading_overlay(
         content_area,
         theme,
         &full_title,
-        &[("Esc", esc_label)],
+        &shortcuts,
         OverlaySize::Fixed(OVERLAY_FIXED_MD.0, OVERLAY_FIXED_MD.1),
         overlay_border_style(theme, false),
     );

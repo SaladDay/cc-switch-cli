@@ -14,6 +14,12 @@ fn get_unix_timestamp() -> Result<i64, AppError> {
         .map_err(|e| AppError::Message(format!("Failed to get system time: {e}")))
 }
 
+fn acquire_prompt_mutation_permit(
+) -> Result<crate::services::state_coordination::OrdinaryMutationPermit, AppError> {
+    crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)
+}
+
 pub struct PromptService;
 
 impl PromptService {
@@ -79,8 +85,19 @@ impl PromptService {
     pub fn upsert_prompt(
         state: &AppState,
         app: AppType,
+        id: &str,
+        prompt: Prompt,
+    ) -> Result<(), AppError> {
+        let permit = acquire_prompt_mutation_permit()?;
+        Self::upsert_prompt_with_permit(state, app, id, prompt, &permit)
+    }
+
+    fn upsert_prompt_with_permit(
+        state: &AppState,
+        app: AppType,
         _id: &str,
         prompt: Prompt,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     ) -> Result<(), AppError> {
         let is_enabled = prompt.enabled;
 
@@ -95,6 +112,7 @@ impl PromptService {
     }
 
     pub fn delete_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        let _permit = acquire_prompt_mutation_permit()?;
         let prompts = state.db.get_prompts(app.as_str())?;
 
         if let Some(prompt) = prompts.get(id) {
@@ -113,11 +131,21 @@ impl PromptService {
         id: &str,
         name: &str,
     ) -> Result<(), AppError> {
+        let permit = acquire_prompt_mutation_permit()?;
         let prompts = state.db.get_prompts(app.as_str())?;
         let Some(existing) = prompts.get(id) else {
             return Err(AppError::InvalidInput(format!("提示词 {id} 不存在")));
         };
-        Self::update_prompt_metadata(state, app, id, id, name, existing.description.clone())?;
+        Self::update_prompt_with_permit(
+            state,
+            app,
+            id,
+            id,
+            name,
+            existing.description.clone(),
+            None,
+            &permit,
+        )?;
         Ok(())
     }
 
@@ -140,6 +168,30 @@ impl PromptService {
         name: &str,
         description: Option<String>,
         content: Option<String>,
+    ) -> Result<Prompt, AppError> {
+        let permit = acquire_prompt_mutation_permit()?;
+        Self::update_prompt_with_permit(
+            state,
+            app,
+            old_id,
+            new_id,
+            name,
+            description,
+            content,
+            &permit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_prompt_with_permit(
+        state: &AppState,
+        app: AppType,
+        old_id: &str,
+        new_id: &str,
+        name: &str,
+        description: Option<String>,
+        content: Option<String>,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     ) -> Result<Prompt, AppError> {
         let new_id = new_id.trim();
         Self::validate_prompt_id(new_id)?;
@@ -195,6 +247,7 @@ impl PromptService {
         description: Option<&str>,
         content: &str,
     ) -> Result<Prompt, AppError> {
+        let permit = acquire_prompt_mutation_permit()?;
         let trimmed_name = name.trim();
         if trimmed_name.is_empty() {
             return Err(AppError::InvalidInput("提示词名称不能为空".to_string()));
@@ -226,11 +279,12 @@ impl PromptService {
             updated_at: Some(timestamp),
         };
 
-        Self::upsert_prompt(state, app, &id, prompt.clone())?;
+        Self::upsert_prompt_with_permit(state, app, &id, prompt.clone(), &permit)?;
         Ok(prompt)
     }
 
     pub fn enable_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        let _permit = acquire_prompt_mutation_permit()?;
         let app_key = app.as_str();
         let target_path = prompt_file_path(&app)?;
 
@@ -294,6 +348,7 @@ impl PromptService {
     }
 
     pub fn disable_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        let _permit = acquire_prompt_mutation_permit()?;
         let app_key = app.as_str();
         let mut prompts = state.db.get_prompts(app_key)?;
 
@@ -316,6 +371,7 @@ impl PromptService {
     }
 
     pub fn import_from_file(state: &AppState, app: AppType) -> Result<String, AppError> {
+        let _permit = acquire_prompt_mutation_permit()?;
         let file_path = prompt_file_path(&app)?;
 
         if !file_path.exists() {
@@ -354,7 +410,7 @@ impl PromptService {
         Ok(Some(content))
     }
 
-    pub fn sync_all_active_to_live_best_effort(state: &AppState) -> Result<(), AppError> {
+    fn sync_all_active_to_live(state: &AppState) -> Result<(), AppError> {
         let mut active_prompts = Vec::new();
 
         for app in AppType::all() {
@@ -364,6 +420,7 @@ impl PromptService {
             }
         }
 
+        let mut failures = crate::services::live_projection::LiveProjectionFailures::default();
         for (app, content) in active_prompts {
             if !crate::sync_policy::should_sync_live(&app) {
                 continue;
@@ -372,16 +429,39 @@ impl PromptService {
             let target_path = match prompt_file_path(&app) {
                 Ok(path) => path,
                 Err(err) => {
-                    log::warn!("同步 {app} 提示词 live 文件时解析路径失败: {err}");
+                    failures.push(format!("{} prompt path", app.as_str()), err);
                     continue;
                 }
             };
 
-            if let Err(err) = write_text_file(&target_path, &content) {
-                log::warn!("同步 {app} 提示词到 live 文件失败: {err}");
-            }
+            failures.record(
+                format!("{} prompt", app.as_str()),
+                write_text_file(&target_path, &content),
+            );
         }
 
+        failures.finish("live prompt projection")
+    }
+
+    pub(crate) fn sync_all_active_to_live_for_restore(
+        state: &AppState,
+        _permit: &crate::services::state_coordination::RestoreExclusivePermit,
+    ) -> Result<(), AppError> {
+        Self::sync_all_active_to_live(state)
+    }
+
+    pub fn sync_all_active_to_live_best_effort(state: &AppState) -> Result<(), AppError> {
+        let permit = acquire_prompt_mutation_permit()?;
+        Self::sync_all_active_to_live_best_effort_with_permit(state, &permit)
+    }
+
+    pub(crate) fn sync_all_active_to_live_best_effort_with_permit(
+        state: &AppState,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
+        if let Err(error) = Self::sync_all_active_to_live(state) {
+            log::warn!("同步 active prompts 到 live 文件失败: {error}");
+        }
         Ok(())
     }
 }
@@ -405,11 +485,10 @@ mod tests {
     use super::*;
     use crate::app_config::MultiAppConfig;
     use crate::database::Database;
-    use crate::services::ProxyService;
     use serial_test::serial;
     use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     struct TempHome {
@@ -466,11 +545,7 @@ mod tests {
 
     fn state_with_config(config: MultiAppConfig) -> AppState {
         let db = Arc::new(Database::init().expect("init db"));
-        AppState {
-            proxy_service: ProxyService::new(db.clone()),
-            db,
-            config: RwLock::new(config),
-        }
+        AppState::from_test_parts(db, config).expect("construct test state")
     }
 
     fn prompt(id: &str, content: &str, enabled: bool) -> Prompt {

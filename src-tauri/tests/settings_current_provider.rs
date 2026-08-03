@@ -134,6 +134,12 @@ mod error {
         },
         #[error("锁获取失败: {0}")]
         Lock(String),
+        #[error("{zh} ({en})")]
+        Localized {
+            key: &'static str,
+            zh: String,
+            en: String,
+        },
     }
 
     impl AppError {
@@ -141,6 +147,14 @@ mod error {
             Self::Io {
                 path: path.as_ref().display().to_string(),
                 source,
+            }
+        }
+
+        pub fn localized(key: &'static str, zh: impl Into<String>, en: impl Into<String>) -> Self {
+            Self::Localized {
+                key,
+                zh: zh.into(),
+                en: en.into(),
             }
         }
     }
@@ -217,6 +231,9 @@ mod services {
         }
     }
 }
+
+#[path = "shims/settings_support.rs"]
+mod test_support;
 
 #[path = "../src/settings.rs"]
 mod settings_impl;

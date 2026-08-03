@@ -13,8 +13,46 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        db: Arc<Database>,
+        config: MultiAppConfig,
+    ) -> Result<Self, AppError> {
+        Self::from_parts(db, config)
+    }
+
     /// 创建新的应用状态
     pub fn try_new() -> Result<Self, AppError> {
+        Self::try_new_with_ordinary_workflow().map(|(state, _permit)| state)
+    }
+
+    pub(crate) fn try_new_with_ordinary_workflow() -> Result<
+        (
+            Self,
+            crate::services::state_coordination::OrdinaryMutationPermit,
+        ),
+        AppError,
+    > {
+        loop {
+            let permit =
+                crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                    .map_err(AppError::Message)?;
+            if !crate::services::RestoreCoordinator::recovery_needed()? {
+                let state = Self::try_new_with_migration_mode(true)?;
+                return Ok((state, permit));
+            }
+            drop(permit);
+            crate::services::RestoreCoordinator::recover_before_state_load_blocking()?;
+        }
+    }
+
+    pub(crate) fn try_new_for_restore(
+        _permit: &crate::services::state_coordination::RestoreExclusivePermit,
+    ) -> Result<Self, AppError> {
+        Self::try_new_with_migration_mode(false)
+    }
+
+    fn try_new_with_migration_mode(run_semantic_migrations: bool) -> Result<Self, AppError> {
         let app_config_dir = crate::config::get_app_config_dir();
         let db_path = app_config_dir.join("cc-switch.db");
         let config_path = app_config_dir.join("config.json");
@@ -22,12 +60,11 @@ impl AppState {
 
         if db_path.exists() {
             let db = Arc::new(Database::init()?);
-            let mut config = export_db_to_multi_app_config(&db)?;
-            migrate_legacy_codex_configs(&db, &mut config);
-            crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
-                &db,
-                &mut config,
-            )?;
+            let config = if run_semantic_migrations {
+                load_migrated_config_snapshot_from_db(&db)?
+            } else {
+                load_config_snapshot_from_db_pure(&db)?
+            };
             return Self::from_parts(db, config);
         }
 
@@ -80,12 +117,11 @@ impl AppState {
         // Ensure default repos exist (insert-missing only).
         let _ = db.init_default_skill_repos();
 
-        let mut config = export_db_to_multi_app_config(&db)?;
-        migrate_legacy_codex_configs(&db, &mut config);
-        crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
-            &db,
-            &mut config,
-        )?;
+        let config = if run_semantic_migrations {
+            load_migrated_config_snapshot_from_db(&db)?
+        } else {
+            load_config_snapshot_from_db_pure(&db)?
+        };
         Self::from_parts(db, config)
     }
 
@@ -97,11 +133,11 @@ impl AppState {
     }
 
     fn try_new_with_startup_recovery_without_codex_migration() -> Result<Self, AppError> {
-        let state = Self::try_new()?;
+        let (state, permit) = Self::try_new_with_ordinary_workflow()?;
 
-        state.import_live_provider_configs_on_startup()?;
+        state.import_live_provider_configs_on_startup(&permit)?;
 
-        state.initialize_common_config_snippets();
+        state.initialize_common_config_snippets(&permit);
 
         let owned_managed_session_active = state
             .proxy_service
@@ -116,15 +152,15 @@ impl AppState {
             if !proxy_running {
                 state
                     .proxy_service
-                    .recover_takeovers_on_startup_blocking()
+                    .recover_takeovers_on_startup_blocking_with_permit(&permit)
                     .map_err(AppError::Config)?;
                 live_config_is_safe_to_repair = true;
             }
         }
 
-        state.import_live_current_provider_configs_on_startup()?;
+        state.import_live_current_provider_configs_on_startup(&permit)?;
         if live_config_is_safe_to_repair {
-            match state.repair_disabled_codex_unified_session_live() {
+            match state.repair_disabled_codex_unified_session_live(&permit) {
                 Ok(true) => log::info!(
                     "✓ Removed a stale unified-session route from the active Codex config"
                 ),
@@ -141,7 +177,10 @@ impl AppState {
     /// Repair the exact live-only route injected by older CLI builds after the
     /// unified-history setting has been disabled. This deliberately leaves the
     /// provider database snapshot untouched and never rewrites a proxy takeover.
-    fn repair_disabled_codex_unified_session_live(&self) -> Result<bool, AppError> {
+    fn repair_disabled_codex_unified_session_live(
+        &self,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<bool, AppError> {
         use crate::app_config::AppType;
         use crate::services::provider::ProviderService;
 
@@ -217,14 +256,18 @@ impl AppState {
         }
     }
 
-    fn import_live_provider_configs_on_startup(&self) -> Result<(), AppError> {
+    fn import_live_provider_configs_on_startup(
+        &self,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         match self.db.init_default_official_providers() {
             Ok(count) if count > 0 => log::info!("✓ Seeded {count} official provider(s)"),
             Ok(_) => {}
             Err(error) => log::warn!("✗ Failed to seed official providers: {error}"),
         }
 
-        match crate::services::provider::ProviderService::import_opencode_providers_from_live(self)
+        match crate::services::provider::ProviderService::
+            import_opencode_providers_from_live_with_permit(self, permit)
         {
             Ok(count) if count > 0 => {
                 log::info!("✓ Imported {count} OpenCode provider(s) from live config");
@@ -233,7 +276,9 @@ impl AppState {
             Err(error) => log::warn!("✗ Failed to import OpenCode providers: {error}"),
         }
 
-        match crate::services::provider::ProviderService::import_hermes_providers_from_live(self) {
+        match crate::services::provider::ProviderService::
+            import_hermes_providers_from_live_with_permit(self, permit)
+        {
             Ok(count) if count > 0 => {
                 log::info!("✓ Imported {count} Hermes provider(s) from live config");
             }
@@ -241,7 +286,8 @@ impl AppState {
             Err(error) => log::warn!("✗ Failed to import Hermes providers: {error}"),
         }
 
-        match crate::services::provider::ProviderService::import_openclaw_providers_from_live(self)
+        match crate::services::provider::ProviderService::
+            import_openclaw_providers_from_live_with_permit(self, permit)
         {
             Ok(count) if count > 0 => {
                 log::info!("✓ Imported {count} OpenClaw provider(s) from live config");
@@ -262,7 +308,10 @@ impl AppState {
     /// （`apply_common_config_to_settings` / `remove_common_config_from_settings`）
     /// 是 no-op，自动播种对它们没有实际效果，反而可能把整份 live 配置（含密钥）
     /// 复制进 `common_config_<app>`。
-    fn initialize_common_config_snippets(&self) {
+    fn initialize_common_config_snippets(
+        &self,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) {
         use crate::app_config::AppType;
         use crate::services::provider::ProviderService;
 
@@ -336,7 +385,10 @@ impl AppState {
         }
     }
 
-    fn import_live_current_provider_configs_on_startup(&self) -> Result<(), AppError> {
+    fn import_live_current_provider_configs_on_startup(
+        &self,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         for app_type in crate::app_config::AppType::all().filter(|app| !app.is_additive_mode()) {
             if self
                 .proxy_service
@@ -349,9 +401,10 @@ impl AppState {
                 continue;
             }
 
-            match crate::services::provider::ProviderService::import_default_config(
+            match crate::services::provider::ProviderService::import_default_config_with_permit(
                 self,
                 app_type.clone(),
+                permit,
             ) {
                 Ok(true) => log::info!(
                     "✓ Imported live config for {} as default provider",
@@ -373,11 +426,32 @@ impl AppState {
 
     /// 将内存中的 config 快照持久化到 SQLite（SSOT）。
     pub fn save(&self) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        self.save_with_permit(&permit)
+    }
+
+    pub(crate) fn save_with_permit(
+        &self,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         let config = self.config.read().map_err(AppError::from)?;
         persist_multi_app_config_to_db(&self.db, &config)
     }
 
     pub(crate) fn save_config_snapshot(&self, config: &MultiAppConfig) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        self.save_config_snapshot_with_permit(config, &permit)
+    }
+
+    pub(crate) fn save_config_snapshot_with_permit(
+        &self,
+        config: &MultiAppConfig,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         persist_multi_app_config_to_db(&self.db, config)
     }
 
@@ -385,6 +459,17 @@ impl AppState {
     pub fn save_preserving_current_providers(
         &self,
         app_types: &[crate::app_config::AppType],
+    ) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        self.save_preserving_current_providers_with_permit(app_types, &permit)
+    }
+
+    pub(crate) fn save_preserving_current_providers_with_permit(
+        &self,
+        app_types: &[crate::app_config::AppType],
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     ) -> Result<(), AppError> {
         let config = self.config.read().map_err(AppError::from)?;
         persist_multi_app_config_to_db_preserving_current_providers(&self.db, &config, app_types)
@@ -395,18 +480,30 @@ impl AppState {
         config: &MultiAppConfig,
         app_types: &[crate::app_config::AppType],
     ) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        self.save_config_snapshot_preserving_current_providers_with_permit(
+            config, app_types, &permit,
+        )
+    }
+
+    pub(crate) fn save_config_snapshot_preserving_current_providers_with_permit(
+        &self,
+        config: &MultiAppConfig,
+        app_types: &[crate::app_config::AppType],
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         persist_multi_app_config_to_db_preserving_current_providers(&self.db, config, app_types)
     }
 
     /// 用数据库中的最新快照重建内存配置，供导入/恢复后的 live 同步流程复用。
     pub fn refresh_config_from_db(&self) -> Result<(), AppError> {
-        let mut config = export_db_to_multi_app_config(&self.db)?;
-        migrate_legacy_codex_configs(&self.db, &mut config);
-        crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
-            &self.db,
-            &mut config,
-        )?;
+        let config = load_migrated_config_snapshot_from_db(&self.db)?;
+        self.replace_config_snapshot(config)
+    }
 
+    pub(crate) fn replace_config_snapshot(&self, config: MultiAppConfig) -> Result<(), AppError> {
         let mut guard = self.config.write().map_err(AppError::from)?;
         *guard = config;
         Ok(())
@@ -432,6 +529,14 @@ impl AppState {
 }
 
 fn run_codex_provider_bucket_migrations(db: &Database) {
+    let _permit =
+        match crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking() {
+            Ok(permit) => permit,
+            Err(error) => {
+                log::warn!("✗ Failed to coordinate Codex provider bucket migrations: {error}");
+                return;
+            }
+        };
     let _ = run_required_codex_provider_bucket_migrations(db);
 
     match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
@@ -497,6 +602,38 @@ fn run_required_codex_provider_bucket_migrations(db: &Database) -> Result<(), Ap
     }
 
     Ok(())
+}
+
+pub(crate) fn load_migrated_config_snapshot_from_db(
+    db: &Database,
+) -> Result<MultiAppConfig, AppError> {
+    let mut config = load_config_snapshot_from_db_pure(db)?;
+    migrate_legacy_codex_configs(db, &mut config);
+    crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
+        db,
+        &mut config,
+    )?;
+    Ok(config)
+}
+
+/// Run side-effecting semantic migrations only after a canonical restore has
+/// been committed. The working snapshot is intentionally discarded; callers
+/// must hydrate again from the migrated database before installing memory
+/// state or projecting live files.
+pub(crate) fn run_post_restore_semantic_migrations(db: &Database) -> Result<(), AppError> {
+    let mut working = load_config_snapshot_from_db_pure(db)?;
+    migrate_legacy_codex_configs_strict(db, &mut working)?;
+    crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_for_restore(
+        db,
+        &mut working,
+    )
+}
+
+/// Hydrate the persisted application snapshot without migrations, live-file
+/// writes, backups, or any other side effect. Import validation uses this path
+/// before a rebuilt database is published.
+pub(crate) fn load_config_snapshot_from_db_pure(db: &Database) -> Result<MultiAppConfig, AppError> {
+    export_db_to_multi_app_config(db)
 }
 
 fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppError> {
@@ -695,12 +832,21 @@ fn archive_legacy_file(path: &Path, suffix: &str) -> Result<Option<PathBuf>, App
 ///
 /// After this runs, all Codex providers in memory and DB use the new format.
 fn migrate_legacy_codex_configs(db: &Database, config: &mut MultiAppConfig) {
+    if let Err(error) = migrate_legacy_codex_configs_strict(db, config) {
+        log::warn!("Failed to persist a migrated Codex provider config: {error}");
+    }
+}
+
+fn migrate_legacy_codex_configs_strict(
+    db: &Database,
+    config: &mut MultiAppConfig,
+) -> Result<(), AppError> {
     use crate::app_config::AppType;
     use crate::services::provider::migrate_legacy_codex_config;
 
     let manager = match config.get_manager_mut(&AppType::Codex) {
         Some(m) => m,
-        None => return,
+        None => return Ok(()),
     };
 
     for (provider_id, provider) in manager.providers.iter_mut() {
@@ -719,19 +865,14 @@ fn migrate_legacy_codex_configs(db: &Database, config: &mut MultiAppConfig) {
                 obj.insert("config".to_string(), serde_json::Value::String(migrated));
             }
             // Persist to DB
-            if let Err(e) = db.update_provider_settings_config(
+            db.update_provider_settings_config(
                 AppType::Codex.as_str(),
                 provider_id,
                 &provider.settings_config,
-            ) {
-                log::warn!(
-                    "Failed to persist migrated Codex config for provider '{}': {}",
-                    provider_id,
-                    e
-                );
-            }
+            )?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

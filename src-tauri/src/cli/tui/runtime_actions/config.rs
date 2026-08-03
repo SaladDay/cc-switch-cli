@@ -52,31 +52,6 @@ pub(super) fn show_full(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppErr
     Ok(())
 }
 
-pub(super) fn import(ctx: &mut RuntimeActionContext<'_>, path: String) -> Result<(), AppError> {
-    let source = std::path::PathBuf::from(path);
-    if !source.exists() {
-        return Err(AppError::Message(texts::tui_error_import_file_not_found(
-            &source.display().to_string(),
-        )));
-    }
-    let state = load_state()?;
-    let backup_id = ConfigService::import_config_from_path(&source, &state)?;
-    if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state) {
-        log::warn!("配置导入后同步 live 配置失败: {e}");
-    }
-    if backup_id.is_empty() {
-        ctx.app
-            .push_toast(texts::tui_toast_imported_config(), ToastKind::Success);
-    } else {
-        ctx.app.push_toast(
-            texts::tui_toast_imported_with_backup(&backup_id),
-            ToastKind::Success,
-        );
-    }
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    Ok(())
-}
-
 pub(super) fn backup(
     ctx: &mut RuntimeActionContext<'_>,
     name: Option<String>,
@@ -89,28 +64,6 @@ pub(super) fn backup(
     } else {
         ctx.app
             .push_toast(texts::tui_toast_backup_created(&id), ToastKind::Success);
-    }
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    Ok(())
-}
-
-pub(super) fn restore_backup(
-    ctx: &mut RuntimeActionContext<'_>,
-    id: String,
-) -> Result<(), AppError> {
-    let state = load_state()?;
-    let pre_backup = ConfigService::restore_from_backup_id(&id, &state)?;
-    if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state) {
-        log::warn!("备份恢复后同步 live 配置失败: {e}");
-    }
-    if pre_backup.is_empty() {
-        ctx.app
-            .push_toast(texts::tui_toast_restored_from_backup(), ToastKind::Success);
-    } else {
-        ctx.app.push_toast(
-            texts::tui_toast_restored_with_pre_backup(&pre_backup),
-            ToastKind::Success,
-        );
     }
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
@@ -169,7 +122,10 @@ pub(super) fn webdav_save(
     mut settings: WebDavSyncSettings,
 ) -> Result<(), AppError> {
     settings.auto_sync = false;
-    set_webdav_sync_settings(Some(settings))?;
+    {
+        let _permit = super::settings::acquire_settings_mutation_permit()?;
+        set_webdav_sync_settings(Some(settings))?;
+    }
     ctx.app.form = None;
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app
@@ -181,11 +137,15 @@ pub(super) fn webdav_set_enabled(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,
 ) -> Result<(), AppError> {
-    let mut settings = get_webdav_sync_settings()
-        .ok_or_else(|| AppError::Message(texts::tui_webdav_status_not_configured().to_string()))?;
-    settings.enabled = enabled;
-    settings.auto_sync = false;
-    set_webdav_sync_settings(Some(settings))?;
+    {
+        let _permit = super::settings::acquire_settings_mutation_permit()?;
+        let mut settings = get_webdav_sync_settings().ok_or_else(|| {
+            AppError::Message(texts::tui_webdav_status_not_configured().to_string())
+        })?;
+        settings.enabled = enabled;
+        settings.auto_sync = false;
+        set_webdav_sync_settings(Some(settings))?;
+    }
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         texts::tui_cloud_sync_backend_state_changed("WebDAV", enabled),
@@ -199,7 +159,10 @@ pub(super) fn s3_save(
     mut settings: S3SyncSettings,
 ) -> Result<(), AppError> {
     settings.auto_sync = false;
-    set_s3_sync_settings(Some(settings))?;
+    {
+        let _permit = super::settings::acquire_settings_mutation_permit()?;
+        set_s3_sync_settings(Some(settings))?;
+    }
     ctx.app.form = None;
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app
@@ -254,11 +217,15 @@ pub(super) fn s3_set_enabled(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,
 ) -> Result<(), AppError> {
-    let mut settings = get_s3_sync_settings()
-        .ok_or_else(|| AppError::Message(texts::tui_webdav_status_not_configured().to_string()))?;
-    settings.enabled = enabled;
-    settings.auto_sync = false;
-    set_s3_sync_settings(Some(settings))?;
+    {
+        let _permit = super::settings::acquire_settings_mutation_permit()?;
+        let mut settings = get_s3_sync_settings().ok_or_else(|| {
+            AppError::Message(texts::tui_webdav_status_not_configured().to_string())
+        })?;
+        settings.enabled = enabled;
+        settings.auto_sync = false;
+        set_s3_sync_settings(Some(settings))?;
+    }
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         texts::tui_cloud_sync_backend_state_changed("S3 Compatible", enabled),
@@ -268,7 +235,10 @@ pub(super) fn s3_set_enabled(
 }
 
 pub(super) fn s3_reset(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    set_s3_sync_settings(None)?;
+    {
+        let _permit = super::settings::acquire_settings_mutation_permit()?;
+        set_s3_sync_settings(None)?;
+    }
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app
         .push_toast(texts::tui_toast_s3_settings_cleared(), ToastKind::Success);
@@ -300,7 +270,10 @@ pub(super) fn webdav_migrate_v1_to_v2(ctx: &mut RuntimeActionContext<'_>) -> Res
 }
 
 pub(super) fn webdav_reset(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    set_webdav_sync_settings(None)?;
+    {
+        let _permit = super::settings::acquire_settings_mutation_permit()?;
+        set_webdav_sync_settings(None)?;
+    }
     ctx.app.push_toast(
         texts::tui_toast_webdav_settings_cleared(),
         ToastKind::Success,
@@ -322,6 +295,8 @@ pub(super) fn webdav_jianguoyun_quick_setup(
 }
 
 pub(super) fn reset(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
+    let permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let config_dir = crate::config::get_app_config_dir();
     let db_path = config_dir.join("cc-switch.db");
     let backup_id = ConfigService::create_backup(&db_path, None)?;
@@ -341,6 +316,7 @@ pub(super) fn reset(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> 
             ToastKind::Success,
         );
     }
+    drop(permit);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
 }
@@ -547,12 +523,21 @@ fn queue_webdav_request(
         return Ok(());
     };
     let request_id = ctx.webdav_loading.start();
+    let loading_kind = if kind.is_restore_mutation() {
+        LoadingKind::CloudRestore
+    } else {
+        LoadingKind::WebDav
+    };
     ctx.app.overlay = Overlay::Loading {
-        kind: LoadingKind::WebDav,
+        kind: loading_kind,
         title,
         message: texts::tui_webdav_loading_message().to_string(),
     };
-    if let Err(err) = tx.send(WebDavReq { request_id, kind }) {
+    if let Err(err) = tx.send(WebDavReq {
+        request_id,
+        kind,
+        app_type: ctx.app.app_type.clone(),
+    }) {
         ctx.webdav_loading.cancel();
         ctx.app.overlay = Overlay::None;
         ctx.app.push_toast(
@@ -574,12 +559,21 @@ fn queue_s3_request(
         return Ok(());
     };
     let request_id = ctx.webdav_loading.start();
+    let loading_kind = if kind.is_restore_mutation() {
+        LoadingKind::CloudRestore
+    } else {
+        LoadingKind::S3
+    };
     ctx.app.overlay = Overlay::Loading {
-        kind: LoadingKind::S3,
+        kind: loading_kind,
         title,
         message: texts::tui_s3_loading_message().to_string(),
     };
-    if let Err(error) = tx.send(WebDavReq { request_id, kind }) {
+    if let Err(error) = tx.send(WebDavReq {
+        request_id,
+        kind,
+        app_type: ctx.app.app_type.clone(),
+    }) {
         ctx.webdav_loading.cancel();
         ctx.app.overlay = Overlay::None;
         ctx.app.push_toast(

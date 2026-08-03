@@ -10,8 +10,10 @@ use crate::app_config::{InstalledSkill, SkillApps};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::services::skill::SkillRepo;
+use crate::skill_directory::SkillDirectory;
 use indexmap::IndexMap;
 use rusqlite::params;
+use std::collections::BTreeMap;
 
 impl Database {
     // ========== InstalledSkill CRUD ==========
@@ -53,6 +55,7 @@ impl Database {
         let mut skills = IndexMap::new();
         for skill_res in skill_iter {
             let skill = skill_res.map_err(|e| AppError::Database(e.to_string()))?;
+            validate_skill_directory(&skill.directory)?;
             skills.insert(skill.id.clone(), skill);
         }
         Ok(skills)
@@ -91,7 +94,10 @@ impl Database {
         });
 
         match result {
-            Ok(skill) => Ok(Some(skill)),
+            Ok(skill) => {
+                validate_skill_directory(&skill.directory)?;
+                Ok(Some(skill))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
@@ -100,6 +106,7 @@ impl Database {
     /// 保存 Skill（添加或更新）
     pub fn save_skill(&self, skill: &InstalledSkill) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        validate_unique_skill_directory(&conn, &skill.id, &skill.directory)?;
         conn.execute(
             "INSERT INTO skills
              (id, name, description, directory, repo_owner, repo_name, repo_branch,
@@ -248,4 +255,48 @@ impl Database {
         }
         Ok(count)
     }
+}
+
+fn validate_skill_directory(value: &str) -> Result<SkillDirectory, AppError> {
+    SkillDirectory::parse(value).map_err(|error| {
+        AppError::InvalidInput(format!(
+            "invalid Skill directory component {value:?}: {}",
+            error.reason()
+        ))
+    })
+}
+
+fn validate_unique_skill_directory(
+    connection: &rusqlite::Connection,
+    skill_id: &str,
+    value: &str,
+) -> Result<(), AppError> {
+    let candidate = validate_skill_directory(value)?;
+    let candidate_key = candidate.collision_key();
+    let mut statement = connection
+        .prepare("SELECT id, directory FROM skills WHERE id != ?1 ORDER BY id")
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let rows = statement
+        .query_map([skill_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let mut observed = BTreeMap::new();
+    for row in rows {
+        let (existing_id, existing_value) =
+            row.map_err(|error| AppError::Database(error.to_string()))?;
+        let existing = validate_skill_directory(&existing_value)?;
+        let existing_key = existing.collision_key();
+        if let Some(previous_id) = observed.insert(existing_key.clone(), existing_id.clone()) {
+            return Err(AppError::InvalidInput(format!(
+                "existing Skills {previous_id:?} and {existing_id:?} have colliding directories"
+            )));
+        }
+        if existing_key == candidate_key {
+            return Err(AppError::InvalidInput(format!(
+                "Skill directory {value:?} collides with Skill {existing_id:?}"
+            )));
+        }
+    }
+    Ok(())
 }

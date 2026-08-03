@@ -14,8 +14,8 @@ use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 
 use super::super::data::{
     load_provider_runtime_snapshot_from_state_async, load_proxy_snapshot_from_state_async,
-    load_snapshot_state, load_state, load_usage_pricing_data_from_state_for_range, UiData,
-    UsageRangePreset,
+    load_snapshot_state, load_state, load_state_for_mutation,
+    load_usage_pricing_data_from_state_for_range, UiData, UsageRangePreset,
 };
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
@@ -23,11 +23,11 @@ use super::types::{
     LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
     ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchSystem,
     ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages,
-    SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
-    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
-    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
-    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
-    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    RestoreUiSnapshot, SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg,
+    SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg,
+    SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq,
+    UpdateSystem, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq,
+    UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -93,14 +93,16 @@ fn codex_history_save_loop(
     operation_tx: mpsc::Sender<CodexHistoryOperation>,
 ) {
     while let Ok(req) = rx.recv() {
-        let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
-            crate::services::codex_history::set_unified_session_history_enabled(
-                &state,
-                req.enabled,
-                req.migrate_existing,
-            )
+        let result = load_state_for_mutation()
             .map_err(|e| e.to_string())
-        });
+            .and_then(|(state, _permit)| {
+                crate::services::codex_history::set_unified_session_history_enabled(
+                    &state,
+                    req.enabled,
+                    req.migrate_existing,
+                )
+                .map_err(|e| e.to_string())
+            });
 
         let changed = result.as_ref().is_ok_and(|outcome| outcome.changed);
         if changed && req.enabled {
@@ -143,6 +145,20 @@ fn codex_history_operation_loop(
     tx: mpsc::Sender<CodexHistoryMsg>,
 ) {
     while let Ok(operation) = rx.recv() {
+        let _permit =
+            match crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking() {
+                Ok(permit) => permit,
+                Err(error) => {
+                    if matches!(&operation, CodexHistoryOperation::Restore) {
+                        let _ = tx.send(CodexHistoryMsg::RestoreFinished(Err(error)));
+                    } else {
+                        log::warn!(
+                        "Codex official history migration could not acquire state permit: {error}"
+                    );
+                    }
+                    continue;
+                }
+            };
         match operation {
             CodexHistoryOperation::MigrateExisting => {
                 match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket(
@@ -223,12 +239,14 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                 enabled,
                 base_reload_token,
             } => {
-                let outcome = match load_state().map_err(|e| e.to_string()) {
+                let outcome = match load_state_for_mutation().map_err(|error| error.to_string()) {
                     Err(error) => ManagedSessionOutcome::Failed(error),
-                    Ok(state) => match rt.block_on(
-                        state
-                            .proxy_service
-                            .set_managed_session_for_app(app_type.as_str(), enabled),
+                    Ok((state, permit)) => match rt.block_on(
+                        state.proxy_service.set_managed_session_for_app_with_permit(
+                            &permit,
+                            app_type.as_str(),
+                            enabled,
+                        ),
                     ) {
                         Err(error) => ManagedSessionOutcome::Failed(error),
                         Ok(()) => ManagedSessionOutcome::Applied {
@@ -382,6 +400,7 @@ fn webdav_worker_loop(rx: mpsc::Receiver<WebDavReq>, tx: mpsc::Sender<WebDavMsg>
     while let Ok(req) = rx.recv() {
         let req = drain_latest_webdav_req(req, &rx);
         let request_id = req.request_id;
+        let app_type = req.app_type.clone();
         let req_for_msg = req.kind.clone();
         let result = match req.kind {
             WebDavReqKind::CheckConnection => WebDavSyncService::check_connection()
@@ -393,23 +412,60 @@ fn webdav_worker_loop(rx: mpsc::Receiver<WebDavReq>, tx: mpsc::Sender<WebDavMsg>
                     message: summary.message,
                 })
                 .map_err(|e| WebDavErr::Generic(e.to_string())),
-            WebDavReqKind::Download => WebDavSyncService::download()
-                .map(|summary| WebDavDone::Downloaded {
-                    decision: summary.decision,
-                    message: summary.message,
-                })
-                .map_err(|e| WebDavErr::Generic(e.to_string())),
-            WebDavReqKind::MigrateV1ToV2 => WebDavSyncService::migrate_v1_to_v2()
-                .map(|summary| WebDavDone::V1Migrated {
-                    message: summary.message,
-                })
-                .map_err(|e| WebDavErr::Generic(e.to_string())),
+            WebDavReqKind::Download => {
+                WebDavSyncService::download_and_then(restore_ui_capture(app_type.clone()))
+                    .map_err(|e| WebDavErr::Generic(e.to_string()))
+                    .and_then(|summary| {
+                        let restored = match summary.publication {
+                            Some(publication) => {
+                                Some(load_restore_ui_snapshot(publication, app_type.clone()))
+                            }
+                            None if matches!(
+                                summary.decision,
+                                crate::services::SyncDecision::V1MigrationNeeded
+                            ) =>
+                            {
+                                None
+                            }
+                            None => {
+                                return Err(WebDavErr::Generic(
+                                    "restore completed without a publication token".to_string(),
+                                ));
+                            }
+                        };
+                        Ok(WebDavDone::Downloaded {
+                            decision: summary.decision,
+                            message: summary.message,
+                            restored,
+                        })
+                    })
+            }
+            WebDavReqKind::MigrateV1ToV2 => {
+                WebDavSyncService::migrate_v1_to_v2_and_then(restore_ui_capture(app_type.clone()))
+                    .map_err(|e| WebDavErr::Generic(e.to_string()))
+                    .and_then(|summary| {
+                        let publication = summary.publication.ok_or_else(|| {
+                            WebDavErr::Generic(
+                                "V1 migration completed without a publication token".to_string(),
+                            )
+                        })?;
+                        Ok(WebDavDone::V1Migrated {
+                            message: summary.message,
+                            restored: load_restore_ui_snapshot(publication, app_type.clone()),
+                        })
+                    })
+            }
             WebDavReqKind::JianguoyunQuickSetup { username, password } => {
                 let mut cfg = webdav_jianguoyun_preset(&username, &password);
                 // Saving credentials is not consent to switch the active sync backend.
                 cfg.enabled = false;
                 cfg.auto_sync = false;
-                if let Err(err) = set_webdav_sync_settings(Some(cfg)) {
+                let save_result =
+                    crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking(
+                    )
+                    .map_err(AppError::Message)
+                    .and_then(|_permit| set_webdav_sync_settings(Some(cfg)));
+                if let Err(err) = save_result {
                     Err(WebDavErr::QuickSetupSave(err.to_string()))
                 } else if let Err(err) = WebDavSyncService::check_connection() {
                     Err(WebDavErr::QuickSetupCheck(err.to_string()))
@@ -429,12 +485,22 @@ fn webdav_worker_loop(rx: mpsc::Receiver<WebDavReq>, tx: mpsc::Sender<WebDavMsg>
                     message: summary.message,
                 })
                 .map_err(|e| WebDavErr::Generic(e.to_string())),
-            WebDavReqKind::S3Download => S3SyncService::download()
-                .map(|summary| WebDavDone::S3Downloaded {
-                    decision: summary.decision,
-                    message: summary.message,
-                })
-                .map_err(|e| WebDavErr::Generic(e.to_string())),
+            WebDavReqKind::S3Download => {
+                S3SyncService::download_and_then(restore_ui_capture(app_type.clone()))
+                    .map_err(|e| WebDavErr::Generic(e.to_string()))
+                    .and_then(|summary| {
+                        let publication = summary.publication.ok_or_else(|| {
+                            WebDavErr::Generic(
+                                "S3 restore completed without a publication token".to_string(),
+                            )
+                        })?;
+                        Ok(WebDavDone::S3Downloaded {
+                            decision: summary.decision,
+                            message: summary.message,
+                            restored: load_restore_ui_snapshot(publication, app_type.clone()),
+                        })
+                    })
+            }
         };
 
         let _ = tx.send(WebDavMsg::Finished {
@@ -442,6 +508,34 @@ fn webdav_worker_loop(rx: mpsc::Receiver<WebDavReq>, tx: mpsc::Sender<WebDavMsg>
             req: req_for_msg,
             result,
         });
+    }
+}
+
+fn load_restore_ui_snapshot(
+    publication: crate::services::RestorePublication<Result<Box<UiData>, String>>,
+    app_type: AppType,
+) -> RestoreUiSnapshot {
+    let loaded = match publication.status.pending_retry() {
+        Some(pending) => Err(pending.message()),
+        None => publication.snapshot.unwrap_or_else(|| {
+            Err("cloud restore completed without its guarded UI snapshot".to_string())
+        }),
+    };
+    RestoreUiSnapshot {
+        publication: publication.token,
+        status: publication.status,
+        app_type,
+        loaded,
+    }
+}
+
+fn restore_ui_capture(
+    app_type: AppType,
+) -> impl FnOnce(&crate::store::AppState) -> Result<Box<UiData>, String> {
+    move |state| {
+        UiData::load_fast_snapshot_from_state(state, &app_type)
+            .map(Box::new)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -3893,7 +3987,13 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
                 let spec_clone = spec.clone();
                 let app_clone = app.clone();
                 let result = rt
-                    .block_on(async { service.install(&spec_clone, &app_clone).await })
+                    .block_on(async {
+                        let _permit =
+                            crate::services::state_coordination::acquire_ordinary_mutation_permit()
+                                .await
+                                .map_err(AppError::Message)?;
+                        service.install(&spec_clone, &app_clone).await
+                    })
                     .map_err(|e| e.to_string());
                 let _ = tx.send(SkillsMsg::InstallFinished { spec, result });
             }
@@ -3905,6 +4005,29 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn cloud_restore_completion_uses_the_snapshot_captured_inside_the_restore_guard() {
+        let mut guarded = UiData::default();
+        guarded.providers.current_id = "guarded-provider".to_string();
+        let publication = crate::services::RestorePublication {
+            token: crate::services::RestorePublicationToken::for_test("guarded-publication"),
+            status: crate::services::RestorePostCommitStatus::Applied,
+            snapshot: Some(Ok(Box::new(guarded))),
+        };
+
+        let restored = load_restore_ui_snapshot(publication, AppType::Codex);
+
+        assert_eq!(restored.app_type, AppType::Codex);
+        assert_eq!(
+            restored
+                .loaded
+                .expect("guarded snapshot")
+                .providers
+                .current_id,
+            "guarded-provider"
+        );
+    }
 
     #[test]
     #[serial_test::serial(home_settings)]

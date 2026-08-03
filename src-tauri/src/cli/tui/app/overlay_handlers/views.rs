@@ -201,7 +201,7 @@ impl App {
         };
 
         Some(match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if !kind.is_restore_mutation() => {
                 let kind = *kind;
                 self.overlay = Overlay::None;
                 if kind == LoadingKind::UpdateCheck {

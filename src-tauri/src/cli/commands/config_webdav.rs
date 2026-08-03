@@ -180,6 +180,8 @@ fn set(
     auto_sync: bool,
     no_auto_sync: bool,
 ) -> Result<(), AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let mut settings = merged_settings(
         get_webdav_sync_settings(),
         base_url,
@@ -205,6 +207,8 @@ fn set(
 }
 
 fn clear() -> Result<(), AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     set_webdav_sync_settings(None)?;
     println!(
         "{}",
@@ -238,7 +242,12 @@ fn jianguoyun(
         settings.auto_sync = false;
     }
     settings.normalize();
-    set_webdav_sync_settings(Some(settings))?;
+    {
+        let _permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        set_webdav_sync_settings(Some(settings))?;
+    }
     WebDavSyncService::check_connection()?;
     println!(
         "{}",
@@ -270,27 +279,25 @@ fn upload() -> Result<(), AppError> {
 
 fn download() -> Result<(), AppError> {
     let summary = WebDavSyncService::download()?;
-    sync_live_config_after_webdav();
-    println!("{}", success(&summary.message));
+    print_restore_summary(&summary);
     Ok(())
 }
 
 fn migrate_v1_to_v2() -> Result<(), AppError> {
     let summary = WebDavSyncService::migrate_v1_to_v2()?;
-    sync_live_config_after_webdav();
-    println!("{}", success(&summary.message));
+    print_restore_summary(&summary);
     Ok(())
 }
 
-fn sync_live_config_after_webdav() {
-    let Ok(state) = crate::AppState::try_new() else {
-        return;
-    };
-
-    if let Err(err) = crate::services::ProviderService::sync_current_to_live(&state) {
-        let en = format!("Live config sync after WebDAV operation failed: {err}");
-        let zh = format!("WebDAV 操作后同步 live 配置失败: {err}");
-        println!("{}", warning(crate::t!(&en, &zh)));
+fn print_restore_summary(summary: &crate::services::WebDavSyncSummary) {
+    if let Some(pending) = summary
+        .publication
+        .as_ref()
+        .and_then(|publication| publication.status.pending_retry())
+    {
+        println!("{}", warning(&pending.message()));
+    } else {
+        println!("{}", success(&summary.message));
     }
 }
 

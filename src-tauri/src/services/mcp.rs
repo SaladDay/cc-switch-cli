@@ -5,6 +5,12 @@ use crate::error::AppError;
 use crate::mcp;
 use crate::store::AppState;
 
+fn acquire_mcp_mutation_permit(
+) -> Result<crate::services::state_coordination::OrdinaryMutationPermit, AppError> {
+    crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)
+}
+
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
 pub struct McpService;
 
@@ -39,6 +45,7 @@ impl McpService {
 
     /// 添加或更新 MCP 服务器
     pub fn upsert_server(state: &AppState, server: McpServer) -> Result<(), AppError> {
+        let permit = acquire_mcp_mutation_permit()?;
         let (server_id, apps_to_remove) = {
             let mut cfg = state.config.write()?;
 
@@ -63,7 +70,7 @@ impl McpService {
             (server_id, apps_to_remove)
         };
 
-        state.save()?;
+        state.save_with_permit(&permit)?;
 
         // 如果是更新：对“由启用变为禁用”的应用，清理对应 live 配置
         for app in apps_to_remove {
@@ -78,6 +85,7 @@ impl McpService {
 
     /// 删除 MCP 服务器
     pub fn delete_server(state: &AppState, id: &str) -> Result<bool, AppError> {
+        let permit = acquire_mcp_mutation_permit()?;
         let server = {
             let mut cfg = state.config.write()?;
 
@@ -89,7 +97,7 @@ impl McpService {
         };
 
         if let Some(server) = server {
-            state.save()?;
+            state.save_with_permit(&permit)?;
 
             // 从所有应用的 live 配置中移除
             Self::remove_server_from_all_apps(state, id, &server)?;
@@ -106,6 +114,7 @@ impl McpService {
         app: AppType,
         enabled: bool,
     ) -> Result<(), AppError> {
+        let permit = acquire_mcp_mutation_permit()?;
         let server = {
             let mut cfg = state.config.write()?;
 
@@ -122,7 +131,7 @@ impl McpService {
         };
 
         if let Some(server) = server {
-            state.save()?;
+            state.save_with_permit(&permit)?;
 
             // 同步到对应应用
             if enabled {
@@ -137,6 +146,7 @@ impl McpService {
 
     /// Replace the full supported-app matrix for one MCP server.
     pub fn set_apps(state: &AppState, server_id: &str, apps: McpApps) -> Result<bool, AppError> {
+        let permit = acquire_mcp_mutation_permit()?;
         let (server, changes) = {
             let mut cfg = state.config.write()?;
 
@@ -161,7 +171,7 @@ impl McpService {
             (server, changes)
         };
 
-        state.save()?;
+        state.save_with_permit(&permit)?;
 
         for (app, enabled) in changes {
             if enabled {
@@ -252,6 +262,25 @@ impl McpService {
     /// 一处损坏没有理由让其它应用的 MCP 状态保持陈旧。全部执行完后聚合错误，
     /// 保留调用方对部分失败的可见性。
     pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
+        let permit = acquire_mcp_mutation_permit()?;
+        Self::sync_all_enabled_with_permit(state, &permit)
+    }
+
+    pub(crate) fn sync_all_enabled_with_permit(
+        state: &AppState,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
+        Self::sync_all_enabled_impl(state)
+    }
+
+    pub(crate) fn sync_all_enabled_for_restore(
+        state: &AppState,
+        _permit: &crate::services::state_coordination::RestoreExclusivePermit,
+    ) -> Result<(), AppError> {
+        Self::sync_all_enabled_impl(state)
+    }
+
+    fn sync_all_enabled_impl(state: &AppState) -> Result<(), AppError> {
         let servers = Self::get_all_servers(state)?;
 
         let mut failures = Vec::new();
@@ -275,6 +304,7 @@ impl McpService {
     /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做
     /// 定向重投影，避免把无关应用的失败面牵连进目标应用的关键路径。
     pub fn sync_enabled_for_app(state: &AppState, app: &AppType) -> Result<(), AppError> {
+        let _permit = acquire_mcp_mutation_permit()?;
         let servers = Self::get_all_servers(state)?;
         Self::project_servers_to_app(state, &servers, app)
     }
@@ -332,6 +362,7 @@ impl McpService {
     /// [已废弃] 同步启用的 MCP 到指定应用（兼容旧 API）
     #[deprecated(since = "3.7.0", note = "Use sync_all_enabled instead")]
     pub fn sync_enabled(state: &AppState, app: AppType) -> Result<(), AppError> {
+        let _permit = acquire_mcp_mutation_permit()?;
         let servers = Self::get_all_servers(state)?;
 
         for server in servers.values() {
@@ -345,56 +376,57 @@ impl McpService {
 
     /// 从 Claude 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_claude(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_claude(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        let permit = acquire_mcp_mutation_permit()?;
+        Self::import_with_permit(state, &permit, mcp::import_from_claude)
     }
 
     /// 从 Codex 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_codex(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_codex(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        let permit = acquire_mcp_mutation_permit()?;
+        Self::import_with_permit(state, &permit, mcp::import_from_codex)
     }
 
     /// 从 Gemini 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_gemini(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_gemini(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        let permit = acquire_mcp_mutation_permit()?;
+        Self::import_with_permit(state, &permit, mcp::import_from_gemini)
     }
 
     /// 从 OpenCode 导入 MCP
     pub fn import_from_opencode(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_opencode(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        let permit = acquire_mcp_mutation_permit()?;
+        Self::import_with_permit(state, &permit, mcp::import_from_opencode)
     }
 
     /// 从 Hermes 导入 MCP
     pub fn import_from_hermes(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_hermes(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        let permit = acquire_mcp_mutation_permit()?;
+        Self::import_with_permit(state, &permit, mcp::import_from_hermes)
     }
 
     pub fn import_from_supported_apps(state: &AppState) -> Result<usize, AppError> {
+        let permit = acquire_mcp_mutation_permit()?;
         let mut total = 0;
-        total += Self::import_from_claude(state)?;
-        total += Self::import_from_codex(state)?;
-        total += Self::import_from_gemini(state)?;
-        total += Self::import_from_opencode(state)?;
-        total += Self::import_from_hermes(state)?;
+        total += Self::import_with_permit(state, &permit, mcp::import_from_claude)?;
+        total += Self::import_with_permit(state, &permit, mcp::import_from_codex)?;
+        total += Self::import_with_permit(state, &permit, mcp::import_from_gemini)?;
+        total += Self::import_with_permit(state, &permit, mcp::import_from_opencode)?;
+        total += Self::import_with_permit(state, &permit, mcp::import_from_hermes)?;
         Ok(total)
+    }
+
+    fn import_with_permit<F>(
+        state: &AppState,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+        importer: F,
+    ) -> Result<usize, AppError>
+    where
+        F: FnOnce(&mut MultiAppConfig) -> Result<usize, AppError>,
+    {
+        let mut cfg = state.config.write()?;
+        let count = importer(&mut cfg)?;
+        drop(cfg);
+        state.save_with_permit(permit)?;
+        Ok(count)
     }
 }

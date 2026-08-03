@@ -3,12 +3,20 @@ use serial_test::serial;
 
 use cc_switch_lib::{
     cli::commands::prompts::{execute, PromptsCommand},
-    AppType, MultiAppConfig, PromptService,
+    update_settings, AppSettings, AppType, MultiAppConfig, PromptService,
 };
 
 #[path = "support.rs"]
 mod support;
 use support::{ensure_test_home, lock_test_mutex, reset_test_fs, state_from_config};
+
+fn configure_test_editor(editor_script: &std::path::Path) {
+    update_settings(AppSettings {
+        preferred_editor: Some(editor_script.to_string_lossy().into_owned()),
+        ..AppSettings::default()
+    })
+    .expect("configure fake editor");
+}
 
 #[test]
 #[serial]
@@ -137,8 +145,7 @@ fn prompt_create_command_uses_explicit_name() {
         std::fs::set_permissions(&editor_script, perms).expect("chmod fake editor");
     }
 
-    std::env::set_var("EDITOR", &editor_script);
-    std::env::set_var("VISUAL", &editor_script);
+    configure_test_editor(&editor_script);
 
     execute(
         PromptsCommand::Create {
@@ -150,9 +157,6 @@ fn prompt_create_command_uses_explicit_name() {
         Some(AppType::Claude),
     )
     .expect("create command succeeds");
-
-    std::env::remove_var("EDITOR");
-    std::env::remove_var("VISUAL");
 
     let persisted = cc_switch_lib::AppState::try_new().expect("reload state");
     let prompts = PromptService::get_prompts(&persisted, AppType::Claude).expect("load prompts");
@@ -232,8 +236,7 @@ fn prompt_create_command_accepts_custom_id_and_description() {
         std::fs::set_permissions(&editor_script, perms).expect("chmod fake editor");
     }
 
-    std::env::set_var("EDITOR", &editor_script);
-    std::env::set_var("VISUAL", &editor_script);
+    configure_test_editor(&editor_script);
 
     execute(
         PromptsCommand::Create {
@@ -245,9 +248,6 @@ fn prompt_create_command_accepts_custom_id_and_description() {
         Some(AppType::Claude),
     )
     .expect("create command succeeds");
-
-    std::env::remove_var("EDITOR");
-    std::env::remove_var("VISUAL");
 
     let persisted = cc_switch_lib::AppState::try_new().expect("reload state");
     let prompts = PromptService::get_prompts(&persisted, AppType::Claude).expect("load prompts");

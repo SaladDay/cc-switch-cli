@@ -173,6 +173,14 @@ pub enum CodexHistoryCommand {
 }
 
 pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
+    let _mutation_permit = if command_requires_mutation_permit(&cmd) {
+        Some(
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?,
+        )
+    } else {
+        None
+    };
     match cmd {
         SettingsCommand::Show { json } => show_settings(json),
         SettingsCommand::Language { language } => language_cmd(language),
@@ -181,6 +189,24 @@ pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
         SettingsCommand::ClaudePlugin(cmd) => claude_plugin_cmd(cmd),
         SettingsCommand::CodexAuthPreservation(cmd) => codex_auth_preservation_cmd(cmd),
         SettingsCommand::CodexHistory(cmd) => codex_history_cmd(cmd),
+    }
+}
+
+fn command_requires_mutation_permit(command: &SettingsCommand) -> bool {
+    match command {
+        SettingsCommand::Show { .. } => false,
+        SettingsCommand::Language { language } => language.is_some(),
+        SettingsCommand::VisibleApps(VisibleAppsCommand::Show { .. }) => false,
+        SettingsCommand::VisibleApps(_) => true,
+        SettingsCommand::ClaudeOnboarding(ClaudeOnboardingCommand::Show) => false,
+        SettingsCommand::ClaudeOnboarding(_) => true,
+        SettingsCommand::ClaudePlugin(ClaudePluginCommand::Show) => false,
+        SettingsCommand::ClaudePlugin(_) => true,
+        SettingsCommand::CodexAuthPreservation(CodexAuthPreservationCommand::Show { .. }) => false,
+        SettingsCommand::CodexAuthPreservation(_) => true,
+        // These workflows either own an AppState capability or acquire one in
+        // their specialized filesystem-only restore branch.
+        SettingsCommand::CodexHistory(_) => false,
     }
 }
 
@@ -556,6 +582,7 @@ fn set_codex_history_enabled(
 }
 
 fn migrate_codex_history_existing() -> Result<(), AppError> {
+    let state = crate::store::AppState::try_new()?;
     let mut settings = crate::settings::get_settings();
     if !settings.unify_codex_session_history {
         return Err(AppError::InvalidInput(
@@ -565,7 +592,6 @@ fn migrate_codex_history_existing() -> Result<(), AppError> {
     settings.unify_codex_migrate_existing = Some(true);
     crate::settings::update_settings(settings)?;
 
-    let state = crate::store::AppState::try_new()?;
     crate::services::provider::reapply_current_codex_official_live(&state)?;
     let outcome =
         crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket()?;
@@ -574,6 +600,8 @@ fn migrate_codex_history_existing() -> Result<(), AppError> {
 }
 
 fn restore_codex_history() -> Result<(), AppError> {
+    let _permit = crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+        .map_err(AppError::Message)?;
     let outcome = crate::codex_history_migration::restore_codex_official_history_from_backups()?;
     print_codex_history_restore_outcome(&outcome);
     Ok(())

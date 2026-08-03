@@ -37,6 +37,8 @@ use live::LiveSnapshot;
 pub use common::migrate_legacy_codex_config;
 #[cfg(test)]
 use common::strip_codex_common_config_from_full_text;
+#[cfg(test)]
+pub(crate) use common_config::GeminiScrubLiveFailureGuard;
 
 /// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
 /// live 配置，使开关即时生效（无需等下一次切换）。
@@ -140,11 +142,7 @@ fn state_from_config(config: MultiAppConfig) -> AppState {
     let mut config = config;
     ProviderService::migrate_common_config_upstream_semantics_if_needed(&db, &mut config)
         .expect("migrate common config semantics for test state");
-    AppState {
-        db: db.clone(),
-        config: std::sync::RwLock::new(config),
-        proxy_service: crate::ProxyService::new(db),
-    }
+    AppState::from_test_parts(db, config).expect("construct test state")
 }
 
 #[derive(Clone)]
@@ -204,6 +202,18 @@ enum PreparedLiveWrite {
     OpenClaw {
         models: Value,
     },
+}
+
+#[derive(Clone, Copy)]
+enum LiveProjectionCapability<'a> {
+    Ordinary(&'a crate::services::state_coordination::OrdinaryMutationPermit),
+    Restore(&'a crate::services::state_coordination::RestoreExclusivePermit),
+}
+
+impl LiveProjectionCapability<'_> {
+    fn is_restore(self) -> bool {
+        matches!(self, Self::Restore(_))
+    }
 }
 
 #[derive(Clone)]
@@ -390,6 +400,9 @@ impl ProviderService {
         source_id: &str,
         provider_override: Option<Provider>,
     ) -> Result<Provider, AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         let app_type_clone = app_type.clone();
         let source_id = source_id.to_string();
         let live_ids = if app_type.is_additive_mode() {
@@ -398,7 +411,7 @@ impl ProviderService {
             HashSet::new()
         };
 
-        Self::run_transaction(state, move |config| {
+        Self::run_transaction_with_permit(state, &permit, move |config| {
             let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
             config.ensure_app(&app_type_clone);
             let manager = config
@@ -510,6 +523,16 @@ impl ProviderService {
     }
 
     pub fn sync_openclaw_to_live(state: &AppState) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::sync_openclaw_to_live_with_permit(state, &permit)
+    }
+
+    pub(crate) fn sync_openclaw_to_live_with_permit(
+        state: &AppState,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         let (providers, snippet) = {
             let guard = state.config.read().map_err(AppError::from)?;
             let Some(manager) = guard.get_manager(&AppType::OpenClaw) else {
@@ -621,16 +644,21 @@ impl ProviderService {
         Ok(value)
     }
 
-    fn run_transaction<R, F>(state: &AppState, f: F) -> Result<R, AppError>
+    fn run_transaction_with_permit<R, F>(
+        state: &AppState,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+        f: F,
+    ) -> Result<R, AppError>
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        Self::run_staged_transaction(state, None, f)
+        Self::run_staged_transaction_with_permit(state, None, permit, f)
     }
 
-    fn run_staged_transaction<R, F>(
+    fn run_staged_transaction_with_permit<R, F>(
         state: &AppState,
         preserved_current_apps: Option<&[AppType]>,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
         f: F,
     ) -> Result<R, AppError>
     where
@@ -652,16 +680,18 @@ impl ProviderService {
         }
 
         let save_result = match preserved_current_apps {
-            Some(apps) => state.save_config_snapshot_preserving_current_providers(&candidate, apps),
-            None => state.save_config_snapshot(&candidate),
+            Some(apps) => state.save_config_snapshot_preserving_current_providers_with_permit(
+                &candidate, apps, permit,
+            ),
+            None => state.save_config_snapshot_with_permit(&candidate, permit),
         };
 
         if let Err(save_err) = save_result {
             let rollback_result = match preserved_current_apps {
-                Some(apps) => {
-                    Self::restore_config_only_preserving_current_providers(state, original, apps)
-                }
-                None => Self::restore_config_only(state, original),
+                Some(apps) => Self::restore_config_only_preserving_current_providers(
+                    state, original, apps, permit,
+                ),
+                None => Self::restore_config_only(state, original, permit),
             };
             if let Err(rollback_err) = rollback_result {
                 return Err(AppError::localized(
@@ -674,18 +704,20 @@ impl ProviderService {
         }
 
         if let Some(prepared) = prepared {
-            if let Err(err) = Self::apply_prepared_post_commit_action(state, &prepared) {
+            if let Err(err) = Self::apply_prepared_post_commit_action(state, &prepared, &permit) {
                 let rollback_result = match preserved_current_apps {
                     Some(apps) => Self::rollback_after_failure_preserving_current_providers(
                         state,
                         original,
                         apps,
                         prepared.action.backup.clone(),
+                        permit,
                     ),
                     None => Self::rollback_after_failure(
                         state,
                         original,
                         prepared.action.backup.clone(),
+                        permit,
                     ),
                 };
                 if let Err(rollback_err) = rollback_result {
@@ -702,43 +734,50 @@ impl ProviderService {
         Ok(result)
     }
 
-    fn run_transaction_preserving_current_providers<R, F>(
+    fn run_transaction_preserving_current_providers_with_permit<R, F>(
         state: &AppState,
         preserved_current_apps: &[AppType],
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
         f: F,
     ) -> Result<R, AppError>
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        Self::run_staged_transaction(state, Some(preserved_current_apps), f)
+        Self::run_staged_transaction_with_permit(state, Some(preserved_current_apps), permit, f)
     }
 
-    fn restore_config_only(state: &AppState, snapshot: MultiAppConfig) -> Result<(), AppError> {
+    fn restore_config_only(
+        state: &AppState,
+        snapshot: MultiAppConfig,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         {
             let mut guard = state.config.write().map_err(AppError::from)?;
             *guard = snapshot;
         }
-        state.save()
+        state.save_with_permit(permit)
     }
 
     fn restore_config_only_preserving_current_providers(
         state: &AppState,
         snapshot: MultiAppConfig,
         preserved_current_apps: &[AppType],
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     ) -> Result<(), AppError> {
         {
             let mut guard = state.config.write().map_err(AppError::from)?;
             *guard = snapshot;
         }
-        state.save_preserving_current_providers(preserved_current_apps)
+        state.save_preserving_current_providers_with_permit(preserved_current_apps, permit)
     }
 
     fn rollback_after_failure(
         state: &AppState,
         snapshot: MultiAppConfig,
         backup: LiveSnapshot,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     ) -> Result<(), AppError> {
-        Self::restore_config_only(state, snapshot)?;
+        Self::restore_config_only(state, snapshot, permit)?;
         backup.restore()
     }
 
@@ -747,11 +786,13 @@ impl ProviderService {
         snapshot: MultiAppConfig,
         preserved_current_apps: &[AppType],
         backup: LiveSnapshot,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     ) -> Result<(), AppError> {
         Self::restore_config_only_preserving_current_providers(
             state,
             snapshot,
             preserved_current_apps,
+            permit,
         )?;
         backup.restore()
     }
@@ -798,6 +839,7 @@ impl ProviderService {
     fn apply_prepared_post_commit_action(
         state: &AppState,
         prepared: &PreparedPostCommitAction,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     ) -> Result<(), AppError> {
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
@@ -886,7 +928,7 @@ impl ProviderService {
 
         if prepared.action.sync_mcp {
             use crate::services::mcp::McpService;
-            McpService::sync_all_enabled(state)?;
+            McpService::sync_all_enabled_with_permit(state, permit)?;
         }
         if !prepared.action.takeover_active
             && prepared.action.refresh_snapshot
@@ -896,10 +938,13 @@ impl ProviderService {
                 state,
                 &prepared.action.app_type,
                 &prepared.action.provider.id,
+                permit,
             )?;
         }
 
-        if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
+        if let Err(e) =
+            crate::services::skill::SkillService::sync_all_enabled_best_effort_with_permit(permit)
+        {
             log::warn!("同步 Skills 失败: {e}");
         }
         Ok(())
@@ -909,6 +954,7 @@ impl ProviderService {
         state: &AppState,
         app_type: &AppType,
         provider_id: &str,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
     ) -> Result<(), AppError> {
         match app_type {
             AppType::Claude => {
@@ -954,7 +1000,7 @@ impl ProviderService {
                         }
                     }
                 }
-                state.save()?;
+                state.save_with_permit(permit)?;
             }
             AppType::Codex => {
                 let auth_path = get_codex_auth_path();
@@ -1090,7 +1136,7 @@ impl ProviderService {
                         }
                     }
                 }
-                state.save()?;
+                state.save_with_permit(permit)?;
             }
             AppType::Gemini => {
                 use crate::gemini_config::{
@@ -1151,7 +1197,7 @@ impl ProviderService {
                         }
                     }
                 }
-                state.save()?;
+                state.save_with_permit(permit)?;
             }
             AppType::OpenCode => {
                 let providers = crate::opencode_config::get_providers()?;
@@ -1171,7 +1217,7 @@ impl ProviderService {
                         }
                     }
                 }
-                state.save()?;
+                state.save_with_permit(permit)?;
             }
             AppType::Hermes => {
                 let providers = crate::hermes_config::get_providers()?;
@@ -1191,7 +1237,7 @@ impl ProviderService {
                         }
                     }
                 }
-                state.save()?;
+                state.save_with_permit(permit)?;
             }
             AppType::OpenClaw => {
                 let providers = crate::openclaw_config::get_providers()?;
@@ -1211,7 +1257,7 @@ impl ProviderService {
                         }
                     }
                 }
-                state.save()?;
+                state.save_with_permit(permit)?;
             }
         }
         Ok(())
@@ -1289,6 +1335,13 @@ impl ProviderService {
         config: &mut MultiAppConfig,
     ) -> Result<(), AppError> {
         common_config::migrate_common_config_upstream_semantics_if_needed(db, config)
+    }
+
+    pub(crate) fn migrate_common_config_upstream_semantics_for_restore(
+        db: &crate::database::Database,
+        config: &mut MultiAppConfig,
+    ) -> Result<(), AppError> {
+        common_config::migrate_common_config_upstream_semantics_for_restore(db, config)
     }
 
     fn build_common_config_post_commit_action(
@@ -1705,6 +1758,9 @@ impl ProviderService {
         app_type: AppType,
         snippet: Option<String>,
     ) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         let normalized_snippet = snippet.and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -1777,9 +1833,10 @@ impl ProviderService {
             }
         };
 
-        Self::run_transaction_preserving_current_providers(
+        Self::run_transaction_preserving_current_providers_with_permit(
             state,
             std::slice::from_ref(&app_type),
+            &permit,
             move |config| {
                 config.ensure_app(&app_type_clone);
 
@@ -1867,7 +1924,17 @@ impl ProviderService {
     }
 
     pub(crate) fn sync_openclaw_providers_from_live(state: &AppState) -> Result<(), AppError> {
-        live::sync_openclaw_providers_from_live(state)?;
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::sync_openclaw_providers_from_live_with_permit(state, &permit)
+    }
+
+    pub(crate) fn sync_openclaw_providers_from_live_with_permit(
+        state: &AppState,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
+        live::sync_openclaw_providers_from_live(state, permit)?;
         Ok(())
     }
 
@@ -1886,6 +1953,9 @@ impl ProviderService {
 
     /// 新增供应商
     pub fn add(state: &AppState, app_type: AppType, provider: Provider) -> Result<bool, AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
@@ -1900,7 +1970,7 @@ impl ProviderService {
             state.db.get_current_provider(app_type.as_str())?
         };
 
-        Self::run_transaction(state, move |config| {
+        Self::run_transaction_with_permit(state, &permit, move |config| {
             let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
             let mut provider_to_store = provider_clone.clone();
             Self::normalize_provider_for_storage(
@@ -1981,6 +2051,9 @@ impl ProviderService {
         app_type: AppType,
         provider: Provider,
     ) -> Result<bool, AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
@@ -2010,7 +2083,7 @@ impl ProviderService {
             (has_live_backup || live_taken_over, live_taken_over)
         };
 
-        Self::run_transaction(state, move |config| {
+        Self::run_transaction_with_permit(state, &permit, move |config| {
             let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
             let manager = config
                 .get_manager_mut(&app_type_clone)
@@ -2143,6 +2216,17 @@ impl ProviderService {
     ///
     /// 返回 `Ok(true)` 表示实际导入，`Ok(false)` 表示该 app 已有非官方 seed provider 而跳过。
     pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::import_default_config_with_permit(state, app_type, &permit)
+    }
+
+    pub(crate) fn import_default_config_with_permit(
+        state: &AppState,
+        app_type: AppType,
+        _permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<bool, AppError> {
         if app_type.is_additive_mode() {
             return Ok(false);
         }
@@ -2350,6 +2434,18 @@ impl ProviderService {
         app_type: AppType,
         updates: Vec<ProviderSortUpdate>,
     ) -> Result<bool, AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::update_sort_order_with_permit(state, app_type, updates, &permit)
+    }
+
+    pub(crate) fn update_sort_order_with_permit(
+        state: &AppState,
+        app_type: AppType,
+        updates: Vec<ProviderSortUpdate>,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<bool, AppError> {
         {
             let mut cfg = state.config.write().map_err(AppError::from)?;
             let manager = cfg
@@ -2363,7 +2459,7 @@ impl ProviderService {
             }
         }
 
-        state.save()?;
+        state.save_with_permit(permit)?;
         Ok(true)
     }
 
@@ -2372,6 +2468,9 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         if !app_type.is_additive_mode() {
             return Err(AppError::localized(
                 "provider.remove_from_live_config.unsupported",
@@ -2432,8 +2531,8 @@ impl ProviderService {
             Self::set_provider_live_config_managed(provider, false);
         }
 
-        if let Err(save_err) = state.save() {
-            let config_restore = Self::restore_config_only(state, original);
+        if let Err(save_err) = state.save_with_permit(&permit) {
+            let config_restore = Self::restore_config_only(state, original, &permit);
             let live_restore = backup.restore();
             if let Err(rollback_err) = config_restore {
                 return Err(AppError::localized(
@@ -2458,11 +2557,14 @@ impl ProviderService {
     }
 
     pub fn import_live_config(state: &AppState, app_type: AppType) -> Result<usize, AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         match app_type {
-            AppType::OpenCode => Self::import_opencode_providers_from_live(state),
-            AppType::OpenClaw => Self::import_openclaw_providers_from_live(state),
-            AppType::Hermes => Self::import_hermes_providers_from_live(state),
-            _ => Self::import_default_config(state, app_type).map(usize::from),
+            AppType::OpenCode => live::import_opencode_providers_from_live(state, &permit),
+            AppType::OpenClaw => live::import_openclaw_providers_from_live(state, &permit),
+            AppType::Hermes => live::import_hermes_providers_from_live(state, &permit),
+            _ => Self::import_default_config_with_permit(state, app_type, &permit).map(usize::from),
         }
     }
 
@@ -2472,9 +2574,12 @@ impl ProviderService {
         provider_id: &str,
         model_id: Option<&str>,
     ) -> Result<String, AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         match app_type {
             AppType::Hermes => {
-                Self::switch(state, AppType::Hermes, provider_id)?;
+                Self::switch_with_permit(state, AppType::Hermes, provider_id, &permit)?;
                 Ok(provider_id.to_string())
             }
             AppType::OpenClaw => Self::set_openclaw_default_model(provider_id, model_id),
@@ -2594,7 +2699,28 @@ impl ProviderService {
     /// （`~/.codex/config.toml`、Claude `settings.json` 等）尚未同步。
     /// 对齐上游 `sync_current_to_live` 行为。
     pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::sync_current_to_live_with_capability(
+            state,
+            LiveProjectionCapability::Ordinary(&permit),
+        )
+    }
+
+    pub(crate) fn sync_current_to_live_for_restore(
+        state: &AppState,
+        permit: &crate::services::state_coordination::RestoreExclusivePermit,
+    ) -> Result<(), AppError> {
+        Self::sync_current_to_live_with_capability(state, LiveProjectionCapability::Restore(permit))
+    }
+
+    fn sync_current_to_live_with_capability(
+        state: &AppState,
+        capability: LiveProjectionCapability<'_>,
+    ) -> Result<(), AppError> {
         use crate::services::mcp::McpService;
+        let strict = capability.is_restore();
 
         // 在读锁下收集所有需要的数据，避免持锁写文件
         let snapshots: Vec<(AppType, Provider, Option<String>)> = {
@@ -2636,12 +2762,17 @@ impl ProviderService {
             result
         };
 
+        let mut failures = crate::services::live_projection::LiveProjectionFailures::default();
         let openclaw_live_provider_ids = match Self::valid_openclaw_live_provider_ids() {
             Ok(provider_ids) => provider_ids,
             Err(err) => {
-                log::warn!(
-                    "sync_current_to_live: 读取 OpenClaw live providers 失败，跳过 OpenClaw 同步: {err}"
-                );
+                if strict {
+                    failures.push("OpenClaw provider discovery", err);
+                } else {
+                    log::warn!(
+                        "sync_current_to_live: 读取 OpenClaw live providers 失败，跳过 OpenClaw 同步: {err}"
+                    );
+                }
                 None
             }
         };
@@ -2655,24 +2786,59 @@ impl ProviderService {
                 continue;
             }
 
-            Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)?;
+            let result = Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true);
+            if strict {
+                failures.record(
+                    format!("{} provider {}", app_type.as_str(), provider.id),
+                    result,
+                );
+            } else {
+                result?;
+            }
         }
 
-        if let Err(e) =
-            crate::services::prompt::PromptService::sync_all_active_to_live_best_effort(state)
-        {
-            log::warn!("sync_current_to_live: Prompt 同步失败: {e}");
+        if strict {
+            let LiveProjectionCapability::Restore(permit) = capability else {
+                unreachable!("strict projection requires a restore capability")
+            };
+            failures.record(
+                "prompts",
+                crate::services::prompt::PromptService::sync_all_active_to_live_for_restore(
+                    state, permit,
+                ),
+            );
+            failures.record(
+                "MCP",
+                McpService::sync_all_enabled_for_restore(state, permit),
+            );
+            failures.record(
+                "skills",
+                crate::services::skill::SkillService::sync_all_enabled_for_restore(
+                    &state.db, permit,
+                ),
+            );
+            failures.finish("restore live projection")
+        } else {
+            let LiveProjectionCapability::Ordinary(permit) = capability else {
+                unreachable!("best-effort projection requires an ordinary capability")
+            };
+            if let Err(e) = crate::services::prompt::PromptService::
+                sync_all_active_to_live_best_effort_with_permit(state, permit)
+            {
+                log::warn!("sync_current_to_live: Prompt 同步失败: {e}");
+            }
+            if let Err(e) = McpService::sync_all_enabled_with_permit(state, permit) {
+                log::warn!("sync_current_to_live: MCP 同步失败: {e}");
+            }
+            if let Err(e) =
+                crate::services::skill::SkillService::sync_all_enabled_best_effort_with_permit(
+                    permit,
+                )
+            {
+                log::warn!("sync_current_to_live: Skills 同步失败: {e}");
+            }
+            Ok(())
         }
-
-        if let Err(e) = McpService::sync_all_enabled(state) {
-            log::warn!("sync_current_to_live: MCP 同步失败: {e}");
-        }
-
-        if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
-            log::warn!("sync_current_to_live: Skills 同步失败: {e}");
-        }
-
-        Ok(())
     }
 
     fn prepare_switch_post_commit_action(
@@ -2756,6 +2922,18 @@ impl ProviderService {
 
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::switch_with_permit(state, app_type, provider_id, &permit)
+    }
+
+    fn switch_with_permit(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<(), AppError> {
         if !app_type.is_additive_mode() {
             let providers = state.db.get_all_providers(app_type.as_str())?;
             providers.get(provider_id).ok_or_else(|| {
@@ -2781,11 +2959,11 @@ impl ProviderService {
             let should_hot_switch = is_app_taken_over || live_taken_over || running_takeover_active;
 
             if should_hot_switch {
-                futures::executor::block_on(
-                    state
-                        .proxy_service
-                        .hot_switch_provider(app_type.as_str(), provider_id),
-                )
+                futures::executor::block_on(state.proxy_service.hot_switch_provider_with_permit(
+                    permit,
+                    app_type.as_str(),
+                    provider_id,
+                ))
                 .map_err(|e| AppError::Message(format!("热切换失败: {e}")))?;
 
                 let mut guard = state.config.write().map_err(AppError::from)?;
@@ -2809,7 +2987,7 @@ impl ProviderService {
             state.db.get_config_snippet(app_type.as_str())?
         };
 
-        Self::run_transaction(state, move |config| {
+        Self::run_transaction_with_permit(state, permit, move |config| {
             let action = Self::prepare_switch_post_commit_action(
                 config,
                 &app_type_clone,
@@ -3361,6 +3539,9 @@ impl ProviderService {
     }
 
     pub fn delete(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
         let (local_current_provider, stored_current_provider) = if app_type.is_additive_mode() {
             (None, None)
         } else {
@@ -3438,7 +3619,7 @@ impl ProviderService {
                 manager.providers.shift_remove(provider_id);
             }
 
-            return state.save();
+            return state.save_with_permit(&permit);
         }
 
         match app_type {
@@ -3494,19 +3675,49 @@ impl ProviderService {
             manager.providers.shift_remove(provider_id);
         }
 
-        state.save()
+        state.save_with_permit(&permit)
     }
 
     pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
-        live::import_openclaw_providers_from_live(state)
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::import_openclaw_providers_from_live_with_permit(state, &permit)
+    }
+
+    pub(crate) fn import_openclaw_providers_from_live_with_permit(
+        state: &AppState,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<usize, AppError> {
+        live::import_openclaw_providers_from_live(state, permit)
     }
 
     pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {
-        live::import_hermes_providers_from_live(state)
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::import_hermes_providers_from_live_with_permit(state, &permit)
+    }
+
+    pub(crate) fn import_hermes_providers_from_live_with_permit(
+        state: &AppState,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<usize, AppError> {
+        live::import_hermes_providers_from_live(state, permit)
     }
 
     pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, AppError> {
-        live::import_opencode_providers_from_live(state)
+        let permit =
+            crate::services::state_coordination::acquire_ordinary_mutation_permit_blocking()
+                .map_err(AppError::Message)?;
+        Self::import_opencode_providers_from_live_with_permit(state, &permit)
+    }
+
+    pub(crate) fn import_opencode_providers_from_live_with_permit(
+        state: &AppState,
+        permit: &crate::services::state_coordination::OrdinaryMutationPermit,
+    ) -> Result<usize, AppError> {
+        live::import_opencode_providers_from_live(state, permit)
     }
 }
 

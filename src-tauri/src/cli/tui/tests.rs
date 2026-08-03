@@ -18,7 +18,306 @@ use crate::test_support::{
     lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
 };
 use crate::{AppError, AppType};
-use runtime_systems::{ManagedSessionOutcome, ProxyMsg};
+use runtime_systems::{
+    ConfigRestoreDone, ConfigRestoreKind, ConfigRestoreMsg, ConfigRestoreSource,
+    ManagedSessionOutcome, ProxyMsg, RestoreUiSnapshot,
+};
+
+fn config_restore_done(
+    kind: ConfigRestoreKind,
+    pre_backup_id: &str,
+    loaded: UiData,
+) -> ConfigRestoreDone {
+    ConfigRestoreDone {
+        kind,
+        pre_backup_id: pre_backup_id.to_string(),
+        restored: RestoreUiSnapshot {
+            publication: crate::services::RestorePublicationToken::for_test("test-publication"),
+            status: crate::services::RestorePostCommitStatus::Applied,
+            app_type: AppType::Claude,
+            loaded: Ok(Box::new(loaded)),
+        },
+    }
+}
+
+#[test]
+fn config_import_action_is_single_flight_and_opens_a_non_cancelable_loading_overlay() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let source = temp.path().join("config.sql");
+    std::fs::write(&source, "-- fixture").expect("write fixture");
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+    let mut app = App::new(Some(AppType::Claude));
+
+    let action = queue_config_restore_action(
+        &mut app,
+        Some(&tx),
+        &mut tracker,
+        false,
+        Action::ConfigImport {
+            path: source.display().to_string(),
+        },
+    );
+
+    assert!(matches!(action, Action::None));
+    let request = rx.recv().expect("config import request");
+    assert_eq!(tracker.active, Some(request.request_id));
+    assert!(matches!(
+        request.source,
+        ConfigRestoreSource::File(path) if path == source
+    ));
+    assert_eq!(request.app_type, AppType::Claude);
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::ConfigRestore,
+            ..
+        }
+    ));
+
+    let first_request_id = request.request_id;
+    let action = queue_config_restore_action(
+        &mut app,
+        Some(&tx),
+        &mut tracker,
+        false,
+        Action::ConfigImport {
+            path: source.display().to_string(),
+        },
+    );
+    assert!(matches!(action, Action::None));
+    assert_eq!(tracker.active, Some(first_request_id));
+    assert!(
+        matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "a second import must not be queued while the first mutates state"
+    );
+
+    let action = app.on_key(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &UiData::default(),
+    );
+    assert!(matches!(action, Action::None));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::ConfigRestore,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn config_restore_loading_overlay_ignores_ctrl_c_until_publication_finishes() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::ConfigRestore,
+        title: "Import".to_string(),
+        message: "Publishing".to_string(),
+    };
+
+    let action = app.on_key(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &UiData::default(),
+    );
+
+    assert!(matches!(action, Action::None));
+    assert!(!app.should_quit);
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::ConfigRestore,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn cloud_restore_loading_overlay_cannot_be_dismissed_while_publication_runs() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::CloudRestore,
+        title: "Restore".to_string(),
+        message: "Publishing".to_string(),
+    };
+
+    let escape = app.on_key(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &UiData::default(),
+    );
+
+    assert!(matches!(escape, Action::None));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::CloudRestore,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn config_import_action_does_not_overlap_an_active_cloud_restore() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let source = temp.path().join("config.sql");
+    std::fs::write(&source, "-- fixture").expect("write fixture");
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+    let mut app = App::new(Some(AppType::Claude));
+
+    let action = queue_config_restore_action(
+        &mut app,
+        Some(&tx),
+        &mut tracker,
+        true,
+        Action::ConfigImport {
+            path: source.display().to_string(),
+        },
+    );
+
+    assert!(matches!(action, Action::None));
+    assert!(tracker.active.is_none());
+    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    assert_eq!(
+        app.toast.as_ref().map(|toast| toast.kind),
+        Some(ToastKind::Info)
+    );
+}
+
+#[test]
+fn config_import_completion_ignores_stale_results_and_invalidates_recreated_state() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::ConfigRestore,
+        title: "Import".to_string(),
+        message: "Working".to_string(),
+    };
+    let mut tracker = RequestTracker {
+        seq: 4,
+        active: Some(4),
+    };
+
+    let stale = handle_config_restore_msg(
+        &mut app,
+        &mut tracker,
+        ConfigRestoreMsg::Finished {
+            request_id: 3,
+            result: Ok(config_restore_done(
+                ConfigRestoreKind::ImportFile,
+                "old",
+                UiData::default(),
+            )),
+        },
+    );
+    assert!(stale.is_none());
+    assert_eq!(tracker.active, Some(4));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::ConfigRestore,
+            ..
+        }
+    ));
+
+    let completed = handle_config_restore_msg(
+        &mut app,
+        &mut tracker,
+        ConfigRestoreMsg::Finished {
+            request_id: 4,
+            result: Ok(config_restore_done(
+                ConfigRestoreKind::ImportFile,
+                "backup-1",
+                UiData::default(),
+            )),
+        },
+    );
+    assert!(completed.is_some());
+    assert_eq!(tracker.active, None);
+    assert!(matches!(app.overlay, Overlay::None));
+    assert!(
+        app.toast.is_none(),
+        "success is shown only after token validation"
+    );
+}
+
+#[test]
+fn config_import_completion_applies_worker_data_without_waiting_for_cache_drop_acks() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "stale-provider".to_string();
+    let mut fresh = UiData::default();
+    fresh.providers.current_id = "fresh-provider".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Codex, UiData::default());
+
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (usage_tx, usage_rx) = mpsc::channel();
+    let started = std::time::Instant::now();
+
+    apply_completed_config_restore_with_token_check(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&app_data_tx),
+        Some(&usage_tx),
+        config_restore_done(ConfigRestoreKind::ImportFile, "backup-1", fresh),
+        |_| Ok(true),
+    )
+    .expect("apply completed import");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(100),
+        "the event loop must not wait for worker cache-drop acknowledgements"
+    );
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert_eq!(cache.app_state_epoch, 1);
+    assert_eq!(cache.data_generation, 1);
+    assert_eq!(cache.by_app.len(), 1);
+    assert!(cache.by_app.contains_key(&AppType::Claude));
+    assert!(matches!(
+        app_data_rx.recv().expect("app-data state drop"),
+        AppDataReq::DropState { .. }
+    ));
+    assert!(matches!(
+        usage_rx.recv().expect("usage state drop"),
+        UsagePricingReq::DropState { .. }
+    ));
+}
+
+#[test]
+fn recreated_state_cache_invalidation_never_waits_for_worker_acknowledgements() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Codex, UiData::default());
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (usage_tx, usage_rx) = mpsc::channel();
+    let started = std::time::Instant::now();
+
+    apply_cache_invalidation(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&app_data_tx),
+        Some(&usage_tx),
+        CacheInvalidation::AppStateRecreated,
+    )
+    .expect("cache invalidation should be dispatched asynchronously");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(100),
+        "the TUI event loop must not wait for worker cache-drop acknowledgements"
+    );
+    assert!(matches!(
+        app_data_rx.recv().expect("app-data state drop"),
+        AppDataReq::DropState { .. }
+    ));
+    assert!(matches!(
+        usage_rx.recv().expect("usage state drop"),
+        UsagePricingReq::DropState { .. }
+    ));
+}
 
 #[test]
 fn codex_history_action_is_forwarded_to_the_dedicated_worker() {
@@ -4997,11 +5296,13 @@ fn drain_latest_webdav_req_prefers_last_enqueued_request() {
     tx.send(WebDavReq {
         request_id: 1,
         kind: WebDavReqKind::CheckConnection,
+        app_type: AppType::Claude,
     })
     .expect("send check request");
     tx.send(WebDavReq {
         request_id: 2,
         kind: WebDavReqKind::Upload,
+        app_type: AppType::Codex,
     })
     .expect("send upload request");
     tx.send(WebDavReq {
@@ -5010,6 +5311,7 @@ fn drain_latest_webdav_req_prefers_last_enqueued_request() {
             username: "u@example.com".to_string(),
             password: "p".to_string(),
         },
+        app_type: AppType::Gemini,
     })
     .expect("send quick setup request");
 
@@ -5019,7 +5321,8 @@ fn drain_latest_webdav_req_prefers_last_enqueued_request() {
         latest,
         WebDavReq {
             request_id: 3,
-            kind: WebDavReqKind::JianguoyunQuickSetup { username, password }
+            kind: WebDavReqKind::JianguoyunQuickSetup { username, password },
+            app_type: AppType::Gemini,
         }
             if username == "u@example.com" && password == "p"
     ));

@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use cc_switch_lib::{
-    update_settings, AppSettings, AppState, Database, MultiAppConfig, ProviderService, ProxyService,
+    update_settings, AppSettings, AppState, Database, MultiAppConfig, ProviderService,
 };
 
 /// 为测试设置隔离的 HOME 目录，避免污染真实用户数据。
@@ -268,17 +268,14 @@ pub fn lock_test_mutex() -> MutexGuard<'static, ()> {
 
 pub fn state_from_config(config: MultiAppConfig) -> AppState {
     let _ = ensure_test_home();
-    let db = Arc::new(Database::init().expect("create database"));
+    let db = Database::init().expect("create database");
     db.migrate_from_json(&config)
         .expect("seed database from config");
     let mut config = config;
     ProviderService::migrate_common_config_upstream_semantics_if_needed(&db, &mut config)
         .expect("migrate common config semantics for test state");
-    AppState {
-        db: db.clone(),
-        config: RwLock::new(config),
-        proxy_service: ProxyService::new(db),
-    }
+    drop(db);
+    AppState::try_new().expect("load isolated test state through the production capability gate")
 }
 
 #[allow(dead_code)]

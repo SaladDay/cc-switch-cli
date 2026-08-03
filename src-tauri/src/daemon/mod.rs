@@ -92,6 +92,8 @@ pub async fn run(binary_path: PathBuf, pidfile: &PidFile) -> Result<(), String> 
         log_path.display()
     );
 
+    let startup_permit =
+        crate::services::state_coordination::acquire_ordinary_mutation_permit().await?;
     let db = Arc::new(
         Database::init_for_daemon(pidfile)
             .map_err(|err| format!("daemon: open database failed: {err}"))?,
@@ -100,9 +102,13 @@ pub async fn run(binary_path: PathBuf, pidfile: &PidFile) -> Result<(), String> 
     Database::spawn_periodic_usage_maintenance(db.clone(), "daemon");
     let supervisor = Supervisor::new(db, socket_path.clone(), binary_path);
 
-    if let Err(err) = supervisor.recover_on_startup().await {
+    if let Err(err) = supervisor
+        .recover_on_startup_with_permit(&startup_permit)
+        .await
+    {
         log::warn!("[daemon] startup recovery: {err}");
     }
+    drop(startup_permit);
 
     let listener = ipc::server::bind(&socket_path)
         .map_err(|err| format!("bind socket {}: {err}", socket_path.display()))?;

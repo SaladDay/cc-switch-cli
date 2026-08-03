@@ -21,8 +21,13 @@ pub fn execute(cmd: InternalCommand) -> Result<(), AppError> {
             provider_id,
             codex_home,
         } => {
-            let state = AppState::try_new()?;
-            ProviderService::capture_codex_temp_launch_snapshot(&state, &provider_id, &codex_home)
+            let (state, permit) = AppState::try_new_with_ordinary_workflow()?;
+            ProviderService::capture_codex_temp_launch_snapshot_with_permit(
+                &state,
+                &provider_id,
+                &codex_home,
+                &permit,
+            )
         }
     }
 }
