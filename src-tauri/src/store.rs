@@ -432,14 +432,6 @@ impl AppState {
 }
 
 fn run_codex_provider_bucket_migrations(db: &Database) {
-    match crate::codex_history_migration::maybe_migrate_codex_legacy_thread_names() {
-        Ok(0) => log::debug!("○ Codex legacy thread name migration skipped: no candidates"),
-        Ok(changed) => {
-            log::info!("✓ Codex legacy thread name migration completed: rows={changed}")
-        }
-        Err(error) => log::warn!("✗ Codex legacy thread name migration failed: {error}"),
-    }
-
     let _ = run_required_codex_provider_bucket_migrations(db);
 
     match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
