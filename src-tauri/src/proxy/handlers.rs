@@ -375,6 +375,15 @@ async fn handle_claude_request(
         );
         let response = forward_result.response;
         let status = response.status();
+        // 无论上游成功/失败都记录一次 provider activity，让 dashboard 点阵图能显示
+        // 请求已发出以及它实际落到了哪个 provider。
+        context
+            .state
+            .record_provider_activity(
+                &forward_result.provider.id,
+                estimated_input_tokens.max(1),
+            )
+            .await;
         let success_sync = status.is_success().then(|| SuccessSyncInfo {
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
@@ -725,6 +734,15 @@ async fn handle_passthrough_request(
 
         let response = forward_result.response;
         let status = response.status();
+        // 无论上游成功/失败都记录一次 provider activity，让 dashboard 点阵图能显示
+        // 请求已发出以及它实际落到了哪个 provider。
+        context
+            .state
+            .record_provider_activity(
+                &forward_result.provider.id,
+                estimated_input_tokens.max(1),
+            )
+            .await;
         let converts_codex_chat = super::providers::should_convert_codex_responses_to_chat(
             &forward_result.provider,
             &endpoint,
@@ -879,6 +897,15 @@ async fn handle_passthrough_request(
     };
 
     let response = forward_result.response;
+    // 无论上游成功/失败都记录一次 provider activity，让 dashboard 点阵图能显示
+    // 请求已发出以及它实际落到了哪个 provider。
+    context
+        .state
+        .record_provider_activity(
+            &forward_result.provider.id,
+            estimated_input_tokens.max(1),
+        )
+        .await;
     let converts_codex_chat = super::providers::should_convert_codex_responses_to_chat(
         &forward_result.provider,
         &endpoint,
@@ -1116,6 +1143,12 @@ async fn finish_codex_live_aware_response(
     let provider = forward_result.provider;
     let response = forward_result.response;
     let status = response.status();
+    // 无论上游成功/失败都记录一次 provider activity，让 dashboard 点阵图能显示
+    // 请求已发出以及它实际落到了哪个 provider。
+    context
+        .state
+        .record_provider_activity(&provider.id, estimated_input_tokens.max(1))
+        .await;
     let success_sync = status.is_success().then(|| SuccessSyncInfo {
         app_type: context.app_type.clone(),
         provider: provider.clone(),
