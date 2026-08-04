@@ -2,6 +2,7 @@ use std::io::{self, Stdout};
 use std::sync::Arc;
 
 use crossterm::{
+    clipboard::CopyToClipboard,
     cursor,
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -25,6 +26,12 @@ enum TerminalHandle {
     Stdout(LiveTerminal),
     #[cfg(test)]
     Test(InMemoryTerminal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardCopyOutcome {
+    Confirmed,
+    Requested,
 }
 
 pub struct TuiTerminal {
@@ -107,6 +114,14 @@ fn terminal_error(e: impl ToString) -> AppError {
     )
 }
 
+fn clipboard_error(e: impl ToString) -> AppError {
+    AppError::localized(
+        "tui_clipboard_error",
+        format!("剪贴板错误: {}", e.to_string()),
+        format!("Clipboard error: {}", e.to_string()),
+    )
+}
+
 impl TuiTerminal {
     pub fn new() -> Result<Self, AppError> {
         let mut stdout = io::stdout();
@@ -174,6 +189,24 @@ impl TuiTerminal {
             TerminalHandle::Stdout(terminal) => terminal.size().map_err(terminal_error),
             #[cfg(test)]
             TerminalHandle::Test(terminal) => terminal.size().map_err(|e| match e {}),
+        }
+    }
+
+    pub fn copy_to_clipboard(&mut self, text: &str) -> Result<ClipboardCopyOutcome, AppError> {
+        match &mut self.terminal {
+            TerminalHandle::Stdout(terminal) => {
+                if super::clipboard::copy_with_system_tool(text) {
+                    return Ok(ClipboardCopyOutcome::Confirmed);
+                }
+                execute!(
+                    terminal.backend_mut(),
+                    CopyToClipboard::to_clipboard_from(text)
+                )
+                .map_err(clipboard_error)?;
+                Ok(ClipboardCopyOutcome::Requested)
+            }
+            #[cfg(test)]
+            TerminalHandle::Test(_) => Ok(ClipboardCopyOutcome::Requested),
         }
     }
 
@@ -400,6 +433,21 @@ mod tests {
         terminal
             .draw(|_| {})
             .expect("draw after with_terminal_restored");
+    }
+
+    #[test]
+    fn test_terminal_accepts_clipboard_requests_without_touching_the_host_clipboard() {
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+
+        assert_eq!(
+            terminal
+                .copy_to_clipboard("codex resume session-1")
+                .expect("test clipboard request"),
+            super::ClipboardCopyOutcome::Requested
+        );
+        terminal
+            .draw(|_| {})
+            .expect("test terminal remains usable after clipboard request");
     }
 
     #[test]

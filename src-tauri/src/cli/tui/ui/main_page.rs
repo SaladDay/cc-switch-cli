@@ -236,26 +236,34 @@ pub(super) fn render_main(
         Style::default().fg(theme.surface)
     };
 
-    let webdav_lines = vec![
-        kv_line(
-            theme,
-            texts::tui_label_webdav_status(),
-            label_width,
-            vec![Span::styled(
-                webdav_status_text.clone(),
-                webdav_status_style,
-            )],
+    // The WebDAV card was folded into the connection card: one compact line
+    // carrying the same status glyph plus the last-sync time.
+    let webdav_glyph = if has_error {
+        "!"
+    } else if is_ok {
+        webdav_ok_glyph()
+    } else {
+        webdav_neutral_glyph()
+    };
+    let webdav_spans = vec![
+        Span::styled(format!("{webdav_glyph} "), webdav_status_style),
+        Span::styled(webdav_status_text.clone(), webdav_status_style),
+        Span::styled(
+            home_separator().to_string(),
+            Style::default().fg(theme.comment),
         ),
-        kv_line(
-            theme,
-            texts::tui_label_webdav_last_sync(),
-            label_width,
-            vec![Span::styled(
-                webdav_last_sync_text.clone(),
-                webdav_last_sync_style,
-            )],
-        ),
+        Span::styled(webdav_last_sync_text.clone(), webdav_last_sync_style),
     ];
+
+    // Keep WebDAV on its own connection-card row. Quota text is provider
+    // controlled and can be wider than the terminal; appending WebDAV after it
+    // made sync errors disappear entirely when the row was clipped.
+    connection_lines.push(kv_line(
+        theme,
+        texts::tui_home_section_webdav(),
+        label_width,
+        webdav_spans,
+    ));
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -266,8 +274,23 @@ pub(super) fn render_main(
 
     let inner = block.inner(area);
     let content = inset_left(inner, CONTENT_INSET_LEFT);
-    let bottom_hero_height = if current_app_routed { 10 } else { 6 };
-    let connection_card_height = (connection_lines.len() as u16 + 2).max(4);
+    // 代理接管当前应用时，底部固定 10 行展示代理活动仪表盘（PR 设计的多色
+    // provider 图例 + 点阵图），并替代上游的 token 使用统计图；未接管时
+    // 弹性区域全部留给使用统计图。
+    let bottom_hero_height = if current_app_routed { 10 } else { 0 };
+    // The card does not wrap. Ratatui word-wraps, so a wrap estimate built from
+    // character counts under-counts on narrow terminals and clips the last line
+    // (the WebDAV one) out of the card. Clipping each line to the card's content
+    // width instead makes the row count exact: one line, one row.
+    let card_text_width = content.width.saturating_sub(2);
+    for line in &mut connection_lines {
+        let spans = std::mem::take(&mut line.spans);
+        line.spans = truncate_spans_to_width(spans, card_text_width);
+    }
+    // usize until the final clamp: an absurdly long provider name or URL must
+    // not wrap the arithmetic into a plausible-looking height.
+    let connection_card_height =
+        u16::try_from(connection_lines.len().saturating_add(2).max(4)).unwrap_or(u16::MAX);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(bottom_hero_height)])
@@ -276,18 +299,15 @@ pub(super) fn render_main(
     let top_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Length(connection_card_height),
-            Constraint::Length(4),
             Constraint::Length(8),
             Constraint::Min(0),
         ])
         .split(chunks[0]);
 
     let card_border = Style::default().fg(theme.dim);
-    render_connection_card(frame, top_chunks[1], theme, &connection_lines, card_border);
-    render_webdav_card(frame, top_chunks[2], theme, &webdav_lines, card_border);
-    render_local_env_check_card(frame, app, top_chunks[3], theme, card_border);
+    render_connection_card(frame, top_chunks[0], theme, &connection_lines, card_border);
+    render_local_env_check_card(frame, app, top_chunks[1], theme, card_border);
 
     if current_app_routed {
         // 收集近期 token 活动按 provider 聚合（用于多色图例，与点阵图同口径）
@@ -311,7 +331,33 @@ pub(super) fn render_main(
             &route_hits,
         );
     } else {
-        render_logo_hero(frame, chunks[1], theme);
+        // 未接管：展示上游 tokscale 风格 token 使用统计。
+        render_home_usage_chart(frame, app, data, top_chunks[2], theme, card_border);
+    }
+}
+
+/// Section separator used by the home cards; ASCII mode drops the middle dot.
+fn home_separator() -> &'static str {
+    if icons::use_emoji() {
+        " · "
+    } else {
+        " - "
+    }
+}
+
+fn webdav_ok_glyph() -> &'static str {
+    if icons::use_emoji() {
+        "✓"
+    } else {
+        "+"
+    }
+}
+
+fn webdav_neutral_glyph() -> &'static str {
+    if icons::use_emoji() {
+        "•"
+    } else {
+        "*"
     }
 }
 
@@ -614,7 +660,11 @@ fn wrapped_display_line_count(text: &str, width: u16) -> u16 {
         return 1;
     }
 
-    UnicodeWidthStr::width(text).max(1).div_ceil(width as usize) as u16
+    // Clamped in `usize`: the cast is the last step, never the first.
+    UnicodeWidthStr::width(text)
+        .max(1)
+        .div_ceil(width as usize)
+        .min(u16::MAX as usize) as u16
 }
 
 /// 点阵图多色 palette（与 legend 共用同一组颜色）
@@ -854,34 +904,9 @@ fn collect_route_hits_for_dashboard(
         .collect()
 }
 
-fn render_logo_hero(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
-    let logo_lines = logo_hero_lines(theme);
-    let logo_height = (logo_lines.len() as u16).min(area.height);
-    let logo_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(logo_height),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    frame.render_widget(
-        Paragraph::new(logo_lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false }),
-        logo_chunks[1],
-    );
-}
-
-fn logo_hero_lines(theme: &super::theme::Theme) -> Vec<Line<'static>> {
-    let logo_style = Style::default().fg(theme.surface);
-    texts::tui_home_ascii_logo()
-        .lines()
-        .map(|s| Line::from(Span::styled(s.to_string(), logo_style)))
-        .collect::<Vec<_>>()
-}
-
+/// The connection card draws exactly the lines it is given, one row each — the
+/// caller has already clipped them to the card's content width, and the card's
+/// height was derived from that same count.
 fn render_connection_card(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -890,36 +915,13 @@ fn render_connection_card(
     card_border: Style,
 ) {
     frame.render_widget(
-        Paragraph::new(connection_lines.to_vec())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .border_style(card_border)
-                    .title(format!(" {} ", texts::tui_home_section_connection())),
-            )
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn render_webdav_card(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    _theme: &super::theme::Theme,
-    webdav_lines: &[Line<'_>],
-    card_border: Style,
-) {
-    frame.render_widget(
-        Paragraph::new(webdav_lines.to_vec())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .border_style(card_border)
-                    .title(format!(" {} ", texts::tui_home_section_webdav())),
-            )
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(connection_lines.to_vec()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(card_border)
+                .title(format!(" {} ", texts::tui_home_section_connection())),
+        ),
         area,
     );
 }
@@ -993,14 +995,8 @@ fn render_local_env_tool_cell(
         .map(|result| &result.status);
 
     let (icon, icon_style) = if pending {
-        let spinner = match app.tick % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        };
         (
-            spinner,
+            spinner_frame(app.tick),
             if theme.no_color {
                 Style::default()
             } else {

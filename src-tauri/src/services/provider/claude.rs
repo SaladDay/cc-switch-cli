@@ -1,34 +1,6 @@
 use super::*;
 
 impl ProviderService {
-    #[allow(dead_code)]
-    pub(super) fn parse_common_claude_config_snippet(snippet: &str) -> Result<Value, AppError> {
-        let value: Value = serde_json::from_str(snippet).map_err(|e| {
-            AppError::localized(
-                "common_config.claude.invalid_json",
-                format!("Claude 通用配置片段不是有效的 JSON：{e}"),
-                format!("Claude common config snippet is not valid JSON: {e}"),
-            )
-        })?;
-        if !value.is_object() {
-            return Err(AppError::localized(
-                "common_config.claude.not_object",
-                "Claude 通用配置片段必须是 JSON 对象",
-                "Claude common config snippet must be a JSON object",
-            ));
-        }
-        Ok(value)
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn parse_common_claude_config_snippet_for_strip(
-        snippet: &str,
-    ) -> Result<Value, AppError> {
-        let mut value = Self::parse_common_claude_config_snippet(snippet)?;
-        let _ = Self::normalize_claude_models_in_value(&mut value);
-        Ok(value)
-    }
-
     /// 归一化 Claude 模型键：读旧键(ANTHROPIC_SMALL_FAST_MODEL)，写新键(DEFAULT_*), 并删除旧键
     pub(crate) fn normalize_claude_models_in_value(settings: &mut Value) -> bool {
         let mut changed = false;

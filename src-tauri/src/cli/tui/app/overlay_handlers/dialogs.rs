@@ -6,6 +6,10 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
+        if let Some(action) = self.handle_codex_history_confirm_key(key) {
+            return Some(action);
+        }
+
         if let Some(action) = self.handle_confirm_overlay_key(key, data) {
             return Some(action);
         }
@@ -15,6 +19,57 @@ impl App {
         }
 
         None
+    }
+
+    fn handle_codex_history_confirm_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::CodexHistoryConfirm(confirm) = &mut self.overlay else {
+            return None;
+        };
+
+        let action = match (confirm.mode, key.code) {
+            (CodexHistoryConfirmMode::Enable, KeyCode::Enter) => {
+                self.close_overlay();
+                Action::SetCodexUnifiedSessionHistory {
+                    enabled: true,
+                    migrate_existing: false,
+                    restore_after_disable: false,
+                }
+            }
+            (CodexHistoryConfirmMode::Enable, KeyCode::Char('y') | KeyCode::Char('Y')) => {
+                self.close_overlay();
+                Action::SetCodexUnifiedSessionHistory {
+                    enabled: true,
+                    migrate_existing: true,
+                    restore_after_disable: false,
+                }
+            }
+            (
+                CodexHistoryConfirmMode::Disable,
+                KeyCode::Char(' ') | KeyCode::Char('x') | KeyCode::Char('X'),
+            ) if confirm.show_restore_checkbox => {
+                confirm.restore_checked = !confirm.restore_checked;
+                Action::None
+            }
+            (
+                CodexHistoryConfirmMode::Disable,
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter,
+            ) => {
+                let restore = confirm.show_restore_checkbox && confirm.restore_checked;
+                self.close_overlay();
+                Action::SetCodexUnifiedSessionHistory {
+                    enabled: false,
+                    migrate_existing: false,
+                    restore_after_disable: restore,
+                }
+            }
+            (_, KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc) => {
+                self.close_overlay();
+                Action::None
+            }
+            _ => Action::None,
+        };
+
+        Some(action)
     }
 
     fn handle_confirm_overlay_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
@@ -76,9 +131,6 @@ impl App {
                     ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
-                    ConfirmAction::SettingsSetCodexUnifiedSessionHistory { enabled } => {
-                        Action::SetCodexUnifiedSessionHistory { enabled: *enabled }
-                    }
                     ConfirmAction::VisibleAppsAutoDetection => {
                         Action::ConfirmVisibleAppsAutoDetection { use_auto: true }
                     }
@@ -91,6 +143,7 @@ impl App {
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
                     ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
                     ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
+                    ConfirmAction::RebuildCodexUsage => Action::UsageRebuildCodex,
                     ConfirmAction::ManagedAuthCancelLogin => {
                         self.cancel_managed_auth_login();
                         Action::None

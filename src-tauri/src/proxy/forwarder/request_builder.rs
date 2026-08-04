@@ -15,16 +15,21 @@ use super::super::{
     json_canonical::canonicalize_value,
     model_mapper::{apply_model_mapping, strip_one_m_suffix_for_upstream_from_body},
     providers::{
-        apply_codex_chat_upstream_model, claude_api_format_needs_transform, copilot_auth,
-        get_adapter, normalize_anthropic_tool_thinking_history_for_provider,
-        resolve_codex_chat_reasoning_config, should_convert_codex_responses_to_chat,
-        transform_codex_chat, AuthStrategy, ProviderAdapter,
+        apply_codex_chat_upstream_model, apply_codex_upstream_model,
+        claude_api_format_needs_transform, copilot_auth, get_adapter,
+        normalize_anthropic_tool_thinking_history_for_provider,
+        resolve_codex_chat_reasoning_config, should_convert_codex_responses_to_anthropic,
+        should_convert_codex_responses_to_chat, transform_codex_anthropic, transform_codex_chat,
+        AuthStrategy, ProviderAdapter,
     },
     session,
 };
 use super::{ForwardOptions, RequestForwarder};
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
+const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/1.0.119 (external, cli)";
+const CLAUDE_CODE_SYSTEM_IDENTITY: &str =
+    "You are Claude Code, Anthropic's official CLI for Claude.";
 
 const HEADER_BLACKLIST: &[&str] = &[
     "authorization",
@@ -87,7 +92,17 @@ struct CopilotOptimization {
     request_classification: bool,
 }
 
+fn provider_uses_full_url(provider: &Provider) -> bool {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.is_full_url)
+        .unwrap_or(false)
+        && !provider.is_codex_oauth()
+}
+
 impl RequestForwarder {
+    #[cfg(test)]
     pub(super) async fn prepare_request(
         &self,
         app_type: &AppType,
@@ -97,20 +112,40 @@ impl RequestForwarder {
         headers: &HeaderMap,
         options: ForwardOptions,
     ) -> Result<reqwest::RequestBuilder, ProxyError> {
+        let client = self.client_for_provider(app_type, provider);
+        self.prepare_request_with_client(
+            app_type, provider, &client, endpoint, body, headers, options,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request construction needs the prewarmed client plus provider request fields"
+    )]
+    pub(super) async fn prepare_request_with_client(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        client: &reqwest::Client,
+        endpoint: &str,
+        body: &Value,
+        headers: &HeaderMap,
+        options: ForwardOptions,
+    ) -> Result<reqwest::RequestBuilder, ProxyError> {
         let adapter = get_adapter(app_type);
         let is_claude_request = matches!(app_type, AppType::Claude);
         let mut upstream_endpoint = self.router.upstream_endpoint(app_type, provider, endpoint);
         let mut base_url = adapter.extract_base_url(provider)?;
-        let is_full_url = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.is_full_url)
-            .unwrap_or(false);
+        let is_full_url = provider_uses_full_url(provider);
         let is_copilot = is_claude_request
             && (provider.is_github_copilot() || base_url.contains("githubcopilot.com"));
         let (mut mapped_body, _, _) = apply_model_mapping(body.clone(), provider);
         let codex_responses_to_chat = should_convert_codex_responses_to_chat(provider, endpoint)
             && matches!(app_type, AppType::Codex);
+        let codex_responses_to_anthropic =
+            should_convert_codex_responses_to_anthropic(provider, endpoint)
+                && matches!(app_type, AppType::Codex);
 
         if is_claude_request && self.optimizer_config.enabled && is_bedrock_provider(provider) {
             if self.optimizer_config.thinking_optimizer {
@@ -131,7 +166,7 @@ impl RequestForwarder {
                 );
             self.apply_copilot_live_model_resolution(provider, &mut mapped_body)
                 .await;
-        } else {
+        } else if !codex_responses_to_anthropic {
             mapped_body = strip_one_m_suffix_for_upstream_from_body(mapped_body);
         }
 
@@ -230,7 +265,22 @@ impl RequestForwarder {
             );
         }
 
+        let codex_impersonate_claude_code = codex_responses_to_anthropic
+            && provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.impersonate_claude_code)
+                == Some(true);
+        if codex_responses_to_anthropic {
+            upstream_endpoint = rewrite_codex_responses_endpoint_to_anthropic(endpoint);
+        }
+
+        let mut codex_anthropic_one_m = false;
         let request_body = if codex_responses_to_chat {
+            let explicit_prompt_cache_key = mapped_body
+                .get("prompt_cache_key")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
             upstream_endpoint = rewrite_codex_responses_endpoint_to_chat(endpoint);
             if let Some(history) = self.codex_chat_history.as_ref() {
                 let restored = history.enrich_request(&mut mapped_body).await;
@@ -242,10 +292,49 @@ impl RequestForwarder {
             }
             apply_codex_chat_upstream_model(provider, &mut mapped_body);
             let reasoning_config = resolve_codex_chat_reasoning_config(provider, &mapped_body);
-            transform_codex_chat::responses_to_chat_completions_with_reasoning(
+            let mut chat_body = transform_codex_chat::responses_to_chat_completions_with_reasoning(
                 mapped_body,
                 reasoning_config.as_ref(),
-            )?
+            )?;
+            super::super::providers::inject_codex_chat_prompt_cache_key(
+                provider,
+                &mut chat_body,
+                explicit_prompt_cache_key.as_deref(),
+                self.session_client_provided
+                    .then_some(self.session_id.as_str()),
+            );
+            chat_body
+        } else if codex_responses_to_anthropic {
+            apply_codex_upstream_model(provider, &mut mapped_body);
+            if let Some(max_out) = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.max_output_tokens)
+                .filter(|value| *value > 0)
+            {
+                mapped_body["max_output_tokens"] = Value::from(max_out);
+            }
+
+            const DEFAULT_CODEX_ANTHROPIC_MAX_TOKENS: u64 = 8192;
+            let mut anthropic_body = transform_codex_anthropic::responses_request_to_anthropic(
+                mapped_body,
+                DEFAULT_CODEX_ANTHROPIC_MAX_TOKENS,
+            )?;
+            if let Some(model) = anthropic_body.get("model").and_then(Value::as_str) {
+                let stripped = super::super::model_mapper::strip_one_m_suffix_for_upstream(model);
+                if stripped != model {
+                    codex_anthropic_one_m = true;
+                    anthropic_body["model"] = Value::String(stripped.to_string());
+                }
+            }
+            if codex_impersonate_claude_code {
+                prepend_claude_code_system_prompt(&mut anthropic_body);
+            }
+            super::super::cache_injector::inject(
+                &mut anthropic_body,
+                &codex_anthropic_cache_config(&self.optimizer_config),
+            );
+            anthropic_body
         } else if needs_transform {
             if is_claude_request {
                 super::super::providers::transform_claude_request_for_api_format_with_shadow(
@@ -276,11 +365,11 @@ impl RequestForwarder {
         }
         let force_identity_encoding = needs_transform
             || codex_responses_to_chat
+            || codex_responses_to_anthropic
             || is_streaming_request(&upstream_endpoint, &filtered_body, headers);
-        let client = self.client_for_provider(provider);
 
         build_request(
-            &client,
+            client,
             &*adapter,
             provider,
             &base_url,
@@ -295,6 +384,9 @@ impl RequestForwarder {
             force_identity_encoding,
             claude_api_format.as_deref(),
             codex_responses_to_chat,
+            codex_responses_to_anthropic,
+            codex_impersonate_claude_code,
+            codex_anthropic_one_m,
             copilot_optimization.as_ref(),
         )
         .await
@@ -362,8 +454,14 @@ impl RequestForwarder {
         matches!(vendor_result, Ok(Some(vendor)) if vendor.eq_ignore_ascii_case("openai"))
     }
 
-    fn client_for_provider(&self, provider: &Provider) -> reqwest::Client {
+    pub(super) fn client_for_provider(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> reqwest::Client {
         http_client::get_for_provider(
+            app_type.as_str(),
+            &provider.id,
             provider
                 .meta
                 .as_ref()
@@ -425,15 +523,14 @@ async fn build_request(
     force_identity_encoding: bool,
     claude_api_format: Option<&str>,
     codex_responses_to_chat: bool,
+    codex_responses_to_anthropic: bool,
+    codex_impersonate_claude_code: bool,
+    codex_anthropic_one_m: bool,
     copilot_optimization: Option<&CopilotOptimization>,
 ) -> Result<reqwest::RequestBuilder, ProxyError> {
     let (endpoint_path, endpoint_query) = split_endpoint_and_query(endpoint);
     let base_url_trimmed = base_url.trim_end_matches('/');
-    let is_full_url = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.is_full_url)
-        .unwrap_or(false);
+    let is_full_url = provider_uses_full_url(provider);
     let url = if claude_api_format == Some("gemini_native") {
         super::super::gemini_url::resolve_gemini_native_url(base_url, endpoint, is_full_url)
     } else if is_full_url
@@ -441,6 +538,7 @@ async fn build_request(
             .to_ascii_lowercase()
             .ends_with("/chat/completions")
             && endpoint_path.trim_matches('/') == "chat/completions")
+        || (codex_responses_to_anthropic && base_url_is_full_endpoint(base_url, "/v1/messages"))
     {
         append_query_to_url(base_url_trimmed, endpoint_query)
     } else if codex_responses_to_chat {
@@ -451,6 +549,17 @@ async fn build_request(
     let mut request = client.post(url);
 
     for (key, value) in headers {
+        if codex_responses_to_anthropic {
+            if is_codex_client_fingerprint_header(key.as_str())
+                || (codex_impersonate_claude_code && key.as_str().eq_ignore_ascii_case("x-app"))
+            {
+                continue;
+            }
+            if key.as_str().eq_ignore_ascii_case("accept") {
+                continue;
+            }
+        }
+
         if key.as_str().eq_ignore_ascii_case("accept-encoding") {
             if !force_identity_encoding {
                 request = request.header(key, value);
@@ -495,6 +604,9 @@ async fn build_request(
 
     if force_identity_encoding {
         request = request.header("accept-encoding", "identity");
+    }
+    if codex_responses_to_anthropic {
+        request = request.header("accept", "application/json");
     }
 
     if let Some(auth) = adapter.extract_auth(provider) {
@@ -566,16 +678,36 @@ async fn build_request(
             .and_then(|value| value.to_str().ok())
             .unwrap_or("2023-06-01");
         request = request.header("anthropic-version", version);
+    } else if codex_responses_to_anthropic {
+        request = request.header("anthropic-version", "2023-06-01");
+        let mut betas = Vec::new();
+        if codex_impersonate_claude_code {
+            betas.push("claude-code-20250219");
+        }
+        if codex_anthropic_one_m {
+            betas.push("context-1m-2025-08-07");
+        }
+        if !betas.is_empty() {
+            request = request.header("anthropic-beta", betas.join(","));
+        }
+        if codex_impersonate_claude_code {
+            request = request.header("x-app", "cli");
+        }
     }
 
     let mut replacements = reqwest::header::HeaderMap::new();
     if !is_copilot {
-        if let Some(user_agent) = provider
+        let custom_user_agent = provider
             .meta
             .as_ref()
-            .and_then(|meta| meta.custom_user_agent_header().ok().flatten())
-        {
+            .and_then(|meta| meta.custom_user_agent_header().ok().flatten());
+        if let Some(user_agent) = custom_user_agent {
             replacements.insert(reqwest::header::USER_AGENT, user_agent);
+        } else if codex_impersonate_claude_code {
+            replacements.insert(
+                reqwest::header::USER_AGENT,
+                reqwest::header::HeaderValue::from_static(CLAUDE_CODE_USER_AGENT),
+            );
         }
 
         apply_local_proxy_header_overrides(
@@ -653,6 +785,76 @@ fn rewrite_codex_responses_endpoint_to_chat(endpoint: &str) -> String {
     match split_endpoint_and_query(endpoint).1 {
         Some(query) if !query.is_empty() => format!("/chat/completions?{query}"),
         _ => "/chat/completions".to_string(),
+    }
+}
+
+fn rewrite_codex_responses_endpoint_to_anthropic(endpoint: &str) -> String {
+    match split_endpoint_and_query(endpoint).1 {
+        Some(query) if !query.is_empty() => format!("/v1/messages?{query}"),
+        _ => "/v1/messages".to_string(),
+    }
+}
+
+fn prepend_claude_code_system_prompt(body: &mut Value) {
+    let identity = serde_json::json!({ "type": "text", "text": CLAUDE_CODE_SYSTEM_IDENTITY });
+    let mut blocks = vec![identity];
+    match body.get("system") {
+        Some(Value::String(existing)) if !existing.is_empty() => {
+            blocks.push(serde_json::json!({ "type": "text", "text": existing }));
+        }
+        Some(Value::Array(existing)) => {
+            if existing
+                .first()
+                .and_then(|block| block.get("text"))
+                .and_then(Value::as_str)
+                == Some(CLAUDE_CODE_SYSTEM_IDENTITY)
+            {
+                return;
+            }
+            blocks.extend(existing.iter().cloned());
+        }
+        _ => {}
+    }
+    body["system"] = Value::Array(blocks);
+}
+
+fn base_url_is_full_endpoint(base_url: &str, endpoint_suffix: &str) -> bool {
+    let trimmed = base_url.trim();
+    let path = match trimmed.split_once(['?', '#']) {
+        Some((head, _)) => head,
+        None => trimmed,
+    };
+    path.trim_end_matches('/')
+        .to_ascii_lowercase()
+        .ends_with(endpoint_suffix)
+}
+
+fn is_codex_client_fingerprint_header(key: &str) -> bool {
+    matches!(
+        key,
+        "originator"
+            | "session_id"
+            | "session-id"
+            | "thread-id"
+            | "conversation_id"
+            | "chatgpt-account-id"
+            | "x-openai-subagent"
+            | "x-client-request-id"
+            | "openai-beta"
+            | "openai-organization"
+            | "openai-project"
+    ) || key.starts_with("x-stainless-")
+        || key.starts_with("x-codex-")
+}
+
+fn codex_anthropic_cache_config(
+    config: &super::super::types::OptimizerConfig,
+) -> super::super::types::OptimizerConfig {
+    super::super::types::OptimizerConfig {
+        enabled: true,
+        thinking_optimizer: false,
+        cache_injection: config.cache_injection,
+        cache_ttl: "5m".to_string(),
     }
 }
 

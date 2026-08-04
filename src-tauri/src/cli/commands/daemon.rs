@@ -40,13 +40,19 @@ fn start_daemon(detach: bool) -> Result<(), AppError> {
     }
 
     let binary_path = current_executable()?;
+    let Some(pidfile) = daemon::acquire_lifetime_pidfile().map_err(AppError::Message)? else {
+        return Ok(());
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|err| AppError::Message(format!("build daemon runtime failed: {err}")))?;
-    runtime
-        .block_on(daemon::run(binary_path))
-        .map_err(AppError::Message)
+    let result = runtime.block_on(daemon::run(binary_path, &pidfile));
+    // `Runtime::drop` waits for spawn_blocking session-import tasks. Release
+    // daemon.pid only afterwards so schema migration can trust the lease.
+    drop(runtime);
+    drop(pidfile);
+    result.map_err(AppError::Message)
 }
 
 fn stop_daemon() -> Result<(), AppError> {

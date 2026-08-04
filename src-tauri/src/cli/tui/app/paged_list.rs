@@ -51,6 +51,18 @@ pub(crate) enum ListEdge {
     End,
 }
 
+/// How navigation behaves at an in-memory page boundary.
+///
+/// `Explicit` exposes a virtual boundary that must be activated by a later
+/// input. `Seamless` keeps focus on real rows and lets the next input cross one
+/// page directly. Both modes retain the one-page-per-wheel-gesture budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PageBoundaryMode {
+    #[default]
+    Explicit,
+    Seamless,
+}
+
 /// Focus within a paged list.
 ///
 /// Boundary focus retains the selected real row so details and accessibility
@@ -130,6 +142,7 @@ impl PagedListOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PagedListState {
     page_size: usize,
+    boundary_mode: PageBoundaryMode,
     len: usize,
     selected: Option<usize>,
     focus: PagedListFocus,
@@ -140,10 +153,19 @@ pub(crate) struct PagedListState {
 
 impl PagedListState {
     pub(crate) fn new(page_size: usize, len: usize) -> Self {
+        Self::with_boundary_mode(page_size, len, PageBoundaryMode::Explicit)
+    }
+
+    pub(crate) fn seamless(page_size: usize, len: usize) -> Self {
+        Self::with_boundary_mode(page_size, len, PageBoundaryMode::Seamless)
+    }
+
+    fn with_boundary_mode(page_size: usize, len: usize, boundary_mode: PageBoundaryMode) -> Self {
         assert!(page_size > 0, "paged list page size must be non-zero");
 
         Self {
             page_size,
+            boundary_mode,
             len,
             selected: (len > 0).then_some(0),
             focus: if len == 0 {
@@ -318,6 +340,17 @@ impl PagedListState {
             return PagedListOutcome::NoChange;
         }
 
+        if self.boundary_mode == PageBoundaryMode::Seamless
+            && self.movement_crosses_page(direction, steps)
+            && self.has_page(direction)
+        {
+            let outcome = self.cross_page_preserving_steps(direction, steps);
+            if outcome.crossed_page() {
+                self.active_wheel_crossed_page = true;
+            }
+            return outcome;
+        }
+
         if let PagedListFocus::Boundary(boundary) = self.focus {
             if boundary == direction.boundary() {
                 if self.boundary_armed_by == Some(gesture) {
@@ -363,6 +396,12 @@ impl PagedListState {
             }
         }
         self.begin_explicit_input();
+        if self.boundary_mode == PageBoundaryMode::Seamless
+            && self.movement_crosses_page(direction, steps)
+            && self.has_page(direction)
+        {
+            return self.cross_page_preserving_steps(direction, steps);
+        }
         if self.focus == PagedListFocus::Boundary(direction.boundary()) {
             return self.cross_page(direction);
         }
@@ -529,6 +568,53 @@ impl PagedListState {
         }
     }
 
+    fn movement_crosses_page(&self, direction: PageDirection, steps: usize) -> bool {
+        let Some(selected) = self.selected else {
+            return false;
+        };
+        match direction {
+            PageDirection::Previous => selected.saturating_sub(steps) < self.page_start(selected),
+            PageDirection::Next => selected.saturating_add(steps) > self.page_end(selected),
+        }
+    }
+
+    /// Move continuously into at most one adjacent page. Keeping the unused
+    /// portion of a PageDown/wheel delta makes virtual paging feel like one
+    /// list, while clamping to the adjacent page preserves the per-input I/O
+    /// budget.
+    fn cross_page_preserving_steps(
+        &mut self,
+        direction: PageDirection,
+        steps: usize,
+    ) -> PagedListOutcome {
+        let Some(from) = self.selected else {
+            return PagedListOutcome::Empty;
+        };
+        let from_page = from / self.page_size;
+        let to_page = match direction {
+            PageDirection::Previous => from_page.saturating_sub(1),
+            PageDirection::Next => from_page.saturating_add(1),
+        };
+        let adjacent_start = to_page.saturating_mul(self.page_size);
+        let adjacent_end = adjacent_start
+            .saturating_add(self.page_size)
+            .min(self.len)
+            .saturating_sub(1);
+        let selected = match direction {
+            PageDirection::Previous => from.saturating_sub(steps).max(adjacent_start),
+            PageDirection::Next => from.saturating_add(steps).min(adjacent_end),
+        };
+        self.selected = Some(selected);
+        self.focus = PagedListFocus::Row;
+        self.boundary_armed_by = None;
+        PagedListOutcome::PageCrossed {
+            direction,
+            from_page,
+            to_page,
+            selected,
+        }
+    }
+
     fn can_focus_boundary(&self, boundary: PageBoundary) -> bool {
         let Some(selected) = self.selected else {
             return false;
@@ -564,11 +650,12 @@ impl PagedListState {
         }
 
         self.selected = Some(target);
-        if target
-            == match direction {
-                PageDirection::Previous => page_start,
-                PageDirection::Next => page_end,
-            }
+        if self.boundary_mode == PageBoundaryMode::Explicit
+            && target
+                == match direction {
+                    PageDirection::Previous => page_start,
+                    PageDirection::Next => page_end,
+                }
             && self.has_page(direction)
         {
             self.focus = PagedListFocus::Boundary(direction.boundary());
@@ -656,6 +743,50 @@ mod tests {
         assert!(state.has_previous_page());
         assert!(!state.has_next_page());
         assert!(state.is_at_end());
+    }
+
+    #[test]
+    fn seamless_mode_crosses_without_virtual_boundary_focus() {
+        let mut state = PagedListState::seamless(10, 25);
+        state.select(8);
+
+        assert_eq!(
+            state.line(PageDirection::Next),
+            PagedListOutcome::SelectionChanged { from: 8, to: 9 }
+        );
+        assert_eq!(state.focus(), PagedListFocus::Row);
+        assert_eq!(
+            state.line(PageDirection::Next),
+            PagedListOutcome::PageCrossed {
+                direction: PageDirection::Next,
+                from_page: 0,
+                to_page: 1,
+                selected: 10,
+            }
+        );
+        assert_eq!(state.focus(), PagedListFocus::Row);
+    }
+
+    #[test]
+    fn seamless_wheel_crosses_at_most_one_page_per_gesture() {
+        let mut state = PagedListState::seamless(10, 30);
+        state.select(7);
+        let id = gesture(21);
+
+        assert_eq!(
+            state.wheel(PageDirection::Next, id, 50),
+            PagedListOutcome::PageCrossed {
+                direction: PageDirection::Next,
+                from_page: 0,
+                to_page: 1,
+                selected: 19,
+            }
+        );
+        assert_eq!(
+            state.wheel(PageDirection::Next, id, 50),
+            PagedListOutcome::NoChange
+        );
+        assert_eq!(state.selected_index(), Some(19));
     }
 
     #[test]

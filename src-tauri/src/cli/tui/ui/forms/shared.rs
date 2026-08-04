@@ -63,12 +63,20 @@ pub(crate) fn add_form_key_items(
                     ) => texts::tui_key_toggle(),
                     Some(
                         ProviderAddField::GeminiAuthType
+                        | ProviderAddField::CodexPromptCacheRouting
                         | ProviderAddField::OpenClawApiProtocol
                         | ProviderAddField::HermesApiMode,
                     ) => texts::tui_key_select(),
                     _ => texts::tui_key_edit_mode(),
                 };
                 keys.extend([("↑↓", texts::tui_key_select()), ("Enter", enter_action)]);
+                if matches!(
+                    selected_field,
+                    Some(ProviderAddField::ClaudeBaseUrl | ProviderAddField::CodexBaseUrl)
+                ) {
+                    // The field-specific action must survive narrow key-bar clipping.
+                    keys.insert(0, ("f", texts::tui_full_url_label()));
+                }
                 if matches!(
                     selected_field,
                     Some(

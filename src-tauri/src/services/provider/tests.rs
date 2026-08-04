@@ -2,7 +2,7 @@ use super::*;
 use serial_test::serial;
 use tempfile::TempDir;
 
-use crate::test_support::TestEnvGuard;
+use crate::{test_support::TestEnvGuard, Database};
 
 type EnvGuard = TestEnvGuard;
 
@@ -18,6 +18,20 @@ fn with_common_enabled(mut provider: Provider) -> Provider {
         .meta
         .get_or_insert_with(crate::provider::ProviderMeta::default)
         .apply_common_config = Some(true);
+    provider
+}
+
+fn claude_codex_oauth_provider(env: Value) -> Provider {
+    let mut provider = Provider::with_id(
+        "codex-oauth".to_string(),
+        "Codex".to_string(),
+        json!({ "env": env }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        provider_type: Some("codex_oauth".to_string()),
+        ..Default::default()
+    });
     provider
 }
 
@@ -46,6 +60,129 @@ approval_policy = "never"
 }
 
 #[test]
+fn extract_claude_common_config_excludes_all_provider_model_fields() {
+    let settings = json!({
+        "env": {
+            "ANTHROPIC_MODEL": "default-model",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku-model",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Haiku Model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Sonnet Model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Opus Model",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "fable-model[1M]",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "Fable Model",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "subagent-model[1M]",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "372000",
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "372000",
+            "ENABLE_TOOL_SEARCH": "true"
+        }
+    });
+
+    let snippet =
+        ProviderService::extract_common_config_snippet_from_settings(AppType::Claude, &settings)
+            .expect("extract Claude common config");
+    let extracted: Value = serde_json::from_str(&snippet).expect("parse extracted JSON");
+    let env = extracted
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("shareable env remains");
+
+    for key in crate::claude_model_config::CLAUDE_MODEL_OVERRIDE_ENV_KEYS {
+        assert!(
+            !env.contains_key(key),
+            "provider model field {key} must not enter common config"
+        );
+    }
+    for key in crate::claude_model_config::CLAUDE_CONTEXT_WINDOW_ENV_KEYS {
+        assert!(
+            !env.contains_key(key),
+            "provider context field {key} must not enter common config"
+        );
+    }
+    assert_eq!(
+        env.get("ENABLE_TOOL_SEARCH").and_then(Value::as_str),
+        Some("true")
+    );
+}
+
+#[test]
+fn common_config_sensitive_key_matcher_covers_credentials_without_overmatching() {
+    for key in [
+        "OPENAI_KEY",
+        "OPENROUTER_API_KEY",
+        "VOLC_ACCESSKEY",
+        "ALIYUN_SECRETKEY",
+        "SOME_APITOKEN",
+        "GITHUB_PAT",
+        "MYSQL_PWD",
+        "DB_PASS",
+        "GPG_PASSPHRASE",
+        "AWS_CREDS",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ] {
+        assert!(
+            super::common_config::is_sensitive_config_key(key),
+            "{key} should be treated as sensitive"
+        );
+    }
+
+    for key in [
+        "PATH",
+        "OLDPWD",
+        "GEMINI_COMPAT",
+        "SSL_BYPASS",
+        "GEMINI_TIMEOUT_MS",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    ] {
+        assert!(
+            !super::common_config::is_sensitive_config_key(key),
+            "{key} should remain shareable"
+        );
+    }
+}
+
+#[test]
+fn common_config_extractors_strip_all_credential_shapes() {
+    let claude = json!({
+        "apiKey": "top-level-secret",
+        "env": {
+            "OPENROUTER_API_KEY": "router-secret",
+            "OPENAI_API_KEY": "openai-secret",
+            "AWS_SECRET_ACCESS_KEY": "aws-secret",
+            "ENABLE_TOOL_SEARCH": "true"
+        }
+    });
+    let claude_snippet =
+        ProviderService::extract_common_config_snippet_from_settings(AppType::Claude, &claude)
+            .expect("extract Claude common config");
+    let claude_value: Value =
+        serde_json::from_str(&claude_snippet).expect("parse Claude common config");
+    assert!(claude_value.get("apiKey").is_none());
+    let claude_env = claude_value["env"].as_object().expect("shareable env");
+    assert_eq!(claude_env.get("ENABLE_TOOL_SEARCH"), Some(&json!("true")));
+    assert!(!claude_env.contains_key("OPENROUTER_API_KEY"));
+    assert!(!claude_env.contains_key("OPENAI_API_KEY"));
+    assert!(!claude_env.contains_key("AWS_SECRET_ACCESS_KEY"));
+
+    let gemini = json!({
+        "env": {
+            "GOOGLE_API_KEY": "google-secret",
+            "SOME_PROXY_AUTH_TOKEN": "proxy-secret",
+            "GEMINI_TIMEOUT_MS": "30000"
+        }
+    });
+    let gemini_snippet =
+        ProviderService::extract_common_config_snippet_from_settings(AppType::Gemini, &gemini)
+            .expect("extract Gemini common config");
+    let gemini_value: Value =
+        serde_json::from_str(&gemini_snippet).expect("parse Gemini common config");
+    assert_eq!(gemini_value.get("GEMINI_TIMEOUT_MS"), Some(&json!("30000")));
+    assert!(gemini_value.get("GOOGLE_API_KEY").is_none());
+    assert!(gemini_value.get("SOME_PROXY_AUTH_TOKEN").is_none());
+}
+
+#[test]
 fn extract_codex_common_config_strips_provider_fields_and_injected_artifacts() {
     let extracted = ProviderService::extract_codex_common_config_from_config_toml(
         r#"model_provider = "azure"
@@ -54,6 +191,7 @@ wire_api = "chat"
 disable_response_storage = true
 experimental_bearer_token = "sk-live-secret"
 model_catalog_json = "cc-switch-model-catalog.json"
+web_search = "disabled"
 
 [model_providers.azure]
 name = "Azure OpenAI"
@@ -78,6 +216,20 @@ command = "legacy-cmd"
     assert!(!extracted.contains("experimental_bearer_token"));
     assert!(!extracted.contains("sk-live-secret"));
     assert!(!extracted.contains("model_catalog_json"));
+    assert!(!extracted.contains("web_search"));
+    assert!(extracted.contains("disable_response_storage = true"));
+}
+
+#[test]
+fn extract_codex_common_config_preserves_user_web_search_preference() {
+    let extracted = ProviderService::extract_codex_common_config_from_config_toml(
+        r#"web_search = "live"
+disable_response_storage = true
+"#,
+    )
+    .expect("extract common config");
+
+    assert!(extracted.contains("web_search = \"live\""));
     assert!(extracted.contains("disable_response_storage = true"));
 }
 
@@ -638,15 +790,22 @@ fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
 
 #[test]
 #[serial]
-fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
+fn codex_switch_preserves_existing_oauth_for_empty_openai_official_provider() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
     let auth_path = crate::codex_config::get_codex_auth_path();
-    crate::config::write_json_file(&auth_path, &json!({ "OPENAI_API_KEY": "sk-existing" }))
-        .expect("write auth.json");
+    let existing_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "oauth-access-token",
+            "account_id": "account-1"
+        }
+    });
+    crate::config::write_json_file(&auth_path, &existing_auth).expect("write auth.json");
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -692,9 +851,11 @@ fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
     ProviderService::switch(&state, AppType::Codex, "codex-official")
         .expect("switch to official should succeed without saved auth");
 
-    assert!(
-        !auth_path.exists(),
-        "empty official auth snapshot should remove live auth.json so Codex can prompt login"
+    let auth_after: Value =
+        crate::config::read_json_file(&auth_path).expect("read preserved auth.json");
+    assert_eq!(
+        auth_after, existing_auth,
+        "empty official auth snapshot must preserve the live OAuth login"
     );
 }
 
@@ -2339,6 +2500,135 @@ fn build_effective_live_snapshot_merges_claude_common_config_with_upstream_prece
 }
 
 #[test]
+#[serial]
+fn startup_cleanup_scrubs_historical_gemini_credentials_without_schema_changes() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    let env_path = crate::gemini_config::get_gemini_env_path();
+    std::fs::create_dir_all(env_path.parent().expect("Gemini env parent"))
+        .expect("create Gemini directory");
+    std::fs::write(
+        &env_path,
+        "# preserve\nGOOGLE_API_KEY=leaked-key\nUNRELATED=value\n",
+    )
+    .expect("seed Gemini live env");
+
+    let db = Database::memory().expect("create memory database");
+    let leaked_provider = Provider::with_id(
+        "victim".to_string(),
+        "Victim".to_string(),
+        json!({
+            "env": {
+                "GOOGLE_API_KEY": "leaked-key",
+                "GEMINI_TIMEOUT_MS": "30000"
+            }
+        }),
+        None,
+    );
+    let owned_provider = Provider::with_id(
+        "owner".to_string(),
+        "Owner".to_string(),
+        json!({
+            "env": {
+                "GOOGLE_API_KEY": "owned-key",
+                "GEMINI_TIMEOUT_MS": "30000"
+            }
+        }),
+        None,
+    );
+    db.save_provider("gemini", &leaked_provider)
+        .expect("save victim provider");
+    db.save_provider("gemini", &owned_provider)
+        .expect("save owner provider");
+    let snippet = json!({
+        "GOOGLE_API_KEY": "leaked-key",
+        "SOME_PROXY_AUTH_TOKEN": "leaked-token",
+        "GEMINI_TIMEOUT_MS": "30000"
+    })
+    .to_string();
+    db.set_config_snippet("gemini", Some(snippet.clone()))
+        .expect("save poisoned common snippet");
+    futures::executor::block_on(
+        db.save_live_backup(
+            "gemini",
+            &json!({
+                "env": {
+                    "GOOGLE_API_KEY": "leaked-key",
+                    "SOME_PROXY_AUTH_TOKEN": "leaked-token",
+                    "UNRELATED": "backup"
+                }
+            })
+            .to_string(),
+        ),
+    )
+    .expect("save poisoned live backup");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Gemini);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Gemini)
+            .expect("Gemini manager");
+        manager
+            .providers
+            .insert(leaked_provider.id.clone(), leaked_provider);
+        manager
+            .providers
+            .insert(owned_provider.id.clone(), owned_provider);
+    }
+    config.common_config_snippets.gemini = Some(snippet);
+
+    ProviderService::migrate_common_config_upstream_semantics_if_needed(&db, &mut config)
+        .expect("scrub leaked credentials");
+
+    let cleaned_snippet: Value = serde_json::from_str(
+        db.get_config_snippet("gemini")
+            .expect("read common snippet")
+            .as_deref()
+            .expect("shareable snippet remains"),
+    )
+    .expect("parse cleaned snippet");
+    assert_eq!(
+        cleaned_snippet.get("GEMINI_TIMEOUT_MS"),
+        Some(&json!("30000"))
+    );
+    assert!(cleaned_snippet.get("GOOGLE_API_KEY").is_none());
+    assert!(cleaned_snippet.get("SOME_PROXY_AUTH_TOKEN").is_none());
+
+    let providers = db.get_all_providers("gemini").expect("read providers");
+    assert!(providers["victim"].settings_config["env"]
+        .get("GOOGLE_API_KEY")
+        .is_none());
+    assert_eq!(
+        providers["owner"].settings_config["env"]["GOOGLE_API_KEY"],
+        json!("owned-key"),
+        "a differently valued provider-owned key must survive"
+    );
+
+    let backup = futures::executor::block_on(db.get_live_backup("gemini"))
+        .expect("read live backup")
+        .expect("live backup remains");
+    let backup: Value = serde_json::from_str(&backup.original_config).expect("parse live backup");
+    assert!(backup["env"].get("GOOGLE_API_KEY").is_none());
+    assert!(backup["env"].get("SOME_PROXY_AUTH_TOKEN").is_none());
+    assert_eq!(backup["env"]["UNRELATED"], json!("backup"));
+
+    let live = std::fs::read_to_string(env_path).expect("read cleaned live env");
+    assert_eq!(live, "# preserve\nUNRELATED=value\n");
+
+    let audit = db
+        .get_setting("gemini_common_config_scrub_audit_v1")
+        .expect("read scrub audit")
+        .expect("scrub audit exists");
+    assert!(audit.contains("GOOGLE_API_KEY"));
+    assert!(!audit.contains("leaked-key"));
+    assert!(!audit.contains("leaked-token"));
+    assert!(db
+        .get_bool_flag("gemini_common_config_credentials_scrubbed_v1")
+        .expect("read scrub marker"));
+}
+
+#[test]
 fn missing_common_config_meta_does_not_enable_runtime_common_config() {
     let provider = Provider::with_id(
         "p1".to_string(),
@@ -2519,6 +2809,131 @@ fn build_effective_live_snapshot_skips_claude_common_config_when_disabled() {
         effective["env"]["ANTHROPIC_BASE_URL"],
         json!("https://provider.example"),
         "provider settings should remain untouched"
+    );
+}
+
+#[test]
+fn codex_oauth_effective_snapshot_injects_current_context_defaults_for_saved_providers() {
+    let provider = claude_codex_oauth_provider(json!({
+        "ANTHROPIC_MODEL": "gpt-5.6-sol",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.6-sol",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-sol"
+    }));
+
+    let effective =
+        ProviderService::build_effective_live_snapshot(&AppType::Claude, &provider, None, false)
+            .expect("build effective Codex OAuth snapshot");
+    let env = effective["env"].as_object().expect("effective env");
+
+    for key in crate::claude_model_config::CLAUDE_CONTEXT_WINDOW_ENV_KEYS {
+        assert_eq!(
+            env.get(key).and_then(Value::as_str),
+            Some(crate::provider_preset_models::CODEX_OAUTH_CONTEXT_TOKENS),
+            "{key} should use the current Codex OAuth catalog window"
+        );
+    }
+    assert!(
+        provider.settings_config["env"]
+            .get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+            .is_none(),
+        "runtime defaults must not mutate the stored provider"
+    );
+
+    let explicit_provider = claude_codex_oauth_provider(json!({
+        "ANTHROPIC_MODEL": "gpt-5.6-sol",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "300000",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "280000"
+    }));
+    let explicit = ProviderService::build_effective_live_snapshot(
+        &AppType::Claude,
+        &explicit_provider,
+        None,
+        false,
+    )
+    .expect("build explicit Codex OAuth snapshot");
+    assert_eq!(
+        explicit["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+        json!("300000")
+    );
+    assert_eq!(
+        explicit["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+        json!("280000")
+    );
+
+    let legacy_provider = with_common_enabled(claude_codex_oauth_provider(json!({
+        "ANTHROPIC_MODEL": "gpt-5.5"
+    })));
+    let legacy = ProviderService::build_effective_live_snapshot(
+        &AppType::Claude,
+        &legacy_provider,
+        Some(
+            r#"{"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"372000","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"372000"}}"#,
+        ),
+        true,
+    )
+    .expect("build legacy Codex OAuth snapshot");
+    for key in crate::claude_model_config::CLAUDE_CONTEXT_WINDOW_ENV_KEYS {
+        assert!(
+            legacy["env"].get(key).is_none(),
+            "{key} must not be inherited by a non-GPT-5.6 Codex OAuth provider"
+        );
+    }
+}
+
+#[test]
+fn codex_oauth_backfill_strips_only_injected_context_defaults() {
+    let provider = claude_codex_oauth_provider(json!({
+        "ANTHROPIC_MODEL": "gpt-5.6-sol",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.6-sol",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-sol"
+    }));
+    let live = json!({
+        "env": {
+            "ANTHROPIC_MODEL": "gpt-5.6-sol",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "372000",
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "360000"
+        }
+    });
+
+    let restored = common_config::strip_common_config_from_live_settings(
+        &AppType::Claude,
+        &provider,
+        live,
+        None,
+    );
+    let env = restored["env"].as_object().expect("restored env");
+
+    assert!(
+        !env.contains_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+        "the exact injected default should not become a stored override"
+    );
+    assert_eq!(
+        env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+            .and_then(Value::as_str),
+        Some("360000"),
+        "a live value changed by the user must be preserved"
+    );
+
+    let explicit_provider = claude_codex_oauth_provider(json!({
+        "ANTHROPIC_MODEL": "gpt-5.6-sol",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "372000"
+    }));
+    let explicit = common_config::strip_common_config_from_live_settings(
+        &AppType::Claude,
+        &explicit_provider,
+        json!({
+            "env": {
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "372000"
+            }
+        }),
+        None,
+    );
+    assert_eq!(
+        explicit["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+        json!("372000"),
+        "an explicitly stored value must survive backfill even when it equals the default"
     );
 }
 
@@ -2738,7 +3153,7 @@ fn provider_add_does_not_infer_claude_common_config_opt_in() {
 
 #[test]
 #[serial]
-fn provider_add_strips_legacy_claude_model_keys_from_common_snippet() {
+fn provider_add_migrates_legacy_claude_model_to_provider_owned_roles() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
@@ -2783,10 +3198,17 @@ fn provider_add_strips_legacy_claude_model_keys_from_common_snippet() {
         !env.contains_key("ANTHROPIC_SMALL_FAST_MODEL"),
         "legacy Claude common keys should not remain after provider normalization"
     );
-    assert!(
-        !env.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
-        "normalized Claude common keys should be stripped before persisting the provider snapshot"
-    );
+    for key in [
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    ] {
+        assert_eq!(
+            env.get(key).and_then(Value::as_str),
+            Some("claude-3-5-haiku-20241022"),
+            "{key} should retain the migrated provider-owned model"
+        );
+    }
     assert_eq!(
         env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
         Some("token"),
@@ -3173,6 +3595,117 @@ async fn provider_update_keeps_running_claude_takeover_and_refreshes_restore_bac
             .and_then(Value::as_str),
         Some("Read")
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn provider_update_refreshes_codex_catalog_during_takeover() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+
+    let original = Provider::with_id(
+        "p1".to_string(),
+        "Codex A".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": "token-a" },
+            "config": r#"model_provider = "custom"
+model = "old-model"
+
+[model_providers.custom]
+name = "Codex A"
+base_url = "https://api.a.example/v1"
+wire_api = "anthropic"
+requires_openai_auth = true
+"#,
+            "modelCatalog": {
+                "models": [{ "model": "old-model" }]
+            }
+        }),
+        None,
+    );
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), original.clone());
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "p1")
+        .expect("set db current provider");
+    crate::settings::set_current_provider(&AppType::Codex, Some("p1"))
+        .expect("set local current provider");
+    ProviderService::write_live_snapshot(&AppType::Codex, &original, None, true)
+        .expect("seed live Codex config");
+    state
+        .db
+        .set_app_proxy_preferred_port(AppType::Codex.as_str(), 0)
+        .expect("use an ephemeral proxy port");
+    state
+        .proxy_service
+        .set_takeover_for_app(AppType::Codex.as_str(), true)
+        .await
+        .expect("enable Codex takeover");
+
+    let mut updated = original.clone();
+    updated.settings_config["config"] = json!(
+        r#"model_provider = "custom"
+model = "gpt-5.4"
+
+[model_providers.custom]
+name = "Codex A"
+base_url = "https://api.updated.example/v1"
+wire_api = "anthropic"
+requires_openai_auth = true
+"#
+    );
+    updated.settings_config["modelCatalog"] = json!({
+        "models": [{ "model": "gpt-5.4", "displayName": "GPT 5.4" }]
+    });
+
+    ProviderService::update(&state, AppType::Codex, updated.clone())
+        .expect("update current Codex provider mapping");
+
+    let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+        .expect("read generated catalog");
+    assert_eq!(catalog["models"][0]["slug"], "gpt-5.4");
+    assert_eq!(
+        catalog["models"][0]["input_modalities"],
+        json!(["text", "image"]),
+        "unknown and GPT models must fail open to image input"
+    );
+    let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+        .expect("read Codex config.toml");
+    assert!(live_config.contains("model_catalog_json"));
+    let live_toml: toml::Value = toml::from_str(&live_config).expect("parse live Codex config");
+    assert_eq!(
+        live_toml["model_providers"]["custom"]["wire_api"].as_str(),
+        Some("responses"),
+        "Codex must speak Responses to the local proxy even for an Anthropic upstream"
+    );
+
+    updated.settings_config["modelCatalog"] = json!({ "models": [] });
+    ProviderService::update(&state, AppType::Codex, updated)
+        .expect("remove current Codex provider mapping");
+
+    let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+        .expect("read Codex config.toml after mapping removal");
+    assert!(
+        !live_config.contains("model_catalog_json"),
+        "removing mappings during takeover must clear the stale catalog pointer"
+    );
+
+    state
+        .proxy_service
+        .set_takeover_for_app(AppType::Codex.as_str(), false)
+        .await
+        .expect("disable Codex takeover");
 }
 
 #[tokio::test]
@@ -3758,7 +4291,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_claude_provider_snaps
 
 #[test]
 #[serial]
-fn updating_common_snippet_migrates_legacy_claude_model_keys_from_provider_snapshots() {
+fn updating_common_snippet_preserves_migrated_provider_owned_claude_models() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir())
@@ -3841,18 +4374,17 @@ fn updating_common_snippet_migrates_legacy_claude_model_keys_from_provider_snaps
         .and_then(Value::as_object)
         .expect("p2 env should be object");
 
-    assert!(
-        !p2_env.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
-        "legacy Claude common model keys should be stripped even when the stored snapshot was normalized"
-    );
-    assert!(
-        !p2_env.contains_key("ANTHROPIC_DEFAULT_SONNET_MODEL"),
-        "normalized Sonnet key derived from the legacy snippet should also be stripped"
-    );
-    assert!(
-        !p2_env.contains_key("ANTHROPIC_DEFAULT_OPUS_MODEL"),
-        "normalized Opus key derived from the legacy snippet should also be stripped"
-    );
+    for key in [
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    ] {
+        assert_eq!(
+            p2_env.get(key).and_then(Value::as_str),
+            Some("claude-3-5-haiku-20241022"),
+            "{key} should remain provider-owned after the old common snippet is retired"
+        );
+    }
     assert_eq!(
         p2_env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
         Some("token2"),

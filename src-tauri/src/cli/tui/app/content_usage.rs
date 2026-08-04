@@ -119,6 +119,17 @@ impl App {
                 self.push_route_and_switch(Route::Pricing)
             }
             Intent::Reload => Action::UsageRefresh,
+            Intent::RebuildCodex => {
+                if !matches!(self.app_type, AppType::Codex) {
+                    return Action::None;
+                }
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: texts::tui_confirm_rebuild_codex_usage_title().to_string(),
+                    message: texts::tui_confirm_rebuild_codex_usage_message().to_string(),
+                    action: ConfirmAction::RebuildCodexUsage,
+                });
+                Action::None
+            }
         }
     }
 

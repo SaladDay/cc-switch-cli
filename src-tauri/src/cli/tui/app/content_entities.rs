@@ -527,11 +527,6 @@ impl App {
         self.sessions
             .pagination
             .sync_len(self.sessions.logical_total_rows());
-        let page_start = self
-            .sessions
-            .remote
-            .current_page()
-            .saturating_mul(crate::session_manager::paged_manifest::PAGE_SIZE);
         let explicit_direction = match key.code {
             KeyCode::Up | KeyCode::PageUp => Some(PageDirection::Previous),
             KeyCode::Down | KeyCode::PageDown => Some(PageDirection::Next),
@@ -570,7 +565,33 @@ impl App {
                 )
             }};
         }
-        if self.sessions.remote.input_is_blocked() {
+        let message_filter_active = self.sessions.message_query_lower().is_some();
+        if matches!(self.sessions.pane, SessionsPane::Detail)
+            && !self.sessions.message_remote.input_is_blocked()
+        {
+            self.sessions.message_remote.sync_loaded_selection(
+                self.sessions.messages.len(),
+                &mut self.sessions.message_idx,
+                &mut self.sessions.message_pagination,
+            );
+        }
+        let message_gate_before_input = self.sessions.message_pagination.clone();
+        if matches!(self.sessions.pane, SessionsPane::Detail)
+            && self.sessions.message_remote.input_is_blocked()
+        {
+            let reverse = match key.code {
+                KeyCode::Up | KeyCode::PageUp => Some(PageDirection::Previous),
+                KeyCode::Down | KeyCode::PageDown => Some(PageDirection::Next),
+                _ => None,
+            };
+            if reverse.is_some_and(|direction| self.sessions.cancel_message_page_cross(direction)) {
+                return Action::None;
+            }
+            return Action::None;
+        }
+        if matches!(self.sessions.pane, SessionsPane::List)
+            && self.sessions.remote.input_is_blocked()
+        {
             let reverse = match key.code {
                 KeyCode::Up | KeyCode::PageUp => Some(PageDirection::Previous),
                 KeyCode::Down | KeyCode::PageDown => Some(PageDirection::Next),
@@ -597,6 +618,17 @@ impl App {
                         return apply_paged!(outcome);
                     }
                     SessionsPane::Detail => {
+                        if !message_filter_active {
+                            let outcome = self
+                                .sessions
+                                .message_pagination
+                                .line(PageDirection::Previous);
+                            return self.apply_session_messages_paged_outcome(
+                                outcome,
+                                message_gate_before_input,
+                                None,
+                            );
+                        }
                         let next_idx = {
                             let messages = visible_session_messages(&self.sessions);
                             if messages.is_empty() {
@@ -612,6 +644,11 @@ impl App {
                         };
                         if let Some(next_idx) = next_idx {
                             self.sessions.message_idx = next_idx;
+                            self.sessions.message_remote.sync_loaded_selection(
+                                self.sessions.messages.len(),
+                                &mut self.sessions.message_idx,
+                                &mut self.sessions.message_pagination,
+                            );
                         }
                     }
                 }
@@ -624,6 +661,15 @@ impl App {
                         return apply_paged!(outcome);
                     }
                     SessionsPane::Detail => {
+                        if !message_filter_active {
+                            let outcome =
+                                self.sessions.message_pagination.line(PageDirection::Next);
+                            return self.apply_session_messages_paged_outcome(
+                                outcome,
+                                message_gate_before_input,
+                                None,
+                            );
+                        }
                         let next_idx = {
                             let messages = visible_session_messages(&self.sessions);
                             if messages.is_empty() {
@@ -639,6 +685,11 @@ impl App {
                         };
                         if let Some(next_idx) = next_idx {
                             self.sessions.message_idx = next_idx;
+                            self.sessions.message_remote.sync_loaded_selection(
+                                self.sessions.messages.len(),
+                                &mut self.sessions.message_idx,
+                                &mut self.sessions.message_pagination,
+                            );
                         }
                     }
                 }
@@ -649,6 +700,18 @@ impl App {
                     let page = self.sessions_list_page_size();
                     let outcome = self.sessions.pagination.lines(PageDirection::Next, page);
                     return apply_paged!(outcome);
+                }
+                if matches!(self.sessions.pane, SessionsPane::Detail) {
+                    let page = self.sessions_messages_page_size();
+                    let outcome = self
+                        .sessions
+                        .message_pagination
+                        .lines(PageDirection::Next, page);
+                    return self.apply_session_messages_paged_outcome(
+                        outcome,
+                        message_gate_before_input,
+                        None,
+                    );
                 }
                 Action::None
             }
@@ -661,12 +724,32 @@ impl App {
                         .lines(PageDirection::Previous, page);
                     return apply_paged!(outcome);
                 }
+                if matches!(self.sessions.pane, SessionsPane::Detail) {
+                    let page = self.sessions_messages_page_size();
+                    let outcome = self
+                        .sessions
+                        .message_pagination
+                        .lines(PageDirection::Previous, page);
+                    return self.apply_session_messages_paged_outcome(
+                        outcome,
+                        message_gate_before_input,
+                        None,
+                    );
+                }
                 Action::None
             }
             KeyCode::Home => {
                 if matches!(self.sessions.pane, SessionsPane::List) {
-                    let outcome = self.sessions.pagination.select(page_start);
+                    let outcome = self.sessions.pagination.select(0);
                     return apply_paged!(outcome);
+                }
+                if matches!(self.sessions.pane, SessionsPane::Detail) {
+                    let outcome = self.sessions.message_pagination.select(0);
+                    return self.apply_session_messages_paged_outcome(
+                        outcome,
+                        message_gate_before_input,
+                        None,
+                    );
                 }
                 Action::None
             }
@@ -675,8 +758,19 @@ impl App {
                     let outcome = self
                         .sessions
                         .pagination
-                        .select(page_start.saturating_add(visible.len() - 1));
+                        .select(self.sessions.logical_total_rows().saturating_sub(1));
                     return apply_paged!(outcome);
+                }
+                if matches!(self.sessions.pane, SessionsPane::Detail) {
+                    let outcome = self
+                        .sessions
+                        .message_pagination
+                        .select(self.sessions.logical_total_messages().saturating_sub(1));
+                    return self.apply_session_messages_paged_outcome(
+                        outcome,
+                        message_gate_before_input,
+                        None,
+                    );
                 }
                 Action::None
             }
@@ -778,9 +872,47 @@ impl App {
         use super::paged_list::PageDirection;
 
         if matches!(self.sessions.pane, SessionsPane::Detail) {
+            let page_direction = PageDirection::from(direction);
+            if self.sessions.message_remote.input_is_blocked() {
+                let _ = self.sessions.cancel_message_page_cross(page_direction);
+                return Action::None;
+            }
+            if self.sessions.message_query_lower().is_none() {
+                self.sessions
+                    .message_pagination
+                    .sync_len(self.sessions.logical_total_messages());
+                let absolute = self
+                    .sessions
+                    .message_remote
+                    .current_page()
+                    .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE)
+                    .saturating_add(self.sessions.message_idx)
+                    .min(self.sessions.logical_total_messages().saturating_sub(1));
+                if self.sessions.logical_total_messages() > 0
+                    && self.sessions.message_pagination.selected_index() != Some(absolute)
+                {
+                    self.sessions.message_pagination.select(absolute);
+                }
+                let previous_gate = self.sessions.message_pagination.clone();
+                let outcome = self.sessions.message_pagination.wheel(
+                    page_direction,
+                    gesture,
+                    usize::try_from(steps).unwrap_or(usize::MAX),
+                );
+                return self.apply_session_messages_paged_outcome(
+                    outcome,
+                    previous_gate,
+                    Some(gesture),
+                );
+            }
             let messages = visible_session_messages(&self.sessions);
             if messages.is_empty() {
                 self.sessions.message_idx = 0;
+                self.sessions.message_remote.sync_loaded_selection(
+                    self.sessions.messages.len(),
+                    &mut self.sessions.message_idx,
+                    &mut self.sessions.message_pagination,
+                );
                 return Action::None;
             }
             let current = messages
@@ -794,6 +926,11 @@ impl App {
                 }
             };
             self.sessions.message_idx = messages.get(target).map(|(index, _)| index).unwrap_or(0);
+            self.sessions.message_remote.sync_loaded_selection(
+                self.sessions.messages.len(),
+                &mut self.sessions.message_idx,
+                &mut self.sessions.message_pagination,
+            );
             return Action::None;
         }
 
@@ -867,8 +1004,8 @@ impl App {
         visible_len: usize,
         wheel_gesture: Option<crate::cli::tui::input::WheelGestureId>,
     ) -> Action {
-        if outcome.crossed_page() {
-            let target_page = selected_absolute / crate::session_manager::paged_manifest::PAGE_SIZE;
+        let target_page = selected_absolute / crate::session_manager::paged_manifest::PAGE_SIZE;
+        if outcome.crossed_page() || target_page != self.sessions.remote.current_page() {
             if self
                 .sessions
                 .begin_page_cross(target_page, previous_gate, wheel_gesture)
@@ -896,6 +1033,37 @@ impl App {
         Action::None
     }
 
+    fn apply_session_messages_paged_outcome(
+        &mut self,
+        outcome: super::paged_list::PagedListOutcome,
+        previous_gate: super::paged_list::PagedListState,
+        wheel_gesture: Option<crate::cli::tui::input::WheelGestureId>,
+    ) -> Action {
+        let selected_absolute = self
+            .sessions
+            .message_pagination
+            .selected_index()
+            .unwrap_or(0);
+        let target_page =
+            selected_absolute / crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE;
+        if outcome.crossed_page() || target_page != self.sessions.message_remote.current_page() {
+            let _ =
+                self.sessions
+                    .begin_message_page_cross(target_page, previous_gate, wheel_gesture);
+            return Action::None;
+        }
+        self.sessions.message_remote.dismiss_page_error();
+        self.sessions.message_idx = selected_absolute
+            .saturating_sub(
+                self.sessions
+                    .message_remote
+                    .current_page()
+                    .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE),
+            )
+            .min(self.sessions.messages.len().saturating_sub(1));
+        Action::None
+    }
+
     /// Approximate the session list viewport height for PageUp/PageDown, derived
     /// from the last rendered terminal size minus the surrounding chrome.
     fn sessions_list_page_size(&self) -> usize {
@@ -904,6 +1072,16 @@ impl App {
         const SESSIONS_LIST_CHROME_ROWS: usize = 9;
         (self.last_size.height as usize)
             .saturating_sub(SESSIONS_LIST_CHROME_ROWS)
+            .max(1)
+    }
+
+    fn sessions_messages_page_size(&self) -> usize {
+        // Same outer chrome as the Sessions list. Message rows have no summary
+        // card of their own, so this remains a conservative viewport estimate
+        // on both narrow (stacked) and wide layouts.
+        const SESSIONS_MESSAGES_CHROME_ROWS: usize = 9;
+        (self.last_size.height as usize)
+            .saturating_sub(SESSIONS_MESSAGES_CHROME_ROWS)
             .max(1)
     }
 

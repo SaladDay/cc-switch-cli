@@ -51,6 +51,37 @@ fn next_reload_token() -> UiDataReloadToken {
     UiDataReloadToken(NEXT_RELOAD_TOKEN.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Process-local version for asynchronous quota results. Rotating it invalidates
+/// replies that were started with credentials from an older provider snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QuotaSnapshotGeneration(u64);
+
+impl Default for QuotaSnapshotGeneration {
+    fn default() -> Self {
+        static NEXT_QUOTA_GENERATION: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_QUOTA_GENERATION.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Content version of a [`UsageSnapshot`], so render-time projections over it
+/// can be memoized instead of rebuilt every frame.
+///
+/// Stamped by `Default`, which is how every snapshot is built (both loaders end
+/// in `..UsageSnapshot::default()`), and carried unchanged by `Clone` — two
+/// clones of one load are the same data and must hit the same cache entry.
+/// Merges that leave `daily_models`/`trends_30d` alone (custom-range merges,
+/// log-head merges) leave the generation alone too; a fixed-range merge
+/// replaces the whole snapshot, generation included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UsageSnapshotGeneration(u64);
+
+impl Default for UsageSnapshotGeneration {
+    fn default() -> Self {
+        static NEXT_USAGE_GENERATION: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_USAGE_GENERATION.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
     pub id: String,
@@ -81,10 +112,20 @@ pub(crate) struct ProviderQuotaState {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QuotaSnapshot {
+    generation: QuotaSnapshotGeneration,
     by_provider: HashMap<String, ProviderQuotaState>,
 }
 
 impl QuotaSnapshot {
+    pub(crate) fn generation(&self) -> QuotaSnapshotGeneration {
+        self.generation
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.generation = QuotaSnapshotGeneration::default();
+        self.by_provider.clear();
+    }
+
     pub(crate) fn mark_loading(&mut self, target: QuotaTarget, manual: bool) {
         let provider_id = target.provider_id.clone();
         match self.by_provider.get_mut(&provider_id) {
@@ -160,10 +201,16 @@ impl QuotaSnapshot {
             .is_some_and(|state| &state.target == target && state.loading && state.manual)
     }
 
-    pub(crate) fn target_is_current(&self, target: &QuotaTarget) -> bool {
-        self.by_provider
-            .get(&target.provider_id)
-            .is_some_and(|state| &state.target == target)
+    pub(crate) fn target_is_current(
+        &self,
+        generation: QuotaSnapshotGeneration,
+        target: &QuotaTarget,
+    ) -> bool {
+        self.generation == generation
+            && self
+                .by_provider
+                .get(&target.provider_id)
+                .is_some_and(|state| &state.target == target)
     }
 }
 
@@ -314,6 +361,23 @@ pub struct ProxySnapshot {
     pub last_error: Option<String>,
     pub current_app_target: Option<ProxyTargetSnapshot>,
     pub provider_health: Arc<HashMap<String, ProviderHealthSnapshot>>,
+}
+
+/// Minimal TUI projection affected by enabling or disabling a managed proxy
+/// session. Provider data is included because takeover setup may persist live
+/// credentials back to the selected provider before rewriting the live config.
+///
+/// Keep this process-local and opaque: provider snapshots can contain secrets.
+pub(crate) struct ProviderRuntimeSnapshot {
+    providers: ProvidersSnapshot,
+    proxy: ProxySnapshot,
+}
+
+impl ProviderRuntimeSnapshot {
+    #[cfg(test)]
+    pub(crate) fn new(providers: ProvidersSnapshot, proxy: ProxySnapshot) -> Self {
+        Self { providers, proxy }
+    }
 }
 
 impl ProxySnapshot {
@@ -523,6 +587,118 @@ pub struct UsageTrendBucket {
     pub error_count: u64,
 }
 
+/// One `(local day, model)` cell of the 30-day home chart.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UsageDailyModelBucket {
+    /// Local calendar day, `YYYY-MM-DD` — matches `UsageTrendBucket::key`.
+    pub date_key: String,
+    pub model: String,
+    /// This cell is the SQL-bounded residual rather than a named model. The
+    /// renderer supplies the localized "Other" label.
+    pub is_other: bool,
+    /// Billable tokens (`fresh input + output`), matching the trend query.
+    /// The home chart stacks [`Self::real_total_tokens`] instead.
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    /// Cache-normalized input, i.e. the same fresh-input semantics the Usage
+    /// page's "Input" tile reports. See [`crate::services::sql_helpers`].
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+}
+
+impl UsageDailyModelBucket {
+    /// Every token the model actually moved: fresh input, output, and both
+    /// cache counters. This is the Usage page's "Real Tokens" metric (see
+    /// `usage_real_total_tokens_sql`), and the figure the home chart stacks —
+    /// so a cache-only day still draws a bar instead of reading as "no usage".
+    pub fn real_total_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_creation_tokens)
+    }
+}
+
+/// The four token counters behind a model's detail line on the home card.
+///
+/// `input_tokens` is fresh input (cache reads/writes excluded), matching the
+/// Usage page's "Input" metric so the same model reads the same on both pages.
+/// `total_tokens` on the surrounding row stays `input + output`; cache tokens
+/// are reported separately, never folded in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageModelTokenBreakdown {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+}
+
+impl UsageModelTokenBreakdown {
+    /// Fold one `(day, model)` cell in. Every counter saturates: a corrupted
+    /// row must not wrap a model's total.
+    pub fn accumulate(&mut self, bucket: &UsageDailyModelBucket) {
+        self.input_tokens = self.input_tokens.saturating_add(bucket.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(bucket.output_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(bucket.cache_read_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(bucket.cache_creation_tokens);
+    }
+}
+
+/// A stacked column of the home chart: one local day, segments parallel to
+/// [`UsageDailyChartSeries::models`].
+///
+/// Segments and `total` count *real* tokens
+/// ([`UsageDailyModelBucket::real_total_tokens`]), so the bar height matches
+/// the Usage page's "Real Tokens" hero.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UsageDailyChartDay {
+    pub date_key: String,
+    pub label: String,
+    pub segments: Vec<u64>,
+    pub total: u64,
+}
+
+/// Chart-ready projection of [`UsageDailyModelBucket`]: the top-N models **by
+/// cost** plus a residual "Other" series, over a fixed day axis.
+///
+/// One entity set feeds everything the card draws — the stacked bars, the
+/// legend, and the "Models by Cost" list — so the ranking the heading promises
+/// is the ranking the colors encode. Token figures throughout are *real*
+/// totals ([`UsageDailyModelBucket::real_total_tokens`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UsageDailyChartSeries {
+    /// Legend keys in draw order (descending cost); the residual bucket, when
+    /// present, is last.
+    pub models: Vec<String>,
+    /// Window cost per entry of `models`, parallel to it. Tokens live in the
+    /// per-day segments; cost has no daily breakdown to sum from.
+    pub model_cost_usd: Vec<f64>,
+    /// Window In/Out/cache counters per entry of `models`, parallel to it.
+    /// Like cost, these have no per-day breakdown to re-sum from, so the
+    /// residual bucket is folded here once and read back by the list.
+    pub model_tokens: Vec<UsageModelTokenBreakdown>,
+    /// Index of the residual bucket inside `models`, if any.
+    pub other_index: Option<usize>,
+    pub days: Vec<UsageDailyChartDay>,
+    /// Tallest day's real-token total: the y-axis maximum.
+    pub max_total: u64,
+    /// Window real-token total, i.e. the sum of every day's `total`.
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+}
+
+impl UsageDailyChartSeries {
+    pub fn has_data(&self) -> bool {
+        self.max_total > 0
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UsageProviderStatsRow {
     pub provider_id: String,
@@ -584,6 +760,9 @@ pub struct UsageLogRow {
 pub(crate) const USAGE_LOG_PAGE_SIZE: usize = 100;
 pub(crate) const USAGE_LOG_ERROR_MESSAGE_MAX_CHARS: usize = 4_096;
 pub(crate) const USAGE_TEXT_MAX_CHARS: usize = 256;
+/// The home chart exposes four named model series; every remaining model is
+/// folded into one residual bucket by the SQL projection.
+pub(crate) const USAGE_DAILY_MODEL_LIMIT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -685,6 +864,13 @@ pub struct UsageSnapshot {
     pub logs_total: u64,
     pub recent_logs_custom: Vec<UsageLogRow>,
     pub logs_total_custom: u64,
+    /// Per-day/per-model tokens for the last 30 days, feeding the home chart.
+    pub daily_models: Vec<UsageDailyModelBucket>,
+    /// Newest `session_log_sync.last_synced_at` (unix seconds), if any file
+    /// has ever been imported.
+    pub last_synced_at: Option<i64>,
+    /// Cache key for render-time projections of this snapshot.
+    pub generation: UsageSnapshotGeneration,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1023,6 +1209,12 @@ pub(crate) fn load_snapshot_state() -> Result<AppState, AppError> {
 impl UiData {
     pub(crate) fn mark_current_app_data_changed(&mut self) {
         self.reload_token = next_reload_token();
+    }
+
+    pub(crate) fn apply_provider_runtime_snapshot(&mut self, snapshot: ProviderRuntimeSnapshot) {
+        self.providers = snapshot.providers;
+        self.proxy = snapshot.proxy;
+        self.mark_current_app_data_changed();
     }
 
     pub(crate) fn refresh_current_app_provider_data(
@@ -1526,22 +1718,10 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .get("ANTHROPIC_BASE_URL")?
             .as_str()
             .map(|s| s.to_string()),
-        AppType::Codex => {
-            if let Some(config_str) = settings_config.get("config")?.as_str() {
-                for line in config_str.lines() {
-                    let line = line.trim();
-                    if line.starts_with("base_url") {
-                        if let Some(url_part) = line.split('=').nth(1) {
-                            let url = url_part.trim().trim_matches('"').trim_matches('\'');
-                            if !url.is_empty() {
-                                return Some(url.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        }
+        AppType::Codex => settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(crate::codex_config::extract_codex_base_url),
         AppType::Gemini => settings_config
             .get("env")
             .and_then(|env| {
@@ -1959,6 +2139,8 @@ fn load_usage_fixed_snapshot(
     let top_models_30d = load_usage_top_models(&conn, app_key, thirty_start, now)?;
     let recent_logs = load_usage_recent_logs(&conn, app_key, None, 100)?;
     let logs_total = load_usage_logs_total(&conn, app_key, None)?;
+    let daily_models = load_usage_daily_models(&conn, app_key, thirty_start, now)?;
+    let last_synced_at = load_session_last_synced_at(&conn);
 
     Ok(UsageSnapshot {
         summary_today,
@@ -1975,6 +2157,8 @@ fn load_usage_fixed_snapshot(
         top_models_30d,
         recent_logs,
         logs_total,
+        daily_models,
+        last_synced_at,
         ..UsageSnapshot::default()
     })
 }
@@ -2291,7 +2475,7 @@ fn local_end_of_day_timestamp(date: NaiveDate) -> i64 {
         .unwrap_or(0)
 }
 
-fn load_usage_summary(
+pub(crate) fn load_usage_summary(
     conn: &rusqlite::Connection,
     app_key: &str,
     start: i64,
@@ -2466,6 +2650,344 @@ fn empty_usage_custom_trend(range: UsageCustomRange) -> Vec<UsageTrendBucket> {
             }
         })
         .collect()
+}
+
+/// Bounded row shape returned by [`load_usage_daily_models`].
+type DailyModelQueryRow = (String, String, bool, i64, f64, i64, i64, i64, i64);
+
+/// Per-day/per-model token+cost cells for the home chart.
+///
+/// Reads the same unpruned `proxy_request_logs` projection as the Usage page,
+/// cross-source deduplicated through `effective_usage_log_filter`. The normal
+/// 30-day window is retained in detail form by database maintenance, so using
+/// the same source keeps the two pages numerically consistent and avoids
+/// double-counting when a restore or re-import temporarily leaves both detail
+/// and rollup rows for one day.
+///
+/// The query routes `input_tokens` through
+/// [`crate::services::sql_helpers::fresh_input_sql`], so "In" here means the
+/// same thing as the Usage page's "Input" tile: fresh (non-cached) input.
+/// `total_tokens` stays `fresh input + output`, matching the trend query; the
+/// home chart stacks the *real* total (that plus the two cache counters), which
+/// [`UsageDailyModelBucket::real_total_tokens`] derives from the same cells.
+///
+/// The SQL returns at most [`USAGE_DAILY_MODEL_LIMIT`] named models plus one
+/// residual cell per day. Model text is bounded before grouping so arbitrary
+/// upstream identifiers cannot make this automatic home-page query materialize
+/// an unbounded number of large strings in the TUI process.
+fn load_usage_daily_models(
+    conn: &rusqlite::Connection,
+    app_key: &str,
+    start: i64,
+    end: i64,
+) -> Result<Vec<UsageDailyModelBucket>, AppError> {
+    let total_tokens_expr = usage_stats_total_tokens_sql(Some("l"));
+    let fresh_input_expr = crate::services::sql_helpers::fresh_input_sql("l");
+    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let model_expr = usage_model_group_sql("l.");
+    let sql = format!(
+        "WITH raw AS (
+            SELECT
+                date(l.created_at, 'unixepoch', 'localtime') AS bucket_date,
+                {model_expr} AS model_name,
+                COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) AS total_cost,
+                COALESCE(SUM({fresh_input_expr}), 0) AS input_tokens,
+                COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(l.cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(l.cache_creation_tokens), 0) AS cache_creation_tokens
+            FROM proxy_request_logs l
+            WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+              AND {effective_filter}
+            GROUP BY bucket_date, model_name
+        ),
+        ranked_models AS (
+            SELECT
+                model_name,
+                SUM(total_cost) AS ranked_cost,
+                SUM(input_tokens + output_tokens
+                    + cache_read_tokens + cache_creation_tokens) AS ranked_tokens
+            FROM raw
+            GROUP BY model_name
+            ORDER BY ranked_cost DESC, ranked_tokens DESC, model_name ASC
+            LIMIT {USAGE_DAILY_MODEL_LIMIT}
+        ),
+        projected AS (
+            SELECT
+                raw.bucket_date,
+                CASE WHEN ranked_models.model_name IS NULL
+                    THEN '' ELSE raw.model_name END AS model_name,
+                CASE WHEN ranked_models.model_name IS NULL
+                    THEN 1 ELSE 0 END AS is_other,
+                raw.total_tokens,
+                raw.total_cost,
+                raw.input_tokens,
+                raw.output_tokens,
+                raw.cache_read_tokens,
+                raw.cache_creation_tokens
+            FROM raw
+            LEFT JOIN ranked_models ON ranked_models.model_name = raw.model_name
+        )
+        SELECT
+            bucket_date,
+            model_name,
+            is_other,
+            COALESCE(SUM(total_tokens), 0),
+            COALESCE(SUM(total_cost), 0.0),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cache_creation_tokens), 0)
+        FROM projected
+        GROUP BY bucket_date, model_name, is_other
+        ORDER BY bucket_date ASC, is_other ASC, model_name ASC"
+    );
+    let read_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<DailyModelQueryRow> {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+        ))
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![app_key, start, end], read_row)?;
+    let mut buckets = Vec::new();
+    for row in rows {
+        let (date_key, model, is_other, tokens, cost, input, output, cache_read, cache_creation) =
+            row?;
+        buckets.push(UsageDailyModelBucket {
+            date_key,
+            model,
+            is_other,
+            total_tokens: non_negative_u64(tokens),
+            total_cost_usd: cost.max(0.0),
+            input_tokens: non_negative_u64(input),
+            output_tokens: non_negative_u64(output),
+            cache_read_tokens: non_negative_u64(cache_read),
+            cache_creation_tokens: non_negative_u64(cache_creation),
+        });
+    }
+
+    log::debug!(
+        "home-usage: bounded daily model query app={app_key} rows={}",
+        buckets.len()
+    );
+    Ok(buckets)
+}
+
+/// Newest local session-log import timestamp (unix seconds), or `None` when
+/// nothing has been imported yet.
+///
+/// Deliberately global rather than per-app: one sync round scans every app's
+/// session logs, so "last updated" is a property of the round, not of the app
+/// currently on screen. Filtering by app would show an older timestamp for apps
+/// that simply had no new files in the last round, which reads as staleness the
+/// user cannot act on.
+fn load_session_last_synced_at(conn: &rusqlite::Connection) -> Option<i64> {
+    match conn.query_row(
+        "SELECT MAX(last_synced_at) FROM session_log_sync",
+        [],
+        |row| row.get::<_, Option<i64>>(0),
+    ) {
+        Ok(value) => value.filter(|ts| *ts > 0),
+        Err(err) => {
+            log::debug!("home-usage: session_log_sync last_synced_at unavailable: {err}");
+            None
+        }
+    }
+}
+
+/// SQL fragment producing a non-empty, bounded model name for the automatic
+/// home-page projection. Full identifiers remain stored in SQLite and are
+/// available in the Usage log detail; the chart never needs more text than its
+/// bounded TUI projection can display.
+fn usage_model_group_sql(prefix: &str) -> String {
+    let raw = format!("COALESCE(NULLIF(TRIM({prefix}model), ''), 'unknown')");
+    format!("SUBSTR({raw}, 1, {USAGE_TEXT_MAX_CHARS})")
+}
+
+/// Fold raw per-day/per-model cells onto a fixed day axis, keeping the
+/// `max_models` costliest models and folding the rest into "Other".
+///
+/// Two metrics, each used for exactly one job:
+///
+/// * **cost** ranks the models, because the card's list is headed "Models by
+///   Cost" and the legend colors have to mean the same thing as the list;
+/// * **real tokens** (input + output + cache read + cache creation) size the
+///   bars, the y-axis, the sparkline, and [`UsageDailyChartSeries::has_data`],
+///   matching the Usage page's "Real Tokens" hero.
+///
+/// Rank ties break on the model name so slot assignment is stable across
+/// refreshes. All sums saturate: a corrupted row with `u64::MAX` tokens must
+/// not wrap the day total or the grand total.
+pub fn build_usage_daily_chart_series(
+    days: &[UsageTrendBucket],
+    buckets: &[UsageDailyModelBucket],
+    max_models: usize,
+    other_label: &str,
+) -> UsageDailyChartSeries {
+    let axis: Vec<(String, String)> = if days.is_empty() {
+        let mut keys = buckets
+            .iter()
+            .map(|bucket| bucket.date_key.clone())
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        keys.into_iter()
+            .map(|key| {
+                let label = key.get(5..).unwrap_or(key.as_str()).replace('-', "/");
+                (key, label)
+            })
+            .collect()
+    } else {
+        days.iter()
+            .map(|day| (day.key.clone(), day.label.clone()))
+            .collect()
+    };
+
+    if axis.is_empty() {
+        return UsageDailyChartSeries::default();
+    }
+
+    let in_window = axis
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<HashSet<_>>();
+
+    // Rank by cost, not by tokens: the list this feeds is headed "Models by
+    // Cost", and a cheap model that moves a lot of cache tokens must not push
+    // the expensive one the user is actually paying for into "Other".
+    let mut model_ranks: HashMap<&str, (f64, u64)> = HashMap::new();
+    let mut has_other = false;
+    for bucket in buckets {
+        if !in_window.contains(bucket.date_key.as_str()) {
+            continue;
+        }
+        if bucket.is_other {
+            has_other = true;
+            continue;
+        }
+        let entry = model_ranks
+            .entry(bucket.model.as_str())
+            .or_insert((0.0, 0u64));
+        if bucket.total_cost_usd.is_finite() {
+            entry.0 += bucket.total_cost_usd.max(0.0);
+        }
+        entry.1 = entry.1.saturating_add(bucket.real_total_tokens());
+    }
+
+    let mut ranked = model_ranks.into_iter().collect::<Vec<_>>();
+    // Cost first, then real tokens, then the model name. The token step is what
+    // keeps the card useful with no pricing configured: every cost ties at 0
+    // there, and an alphabetical top-4 would be worse than useless next to the
+    // token shares the list falls back to. The name is the last word, so slot
+    // assignment stays stable across refreshes.
+    ranked.sort_by(|a, b| {
+        b.1 .0
+            .partial_cmp(&a.1 .0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1 .1.cmp(&a.1 .1))
+            .then_with(|| a.0.cmp(b.0))
+    });
+
+    let kept = max_models.min(ranked.len());
+    let mut models = ranked[..kept]
+        .iter()
+        .map(|(model, _)| (*model).to_string())
+        .collect::<Vec<_>>();
+    let other_index = if has_other || ranked.len() > kept {
+        models.push(other_label.to_string());
+        Some(models.len() - 1)
+    } else {
+        None
+    };
+
+    let slot_by_model = models
+        .iter()
+        .take(kept)
+        .enumerate()
+        .map(|(idx, model)| (model.as_str(), idx))
+        .collect::<HashMap<_, _>>();
+    let mut day_index = HashMap::new();
+    for (idx, (key, _)) in axis.iter().enumerate() {
+        day_index.insert(key.as_str(), idx);
+    }
+
+    let mut chart_days = axis
+        .iter()
+        .map(|(key, label)| UsageDailyChartDay {
+            date_key: key.clone(),
+            label: label.clone(),
+            segments: vec![0; models.len()],
+            total: 0,
+        })
+        .collect::<Vec<_>>();
+
+    let mut total_tokens = 0u64;
+    let mut total_cost_usd = 0.0f64;
+    let mut model_cost_usd = vec![0.0f64; models.len()];
+    let mut model_tokens = vec![UsageModelTokenBreakdown::default(); models.len()];
+    for bucket in buckets {
+        let Some(&idx) = day_index.get(bucket.date_key.as_str()) else {
+            continue;
+        };
+        let slot = if bucket.is_other {
+            other_index
+        } else {
+            slot_by_model
+                .get(bucket.model.as_str())
+                .copied()
+                .or(other_index)
+        };
+        let Some(slot) = slot else {
+            continue;
+        };
+        // Real tokens, cache included: a day that only replayed a cached
+        // context still cost the user something and must draw a bar.
+        let real_tokens = bucket.real_total_tokens();
+        let day = &mut chart_days[idx];
+        day.segments[slot] = day.segments[slot].saturating_add(real_tokens);
+        day.total = day.total.saturating_add(real_tokens);
+        total_tokens = total_tokens.saturating_add(real_tokens);
+        // Folds the residual models into the "Other" slot as a side effect:
+        // every bucket that misses `slot_by_model` lands on `other_index`.
+        model_tokens[slot].accumulate(bucket);
+        if bucket.total_cost_usd.is_finite() {
+            let cost = bucket.total_cost_usd.max(0.0);
+            total_cost_usd += cost;
+            model_cost_usd[slot] += cost;
+        }
+    }
+
+    let max_total = chart_days.iter().map(|day| day.total).max().unwrap_or(0);
+    if max_total == 0 {
+        // Keep the day axis (the renderer still draws an empty baseline) but
+        // drop series that carry no tokens so the legend stays empty.
+        for day in &mut chart_days {
+            day.segments.clear();
+        }
+        return UsageDailyChartSeries {
+            days: chart_days,
+            ..UsageDailyChartSeries::default()
+        };
+    }
+
+    UsageDailyChartSeries {
+        models,
+        model_cost_usd,
+        model_tokens,
+        other_index,
+        days: chart_days,
+        max_total,
+        total_tokens,
+        total_cost_usd,
+    }
 }
 
 fn load_usage_top_providers(
@@ -3136,6 +3658,20 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
     })
 }
 
+pub(crate) async fn load_provider_runtime_snapshot_from_state_async(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<ProviderRuntimeSnapshot, AppError> {
+    // The managed proxy operation runs through the daemon, so the AppState
+    // created by the foreground worker predates any provider token persisted by
+    // takeover setup. Refresh its in-memory provider projection only after the
+    // daemon call has completed.
+    state.reload_config_snapshot_from_db()?;
+    let providers = load_providers_with_mode(state, app_type, ProviderLoadMode::SyncLive)?;
+    let proxy = load_proxy_snapshot_from_state_async(state, app_type).await?;
+    Ok(ProviderRuntimeSnapshot { providers, proxy })
+}
+
 fn proxy_target_snapshot_for_app(
     runtime_status: &crate::proxy::types::ProxyStatus,
     app_type: &str,
@@ -3177,7 +3713,7 @@ fn load_skills_snapshot_from_state(state: &AppState) -> Result<SkillsSnapshot, A
 mod tests {
     use super::*;
     use crate::prompt::Prompt;
-    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta, UsageScript};
     use serde_json::json;
     use serial_test::serial;
     use std::path::Path;
@@ -3343,6 +3879,872 @@ mod tests {
                 created_at
             ],
         )?;
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper mirrors usage log columns"
+    )]
+    fn insert_usage_log_with_source(
+        conn: &rusqlite::Connection,
+        request_id: &str,
+        app_type: &str,
+        model: &str,
+        created_at: i64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost: &str,
+        data_source: &str,
+    ) -> Result<(), AppError> {
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, latency_ms, status_code, created_at, data_source
+             ) VALUES (?1, 'p1', ?2, ?3, ?4, ?5, 0, 0, ?6, 40, 200, ?7, ?8)",
+            params![
+                request_id,
+                app_type,
+                model,
+                input_tokens as i64,
+                output_tokens as i64,
+                cost,
+                created_at,
+                data_source
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn insert_daily_rollup(
+        conn: &rusqlite::Connection,
+        date: &str,
+        app_type: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost: &str,
+    ) -> Result<(), AppError> {
+        conn.execute(
+            "INSERT INTO usage_daily_rollups (
+                date, app_type, provider_id, model, request_model, pricing_model,
+                request_count, success_count, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, input_token_semantics,
+                total_cost_usd, avg_latency_ms
+             ) VALUES (?1, ?2, 'p1', ?3, '', '', 1, 1, ?4, ?5, 0, 0, 2, ?6, 10)",
+            params![
+                date,
+                app_type,
+                model,
+                input_tokens as i64,
+                output_tokens as i64,
+                cost
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn bucket_tokens(buckets: &[UsageDailyModelBucket], date_key: &str, model: &str) -> u64 {
+        buckets
+            .iter()
+            .find(|bucket| bucket.date_key == date_key && bucket.model == model)
+            .map(|bucket| bucket.total_tokens)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn daily_model_buckets_match_usage_detail_source_and_ignore_rollups() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        let today = Local::now().date_naive();
+        let start = usage_range_start(UsageRangePreset::ThirtyDays);
+        let now = Local::now().timestamp();
+
+        let yesterday = today.checked_sub_days(Days::new(1)).expect("yesterday");
+        let archived_day = today.checked_sub_days(Days::new(10)).expect("archived day");
+
+        // Detail rows for the retained days.
+        insert_usage_log_with_source(
+            &conn,
+            "log-today-a",
+            "claude",
+            "claude-opus",
+            now - 60,
+            100,
+            50,
+            "0.10",
+            "proxy",
+        )?;
+        insert_usage_log_with_source(
+            &conn,
+            "log-today-b",
+            "claude",
+            "claude-haiku",
+            now - 120,
+            10,
+            5,
+            "0.01",
+            "proxy",
+        )?;
+        insert_usage_log_with_source(
+            &conn,
+            "log-yesterday",
+            "claude",
+            "claude-opus",
+            now - 26 * 60 * 60,
+            7,
+            3,
+            "0.02",
+            "proxy",
+        )?;
+        // Another app must not leak into the current app's chart.
+        insert_usage_log_with_source(
+            &conn,
+            "log-codex",
+            "codex",
+            "gpt-5.4",
+            now - 60,
+            999,
+            999,
+            "9.99",
+            "proxy",
+        )?;
+
+        // Rollups deliberately do not feed this projection: the Usage page
+        // reads detail rows, and restored/re-imported databases can briefly
+        // contain both sources for the same day.
+        insert_daily_rollup(
+            &conn,
+            &archived_day.format("%Y-%m-%d").to_string(),
+            "claude",
+            "claude-opus",
+            40,
+            20,
+            "0.30",
+        )?;
+        // A same-day rollup must not double-count the detail rows above.
+        insert_daily_rollup(
+            &conn,
+            &today.format("%Y-%m-%d").to_string(),
+            "claude",
+            "claude-opus",
+            5_000,
+            5_000,
+            "50.0",
+        )?;
+
+        let buckets = load_usage_daily_models(&conn, "claude", start, now)?;
+
+        let today_key = today.format("%Y-%m-%d").to_string();
+        let yesterday_key = yesterday.format("%Y-%m-%d").to_string();
+        let archived_key = archived_day.format("%Y-%m-%d").to_string();
+
+        assert_eq!(bucket_tokens(&buckets, &today_key, "claude-opus"), 150);
+        assert_eq!(bucket_tokens(&buckets, &today_key, "claude-haiku"), 15);
+        assert_eq!(bucket_tokens(&buckets, &yesterday_key, "claude-opus"), 10);
+        assert_eq!(bucket_tokens(&buckets, &archived_key, "claude-opus"), 0);
+        assert!(
+            buckets.iter().all(|bucket| bucket.model != "gpt-5.4"),
+            "another app's rows must not appear: {buckets:?}"
+        );
+
+        // Sorted by (date, model) so the chart builder sees a stable order.
+        let mut sorted = buckets.clone();
+        sorted.sort_by(|a, b| {
+            a.date_key
+                .cmp(&b.date_key)
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        assert_eq!(sorted, buckets);
+        Ok(())
+    }
+
+    #[test]
+    fn daily_model_buckets_drop_session_rows_already_covered_by_proxy() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+        let now = Local::now().timestamp();
+        let start = usage_range_start(UsageRangePreset::ThirtyDays);
+
+        insert_usage_log_with_source(
+            &conn,
+            "proxy-row",
+            "claude",
+            "claude-opus",
+            now - 60,
+            100,
+            50,
+            "0.10",
+            "proxy",
+        )?;
+        // Same fingerprint inside the dedup window: the session copy is dropped.
+        insert_usage_log_with_source(
+            &conn,
+            "session-row",
+            "claude",
+            "claude-opus",
+            now - 120,
+            100,
+            50,
+            "0.10",
+            "session_log",
+        )?;
+
+        let buckets = load_usage_daily_models(&conn, "claude", start, now)?;
+        let today_key = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        assert_eq!(bucket_tokens(&buckets, &today_key, "claude-opus"), 150);
+        Ok(())
+    }
+
+    /// A detail row with explicit cache columns and input-token semantics.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper mirrors usage log columns"
+    )]
+    fn insert_detailed_usage_log(
+        conn: &rusqlite::Connection,
+        request_id: &str,
+        app_type: &str,
+        model: &str,
+        created_at: i64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+        input_token_semantics: i64,
+    ) -> Result<(), AppError> {
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                input_token_semantics, total_cost_usd, latency_ms, status_code, created_at
+             ) VALUES (?1, 'p1', ?2, ?3, ?4, ?5, ?6, ?7, ?8, '0.5000', 40, 200, ?9)",
+            params![
+                request_id,
+                app_type,
+                model,
+                input_tokens as i64,
+                output_tokens as i64,
+                cache_read_tokens as i64,
+                cache_creation_tokens as i64,
+                input_token_semantics,
+                created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A rollup row with explicit cache columns and input-token semantics.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper mirrors rollup columns"
+    )]
+    fn insert_detailed_daily_rollup(
+        conn: &rusqlite::Connection,
+        date: &str,
+        app_type: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+        input_token_semantics: i64,
+    ) -> Result<(), AppError> {
+        conn.execute(
+            "INSERT INTO usage_daily_rollups (
+                date, app_type, provider_id, model, request_model, pricing_model,
+                request_count, success_count, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, input_token_semantics,
+                total_cost_usd, avg_latency_ms
+             ) VALUES (?1, ?2, 'p1', ?3, '', '', 1, 1, ?4, ?5, ?6, ?7, ?8, '1.0', 10)",
+            params![
+                date,
+                app_type,
+                model,
+                input_tokens as i64,
+                output_tokens as i64,
+                cache_read_tokens as i64,
+                cache_creation_tokens as i64,
+                input_token_semantics
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn daily_model_buckets_sum_detail_counters_without_rollup_overlap() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        let today = Local::now().date_naive();
+        let start = usage_range_start(UsageRangePreset::ThirtyDays);
+        let now = Local::now().timestamp();
+        let archived_day = today.checked_sub_days(Days::new(10)).expect("archived day");
+
+        // Two detail rows on the same (day, model) cell: the counters add up.
+        insert_detailed_usage_log(
+            &conn,
+            "log-a",
+            "claude",
+            "claude-opus",
+            now - 60,
+            100,
+            50,
+            30,
+            20,
+            crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH,
+        )?;
+        insert_detailed_usage_log(
+            &conn,
+            "log-b",
+            "claude",
+            "claude-opus",
+            now - 120,
+            7,
+            3,
+            2,
+            1,
+            crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH,
+        )?;
+        // An archived rollup is outside the Usage page's detail-backed
+        // projection and must not alter this chart.
+        insert_detailed_daily_rollup(
+            &conn,
+            &archived_day.format("%Y-%m-%d").to_string(),
+            "claude",
+            "claude-opus",
+            400,
+            200,
+            60,
+            40,
+            crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH,
+        )?;
+
+        let buckets = load_usage_daily_models(&conn, "claude", start, now)?;
+        let cell = |date: &str| {
+            buckets
+                .iter()
+                .find(|bucket| bucket.date_key == date && bucket.model == "claude-opus")
+                .cloned()
+                .expect("cell")
+        };
+
+        let detail = cell(&today.format("%Y-%m-%d").to_string());
+        assert_eq!(detail.input_tokens, 107);
+        assert_eq!(detail.output_tokens, 53);
+        assert_eq!(detail.cache_read_tokens, 32);
+        assert_eq!(detail.cache_creation_tokens, 21);
+        assert_eq!(
+            detail.total_tokens,
+            detail.input_tokens + detail.output_tokens,
+            "the stacked total stays input + output"
+        );
+
+        assert!(
+            buckets
+                .iter()
+                .all(|bucket| bucket.date_key != archived_day.format("%Y-%m-%d").to_string()),
+            "rollup-only days stay out of the detail-backed projection: {buckets:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn daily_model_input_matches_the_usage_page_input_metric() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        let start = usage_range_start(UsageRangePreset::ThirtyDays);
+        let now = Local::now().timestamp();
+
+        // Codex reports cache-inclusive input, so both the summary and the home
+        // card have to subtract the cached portion to report the same "Input".
+        insert_detailed_usage_log(
+            &conn,
+            "codex-total",
+            "codex",
+            "gpt-5.4",
+            now - 60,
+            1_000,
+            120,
+            200,
+            100,
+            crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_TOTAL,
+        )?;
+        // A legacy row only has cache reads folded into input.
+        insert_detailed_usage_log(
+            &conn,
+            "codex-legacy",
+            "codex",
+            "gpt-5.4",
+            now - 120,
+            500,
+            40,
+            80,
+            0,
+            crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_LEGACY,
+        )?;
+
+        let summary = load_usage_summary(&conn, "codex", start, now)?;
+        let buckets = load_usage_daily_models(&conn, "codex", start, now)?;
+        let bucket_input = buckets
+            .iter()
+            .fold(0u64, |acc, bucket| acc + bucket.input_tokens);
+
+        assert_eq!(bucket_input, 700 + 420, "fresh input, cached part removed");
+        assert_eq!(
+            bucket_input, summary.input_tokens,
+            "the home card's In must read like the Usage page's Input tile"
+        );
+        assert_eq!(
+            buckets
+                .iter()
+                .fold(0u64, |acc, bucket| acc + bucket.cache_read_tokens),
+            summary.cache_read_tokens
+        );
+        assert_eq!(
+            buckets
+                .iter()
+                .fold(0u64, |acc, bucket| acc + bucket.cache_creation_tokens),
+            summary.cache_creation_tokens
+        );
+        Ok(())
+    }
+
+    /// The automatic projection bounds model text before it reaches Rust, but
+    /// still distinguishes long ids that differ inside that bound.
+    #[test]
+    fn daily_model_buckets_bound_long_model_ids() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        let start = usage_range_start(UsageRangePreset::ThirtyDays);
+        let now = Local::now().timestamp();
+        let shared_prefix = "m".repeat(255);
+        let first = format!("{shared_prefix}{}", "a".repeat(45));
+        let second = format!("{shared_prefix}{}", "b".repeat(45));
+        assert_eq!(first.len(), 300);
+        assert_eq!(second.len(), 300);
+
+        insert_usage_log_with_source(
+            &conn,
+            "raw-a",
+            "claude",
+            &first,
+            now - 60,
+            100,
+            50,
+            "0.10",
+            "proxy",
+        )?;
+        insert_usage_log_with_source(
+            &conn,
+            "raw-b",
+            "claude",
+            &second,
+            now - 90,
+            7,
+            3,
+            "0.02",
+            "proxy",
+        )?;
+
+        let buckets = load_usage_daily_models(&conn, "claude", start, now)?;
+        let today_key = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let bounded_first = first.chars().take(USAGE_TEXT_MAX_CHARS).collect::<String>();
+        let bounded_second = second
+            .chars()
+            .take(USAGE_TEXT_MAX_CHARS)
+            .collect::<String>();
+
+        assert_eq!(bucket_tokens(&buckets, &today_key, &bounded_first), 150);
+        assert_eq!(bucket_tokens(&buckets, &today_key, &bounded_second), 10);
+        assert_eq!(
+            buckets.len(),
+            2,
+            "the two ids must stay separate buckets: {buckets:?}"
+        );
+        assert!(
+            buckets
+                .iter()
+                .all(|bucket| bucket.model.chars().count() <= USAGE_TEXT_MAX_CHARS),
+            "model ids are bounded before reaching the TUI: {:?}",
+            buckets
+                .iter()
+                .map(|bucket| bucket.model.chars().count())
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn daily_model_query_folds_high_cardinality_into_one_residual() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+        let start = usage_range_start(UsageRangePreset::ThirtyDays);
+        let now = Local::now().timestamp();
+
+        for index in 0..32u64 {
+            insert_usage_log_with_source(
+                &conn,
+                &format!("many-{index}"),
+                "claude",
+                &format!("model-{index:02}-{}", "x".repeat(400)),
+                now - index as i64,
+                index + 1,
+                1,
+                &format!("{:.2}", index as f64 / 100.0),
+                "proxy",
+            )?;
+        }
+
+        let buckets = load_usage_daily_models(&conn, "claude", start, now)?;
+        assert_eq!(
+            buckets.iter().filter(|bucket| !bucket.is_other).count(),
+            USAGE_DAILY_MODEL_LIMIT
+        );
+        assert_eq!(buckets.iter().filter(|bucket| bucket.is_other).count(), 1);
+        assert!(buckets.len() <= USAGE_DAILY_MODEL_LIMIT + 1);
+        assert!(buckets
+            .iter()
+            .all(|bucket| bucket.model.chars().count() <= USAGE_TEXT_MAX_CHARS));
+
+        let summary = load_usage_summary(&conn, "claude", start, now)?;
+        let projected_total = buckets.iter().fold(0u64, |total, bucket| {
+            total.saturating_add(bucket.real_total_tokens())
+        });
+        assert_eq!(projected_total, summary.total_tokens);
+
+        let trends = load_usage_trend(&conn, "claude", UsageRangePreset::ThirtyDays, start, now)?;
+        let series =
+            build_usage_daily_chart_series(&trends, &buckets, USAGE_DAILY_MODEL_LIMIT, "Other");
+        assert_eq!(series.other_index, Some(USAGE_DAILY_MODEL_LIMIT));
+        assert_eq!(
+            series
+                .models
+                .get(USAGE_DAILY_MODEL_LIMIT)
+                .map(String::as_str),
+            Some("Other")
+        );
+        assert_eq!(series.total_tokens, summary.total_tokens);
+        Ok(())
+    }
+
+    /// The home card's 30-day real-token total is the Usage page's
+    /// `real_total_tokens` over the same window, by construction: both are
+    /// `fresh input + output + cache read + cache creation`.
+    #[test]
+    fn chart_real_total_matches_the_usage_summary() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        let start = usage_range_start(UsageRangePreset::ThirtyDays);
+        let now = Local::now().timestamp();
+
+        // Mixed input-token semantics and a cache-only row, so the comparison
+        // exercises the normalization both sides share.
+        insert_detailed_usage_log(
+            &conn,
+            "sum-fresh",
+            "claude",
+            "claude-opus",
+            now - 60,
+            1_000,
+            120,
+            200,
+            100,
+            crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH,
+        )?;
+        insert_detailed_usage_log(
+            &conn,
+            "sum-total",
+            "claude",
+            "claude-sonnet",
+            now - 3_600,
+            900,
+            80,
+            300,
+            50,
+            crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_TOTAL,
+        )?;
+        insert_detailed_usage_log(
+            &conn,
+            "sum-cache-only",
+            "claude",
+            "claude-haiku",
+            now - 26 * 3_600,
+            0,
+            0,
+            5_000,
+            0,
+            crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH,
+        )?;
+
+        let summary = load_usage_summary(&conn, "claude", start, now)?;
+        let buckets = load_usage_daily_models(&conn, "claude", start, now)?;
+        let trends = load_usage_trend(&conn, "claude", UsageRangePreset::ThirtyDays, start, now)?;
+        let series = build_usage_daily_chart_series(&trends, &buckets, 4, "Other");
+
+        assert!(summary.total_tokens > 0);
+        assert_eq!(
+            series.total_tokens, summary.total_tokens,
+            "the card's 30d total must equal the Usage page's Real Tokens"
+        );
+        Ok(())
+    }
+
+    /// Fixed day axis for the chart-series unit tests.
+    fn chart_axis(keys: &[&str]) -> Vec<UsageTrendBucket> {
+        keys.iter()
+            .map(|key| UsageTrendBucket {
+                key: (*key).to_string(),
+                label: key[5..].replace('-', "/"),
+                ..UsageTrendBucket::default()
+            })
+            .collect()
+    }
+
+    /// One `(day, model)` cell with explicit cost and counters.
+    fn chart_cell(
+        date_key: &str,
+        model: &str,
+        cost: f64,
+        counters: (u64, u64, u64, u64),
+    ) -> UsageDailyModelBucket {
+        let (input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) = counters;
+        UsageDailyModelBucket {
+            date_key: date_key.to_string(),
+            model: model.to_string(),
+            is_other: false,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            total_cost_usd: cost,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        }
+    }
+
+    #[test]
+    fn chart_series_keeps_top_models_and_folds_the_rest_into_other() {
+        let days = chart_axis(&["2026-07-01", "2026-07-02"]);
+
+        let buckets = [
+            ("2026-07-01", "m1", 1.0, (50u64, 100u64, 1_000u64, 1_500u64)),
+            ("2026-07-01", "m2", 1.0, (40, 80, 800, 1_200)),
+            ("2026-07-01", "m3", 1.0, (30, 60, 600, 900)),
+            ("2026-07-01", "m4", 1.0, (20, 40, 400, 600)),
+            ("2026-07-01", "m5", 0.5, (10, 20, 200, 300)),
+            ("2026-07-02", "m6", 0.5, (5, 10, 100, 150)),
+            ("2026-07-02", "m1", 1.0, (1, 2, 20, 30)),
+            // Outside the axis: ignored, cost included.
+            ("2026-06-01", "m1", 99.0, (999, 999, 999, 999)),
+        ]
+        .into_iter()
+        .map(|(date_key, model, cost, counters)| chart_cell(date_key, model, cost, counters))
+        .collect::<Vec<_>>();
+
+        let series = build_usage_daily_chart_series(&days, &buckets, 4, "Other");
+
+        // Cost ranks: m1 = 2.0, then m2/m3/m4 = 1.0 each (tie broken by real
+        // tokens), and m5/m6 = 0.5 fold into "Other".
+        assert_eq!(series.models, vec!["m1", "m2", "m3", "m4", "Other"]);
+        assert_eq!(series.other_index, Some(4));
+        assert_eq!(series.days.len(), 2);
+        // Real tokens: In + Out + CR + CW, not the billable subtotal.
+        assert_eq!(
+            series.days[0].segments,
+            vec![2_650, 2_120, 1_590, 1_060, 530]
+        );
+        assert_eq!(series.days[0].total, 7_950);
+        assert_eq!(series.days[1].segments, vec![53, 0, 0, 0, 265]);
+        assert_eq!(series.days[1].total, 318);
+        assert_eq!(series.max_total, 7_950);
+        assert_eq!(series.total_tokens, 8_268);
+        assert_eq!(series.total_cost_usd, 6.0);
+        assert!(series.has_data());
+
+        // m1 spans two in-window days; the out-of-window one stays out.
+        assert_eq!(
+            series.model_tokens[0],
+            UsageModelTokenBreakdown {
+                input_tokens: 50 + 1,
+                output_tokens: 100 + 2,
+                cache_read_tokens: 1_000 + 20,
+                cache_creation_tokens: 1_500 + 30,
+            }
+        );
+        // "Other" aggregates m5 and m6, the two folded models.
+        assert_eq!(
+            series.model_tokens[4],
+            UsageModelTokenBreakdown {
+                input_tokens: 10 + 5,
+                output_tokens: 20 + 10,
+                cache_read_tokens: 200 + 100,
+                cache_creation_tokens: 300 + 150,
+            }
+        );
+        assert_eq!(series.model_tokens.len(), series.models.len());
+        assert_eq!(series.model_cost_usd, vec![2.0, 1.0, 1.0, 1.0, 1.0]);
+    }
+
+    /// A model can be tiny in tokens and still be what the user is paying for.
+    #[test]
+    fn chart_series_ranks_by_cost_not_by_tokens() {
+        let days = chart_axis(&["2026-07-01"]);
+        let buckets = vec![
+            // Expensive and tiny: must lead the list and never fold away.
+            chart_cell("2026-07-01", "premium", 40.0, (10, 10, 0, 0)),
+            chart_cell("2026-07-01", "bulk-a", 1.0, (1_000, 1_000, 50_000, 10_000)),
+            chart_cell("2026-07-01", "bulk-b", 0.9, (900, 900, 45_000, 9_000)),
+            chart_cell("2026-07-01", "bulk-c", 0.8, (800, 800, 40_000, 8_000)),
+            chart_cell("2026-07-01", "bulk-d", 0.7, (700, 700, 35_000, 7_000)),
+        ];
+
+        let series = build_usage_daily_chart_series(&days, &buckets, 4, "Other");
+
+        assert_eq!(
+            series.models,
+            vec!["premium", "bulk-a", "bulk-b", "bulk-c", "Other"],
+            "the costliest model leads even with the fewest tokens"
+        );
+        assert_eq!(series.days[0].segments[0], 20, "premium keeps its own band");
+        assert_eq!(
+            series.days[0].segments.last().copied(),
+            Some(43_400),
+            "bulk-d is the only model folded into Other"
+        );
+    }
+
+    /// No pricing configured: every cost ties at zero, so the kept set falls
+    /// back to real tokens instead of degenerating into alphabetical order.
+    #[test]
+    fn chart_series_falls_back_to_tokens_when_nothing_has_a_price() {
+        let days = chart_axis(&["2026-07-01"]);
+        let buckets = vec![
+            chart_cell("2026-07-01", "zzz-biggest", 0.0, (10, 10, 900, 80)),
+            chart_cell("2026-07-01", "yyy-second", 0.0, (10, 10, 400, 80)),
+            chart_cell("2026-07-01", "aaa-smallest", 0.0, (1, 1, 1, 1)),
+        ];
+
+        let series = build_usage_daily_chart_series(&days, &buckets, 2, "Other");
+
+        assert_eq!(series.models, vec!["zzz-biggest", "yyy-second", "Other"]);
+        assert_eq!(series.total_cost_usd, 0.0);
+    }
+
+    /// A day that only replayed cached context has zero billable tokens; it
+    /// still moved tokens and must draw a bar rather than read as "no usage".
+    #[test]
+    fn chart_series_counts_cache_only_days() {
+        let days = chart_axis(&["2026-07-01", "2026-07-02"]);
+        let buckets = vec![
+            chart_cell("2026-07-01", "cached", 0.25, (0, 0, 5_000, 0)),
+            chart_cell("2026-07-02", "cached", 0.25, (10, 20, 0, 300)),
+        ];
+
+        let series = build_usage_daily_chart_series(&days, &buckets, 4, "Other");
+
+        assert!(
+            series.has_data(),
+            "cache reads alone are still usage: {series:?}"
+        );
+        assert_eq!(series.days[0].total, 5_000);
+        assert_eq!(series.days[1].total, 330);
+        assert_eq!(series.max_total, 5_000);
+        assert_eq!(series.total_tokens, 5_330);
+    }
+
+    #[test]
+    fn chart_series_saturates_instead_of_wrapping() {
+        let days = chart_axis(&["2026-07-01", "2026-07-02", "2026-07-03"]);
+        let buckets = (1..=3)
+            .map(|day| UsageDailyModelBucket {
+                date_key: format!("2026-07-0{day}"),
+                model: "corrupt".to_string(),
+                is_other: false,
+                total_tokens: u64::MAX,
+                total_cost_usd: f64::NAN,
+                input_tokens: u64::MAX,
+                output_tokens: u64::MAX,
+                cache_read_tokens: u64::MAX,
+                cache_creation_tokens: u64::MAX,
+            })
+            .collect::<Vec<_>>();
+
+        let series = build_usage_daily_chart_series(&days, &buckets, 4, "Other");
+
+        assert_eq!(series.max_total, u64::MAX);
+        assert_eq!(series.total_tokens, u64::MAX);
+        assert_eq!(series.total_cost_usd, 0.0, "NaN costs must not propagate");
+        assert!(series.days.iter().all(|day| day.total == u64::MAX));
+        assert_eq!(
+            series.model_tokens[0],
+            UsageModelTokenBreakdown {
+                input_tokens: u64::MAX,
+                output_tokens: u64::MAX,
+                cache_read_tokens: u64::MAX,
+                cache_creation_tokens: u64::MAX,
+            },
+            "detail counters saturate like the chart totals"
+        );
+    }
+
+    #[test]
+    fn chart_series_without_data_keeps_the_axis_and_drops_the_legend() {
+        let days = (1..=3)
+            .map(|day| UsageTrendBucket {
+                key: format!("2026-07-0{day}"),
+                label: format!("07/0{day}"),
+                ..UsageTrendBucket::default()
+            })
+            .collect::<Vec<_>>();
+
+        let series = build_usage_daily_chart_series(&days, &[], 4, "Other");
+
+        assert!(!series.has_data());
+        assert!(series.models.is_empty());
+        assert_eq!(series.days.len(), 3);
+        assert!(series.days.iter().all(|day| day.segments.is_empty()));
+    }
+
+    #[test]
+    fn chart_series_derives_its_axis_from_the_buckets_when_no_trend_is_loaded() {
+        let buckets = vec![
+            chart_cell("2026-07-02", "m1", 0.1, (2, 3, 0, 0)),
+            chart_cell("2026-07-01", "m1", 0.2, (3, 4, 0, 0)),
+        ];
+
+        let series = build_usage_daily_chart_series(&[], &buckets, 4, "Other");
+
+        assert_eq!(
+            series
+                .days
+                .iter()
+                .map(|day| day.date_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-07-01", "2026-07-02"]
+        );
+        assert_eq!(series.days[0].label, "07/01");
+        assert_eq!(series.max_total, 7);
+    }
+
+    #[test]
+    fn last_session_sync_reads_the_newest_import_timestamp() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        assert_eq!(load_session_last_synced_at(&conn), None);
+
+        conn.execute(
+            "INSERT INTO session_log_sync (file_path, last_modified, last_line_offset, last_synced_at)
+             VALUES ('/tmp/a.jsonl', 1, 0, 1700000000), ('/tmp/b.jsonl', 1, 0, 1700000500)",
+            [],
+        )?;
+
+        assert_eq!(load_session_last_synced_at(&conn), Some(1_700_000_500));
         Ok(())
     }
 
@@ -4290,112 +5692,41 @@ mod tests {
     }
 
     #[test]
-    fn quota_target_detects_official_claude_by_explicit_category() {
+    fn quota_target_requires_official_subscription_opt_in() {
         let mut official = test_provider_row("official", "Claude Official", json!({"env": {}}));
         official.provider.category = Some("official".to_string());
-        let stripped_custom = test_provider_row("stripped-custom", "Custom", json!({"env": {}}));
-        let custom = test_provider_row(
-            "custom",
-            "Claude Custom",
-            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
-        );
 
+        assert!(quota_target_for_provider(&AppType::Claude, &official).is_none());
+
+        official.provider.meta = Some(ProviderMeta {
+            usage_script: Some(UsageScript {
+                enabled: false,
+                language: "javascript".to_string(),
+                code: String::new(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("official_subscription".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..ProviderMeta::default()
+        });
+        assert!(quota_target_for_provider(&AppType::Claude, &official).is_none());
+
+        official
+            .provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.usage_script.as_mut())
+            .expect("usage script")
+            .enabled = true;
         assert!(matches!(
             quota_target_for_provider(&AppType::Claude, &official).map(|target| target.kind),
             Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "claude"
         ));
-        assert!(quota_target_for_provider(&AppType::Claude, &stripped_custom).is_none());
-        assert!(quota_target_for_provider(&AppType::Claude, &custom).is_none());
-    }
-
-    #[test]
-    fn quota_target_detects_codex_official_and_skips_api_key_providers() {
-        let missing_key = test_provider_row("official", "OpenAI Official", json!({"auth": {}}));
-        let no_key_custom_base_url = test_provider_row(
-            "base-url",
-            "OpenAI Official",
-            json!({
-                "auth": {},
-                "config": r#"base_url = "https://api.example.com/v1""#
-            }),
-        );
-        let mut metadata_official = test_provider_row(
-            "metadata",
-            "Codex Official",
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-        );
-        metadata_official.provider.meta = Some(ProviderMeta {
-            codex_official: Some(true),
-            ..ProviderMeta::default()
-        });
-        let api_key = test_provider_row(
-            "api-key",
-            "Custom OpenAI",
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-        );
-
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Codex, &missing_key).map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Codex, &metadata_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
-        ));
-        assert!(quota_target_for_provider(&AppType::Codex, &no_key_custom_base_url).is_none());
-        assert!(quota_target_for_provider(&AppType::Codex, &api_key).is_none());
-    }
-
-    #[test]
-    fn quota_target_detects_gemini_official_and_skips_api_key_providers() {
-        let mut explicit_official =
-            test_provider_row("google-official", "Google Official", json!({"env": {}}));
-        explicit_official.provider.category = Some("official".to_string());
-
-        let google_oauth = test_provider_row(
-            "google-oauth",
-            "Google OAuth",
-            json!({"env": {}, "config": {}}),
-        );
-        let mut partner_official = test_provider_row(
-            "partner",
-            "Gemini",
-            json!({"env": {"GEMINI_API_KEY": "sk"}}),
-        );
-        partner_official.provider.meta = Some(ProviderMeta {
-            partner_promotion_key: Some("google-official".to_string()),
-            ..ProviderMeta::default()
-        });
-        let api_key = test_provider_row(
-            "api-key",
-            "Google OAuth",
-            json!({"env": {"GEMINI_API_KEY": "sk-custom"}}),
-        );
-        let base_url = test_provider_row(
-            "base-url",
-            "Google OAuth",
-            json!({"env": {"GOOGLE_GEMINI_BASE_URL": "https://api.example.com"}}),
-        );
-        let stripped_custom = test_provider_row("custom", "Custom Gemini", json!({"env": {}}));
-
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &explicit_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &google_oauth).map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &partner_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(quota_target_for_provider(&AppType::Gemini, &api_key).is_none());
-        assert!(quota_target_for_provider(&AppType::Gemini, &base_url).is_none());
-        assert!(quota_target_for_provider(&AppType::Gemini, &stripped_custom).is_none());
     }
 
     #[test]
@@ -4449,6 +5780,27 @@ mod tests {
         assert_eq!(
             extract_api_url(&settings, &AppType::Gemini),
             Some("https://legacy.example".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_api_url_codex_uses_active_provider_section() {
+        let settings = json!({
+            "config": r#"model_provider = "current"
+
+# base_url = "https://commented.example.com/v1"
+
+[model_providers.inactive]
+base_url = "https://inactive.example.com/v1"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+"#
+        });
+
+        assert_eq!(
+            extract_api_url(&settings, &AppType::Codex),
+            Some("https://current.example.com/v1".to_string())
         );
     }
 

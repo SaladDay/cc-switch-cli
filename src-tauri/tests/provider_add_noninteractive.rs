@@ -25,6 +25,11 @@ struct AddOpts {
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+    haiku_model: Option<String>,
+    sonnet_model: Option<String>,
+    opus_model: Option<String>,
+    fable_model: Option<String>,
+    subagent_model: Option<String>,
     config: Option<String>,
     config_file: Option<std::path::PathBuf>,
     website_url: Option<String>,
@@ -32,6 +37,8 @@ struct AddOpts {
     sort_index: Option<usize>,
     api_key_field: Option<ClaudeApiKeyFieldArg>,
     api_format: Option<String>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
     common_config: bool,
     account_id: Option<String>,
     fast_mode: bool,
@@ -45,6 +52,11 @@ fn add_command(name: Option<&str>, opts: AddOpts) -> ProviderCommand {
         base_url: opts.base_url,
         api_key: opts.api_key,
         model: opts.model,
+        haiku_model: opts.haiku_model,
+        sonnet_model: opts.sonnet_model,
+        opus_model: opts.opus_model,
+        fable_model: opts.fable_model,
+        subagent_model: opts.subagent_model,
         config: opts.config,
         config_file: opts.config_file,
         website_url: opts.website_url,
@@ -52,6 +64,8 @@ fn add_command(name: Option<&str>, opts: AddOpts) -> ProviderCommand {
         sort_index: opts.sort_index,
         api_key_field: opts.api_key_field,
         api_format: opts.api_format,
+        impersonate_claude_code: opts.impersonate_claude_code,
+        max_output_tokens: opts.max_output_tokens,
         common_config: opts.common_config,
         account_id: opts.account_id,
         fast_mode: opts.fast_mode,
@@ -147,6 +161,54 @@ fn add_claude_field_mode_defaults_to_auth_token() {
         .as_ref()
         .and_then(|meta| meta.api_key_field.as_ref())
         .is_none());
+}
+
+#[test]
+#[serial]
+fn add_claude_field_mode_accepts_every_model_role() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    run_add(
+        Some("Role Models"),
+        AppType::Claude,
+        AddOpts {
+            base_url: Some("https://api.example.com".to_string()),
+            api_key: Some("sk-role-models".to_string()),
+            model: Some("default-model".to_string()),
+            haiku_model: Some("haiku-model[1M]".to_string()),
+            sonnet_model: Some("sonnet-model[1M]".to_string()),
+            opus_model: Some("opus-model".to_string()),
+            fable_model: Some("fable-model[1M]".to_string()),
+            subagent_model: Some("subagent-model[1M]".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("Claude role-model flags should succeed");
+
+    let provider = saved_provider(AppType::Claude, "role-models");
+    assert_eq!(env_str(&provider, "ANTHROPIC_MODEL"), Some("default-model"));
+    assert_eq!(
+        env_str(&provider, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        Some("haiku-model"),
+        "Haiku must strip the unsupported 1M marker"
+    );
+    assert_eq!(
+        env_str(&provider, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        Some("sonnet-model[1M]")
+    );
+    assert_eq!(
+        env_str(&provider, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        Some("opus-model")
+    );
+    assert_eq!(
+        env_str(&provider, "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+        Some("fable-model[1M]")
+    );
+    assert_eq!(
+        env_str(&provider, "CLAUDE_CODE_SUBAGENT_MODEL"),
+        Some("subagent-model[1M]")
+    );
 }
 
 #[test]
@@ -306,6 +368,95 @@ fn add_codex_api_format_override_is_applied() {
 
 #[test]
 #[serial]
+fn add_codex_anthropic_options_are_persisted() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    run_add(
+        Some("Anthropic Gateway"),
+        AppType::Codex,
+        AddOpts {
+            base_url: Some("https://gateway.example/v1".to_string()),
+            api_key: Some("sk-anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            api_format: Some("anthropic".to_string()),
+            api_key_field: Some(ClaudeApiKeyFieldArg::ApiKey),
+            impersonate_claude_code: true,
+            max_output_tokens: Some(16_384),
+            ..Default::default()
+        },
+    )
+    .expect("codex Anthropic add should succeed");
+
+    let provider = saved_provider(AppType::Codex, "anthropic-gateway");
+    let meta = provider.meta.as_ref().expect("Codex provider metadata");
+    assert_eq!(meta.api_format.as_deref(), Some("anthropic"));
+    assert_eq!(meta.api_key_field.as_deref(), Some("ANTHROPIC_API_KEY"));
+    assert_eq!(meta.impersonate_claude_code, Some(true));
+    assert_eq!(meta.max_output_tokens, Some(16_384));
+    assert_eq!(
+        provider
+            .settings_config
+            .get("auth")
+            .and_then(|auth| auth.get("OPENAI_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("sk-anthropic")
+    );
+    let config = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .expect("Codex config");
+    assert!(config.contains("wire_api = \"responses\""));
+}
+
+#[test]
+#[serial]
+fn add_codex_raw_anthropic_config_preserves_upstream_format() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    run_add(
+        Some("Legacy Anthropic"),
+        AppType::Codex,
+        AddOpts {
+            config: Some(
+                serde_json::json!({
+                    "auth": {"OPENAI_API_KEY": "sk-anthropic"},
+                    "config": r#"model_provider = "vendor"
+model = "claude-sonnet-4-6"
+
+[model_providers.vendor]
+base_url = "https://gateway.example/v1"
+wire_api = "anthropic"
+requires_openai_auth = true
+"#
+                })
+                .to_string(),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("raw Codex Anthropic config should succeed");
+
+    let provider = saved_provider(AppType::Codex, "legacy-anthropic");
+    assert_eq!(
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.api_format.as_deref()),
+        Some("anthropic")
+    );
+    let config = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .expect("Codex config");
+    assert!(config.contains("wire_api = \"responses\""));
+}
+
+#[test]
+#[serial]
 fn add_sponsor_template_inherits_base_url() {
     let _guard = lock_test_mutex();
     prepare_empty_state();
@@ -324,13 +475,86 @@ fn add_sponsor_template_inherits_base_url() {
     let provider = saved_provider(AppType::Claude, "packy");
     assert_eq!(
         env_str(&provider, "ANTHROPIC_BASE_URL"),
-        Some("https://www.packyapi.com")
+        Some("https://www.packyapi.ai")
     );
     assert_eq!(env_str(&provider, "ANTHROPIC_AUTH_TOKEN"), Some("sk-packy"));
     assert_eq!(
         provider.meta.as_ref().and_then(|meta| meta.is_partner),
         Some(true)
     );
+}
+
+#[test]
+#[serial]
+fn add_packycode_template_is_scriptable_for_every_additive_app() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    for (app_type, name) in [
+        (AppType::OpenCode, "Packy OpenCode"),
+        (AppType::Hermes, "Packy Hermes"),
+        (AppType::OpenClaw, "Packy OpenClaw"),
+    ] {
+        run_add(
+            Some(name),
+            app_type.clone(),
+            AddOpts {
+                template: Some(ProviderAddTemplate::Packycode),
+                api_key: Some("sk-packy".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("PackyCode additive preset should accept non-interactive API-key input");
+    }
+
+    let opencode = saved_provider(AppType::OpenCode, "packy-opencode");
+    assert_eq!(opencode.settings_config["options"]["apiKey"], "sk-packy");
+    assert_eq!(
+        opencode.settings_config["options"]["baseURL"],
+        "https://www.packyapi.ai/v1"
+    );
+    assert!(opencode.settings_config["models"]
+        .get("claude-opus-5")
+        .is_some());
+
+    let hermes = saved_provider(AppType::Hermes, "packy-hermes");
+    assert_eq!(hermes.settings_config["api_key"], "sk-packy");
+    assert_eq!(
+        hermes.settings_config["base_url"],
+        "https://www.packyapi.ai"
+    );
+    assert_eq!(hermes.settings_config["api_mode"], "anthropic_messages");
+    assert_eq!(hermes.settings_config["models"][0]["id"], "claude-opus-5");
+
+    let openclaw = saved_provider(AppType::OpenClaw, "packy-openclaw");
+    assert_eq!(openclaw.settings_config["apiKey"], "sk-packy");
+    assert_eq!(
+        openclaw.settings_config["baseUrl"],
+        "https://www.packyapi.ai"
+    );
+    assert_eq!(openclaw.settings_config["api"], "anthropic-messages");
+    assert_eq!(openclaw.settings_config["models"][0]["id"], "claude-opus-5");
+}
+
+#[test]
+#[serial]
+fn add_claude_role_flags_reject_non_claude_apps() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    let err = run_add(
+        Some("Wrong App"),
+        AppType::Codex,
+        AddOpts {
+            base_url: Some("https://api.example.com/v1".to_string()),
+            api_key: Some("sk-test".to_string()),
+            fable_model: Some("fable-model".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("Claude role flags must not be silently ignored for Codex");
+
+    assert!(err.to_string().contains("only valid for Claude"), "{err}");
 }
 
 #[test]

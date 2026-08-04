@@ -39,8 +39,9 @@ fn provider_proxy_badge(app_type: &AppType, row: &ProviderRow) -> Option<Provide
             Some(ProviderProxyBadge::NoProxySupport)
         }
         AppType::Codex => {
-            crate::proxy::providers::codex_provider_uses_chat_completions(&row.provider)
-                .then_some(ProviderProxyBadge::NeedsProxy)
+            (crate::proxy::providers::codex_provider_uses_chat_completions(&row.provider)
+                || crate::proxy::providers::codex_provider_uses_anthropic(&row.provider))
+            .then_some(ProviderProxyBadge::NeedsProxy)
         }
         _ => None,
     }
@@ -118,10 +119,6 @@ fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super:
         theme,
         texts::tui_provider_empty_title(),
         texts::tui_provider_empty_subtitle(),
-        &[
-            ("Enter", texts::tui_key_import_current_config()),
-            ("a", texts::tui_key_add_provider()),
-        ],
     );
 }
 
@@ -269,6 +266,22 @@ mod tests {
             None,
         );
         provider.category = Some("official".to_string());
+        provider.meta = Some(ProviderMeta {
+            usage_script: Some(UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: String::new(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("official_subscription".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..Default::default()
+        });
         data.providers.current_id = "official".to_string();
         data.providers.rows = vec![ProviderRow {
             id: "official".to_string(),
@@ -370,6 +383,42 @@ mod tests {
         data
     }
 
+    fn coding_plan_usage_data() -> UiData {
+        let mut data = usage_script_data();
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota.finish(
+            target,
+            ProviderUsageQuota::Script(UsageResult {
+                success: true,
+                data: Some(vec![
+                    UsageData {
+                        plan_name: Some("five_hour".to_string()),
+                        extra: None,
+                        is_valid: Some(true),
+                        invalid_message: None,
+                        total: Some(100.0),
+                        used: Some(0.0),
+                        remaining: Some(100.0),
+                        unit: Some("%".to_string()),
+                    },
+                    UsageData {
+                        plan_name: Some("weekly_limit".to_string()),
+                        extra: None,
+                        is_valid: Some(true),
+                        invalid_message: None,
+                        total: Some(100.0),
+                        used: Some(100.0),
+                        remaining: Some(0.0),
+                        unit: Some("%".to_string()),
+                    },
+                ]),
+                error: None,
+            }),
+        );
+        data
+    }
+
     fn claude_openai_chat_data() -> UiData {
         let mut data = super::super::tests::minimal_data(&AppType::Claude);
         data.providers.rows[0].provider = Provider::with_id(
@@ -395,6 +444,23 @@ mod tests {
             }),
             None,
         );
+        data
+    }
+
+    fn codex_anthropic_data() -> UiData {
+        let mut data = super::super::tests::minimal_data(&AppType::Codex);
+        data.providers.rows[0].provider = Provider::with_id(
+            "p1".to_string(),
+            "Anthropic Gateway".to_string(),
+            json!({
+                "config": "model_provider = \"custom\"\nmodel = \"claude-sonnet-4-6\"\n\n[model_providers.custom]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            }),
+            None,
+        );
+        data.providers.rows[0].provider.meta = Some(ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            ..Default::default()
+        });
         data
     }
 
@@ -428,6 +494,22 @@ mod tests {
         let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
 
         assert!(all.contains("Chat Wire Provider"), "{all}");
+        assert!(all.contains("[Needs Proxy]"), "{all}");
+    }
+
+    #[test]
+    fn codex_provider_list_marks_anthropic_as_needing_proxy() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = codex_anthropic_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains("Anthropic Gateway"), "{all}");
         assert!(all.contains("[Needs Proxy]"), "{all}");
     }
 
@@ -563,6 +645,24 @@ mod tests {
         assert!(all.contains("12 USD"), "{all}");
         assert!(all.contains("second ago"), "{all}");
         assert!(!all.contains("default"), "{all}");
+    }
+
+    #[test]
+    fn coding_plan_quota_uses_localized_window_labels() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = coding_plan_usage_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 240, 40));
+
+        assert!(all.contains("5h 100 / 100 % left, 0 used"), "{all}");
+        assert!(all.contains("weekly 0 / 100 % left, 100 used"), "{all}");
+        assert!(!all.contains("five_hour"), "{all}");
+        assert!(!all.contains("weekly_limit"), "{all}");
     }
 
     #[cfg(not(unix))]

@@ -1,7 +1,7 @@
 use super::*;
 
 mod dialogs;
-mod mcp_env;
+mod mcp_key_value;
 mod pickers;
 mod views;
 
@@ -19,7 +19,7 @@ impl App {
             return action;
         }
 
-        if let Some(action) = self.handle_mcp_env_overlay_key(key) {
+        if let Some(action) = self.handle_mcp_key_value_overlay_key(key) {
             return action;
         }
 

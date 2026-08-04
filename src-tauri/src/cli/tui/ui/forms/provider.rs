@@ -109,6 +109,8 @@ fn provider_json_preview_source_fits(
         provider.claude_haiku_model.value.as_str(),
         provider.claude_sonnet_model.value.as_str(),
         provider.claude_opus_model.value.as_str(),
+        provider.claude_fable_model.value.as_str(),
+        provider.claude_subagent_model.value.as_str(),
         provider.codex_base_url.value.as_str(),
         provider.codex_model.value.as_str(),
         provider.codex_env_key.value.as_str(),
@@ -604,11 +606,17 @@ fn render_provider_inline_fields(
             provider.input(*field).map_or_else(
                 || truncated_value_cell(value, table_area.width, label_col_width, theme),
                 |input| {
-                    let (visible, x) = inline_input_window(input, value_width);
+                    let prefix = provider_full_url_value_prefix(provider, *field);
+                    let prefix_width = prefix
+                        .as_deref()
+                        .map(unicode_width::UnicodeWidthStr::width)
+                        .unwrap_or(0) as u16;
+                    let (visible, x) =
+                        inline_input_window(input, value_width.saturating_sub(prefix_width));
                     if idx == selected_idx {
-                        cursor_x = Some(x);
+                        cursor_x = Some(prefix_width.saturating_add(x));
                     }
-                    visible
+                    format!("{}{}", prefix.unwrap_or_default(), visible)
                 },
             )
         } else {
@@ -1649,6 +1657,9 @@ fn render_usage_query_info_panel(
             texts::tui_usage_query_copilot_auto_auth()
         }
         super::form::UsageQueryTemplate::TokenPlan => texts::tui_usage_query_token_plan_hint(),
+        super::form::UsageQueryTemplate::OfficialSubscription => {
+            texts::tui_usage_query_official_subscription_hint()
+        }
         super::form::UsageQueryTemplate::Custom
         | super::form::UsageQueryTemplate::General
         | super::form::UsageQueryTemplate::NewApi
@@ -1876,7 +1887,19 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::CodexOAuthAccount => texts::tui_label_chatgpt_account().to_string(),
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
+        ProviderAddField::CodexAnthropicApiKeyField => {
+            texts::tui_label_codex_anthropic_auth_field().to_string()
+        }
+        ProviderAddField::CodexImpersonateClaudeCode => {
+            texts::tui_label_codex_impersonate_claude_code().to_string()
+        }
+        ProviderAddField::CodexMaxOutputTokens => {
+            texts::tui_label_codex_max_output_tokens().to_string()
+        }
         ProviderAddField::CodexModel => texts::model_label().to_string(),
+        ProviderAddField::CodexPromptCacheRouting => {
+            texts::tui_label_codex_prompt_cache_routing().to_string()
+        }
         ProviderAddField::CodexLocalRouting => texts::tui_label_codex_model_mapping().to_string(),
         ProviderAddField::CodexWireApi => {
             strip_trailing_colon(texts::codex_wire_api_label()).to_string()
@@ -1930,6 +1953,17 @@ pub(crate) fn provider_field_label_and_value(
 
     let value = match field {
         ProviderAddField::ClaudeApiFormat => provider_api_format_label(provider),
+        ProviderAddField::CodexAnthropicApiKeyField => {
+            texts::tui_codex_anthropic_auth_field_value(provider.claude_api_key_field.as_env_key())
+                .to_string()
+        }
+        ProviderAddField::CodexImpersonateClaudeCode => {
+            if provider.codex_impersonate_claude_code {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
         ProviderAddField::CodexWireApi => provider.codex_wire_api.as_str().to_string(),
         ProviderAddField::CodexRequiresOpenaiAuth => {
             if provider.codex_requires_openai_auth {
@@ -1998,6 +2032,10 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
+        ProviderAddField::CodexPromptCacheRouting => texts::tui_codex_prompt_cache_routing_value(
+            provider.codex_prompt_cache_routing.as_str(),
+        )
+        .to_string(),
         ProviderAddField::CodexLocalRouting => {
             if provider.codex_local_routing_enabled {
                 format!(
@@ -2060,14 +2098,26 @@ pub(crate) fn provider_field_label_and_value(
             .unwrap_or_default(),
     };
 
-    (
-        label,
-        if value.is_empty() {
-            texts::tui_na().to_string()
-        } else {
-            value
-        },
-    )
+    let value = if value.is_empty() {
+        texts::tui_na().to_string()
+    } else {
+        value
+    };
+    let value = match provider_full_url_value_prefix(provider, field) {
+        Some(prefix) => format!("{prefix}{value}"),
+        None => value,
+    };
+
+    (label, value)
+}
+
+fn provider_full_url_value_prefix(
+    provider: &super::form::ProviderAddFormState,
+    field: ProviderAddField,
+) -> Option<String> {
+    provider
+        .full_url_mode_enabled_for_field(field)
+        .then(|| format!("[{}] ", texts::tui_full_url_label()))
 }
 
 pub(crate) fn codex_local_routing_field_label_and_value(

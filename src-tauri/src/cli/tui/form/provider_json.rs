@@ -1,5 +1,9 @@
 use crate::app_config::AppType;
+use crate::claude_model_config::{
+    set_claude_role_model, CLAUDE_DEFAULT_MODEL_ENV_KEY, CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY,
+};
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
+use crate::provider_preset_models::CODEX_DEFAULT_MODEL;
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -7,8 +11,8 @@ use std::collections::HashSet;
 use super::codex_config::{build_codex_third_party_config_toml, update_codex_config_snippet};
 use super::{
     normalize_local_proxy_header_overrides, parse_codex_model_catalog_context_window,
-    ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, UsageQueryTemplate,
-    OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
+    ClaudeApiFormat, ClaudeModelRole, GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState,
+    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
 
 impl ProviderAddFormState {
@@ -27,7 +31,7 @@ impl ProviderAddFormState {
         }
 
         let fallback_model = if self.codex_model.is_blank() {
-            "gpt-5.4"
+            CODEX_DEFAULT_MODEL
         } else {
             self.codex_model.value.trim()
         };
@@ -54,9 +58,11 @@ impl ProviderAddFormState {
             Vec::new()
         };
         let model = if !model_catalog.is_empty() {
-            model_catalog[0]["model"].as_str().unwrap_or("gpt-5.4")
+            model_catalog[0]["model"]
+                .as_str()
+                .unwrap_or(CODEX_DEFAULT_MODEL)
         } else if self.codex_model.is_blank() {
-            "gpt-5.4"
+            CODEX_DEFAULT_MODEL
         } else {
             self.codex_model.value.trim()
         };
@@ -170,18 +176,21 @@ impl ProviderAddFormState {
                         &self.claude_base_url.value,
                     );
                 }
-                if self.claude_model_config_touched {
-                    let sonnet_model = self.claude_model_value_for_config(1);
-                    let opus_model = self.claude_model_value_for_config(2);
-                    set_or_remove_trimmed(env_obj, "ANTHROPIC_MODEL", &self.claude_model.value);
+                if self.claude_fallback_model_touched {
                     set_or_remove_trimmed(
                         env_obj,
-                        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                        &self.claude_haiku_model.value,
+                        CLAUDE_DEFAULT_MODEL_ENV_KEY,
+                        &self.claude_model.value,
                     );
-                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_SONNET_MODEL", &sonnet_model);
-                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_OPUS_MODEL", &opus_model);
-                    env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
+                }
+                for role in ClaudeModelRole::ALL {
+                    if self.claude_model_role_was_touched(role.index()) {
+                        let model = self.claude_model_value_for_config(role.index());
+                        set_claude_role_model(env_obj, role, &model);
+                    }
+                }
+                if self.claude_fallback_model_touched || self.any_claude_model_role_was_touched() {
+                    env_obj.remove(CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY);
                 }
                 if self.claude_teammates_touched {
                     if self.claude_teammates {
@@ -347,8 +356,8 @@ impl ProviderAddFormState {
                 }
 
                 if let Some(model_id) = current_model_id {
-                    let mut model_obj = match models_obj.remove(&model_id) {
-                        Some(Value::Object(map)) => map,
+                    let mut model_obj = match models_obj.get(&model_id) {
+                        Some(Value::Object(map)) => map.clone(),
                         _ => serde_json::Map::new(),
                     };
                     let model_name = self.opencode_model_name.value.trim().to_string();
@@ -580,6 +589,12 @@ impl ProviderAddFormState {
             && !self.is_claude_official_provider();
         let should_write_codex_api_format =
             matches!(self.app_type, AppType::Codex) && !self.is_codex_official_provider();
+        let should_write_prompt_cache_routing = should_write_codex_api_format
+            && self.codex_is_chat_format()
+            && !matches!(
+                self.codex_prompt_cache_routing,
+                PromptCacheRoutingMode::Auto
+            );
         let should_write_claude_api_key_field = matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider()
             && !self.is_claude_codex_oauth_provider()
@@ -593,14 +608,18 @@ impl ProviderAddFormState {
             && (!self.custom_user_agent.is_blank()
                 || !self.local_proxy_header_overrides.is_empty()
                 || local_proxy_body_override.is_some());
+        let should_write_full_url = self.supports_full_url_mode() && self.is_full_url;
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
             && !should_write_codex_api_format
+            && !should_write_prompt_cache_routing
             && !should_write_claude_api_key_field
             && !is_codex_oauth
             && !should_write_local_proxy_settings
             && !self.has_usage_script_meta()
+            && !self.usage_query_touched
+            && !should_write_full_url
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
             return;
@@ -662,13 +681,48 @@ impl ProviderAddFormState {
         if matches!(self.app_type, AppType::Codex) {
             if self.is_codex_official_provider() {
                 meta_obj.remove("apiFormat");
+                meta_obj.remove("apiKeyField");
+                meta_obj.remove("impersonateClaudeCode");
+                meta_obj.remove("maxOutputTokens");
                 meta_obj.remove("codexChatReasoning");
+                meta_obj.remove("promptCacheRouting");
             } else {
                 let api_format = match self.claude_api_format {
                     ClaudeApiFormat::OpenAiChat => "openai_chat",
+                    ClaudeApiFormat::Anthropic => "anthropic",
                     _ => "openai_responses",
                 };
                 meta_obj.insert("apiFormat".to_string(), json!(api_format));
+                if matches!(self.claude_api_format, ClaudeApiFormat::Anthropic) {
+                    if self.claude_api_key_field == ClaudeApiKeyField::ApiKey {
+                        meta_obj.insert(
+                            "apiKeyField".to_string(),
+                            json!(self.claude_api_key_field.as_env_key()),
+                        );
+                    } else {
+                        meta_obj.remove("apiKeyField");
+                    }
+                    if self.codex_impersonate_claude_code {
+                        meta_obj.insert("impersonateClaudeCode".to_string(), json!(true));
+                    } else {
+                        meta_obj.remove("impersonateClaudeCode");
+                    }
+                    let max_output_tokens = self
+                        .codex_max_output_tokens
+                        .value
+                        .trim()
+                        .parse::<u64>()
+                        .ok();
+                    if let Some(value) = max_output_tokens.filter(|value| *value > 0) {
+                        meta_obj.insert("maxOutputTokens".to_string(), json!(value));
+                    } else {
+                        meta_obj.remove("maxOutputTokens");
+                    }
+                } else {
+                    meta_obj.remove("apiKeyField");
+                    meta_obj.remove("impersonateClaudeCode");
+                    meta_obj.remove("maxOutputTokens");
+                }
                 // Reasoning capability is persisted only when routing is enabled
                 // AND the upstream format is Chat (reasoning is Chat-only).
                 if self.codex_local_routing_enabled() && self.codex_is_chat_format() {
@@ -682,6 +736,23 @@ impl ProviderAddFormState {
                 } else {
                     meta_obj.remove("codexChatReasoning");
                 }
+
+                if should_write_prompt_cache_routing {
+                    meta_obj.insert(
+                        "promptCacheRouting".to_string(),
+                        json!(self.codex_prompt_cache_routing.as_str()),
+                    );
+                } else {
+                    meta_obj.remove("promptCacheRouting");
+                }
+            }
+        }
+
+        if matches!(self.app_type, AppType::Claude | AppType::Codex) {
+            if should_write_full_url {
+                meta_obj.insert("isFullUrl".to_string(), json!(true));
+            } else {
+                meta_obj.remove("isFullUrl");
             }
         }
 
@@ -765,12 +836,17 @@ impl ProviderAddFormState {
     }
 
     fn update_usage_script_meta(&self, meta_obj: &mut serde_json::Map<String, Value>) {
-        if !self.has_usage_script_meta() && !self.usage_query_enabled && !self.usage_query_touched {
-            meta_obj.remove("usage_script");
+        // Provider edits outside the Usage Query page must not normalize or
+        // rewrite a shared desktop configuration.
+        if !self.usage_query_touched {
             return;
         }
 
-        let mut script = serde_json::Map::new();
+        let mut script = meta_obj
+            .get("usage_script")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         script.insert("enabled".to_string(), json!(self.usage_query_enabled));
         script.insert("language".to_string(), json!("javascript"));
         script.insert("code".to_string(), json!(self.usage_query_code.as_str()));
@@ -793,6 +869,8 @@ impl ProviderAddFormState {
             UsageQueryTemplate::General => {
                 set_or_remove_trimmed(&mut script, "apiKey", &self.usage_query_api_key.value);
                 set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
+                script.remove("accessToken");
+                script.remove("userId");
             }
             UsageQueryTemplate::NewApi => {
                 set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
@@ -802,17 +880,30 @@ impl ProviderAddFormState {
                     &self.usage_query_access_token.value,
                 );
                 set_or_remove_trimmed(&mut script, "userId", &self.usage_query_user_id.value);
+                script.remove("apiKey");
             }
             UsageQueryTemplate::TokenPlan => {
+                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
+                    script.remove(key);
+                }
                 set_or_remove_trimmed(
                     &mut script,
                     "codingPlanProvider",
                     &self.usage_query_coding_plan_provider.value,
                 );
             }
+            UsageQueryTemplate::OfficialSubscription => {
+                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
+                    script.remove(key);
+                }
+            }
             UsageQueryTemplate::Custom
             | UsageQueryTemplate::GitHubCopilot
-            | UsageQueryTemplate::Balance => {}
+            | UsageQueryTemplate::Balance => {
+                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
+                    script.remove(key);
+                }
+            }
         }
 
         meta_obj.insert("usage_script".to_string(), Value::Object(script));

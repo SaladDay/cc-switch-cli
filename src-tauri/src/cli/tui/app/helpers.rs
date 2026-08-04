@@ -1342,6 +1342,7 @@ pub(crate) fn clamp_session_message_selection(sessions: &mut SessionsState) {
     if let Some(selected) = selected {
         sessions.message_idx = selected;
     }
+    sessions.sync_loaded_message_selection();
 }
 
 fn loaded_detail_message_match_key(

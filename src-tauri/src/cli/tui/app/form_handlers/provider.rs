@@ -86,6 +86,7 @@ impl App {
             let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                 return Action::None;
             };
+            provider.refresh_usage_query_provider_kind();
             provider.field_errors.clear();
             provider.usage_query_field_errors.clear();
             if let Some(message) = provider.usage_query_script_validation_error() {
@@ -139,6 +140,14 @@ impl App {
                 Some((
                     ProviderValidationTarget::Main(ProviderAddField::CodexBaseUrl),
                     texts::base_url_empty_error().to_string(),
+                ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Codex)
+                && matches!(provider.claude_api_format, form::ClaudeApiFormat::Anthropic)
+                && !is_valid_codex_max_output_tokens(&provider.codex_max_output_tokens.value)
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::CodexMaxOutputTokens),
+                    texts::tui_codex_max_output_tokens_invalid().to_string(),
                 ))
             } else if let Some(message) = validate_usage_query_form(provider) {
                 Some((ProviderValidationTarget::UsageScript, message.to_string()))
@@ -317,6 +326,35 @@ impl App {
             {
                 Some(self.handle_provider_model_fetch(selected))
             }
+            KeyCode::Char('f')
+                if matches!(
+                    selected,
+                    ProviderAddField::ClaudeBaseUrl | ProviderAddField::CodexBaseUrl
+                ) =>
+            {
+                let (enabled, app_type) = {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return None;
+                    };
+                    if !provider.supports_full_url_mode() {
+                        return Some(Action::None);
+                    }
+                    (provider.toggle_full_url_mode(), provider.app_type.clone())
+                };
+                if enabled
+                    && !data
+                        .proxy
+                        .routes_current_app_through_proxy(&app_type)
+                        .unwrap_or(false)
+                {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+                        message: texts::tui_full_url_requires_proxy_message().to_string(),
+                        action: ConfirmAction::ProviderApiFormatProxyNotice,
+                    });
+                }
+                Some(Action::None)
+            }
             KeyCode::Char(' ') | KeyCode::Enter => {
                 Some(self.handle_provider_field_activate(selected, key, data))
             }
@@ -343,6 +381,40 @@ impl App {
                         .claude_api_format
                         .picker_index_for_app(&provider.app_type),
                 };
+                Action::None
+            }
+            ProviderAddField::CodexAnthropicApiKeyField => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.claude_api_key_field = match provider.claude_api_key_field {
+                    crate::provider::ClaudeApiKeyField::AuthToken => {
+                        crate::provider::ClaudeApiKeyField::ApiKey
+                    }
+                    crate::provider::ClaudeApiKeyField::ApiKey => {
+                        crate::provider::ClaudeApiKeyField::AuthToken
+                    }
+                };
+                Action::None
+            }
+            ProviderAddField::CodexImpersonateClaudeCode => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.codex_impersonate_claude_code = !provider.codex_impersonate_claude_code;
+                Action::None
+            }
+            ProviderAddField::CodexPromptCacheRouting => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.cycle_codex_prompt_cache_routing();
                 Action::None
             }
             ProviderAddField::CodexWireApi => {
@@ -1110,6 +1182,7 @@ impl App {
 
         Action::ProviderModelFetch {
             base_url: provider.codex_base_url.value.clone(),
+            is_full_url: provider.is_full_url,
             api_key: (!provider.codex_api_key.value.trim().is_empty())
                 .then(|| provider.codex_api_key.value.clone()),
             custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
@@ -1358,6 +1431,7 @@ impl App {
 
         Action::ProviderModelFetch {
             base_url: provider.hermes_base_url.value.clone(),
+            is_full_url: false,
             api_key: Some(provider.hermes_api_key.value.clone()),
             custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
                 .then(|| provider.custom_user_agent.value.clone()),
@@ -1411,6 +1485,7 @@ impl App {
         };
         Action::ProviderModelFetch {
             base_url,
+            is_full_url: provider.is_full_url && matches!(selected, ProviderAddField::CodexModel),
             api_key,
             custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
                 .then(|| provider.custom_user_agent.value.clone()),
@@ -1709,12 +1784,13 @@ impl App {
             );
         }
         if changed && usage_query_provider_credential_field(selected) {
+            provider.refresh_usage_query_provider_kind();
             provider.refresh_usage_query_custom_variable_comment();
         }
         // The fallback model lives outside the model-mapping sub-page, so editing it
         // here must still mark the model config touched to persist ANTHROPIC_MODEL.
         if changed && selected == ProviderAddField::ClaudeFallbackModel {
-            provider.mark_claude_model_config_touched();
+            provider.mark_claude_fallback_model_touched();
         }
 
         if let Some(message) = validate_provider_inline_field(provider, selected) {
@@ -1764,6 +1840,11 @@ pub(super) fn validate_provider_inline_field(
         {
             Some(texts::base_url_empty_error().to_string())
         }
+        ProviderAddField::CodexMaxOutputTokens
+            if !is_valid_codex_max_output_tokens(&provider.codex_max_output_tokens.value) =>
+        {
+            Some(texts::tui_codex_max_output_tokens_invalid().to_string())
+        }
         _ => None,
     }
 }
@@ -1795,6 +1876,10 @@ fn sanitize_number_char(ch: char) -> Option<char> {
     (ch.is_ascii_digit() || ch == '.').then_some(ch)
 }
 
+fn sanitize_integer_char(ch: char) -> Option<char> {
+    ch.is_ascii_digit().then_some(ch)
+}
+
 fn provider_field_sanitize_fn(
     app_type: &AppType,
     selected: ProviderAddField,
@@ -1804,8 +1889,14 @@ fn provider_field_sanitize_fn(
             Some(sanitize_provider_key_char)
         }
         (&AppType::Hermes, ProviderAddField::HermesRateLimitDelay) => Some(sanitize_number_char),
+        (&AppType::Codex, ProviderAddField::CodexMaxOutputTokens) => Some(sanitize_integer_char),
         _ => None,
     }
+}
+
+fn is_valid_codex_max_output_tokens(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed.parse::<u64>().is_ok_and(|value| value > 0)
 }
 
 fn is_valid_hermes_rate_limit_delay(value: &str) -> bool {

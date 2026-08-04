@@ -10,6 +10,9 @@ pub enum Action {
     Quit,
     SetAppType(AppType),
     LocalEnvRefresh,
+    CopyToClipboard {
+        text: String,
+    },
 
     SessionsRefresh,
     SessionsDeepSearch {
@@ -120,6 +123,7 @@ pub enum Action {
     },
     ProviderModelFetch {
         base_url: String,
+        is_full_url: bool,
         api_key: Option<String>,
         custom_user_agent: Option<String>,
         codex_oauth: bool,
@@ -148,6 +152,7 @@ pub enum Action {
         range: data::UsageCustomRange,
     },
     UsageRefresh,
+    UsageRebuildCodex,
     UsageLogDetailRefresh {
         rowid: i64,
     },
@@ -301,8 +306,13 @@ pub enum Action {
     SetClaudePluginIntegration {
         enabled: bool,
     },
+    SetPreserveCodexOfficialAuth {
+        enabled: bool,
+    },
     SetCodexUnifiedSessionHistory {
         enabled: bool,
+        migrate_existing: bool,
+        restore_after_disable: bool,
     },
     #[allow(dead_code)]
     SetProxyEnabled {
@@ -505,6 +515,7 @@ pub enum SettingsItem {
     ManagedAccounts,
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
+    PreserveCodexOfficialAuth,
     CodexUnifiedSessionHistory,
     Proxy,
     ModelRoutes,
@@ -512,7 +523,7 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 14] = [
+    pub const ALL: [SettingsItem; 15] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::Theme,
@@ -523,6 +534,7 @@ impl SettingsItem {
         SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
+        SettingsItem::PreserveCodexOfficialAuth,
         SettingsItem::CodexUnifiedSessionHistory,
         SettingsItem::Proxy,
         SettingsItem::ModelRoutes,
@@ -705,6 +717,18 @@ pub struct App {
     pub proxy_visual_transition: Option<ProxyVisualTransition>,
     pub quota_auto_target_key: Option<String>,
     pub quota_last_auto_tick: Option<u64>,
+    /// Tick of the last periodic session-usage sync, seeded on the first check
+    /// so the interval is measured from TUI start rather than firing at once.
+    pub usage_last_auto_sync_tick: Option<u64>,
+    /// Proxy snapshots mark this when the current app persisted new token
+    /// activity. The main loop consumes it on a throttled aggregate refresh.
+    pub usage_proxy_activity_dirty: bool,
+    pub usage_last_proxy_refresh_tick: Option<u64>,
+    /// Tick the currently running session-usage sync round started at, or
+    /// `None` while no round is in flight. Refresh indicators stay numberless
+    /// until a round outlives the escalation threshold; see
+    /// `ui::shared::sync_escalation`.
+    pub usage_sync_round_started_tick: Option<u64>,
     pub prompt_import_prompted_apps: HashSet<String>,
     pub common_config_notice_confirmed: bool,
     pub usage_query_notice_confirmed: bool,

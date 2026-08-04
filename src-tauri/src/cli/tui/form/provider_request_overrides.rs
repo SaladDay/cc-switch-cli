@@ -176,7 +176,7 @@ fn parse_override_object(raw: &str) -> Result<Option<Map<String, Value>>, String
         .ok_or_else(|| texts::tui_override_json_not_object().to_string())
 }
 
-fn is_valid_http_header_name(name: &str) -> bool {
+pub(crate) fn is_valid_http_header_name(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
@@ -200,7 +200,7 @@ fn is_valid_http_header_name(name: &str) -> bool {
         })
 }
 
-fn is_valid_http_header_value(value: &str) -> bool {
+pub(crate) fn is_valid_http_header_value(value: &str) -> bool {
     value
         .bytes()
         .all(|byte| byte == b'\t' || (byte >= 0x20 && byte != 0x7f))

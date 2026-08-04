@@ -935,6 +935,72 @@ async fn responses_json_2xx_failure_fails_over_before_provider_commit() {
 }
 
 #[tokio::test]
+async fn codex_anthropic_json_2xx_error_fails_over_before_provider_commit() {
+    let (primary_url, primary_hits, primary_server) = spawn_mock_upstream(
+        StatusCode::OK,
+        json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "primary failed"}
+        }),
+    )
+    .await;
+    let (secondary_url, secondary_hits, secondary_server) = spawn_mock_upstream(
+        StatusCode::OK,
+        json!({
+            "id": "msg_ok",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }),
+    )
+    .await;
+    let mut primary = codex_provider("p1", &primary_url, false);
+    primary.meta = Some(ProviderMeta {
+        api_format: Some("anthropic".to_string()),
+        ..Default::default()
+    });
+    let mut secondary = codex_provider("p2", &secondary_url, false);
+    secondary.meta = Some(ProviderMeta {
+        api_format: Some("anthropic".to_string()),
+        ..Default::default()
+    });
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("codex", &primary)
+        .expect("save primary provider");
+    db.save_provider("codex", &secondary)
+        .expect("save secondary provider");
+
+    let result = forwarder
+        .forward_buffered_response(
+            &AppType::Codex,
+            "/responses",
+            json!({"model": "gpt-5.4", "input": "hello"}),
+            &HeaderMap::new(),
+            vec![primary, secondary],
+            ForwardOptions {
+                max_retries: 1,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("Anthropic 2xx error envelope should fail over");
+
+    assert_eq!(result.provider.id, "p2");
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 1);
+
+    primary_server.abort();
+    secondary_server.abort();
+}
+
+#[tokio::test]
 async fn responses_sse_failure_before_output_fails_over_and_replays_fallback() {
     let primary_sse = concat!(
         "event: response.created\n",

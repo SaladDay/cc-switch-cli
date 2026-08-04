@@ -228,10 +228,7 @@ pub(super) fn render_update_result_overlay(
             ("Esc", texts::tui_key_hide()),
         ]
     } else {
-        &[
-            ("Enter", texts::tui_key_close()),
-            ("Esc", texts::tui_key_close()),
-        ]
+        &[("Enter", texts::tui_key_close())]
     };
 
     let body = overlay_frame_at(

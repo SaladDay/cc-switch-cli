@@ -67,15 +67,28 @@ async fn provider_health_batch_query_returns_only_existing_records_for_requested
 
 struct ConfigDirEnvGuard {
     original: Option<OsString>,
+    original_xdg_runtime_dir: Option<OsString>,
+    original_xdg_state_home: Option<OsString>,
+    _runtime: tempfile::TempDir,
 }
 
 impl ConfigDirEnvGuard {
     fn set(path: &Path) -> Self {
         let original = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+        let original_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+        let original_xdg_state_home = std::env::var_os("XDG_STATE_HOME");
+        let runtime = tempfile::tempdir().expect("create isolated daemon runtime");
         unsafe {
             std::env::set_var("CC_SWITCH_CONFIG_DIR", path);
+            std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+            std::env::set_var("XDG_STATE_HOME", runtime.path());
         }
-        Self { original }
+        Self {
+            original,
+            original_xdg_runtime_dir,
+            original_xdg_state_home,
+            _runtime: runtime,
+        }
     }
 }
 
@@ -84,6 +97,14 @@ impl Drop for ConfigDirEnvGuard {
         match self.original.as_ref() {
             Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
             None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
+        }
+        match self.original_xdg_runtime_dir.as_ref() {
+            Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        match self.original_xdg_state_home.as_ref() {
+            Some(value) => unsafe { std::env::set_var("XDG_STATE_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_STATE_HOME") },
         }
     }
 }
@@ -338,6 +359,114 @@ fn init_aborts_migration_when_pre_migration_backup_fails() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn daemon_owned_pidfile_can_initialize_and_run_v16_migration_without_self_deadlock() {
+    let home = tempfile::tempdir().expect("isolated daemon home");
+    let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+    let config_dir = home.path().join(".cc-switch");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let db_path = config_dir.join("cc-switch.db");
+    let conn = Connection::open(&db_path).expect("seed database");
+    Database::create_tables_on_conn(&conn).expect("create current tables");
+    conn.execute_batch(
+        "INSERT INTO proxy_request_logs (
+            request_id, provider_id, app_type, model, input_tokens,
+            output_tokens, cache_read_tokens, latency_ms, status_code,
+            created_at, data_source
+         ) VALUES
+            ('stale-codex', '_codex_session', 'codex', 'gpt',
+             1, 1, 0, 0, 200, 1, 'codex_session');",
+    )
+    .expect("seed stale usage");
+    Database::set_user_version(&conn, 15).expect("set v15");
+    drop(conn);
+
+    let pidfile = crate::daemon::pidfile::PidFile::acquire(crate::daemon::paths::pidfile_path())
+        .expect("acquire daemon lifetime pidfile");
+    let db = Database::init_for_daemon(&pidfile).expect("daemon schema migration");
+
+    let conn = db.conn.lock().expect("lock migrated database");
+    assert_eq!(
+        Database::get_user_version(&conn).expect("schema version"),
+        16
+    );
+    let stale_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'stale-codex'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query stale rows");
+    assert_eq!(stale_rows, 0);
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn init_refuses_v16_migration_while_an_external_process_holds_the_database() {
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create isolated config dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+
+    let db = Database::init().expect("initialize current database");
+    Database::set_user_version(&db.conn.lock().expect("database lock"), 15)
+        .expect("downgrade schema marker");
+    drop(db);
+
+    let mut holder = Command::new("sh")
+        .args([
+            "-c",
+            "exec 9<\"$1\"; printf 'ready\\n'; read -r _",
+            "cc-switch-holder",
+        ])
+        .arg(&db_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn external holder");
+    let mut ready = String::new();
+    std::io::BufReader::new(holder.stdout.take().expect("holder stdout"))
+        .read_line(&mut ready)
+        .expect("wait for holder readiness");
+    assert_eq!(ready, "ready\n");
+
+    let error = match Database::init() {
+        Ok(_) => panic!("migration should fail closed while an old process owns the database"),
+        Err(error) => error,
+    };
+    holder
+        .stdin
+        .as_mut()
+        .expect("holder stdin")
+        .write_all(b"done\n")
+        .expect("release holder");
+    assert!(holder.wait().expect("wait for holder").success());
+
+    assert!(
+        error.to_string().contains("another process has it open"),
+        "unexpected error: {error}"
+    );
+    let connection = Connection::open(&db_path).expect("inspect blocked database");
+    assert_eq!(
+        Database::get_user_version(&connection).expect("blocked schema version"),
+        15,
+        "holder detection must happen before any migration write"
+    );
+    drop(connection);
+
+    let migrated = Database::init().expect("retry migration after holder exits");
+    assert_eq!(
+        Database::get_user_version(&migrated.conn.lock().expect("migrated database lock"))
+            .expect("migrated schema version"),
+        16
+    );
+}
+
 #[test]
 #[serial_test::serial]
 fn init_rejects_unsafe_config_dir() {
@@ -538,6 +667,25 @@ fn schema_create_tables_include_pricing_model_columns() {
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
+
+    for table in ["mcp_servers", "skills"] {
+        let enabled_grokbuild = get_column_info(&conn, table, "enabled_grokbuild");
+        assert_eq!(enabled_grokbuild.r#type, "BOOLEAN");
+        assert_eq!(enabled_grokbuild.notnull, 1);
+        assert_eq!(
+            normalize_default(&enabled_grokbuild.default).as_deref(),
+            Some("0")
+        );
+    }
+
+    let grok_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'grokbuild'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count fresh grokbuild proxy rows");
+    assert_eq!(grok_rows, 1);
 }
 
 #[test]
@@ -1494,7 +1642,7 @@ fn schema_migration_v10_to_v11_preserves_rollup_rows_with_empty_new_dimensions()
 }
 
 #[test]
-fn schema_migration_v11_to_v13_preserves_data_and_adds_upstream_schema() {
+fn schema_migration_v11_to_current_preserves_data_and_adds_upstream_schema() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(
         r#"
@@ -1614,7 +1762,7 @@ fn schema_migration_v11_to_v13_preserves_data_and_adds_upstream_schema() {
 }
 
 #[test]
-fn schema_current_v13_repairs_missing_usage_semantics_columns() {
+fn schema_v13_to_current_repairs_missing_usage_semantics_columns() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(
         r#"
@@ -1689,6 +1837,134 @@ fn schema_migration_v11_to_v13_rolls_back_both_steps_on_v13_failure() {
         .expect("count preserved row"),
         1
     );
+}
+
+#[test]
+fn schema_migration_v13_adds_grokbuild_proxy_row_and_preserves_values() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create v13-compatible schema");
+    conn.execute("DELETE FROM proxy_config WHERE app_type = 'grokbuild'", [])
+        .expect("remove future proxy row");
+    conn.execute(
+        "UPDATE proxy_config SET enabled = 1, max_retries = 9 WHERE app_type = 'codex'",
+        [],
+    )
+    .expect("customize codex proxy config");
+    Database::set_user_version(&conn, 13).expect("set user_version=13");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v13 to current");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        SCHEMA_VERSION
+    );
+    let grok_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'grokbuild'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count grokbuild proxy rows");
+    assert_eq!(grok_rows, 1);
+    let codex_values: (i64, i64) = conn
+        .query_row(
+            "SELECT enabled, max_retries FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read preserved codex config");
+    assert_eq!(codex_values, (1, 9));
+}
+
+#[test]
+fn schema_migration_v14_adds_grokbuild_skill_and_mcp_flags() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        "CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0
+        );
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0
+        );
+        INSERT INTO mcp_servers (id, enabled_codex) VALUES ('mcp-1', 1);
+        INSERT INTO skills (id, enabled_codex) VALUES ('skill-1', 1);",
+    )
+    .expect("seed schema v14");
+    Database::set_user_version(&conn, 14).expect("set user_version=14");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v14 to current");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        SCHEMA_VERSION
+    );
+    assert!(
+        Database::has_column(&conn, "mcp_servers", "enabled_grokbuild").expect("check MCP flag")
+    );
+    assert!(Database::has_column(&conn, "skills", "enabled_grokbuild").expect("check Skill flag"));
+    let mcp_values: (i64, i64) = conn
+        .query_row(
+            "SELECT enabled_codex, enabled_grokbuild FROM mcp_servers WHERE id = 'mcp-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read migrated MCP row");
+    let skill_values: (i64, i64) = conn
+        .query_row(
+            "SELECT enabled_codex, enabled_grokbuild FROM skills WHERE id = 'skill-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read migrated Skill row");
+    assert_eq!(mcp_values, (1, 0));
+    assert_eq!(skill_values, (1, 0));
+}
+
+#[test]
+fn schema_migration_v15_resets_only_codex_session_usage() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create schema");
+    conn.execute_batch(
+        "INSERT INTO proxy_request_logs (
+            request_id, provider_id, app_type, model, input_tokens,
+            output_tokens, cache_read_tokens, latency_ms, status_code,
+            created_at, data_source
+         ) VALUES
+            ('codex-row', '_codex_session', 'codex', 'gpt', 1, 1, 0, 0, 200, 1, 'codex_session'),
+            ('gemini-row', '_gemini_session', 'gemini', 'gemini', 1, 1, 0, 0, 200, 1, 'gemini_session');
+         INSERT INTO usage_daily_rollups (date, app_type, provider_id, model)
+         VALUES
+            ('2026-07-10', 'codex', '_codex_session', 'gpt'),
+            ('2026-07-10', 'gemini', '_gemini_session', 'gemini');
+         INSERT INTO session_log_sync
+            (file_path, last_modified, last_line_offset, last_synced_at)
+         VALUES
+            ('/old/sessions/rollout-old-00000000-0000-4000-8000-000000000001.jsonl', 1, 1, 1),
+            ('/gemini/tmp/session-123.json', 1, 1, 1);",
+    )
+    .expect("seed usage rows and cursors");
+    Database::set_user_version(&conn, 15).expect("set user_version=15");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v15 to current");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        SCHEMA_VERSION
+    );
+    let counts: (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'codex_session'),
+                (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'gemini_session'),
+                (SELECT COUNT(*) FROM usage_daily_rollups WHERE provider_id = '_codex_session'),
+                (SELECT COUNT(*) FROM session_log_sync)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read post-migration counts");
+    assert_eq!(counts, (0, 1, 0, 1));
 }
 
 #[test]
@@ -1776,7 +2052,7 @@ fn schema_migration_v9_adds_hermes_columns() {
 }
 
 #[test]
-fn mcp_dao_roundtrip_preserves_hermes_enablement() {
+fn mcp_dao_roundtrip_preserves_unknown_grokbuild_enablement() {
     let db = Database::memory().expect("create memory db");
 
     {
@@ -1784,8 +2060,9 @@ fn mcp_dao_roundtrip_preserves_hermes_enablement() {
         conn.execute(
             "INSERT INTO mcp_servers (
                 id, name, server_config, tags,
-                enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes
-            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, 1)",
+                enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild,
+                enabled_opencode, enabled_hermes
+            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 1, 0, 1)",
             params![
                 "remote-hermes",
                 "Remote Hermes",
@@ -1812,16 +2089,57 @@ fn mcp_dao_roundtrip_preserves_hermes_enablement() {
     server.description = Some("updated".to_string());
     db.save_mcp_server(&server).expect("save mcp server");
 
-    let enabled_hermes: i64 = {
+    let hidden_enablement: (i64, i64) = {
         let conn = db.conn.lock().expect("lock conn");
         conn.query_row(
-            "SELECT enabled_hermes FROM mcp_servers WHERE id = 'remote-hermes'",
+            "SELECT enabled_grokbuild, enabled_hermes FROM mcp_servers WHERE id = 'remote-hermes'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .expect("read enabled_hermes after save")
+        .expect("read hidden enablement after save")
     };
-    assert_eq!(enabled_hermes, 1, "save should not clear enabled_hermes");
+    assert_eq!(
+        hidden_enablement,
+        (1, 1),
+        "save should preserve hidden flags"
+    );
+}
+
+#[test]
+fn skill_dao_save_preserves_unknown_grokbuild_enablement() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "INSERT INTO skills (
+                id, name, directory, enabled_grokbuild, enabled_hermes, installed_at
+             ) VALUES ('remote-skill', 'Remote Skill', 'remote-skill', 1, 1, 42)",
+            [],
+        )
+        .expect("seed grokbuild-enabled Skill");
+    }
+
+    let mut skill = db
+        .get_installed_skill("remote-skill")
+        .expect("load Skill")
+        .expect("find Skill");
+    skill.description = Some("updated".to_string());
+    db.save_skill(&skill).expect("save Skill");
+
+    let hidden_enablement: (i64, i64) = {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.query_row(
+            "SELECT enabled_grokbuild, enabled_hermes FROM skills WHERE id = 'remote-skill'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read hidden enablement after save")
+    };
+    assert_eq!(
+        hidden_enablement,
+        (1, 1),
+        "save should preserve hidden flags"
+    );
 }
 
 #[test]
@@ -1859,7 +2177,7 @@ fn schema_create_tables_repairs_legacy_proxy_config_singleton_to_per_app() {
     let count: i32 = conn
         .query_row("SELECT COUNT(*) FROM proxy_config", [], |r| r.get(0))
         .expect("count rows");
-    assert_eq!(count, 3, "per-app proxy_config should have 3 rows");
+    assert_eq!(count, 4, "per-app proxy_config should have 4 rows");
 
     // 新结构下应能按 app_type 查询
     let _: i32 = conn
@@ -2055,11 +2373,11 @@ fn migration_from_v3_8_schema_v1_to_current_schema_v3() {
         "skills_ssot_migration_pending should be set after v2->v3 migration"
     );
 
-    // v3.9+ 新增：proxy_config 三行 seed 必须存在（否则 UI 会查不到默认值）
+    // proxy_config 每应用 seed 必须存在（否则 UI 会查不到默认值）
     let proxy_rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM proxy_config", [], |r| r.get(0))
         .expect("count proxy_config rows");
-    assert_eq!(proxy_rows, 3);
+    assert_eq!(proxy_rows, 4);
 
     // model_pricing 应具备默认数据（迁移时会 seed）
     let pricing_rows: i64 = conn
@@ -2648,6 +2966,128 @@ fn init_does_not_silently_fix_existing_dir_permissions() {
         "init should not silently change existing dir permissions"
     );
 }
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_rejects_other_user_writable_config_dir_without_changing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o777))
+        .expect("set config dir perms");
+
+    let err = match Database::init() {
+        Ok(_) => panic!("other-user-writable config dir must be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains("不能允许组或其他用户写入"));
+    assert!(
+        !temp.path().join("cc-switch.db").exists(),
+        "rejected initialization must not create the database"
+    );
+    let mode = std::fs::metadata(temp.path())
+        .expect("metadata config dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o777, "validation must not chmod the directory");
+}
+
+#[test]
+fn readonly_database_error_has_actionable_context() {
+    let path = Path::new("/example/cc-switch.db");
+    for sqlite_message in [
+        "attempt to write a readonly database",
+        "unable to open database file",
+        "permission denied",
+    ] {
+        let error =
+            with_database_write_context(AppError::Database(sqlite_message.to_string()), Some(path));
+        let message = error.to_string();
+
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains("数据库不可写"));
+        assert!(message.contains("Database is not writable"));
+        assert!(message.contains("不会自动修改"));
+        assert!(message.contains("does not automatically change"));
+        assert!(message.contains(sqlite_message));
+    }
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_reports_readonly_database_without_changing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY: geteuid has no preconditions and does not modify process state.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+
+    drop(Database::init().expect("initialize database"));
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o400))
+        .expect("make database readonly");
+
+    let error = match Database::init() {
+        Ok(_) => panic!("readonly database should fail initialization"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains(&db_path.display().to_string()));
+    assert!(
+        message.contains("Database is not writable"),
+        "unexpected error: {message}"
+    );
+
+    let mode = std::fs::metadata(&db_path)
+        .expect("database metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o400,
+        "initialization must not change existing database permissions"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_preserves_existing_writable_database_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+
+    drop(Database::init().expect("initialize database"));
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644))
+        .expect("set existing database permissions");
+
+    drop(Database::init().expect("reopen writable database"));
+
+    let mode = std::fs::metadata(&db_path)
+        .expect("database metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o644,
+        "initialization must leave existing database permissions unchanged"
+    );
+}
+
 #[test]
 fn model_pricing_delete_survives_reseed_until_user_upserts() {
     let db = Database::memory().expect("create memory db");
@@ -2721,6 +3161,124 @@ fn model_pricing_seeds_gpt_5_6_family_and_aliases() {
             "unexpected pricing for {model_id}"
         );
     }
+}
+
+#[test]
+fn model_pricing_seeds_synced_upstream_catalog() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let expected = [
+        ("claude-fable-5", "10", "50", "1.00", "12.50"),
+        ("gemini-3.6-flash", "1.50", "7.50", "0.15", "0"),
+        ("step-3.7-flash", "0.19", "1.13", "0.04", "0"),
+        ("doubao-seed-2-1-pro", "0.84", "4.2", "0.17", "0"),
+        ("deepseek-v4-pro", "0.435", "0.87", "0.003625", "0"),
+        ("kimi-k3", "3.00", "15.00", "0.30", "0"),
+        ("minimax-m3", "0.30", "1.20", "0.06", "0"),
+        ("glm-5.2", "1.4", "4.4", "0.26", "0"),
+        ("mimo-v2.5-pro", "0.435", "0.87", "0.0036", "0"),
+        ("qwen3.7-plus", "0.40", "1.60", "0.08", "0"),
+        ("grok-4.5", "2", "6", "0.50", "0"),
+        ("mistral-small-4", "0.10", "0.30", "0.01", "0"),
+    ];
+
+    for (model_id, input, output, cache_read, cache_write) in expected {
+        let pricing: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap_or_else(|error| panic!("query {model_id} pricing: {error}"));
+        assert_eq!(
+            pricing,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_write.to_string(),
+            ),
+            "unexpected pricing for {model_id}"
+        );
+    }
+}
+
+#[test]
+fn model_pricing_repairs_synced_values_without_overwriting_custom_prices() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '0.60',
+                 output_cost_per_million = '2.40',
+                 cache_read_cost_per_million = '0.12'
+             WHERE model_id = 'minimax-m3'",
+            [],
+        )
+        .expect("restore upstream MiniMax M3 seed");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '2',
+                 output_cost_per_million = '6'
+             WHERE model_id = 'grok-4.20-0309-reasoning'",
+            [],
+        )
+        .expect("restore old Grok pricing");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '9',
+                 cache_read_cost_per_million = '0'
+             WHERE model_id = 'qwen3.6-plus'",
+            [],
+        )
+        .expect("set custom Qwen pricing");
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("repair synchronized pricing");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let minimax: (String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = 'minimax-m3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("query repaired MiniMax pricing");
+    assert_eq!(
+        minimax,
+        ("0.30".to_string(), "1.20".to_string(), "0.06".to_string())
+    );
+
+    let grok: (String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million
+             FROM model_pricing WHERE model_id = 'grok-4.20-0309-reasoning'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query repaired Grok pricing");
+    assert_eq!(grok, ("1.25".to_string(), "2.50".to_string()));
+
+    let qwen: (String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = 'qwen3.6-plus'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query custom Qwen pricing");
+    assert_eq!(
+        qwen,
+        ("9".to_string(), "0".to_string()),
+        "custom pricing must not be replaced"
+    );
 }
 
 #[test]

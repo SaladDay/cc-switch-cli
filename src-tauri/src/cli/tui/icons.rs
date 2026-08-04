@@ -113,7 +113,7 @@ pub fn strip_icon(label: &str) -> &str {
 
 /// Icon-mode-agnostic version of [`strip_icon`]: removes a leading emoji and
 /// its trailing space, tolerating any leading indent spaces (e.g. the centred
-/// home title `"    🎯 CC-Switch …"`). Kept separate so callers that already
+/// label `"    🔧 Settings"`). Kept separate so callers that already
 /// resolved the mode (and the tests) don't re-read the environment.
 pub fn strip_leading_emoji(label: &str) -> &str {
     let trimmed = label.trim_start_matches(' ');
@@ -230,11 +230,8 @@ mod tests {
             strip_leading_emoji("🛠️ MCP Server Management"),
             "MCP Server Management"
         );
-        // Leading indent spaces before the emoji (the centred home title).
-        assert_eq!(
-            strip_leading_emoji("    🎯 CC-Switch 交互模式"),
-            "CC-Switch 交互模式"
-        );
+        // Leading indent spaces before the emoji (for a centred label).
+        assert_eq!(strip_leading_emoji("    🔧 Settings"), "Settings");
         // No emoji prefix → unchanged, even with a leading indent or CJK text.
         assert_eq!(strip_leading_emoji("供应商管理"), "供应商管理");
         assert_eq!(strip_leading_emoji("Custom Provider"), "Custom Provider");

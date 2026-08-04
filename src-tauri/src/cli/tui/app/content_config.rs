@@ -983,16 +983,26 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::PreserveCodexOfficialAuth) => {
+                    let enabled = !crate::settings::preserve_codex_official_auth_on_switch();
+                    Action::SetPreserveCodexOfficialAuth { enabled }
+                }
                 Some(SettingsItem::CodexUnifiedSessionHistory) => {
                     let current = crate::settings::unify_codex_session_history();
                     let next = !current;
+                    let settings = crate::settings::get_settings();
+                    let show_restore =
+                        crate::codex_history_migration::has_codex_official_history_unify_backup()
+                            || settings.unify_codex_migrate_existing.unwrap_or(false);
 
-                    self.overlay = Overlay::Confirm(ConfirmOverlay {
-                        title: texts::tui_confirm_title().to_string(),
-                        message: texts::codex_unified_session_history_confirm(next),
-                        action: ConfirmAction::SettingsSetCodexUnifiedSessionHistory {
-                            enabled: next,
+                    self.overlay = Overlay::CodexHistoryConfirm(CodexHistoryConfirmState {
+                        mode: if next {
+                            CodexHistoryConfirmMode::Enable
+                        } else {
+                            CodexHistoryConfirmMode::Disable
                         },
+                        show_restore_checkbox: !next && show_restore,
+                        restore_checked: !next && show_restore,
                     });
                     Action::None
                 }

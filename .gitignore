@@ -28,6 +28,7 @@ scripts/*
 !scripts/generate_latest_json.py
 !scripts/benchmark_cc_switch.py
 !scripts/check_benchmark_thresholds.py
+!scripts/test_benchmark_cc_switch.py
 
 .agent/
 .agents/

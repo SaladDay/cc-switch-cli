@@ -7,8 +7,9 @@ use serde_json::Value;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::cli::tui::data::ProxySnapshot;
-use crate::cli::tui::data::QuotaTarget;
+use crate::cli::tui::data::{
+    ProviderRuntimeSnapshot, ProxySnapshot, QuotaSnapshotGeneration, QuotaTarget, UiDataReloadToken,
+};
 use crate::provider::Provider;
 use crate::services::{EndpointLatency, HealthStatus, StreamCheckResult, SyncDecision};
 
@@ -74,9 +75,9 @@ pub(crate) enum SessionReq {
         request_id: u64,
         scope_epoch: u64,
         provider_id: String,
-        /// When true (manual `r` reload), ignore the cached `(mtime, size)`
-        /// snapshot and re-parse every file; the fresh results still refresh the
-        /// persistent cache.
+        /// Manual `r` (and delete-recovery) rebuilds from provider sources and
+        /// ignores cached `(mtime, size)` metadata. False opens the persisted
+        /// manifest only, falling back to one bootstrap build when none exists.
         force: bool,
     },
     LoadPage {
@@ -100,6 +101,20 @@ pub(crate) enum SessionReq {
         key: String,
         provider_id: String,
         source_path: String,
+    },
+    LoadMessagePage {
+        request_id: u64,
+        key: String,
+        transcript_generation: String,
+        page: usize,
+        /// Page that owns the current user selection. If `page` was only a
+        /// speculative prefetch and its generation is stale, refresh this page
+        /// instead so a background revision change cannot move the viewport.
+        refresh_page: usize,
+        /// Stable message identity that owned the selection when a speculative
+        /// request began. Refresh follows it across insertion/reordering.
+        refresh_message_key: Option<String>,
+        reader: crate::session_manager::transcript::TranscriptReader,
     },
     /// Invalidate the current bounded detail read without entering the ordered
     /// delete/control lane.
@@ -145,12 +160,27 @@ pub(crate) enum SessionReq {
     CancelProjectFilter,
 }
 
+pub(crate) enum LoadedMessagePage {
+    Page(crate::session_manager::transcript::TranscriptPage),
+    Refreshed(Box<RefreshedMessagePages>),
+}
+
+pub(crate) struct RefreshedMessagePages {
+    pub(crate) reader: crate::session_manager::transcript::TranscriptReader,
+    pub(crate) active_page: crate::session_manager::transcript::TranscriptPage,
+    pub(crate) requested_page: Option<crate::session_manager::transcript::TranscriptPage>,
+}
+
 pub(crate) enum SessionMsg {
     /// Fixed-cost scope open: at most one immutable 100-row manifest page.
     ScopeOpened {
         request_id: u64,
         scope_epoch: u64,
         scope: String,
+        /// True when a valid persisted manifest satisfied this request and no
+        /// source revalidation follows. A cache miss keeps the scan active
+        /// while the same worker performs the one-time bootstrap build.
+        complete: bool,
         result: Result<
             Option<(
                 crate::session_manager::paged_manifest::ManifestReader,
@@ -179,6 +209,16 @@ pub(crate) enum SessionMsg {
             String,
         >,
     },
+    CostOverlayReady {
+        cost_seq: u64,
+        page_token: crate::cli::tui::app::SessionPageToken,
+        page_index: usize,
+        identities: Vec<crate::cli::tui::app::SessionRowIdentity>,
+        overlays: std::collections::HashMap<
+            crate::services::session_cost::SessionCostIdentity,
+            crate::session_manager::SessionUsageSummary,
+        >,
+    },
     PageLoaded {
         request_id: u64,
         token: crate::cli::tui::app::SessionPageToken,
@@ -201,7 +241,20 @@ pub(crate) enum SessionMsg {
     MessagesLoaded {
         request_id: u64,
         key: String,
-        result: Result<crate::session_manager::SessionMessageBatch, String>,
+        result: Result<
+            (
+                crate::session_manager::transcript::TranscriptReader,
+                crate::session_manager::transcript::TranscriptPage,
+            ),
+            String,
+        >,
+    },
+    MessagePageLoaded {
+        request_id: u64,
+        key: String,
+        transcript_generation: String,
+        page: usize,
+        result: Result<LoadedMessagePage, String>,
     },
     DeleteFinished {
         request_id: u64,
@@ -250,11 +303,15 @@ pub(crate) enum SessionMsg {
 }
 
 pub(crate) enum QuotaReq {
-    Refresh { target: QuotaTarget },
+    Refresh {
+        generation: QuotaSnapshotGeneration,
+        target: QuotaTarget,
+    },
 }
 
 pub(crate) enum QuotaMsg {
     Finished {
+        generation: QuotaSnapshotGeneration,
         target: QuotaTarget,
         result: Result<crate::cli::tui::data::ProviderUsageQuota, String>,
     },
@@ -396,12 +453,17 @@ pub(crate) enum UsagePricingLoadError {
 
 pub(crate) enum SessionUsageSyncReq {
     Run { request_id: u64 },
+    RebuildCodex { request_id: u64 },
 }
 
 pub(crate) enum SessionUsageSyncMsg {
     Finished {
         request_id: u64,
         result: Result<(), String>,
+    },
+    CodexRebuilt {
+        request_id: u64,
+        result: Result<crate::services::session_usage::SessionSyncResult, String>,
     },
 }
 
@@ -587,6 +649,8 @@ impl Drop for LocalEnvSystem {
 
 pub(crate) struct SessionSystem {
     pub(crate) req_tx: mpsc::Sender<SessionReq>,
+    pub(crate) cost_req_tx:
+        crate::cli::tui::runtime_systems::session_cost::SessionCostRequestSender,
     pub(crate) result_rx: mpsc::Receiver<SessionMsg>,
     pub(crate) _handles: Vec<std::thread::JoinHandle<()>>,
 }
@@ -621,6 +685,7 @@ pub(crate) enum ProxyReq {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
+        base_reload_token: UiDataReloadToken,
     },
     RefreshSnapshot {
         request_id: u64,
@@ -628,13 +693,20 @@ pub(crate) enum ProxyReq {
     },
 }
 
-#[allow(clippy::large_enum_variant)]
+pub(crate) enum ManagedSessionOutcome {
+    Failed(String),
+    Applied {
+        snapshot: Result<Box<ProviderRuntimeSnapshot>, String>,
+    },
+}
+
 pub(crate) enum ProxyMsg {
     ManagedSessionFinished {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
-        result: Result<(), String>,
+        base_reload_token: UiDataReloadToken,
+        outcome: ManagedSessionOutcome,
     },
     SnapshotRefreshed {
         request_id: u64,
@@ -647,6 +719,31 @@ pub(crate) struct ProxySystem {
     pub(crate) req_tx: mpsc::Sender<ProxyReq>,
     pub(crate) result_rx: mpsc::Receiver<ProxyMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CodexHistoryReq {
+    pub(crate) request_id: u64,
+    pub(crate) enabled: bool,
+    pub(crate) migrate_existing: bool,
+    pub(crate) restore_after_disable: bool,
+}
+
+pub(crate) enum CodexHistoryMsg {
+    Saved {
+        request_id: u64,
+        enabled: bool,
+        result: Result<crate::services::codex_history::CodexHistoryToggleOutcome, String>,
+    },
+    RestoreFinished(
+        Result<crate::codex_history_migration::CodexOfficialHistoryRestoreOutcome, String>,
+    ),
+}
+
+pub(crate) struct CodexHistorySystem {
+    pub(crate) req_tx: mpsc::Sender<CodexHistoryReq>,
+    pub(crate) result_rx: mpsc::Receiver<CodexHistoryMsg>,
+    pub(crate) _handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 pub(crate) struct SkillsSystem {
@@ -694,6 +791,7 @@ pub(crate) enum ModelFetchReq {
     Fetch {
         request_id: u64,
         base_url: String,
+        is_full_url: bool,
         api_key: Option<String>,
         custom_user_agent: Option<String>,
         codex_oauth: bool,
@@ -736,11 +834,29 @@ pub(crate) fn model_fetch_strategy_for_field(field: ProviderAddField) -> ModelFe
 pub(crate) fn build_model_fetch_candidate_urls(
     base_url: &str,
     strategy: ModelFetchStrategy,
+    is_full_url: bool,
 ) -> Vec<String> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Vec::new();
     }
+
+    if is_full_url {
+        let mut urls = Vec::new();
+        if let Some(index) = base.find("/v1/") {
+            urls.push(format!("{}/v1/models", &base[..index]));
+        } else if let Some(index) = base.rfind('/') {
+            let root = &base[..index];
+            if root
+                .find("://")
+                .is_some_and(|scheme| root.len() > scheme.saturating_add(3))
+            {
+                urls.push(format!("{root}/v1/models"));
+            }
+        }
+        return urls;
+    }
+
     if base.ends_with("/models") {
         return vec![base.to_string()];
     }
@@ -831,13 +947,18 @@ pub(crate) fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
 
 pub(crate) async fn fetch_provider_models_for_tui(
     base_url: &str,
+    is_full_url: bool,
     api_key: Option<&str>,
     custom_user_agent: Option<&str>,
     strategy: ModelFetchStrategy,
 ) -> Result<Vec<String>, String> {
-    let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy);
+    let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy, is_full_url);
     if candidate_urls.is_empty() {
-        return Err("URL cannot be empty".to_string());
+        return Err(if is_full_url && !base_url.trim().is_empty() {
+            "Cannot derive models endpoint from full URL".to_string()
+        } else {
+            "URL cannot be empty".to_string()
+        });
     }
 
     let client = reqwest::Client::builder()

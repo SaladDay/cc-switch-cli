@@ -76,16 +76,7 @@ pub(super) fn overlay_frame_at(
     keys: &[(&str, &str)],
     border: Style,
 ) -> Rect {
-    frame.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(border)
-        .title(format!(" {} ", title));
-    frame.render_widget(block.clone(), area);
-    let inner = block.inner(area);
-
+    let inner = render_overlay_shell(frame, area, title, border);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
@@ -93,6 +84,34 @@ pub(super) fn overlay_frame_at(
     render_key_bar_center(frame, chunks[0], theme, keys);
 
     inset_horizontal(inset_top(chunks[1], 1), 1)
+}
+
+/// Render overlay chrome without the top key bar. Action dialogs use this
+/// variant because their discoverable actions are rendered as buttons below
+/// the message instead of as key chips above it.
+pub(super) fn action_dialog_frame_at(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    border: Style,
+) -> Rect {
+    inset_horizontal(
+        inset_top(render_overlay_shell(frame, area, title, border), 1),
+        1,
+    )
+}
+
+fn render_overlay_shell(frame: &mut Frame<'_>, area: Rect, title: &str, border: Style) -> Rect {
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(border)
+        .title(format!(" {} ", icons::strip_icon(title)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
 }
 
 #[cfg(test)]

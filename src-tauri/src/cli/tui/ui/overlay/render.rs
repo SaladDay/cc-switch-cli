@@ -15,6 +15,9 @@ pub(crate) fn render_overlay(
         Overlay::Confirm(confirm) => {
             super::basic::render_confirm_overlay(frame, content_area, theme, confirm)
         }
+        Overlay::CodexHistoryConfirm(confirm) => {
+            super::basic::render_codex_history_confirm_overlay(frame, content_area, theme, confirm)
+        }
         Overlay::TextInput(input) => {
             super::basic::render_text_input_overlay(frame, content_area, theme, input)
         }
@@ -269,19 +272,24 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
-        Overlay::McpEnvPicker { selected } => super::mcp_env::render_mcp_env_picker_overlay(
-            frame,
-            app,
-            content_area,
-            theme,
-            *selected,
-        ),
-        Overlay::McpEnvEntryEditor(_) => super::mcp_env::render_mcp_env_entry_editor_overlay(
-            frame,
-            content_area,
-            theme,
-            &app.overlay,
-        ),
+        Overlay::McpKeyValuePicker { kind, selected } => {
+            super::mcp_key_value::render_mcp_key_value_picker_overlay(
+                frame,
+                app,
+                content_area,
+                theme,
+                *kind,
+                *selected,
+            )
+        }
+        Overlay::McpKeyValueEntryEditor(_) => {
+            super::mcp_key_value::render_mcp_key_value_entry_editor_overlay(
+                frame,
+                content_area,
+                theme,
+                &app.overlay,
+            )
+        }
         Overlay::Loading {
             kind,
             title,

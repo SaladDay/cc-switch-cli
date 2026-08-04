@@ -7,6 +7,7 @@
 
 pub mod ipc;
 pub mod logging;
+pub(crate) mod migration;
 pub mod paths;
 pub mod pidfile;
 pub mod restart;
@@ -55,31 +56,33 @@ pub fn notify_global_switch(enabled: bool) -> Result<(), String> {
     }
 }
 
-/// Run the daemon to completion. Acquires the pidfile, installs the file
-/// logger, runs startup recovery, binds the IPC socket, and dispatches
-/// requests until shutdown is signalled.
-pub async fn run(binary_path: PathBuf) -> Result<(), String> {
+/// Acquire the daemon lifetime lease before the Tokio runtime is created.
+/// Keeping this value outside the runtime ensures its flock is released only
+/// after every blocking database task has finished during runtime shutdown.
+pub fn acquire_lifetime_pidfile() -> Result<Option<PidFile>, String> {
     let pidfile_path = paths::pidfile_path();
-    let socket_path = paths::socket_path();
-    let log_path = paths::log_path();
-
-    let _pidfile = match PidFile::acquire(&pidfile_path) {
-        Ok(p) => p,
+    match PidFile::acquire(&pidfile_path) {
+        Ok(pidfile) => Ok(Some(pidfile)),
         Err(AcquireError::AlreadyHeld { pid }) => {
-            // Another daemon is already running — exit cleanly.
             log::info!(
                 "another cc-switch daemon is already running (pid {})",
                 pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into())
             );
-            return Ok(());
+            Ok(None)
         }
-        Err(AcquireError::Io(err)) => {
-            return Err(format!(
-                "acquire pidfile {} failed: {err}",
-                pidfile_path.display()
-            ));
-        }
-    };
+        Err(AcquireError::Io(err)) => Err(format!(
+            "acquire pidfile {} failed: {err}",
+            pidfile_path.display()
+        )),
+    }
+}
+
+/// Run the daemon to completion while the caller holds its lifetime pidfile.
+/// Installs the file logger, runs startup recovery, binds the IPC socket, and
+/// dispatches requests until shutdown is signalled.
+pub async fn run(binary_path: PathBuf, pidfile: &PidFile) -> Result<(), String> {
+    let socket_path = paths::socket_path();
+    let log_path = paths::log_path();
 
     logging::install(&log_path, LevelFilter::Info)?;
     log::info!(
@@ -89,8 +92,10 @@ pub async fn run(binary_path: PathBuf) -> Result<(), String> {
         log_path.display()
     );
 
-    let db =
-        Arc::new(Database::init().map_err(|err| format!("daemon: open database failed: {err}"))?);
+    let db = Arc::new(
+        Database::init_for_daemon(pidfile)
+            .map_err(|err| format!("daemon: open database failed: {err}"))?,
+    );
     crate::services::session_usage::spawn_periodic_session_usage_sync(db.clone(), "daemon");
     Database::spawn_periodic_usage_maintenance(db.clone(), "daemon");
     let supervisor = Supervisor::new(db, socket_path.clone(), binary_path);

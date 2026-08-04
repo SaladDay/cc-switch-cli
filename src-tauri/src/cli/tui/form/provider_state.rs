@@ -1,6 +1,8 @@
 use crate::app_config::AppType;
+use crate::claude_model_config::split_claude_one_m_marker;
 use crate::cli::i18n::texts;
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig, Provider};
+use crate::provider_preset_models::{CODEX_DEFAULT_MODEL, GEMINI_DEFAULT_MODEL};
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 
@@ -13,11 +15,12 @@ use super::provider_json::{
 };
 use super::provider_state_loading::populate_form_from_provider;
 use super::{
-    ClaudeApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
-    CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType, HermesModelField,
-    InlineFieldError, LocalProxySettingsField, ProviderAddField, ProviderAddFormState,
-    ProviderFormPage, ProviderTextField, TextEditSession, TextInput, UsageQueryField,
-    UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
+    ClaudeApiFormat, ClaudeModelRole, CodexLocalRoutingField, CodexModelCatalogField,
+    CodexModelCatalogRow, CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType,
+    HermesModelField, InlineFieldError, LocalProxySettingsField, PromptCacheRoutingMode,
+    ProviderAddField, ProviderAddFormState, ProviderFormPage, ProviderTextField, TextEditSession,
+    TextInput, UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
+    OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
 fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
@@ -34,28 +37,6 @@ fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
         }
         counter += 1;
     }
-}
-
-fn split_claude_one_m_marker(value: &str) -> (String, bool) {
-    const MARKER: &str = "[1M]";
-
-    let trimmed_end = value.trim_end();
-    let marker_start = trimmed_end.len().saturating_sub(MARKER.len());
-    let has_marker = trimmed_end
-        .get(marker_start..)
-        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(MARKER));
-    if !has_marker {
-        return (value.to_string(), false);
-    }
-
-    (
-        trimmed_end
-            .get(..marker_start)
-            .unwrap_or_default()
-            .trim_end()
-            .to_string(),
-        true,
-    )
 }
 
 impl ProviderAddFormState {
@@ -127,13 +108,14 @@ impl ProviderAddFormState {
         let include_common_config =
             Self::snippet_has_effective_common_config(&app_type, common_snippet);
         let is_codex = matches!(app_type, AppType::Codex);
+        let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
             AppType::OpenClaw => OPENCLAW_DEFAULT_API_PROTOCOL,
             _ => "@ai-sdk/openai-compatible",
         };
 
         let codex_defaults = if is_codex {
-            ("", "gpt-5.4", CodexWireApi::Responses, true)
+            ("", CODEX_DEFAULT_MODEL, CodexWireApi::Responses, true)
         } else {
             ("", "", CodexWireApi::Responses, true)
         };
@@ -167,7 +149,8 @@ impl ProviderAddFormState {
             codex_preview_section: CodexPreviewSection::Auth,
             codex_auth_scroll: 0,
             codex_config_scroll: 0,
-            claude_model_config_touched: false,
+            claude_fallback_model_touched: false,
+            claude_model_role_touched: [false; ClaudeModelRole::COUNT],
             claude_api_key: TextInput::new(""),
             claude_api_key_field: ClaudeApiKeyField::AuthToken,
             claude_base_url: TextInput::new(""),
@@ -180,8 +163,12 @@ impl ProviderAddFormState {
             claude_haiku_model: TextInput::new(""),
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
+            claude_fable_model: TextInput::new(""),
+            claude_subagent_model: TextInput::new(""),
             claude_sonnet_one_m: false,
             claude_opus_one_m: false,
+            claude_fable_one_m: false,
+            claude_subagent_one_m: false,
             claude_hide_attribution: false,
             claude_hide_attribution_touched: false,
             claude_teammates: false,
@@ -190,6 +177,7 @@ impl ProviderAddFormState {
             claude_tool_search_touched: false,
             claude_disable_auto_upgrade: false,
             claude_disable_auto_upgrade_touched: false,
+            is_full_url: false,
             claude_quick_config_idx: 0,
             codex_goal_mode: false,
             codex_goal_mode_touched: false,
@@ -198,6 +186,8 @@ impl ProviderAddFormState {
             codex_quick_config_idx: 0,
             codex_oauth_account_id: None,
             codex_fast_mode: false,
+            codex_impersonate_claude_code: false,
+            codex_max_output_tokens: TextInput::new(""),
             codex_base_url: TextInput::new(codex_defaults.0),
             codex_model: TextInput::new(codex_defaults.1),
             codex_wire_api: codex_defaults.2,
@@ -205,6 +195,7 @@ impl ProviderAddFormState {
             codex_env_key: TextInput::new("OPENAI_API_KEY"),
             codex_api_key: TextInput::new(""),
             codex_chat_reasoning: CodexChatReasoningConfig::default(),
+            codex_prompt_cache_routing: PromptCacheRoutingMode::Auto,
             codex_model_catalog: Vec::new(),
             codex_local_routing_enabled: false,
             custom_user_agent: TextInput::new(""),
@@ -213,10 +204,11 @@ impl ProviderAddFormState {
             gemini_auth_type: GeminiAuthType::ApiKey,
             gemini_api_key: TextInput::new(""),
             gemini_base_url: TextInput::new("https://generativelanguage.googleapis.com"),
-            gemini_model: TextInput::new(""),
+            gemini_model: TextInput::new(if is_gemini { GEMINI_DEFAULT_MODEL } else { "" }),
             openclaw_user_agent: false,
             openclaw_models: Vec::new(),
             usage_query_enabled: false,
+            usage_query_official_subscription: false,
             usage_query_template: UsageQueryTemplate::General,
             usage_query_api_key: TextInput::new(""),
             usage_query_base_url: TextInput::new(""),
@@ -431,6 +423,14 @@ impl ProviderAddFormState {
                     // Upstream format is an independent picker; local routing /
                     // model mapping is decoupled from it.
                     fields.push(ProviderAddField::ClaudeApiFormat);
+                    if matches!(self.claude_api_format, ClaudeApiFormat::Anthropic) {
+                        fields.push(ProviderAddField::CodexAnthropicApiKeyField);
+                        fields.push(ProviderAddField::CodexImpersonateClaudeCode);
+                        fields.push(ProviderAddField::CodexMaxOutputTokens);
+                    }
+                    if self.codex_is_chat_format() {
+                        fields.push(ProviderAddField::CodexPromptCacheRouting);
+                    }
                     fields.push(ProviderAddField::CodexLocalRouting);
                     fields.push(ProviderAddField::LocalProxySettings);
                 }
@@ -541,6 +541,9 @@ impl ProviderAddFormState {
                     UsageQueryField::AutoInterval,
                 ]);
             }
+            UsageQueryTemplate::OfficialSubscription => {
+                fields.extend([UsageQueryField::Timeout, UsageQueryField::AutoInterval]);
+            }
         }
 
         fields
@@ -560,6 +563,7 @@ impl ProviderAddFormState {
                 UsageQueryTemplate::GitHubCopilot
                     | UsageQueryTemplate::TokenPlan
                     | UsageQueryTemplate::Balance
+                    | UsageQueryTemplate::OfficialSubscription
             )
         {
             return None;
@@ -586,6 +590,7 @@ impl ProviderAddFormState {
             ProviderAddField::ClaudeApiKey => Some(&self.claude_api_key),
             ProviderAddField::ClaudeFallbackModel => Some(&self.claude_model),
             ProviderAddField::CodexBaseUrl => Some(&self.codex_base_url),
+            ProviderAddField::CodexMaxOutputTokens => Some(&self.codex_max_output_tokens),
             ProviderAddField::CodexModel => Some(&self.codex_model),
             ProviderAddField::CodexEnvKey => Some(&self.codex_env_key),
             ProviderAddField::CodexApiKey => Some(&self.codex_api_key),
@@ -604,6 +609,9 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexAnthropicApiKeyField
+            | ProviderAddField::CodexImpersonateClaudeCode
+            | ProviderAddField::CodexPromptCacheRouting
             | ProviderAddField::CodexLocalRouting
             | ProviderAddField::LocalProxySettings
             | ProviderAddField::CodexQuickConfig
@@ -645,6 +653,7 @@ impl ProviderAddFormState {
             ProviderAddField::ClaudeApiKey => Some(&mut self.claude_api_key),
             ProviderAddField::ClaudeFallbackModel => Some(&mut self.claude_model),
             ProviderAddField::CodexBaseUrl => Some(&mut self.codex_base_url),
+            ProviderAddField::CodexMaxOutputTokens => Some(&mut self.codex_max_output_tokens),
             ProviderAddField::CodexModel => Some(&mut self.codex_model),
             ProviderAddField::CodexEnvKey => Some(&mut self.codex_env_key),
             ProviderAddField::CodexApiKey => Some(&mut self.codex_api_key),
@@ -667,6 +676,9 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexAnthropicApiKeyField
+            | ProviderAddField::CodexImpersonateClaudeCode
+            | ProviderAddField::CodexPromptCacheRouting
             | ProviderAddField::CodexLocalRouting
             | ProviderAddField::LocalProxySettings
             | ProviderAddField::CodexQuickConfig
@@ -1101,6 +1113,7 @@ impl ProviderAddFormState {
     }
 
     pub fn open_usage_query_page(&mut self) {
+        self.refresh_usage_query_provider_kind();
         self.refresh_default_usage_query_template();
         self.page = ProviderFormPage::UsageQuery;
         self.focus = FormFocus::Fields;
@@ -1308,6 +1321,10 @@ impl ProviderAddFormState {
             .min(len.saturating_sub(1));
     }
 
+    pub fn cycle_codex_prompt_cache_routing(&mut self) {
+        self.codex_prompt_cache_routing = self.codex_prompt_cache_routing.next();
+    }
+
     pub fn toggle_codex_reasoning_thinking(&mut self) {
         let next = !self.codex_reasoning_supports_thinking();
         self.codex_chat_reasoning.supports_thinking = Some(next);
@@ -1339,11 +1356,29 @@ impl ProviderAddFormState {
     }
 
     pub fn refresh_default_usage_query_template(&mut self) {
+        if self.usage_query_official_subscription {
+            if self.usage_query_template != UsageQueryTemplate::OfficialSubscription {
+                self.set_usage_query_template(UsageQueryTemplate::OfficialSubscription);
+            }
+            return;
+        }
+
         if self.usage_query_touched || self.has_usage_script_meta() {
             return;
         }
 
-        let template = match self
+        let template = self.default_non_official_usage_query_template();
+
+        self.set_usage_query_template(template);
+        if let Some(provider) =
+            detect_coding_plan_provider_for_usage_query(&self.current_provider_base_url())
+        {
+            self.usage_query_coding_plan_provider.set(provider);
+        }
+    }
+
+    fn default_non_official_usage_query_template(&self) -> UsageQueryTemplate {
+        match self
             .extra
             .get("meta")
             .and_then(|meta| meta.get("providerType"))
@@ -1354,13 +1389,6 @@ impl ProviderAddFormState {
                 UsageQueryTemplate::Balance
             }
             _ => UsageQueryTemplate::General,
-        };
-
-        self.set_usage_query_template(template);
-        if let Some(provider) =
-            detect_coding_plan_provider_for_usage_query(&self.current_provider_base_url())
-        {
-            self.usage_query_coding_plan_provider.set(provider);
         }
     }
 
@@ -1562,6 +1590,10 @@ impl ProviderAddFormState {
     }
 
     pub fn available_usage_query_templates(&self) -> Vec<UsageQueryTemplate> {
+        if self.usage_query_official_subscription {
+            return vec![UsageQueryTemplate::OfficialSubscription];
+        }
+
         vec![
             UsageQueryTemplate::Custom,
             UsageQueryTemplate::General,
@@ -1591,6 +1623,13 @@ impl ProviderAddFormState {
                 self.usage_query_api_key.set("");
             }
             UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::Balance => {
+                self.usage_query_code.clear();
+                self.usage_query_api_key.set("");
+                self.usage_query_base_url.set("");
+                self.usage_query_access_token.set("");
+                self.usage_query_user_id.set("");
+            }
+            UsageQueryTemplate::OfficialSubscription => {
                 self.usage_query_code.clear();
                 self.usage_query_api_key.set("");
                 self.usage_query_base_url.set("");
@@ -1673,7 +1712,11 @@ impl ProviderAddFormState {
     }
 
     pub fn usage_query_template_value(&self) -> &'static str {
-        self.usage_query_template.as_str()
+        if self.usage_query_template == UsageQueryTemplate::OfficialSubscription {
+            self.usage_query_template.label()
+        } else {
+            self.usage_query_template.as_str()
+        }
     }
 
     pub fn usage_query_template_label(&self) -> &'static str {
@@ -1684,8 +1727,53 @@ impl ProviderAddFormState {
         self.usage_query_enabled
             && !matches!(
                 self.usage_query_template,
-                UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::TokenPlan
+                UsageQueryTemplate::GitHubCopilot
+                    | UsageQueryTemplate::TokenPlan
+                    | UsageQueryTemplate::OfficialSubscription
             )
+    }
+
+    pub fn refresh_usage_query_provider_kind(&mut self) {
+        let was_official = self.usage_query_official_subscription;
+        let is_official = serde_json::from_value::<Provider>(self.to_provider_json_value())
+            .ok()
+            .and_then(|provider| provider.official_subscription_tool(&self.app_type))
+            .is_some();
+        self.usage_query_official_subscription = is_official;
+
+        if was_official == is_official && !self.usage_query_touched {
+            return;
+        }
+
+        let next_template = if is_official {
+            Some(UsageQueryTemplate::OfficialSubscription)
+        } else if self.usage_query_template == UsageQueryTemplate::OfficialSubscription {
+            Some(self.default_non_official_usage_query_template())
+        } else {
+            None
+        };
+        let entering_official = !was_official && is_official;
+        let should_persist = self.usage_query_touched || self.has_usage_script_meta();
+        let template_changed = if let Some(template) =
+            next_template.filter(|template| *template != self.usage_query_template)
+        {
+            self.set_usage_query_template(template);
+            true
+        } else {
+            false
+        };
+        if entering_official {
+            // Matching the desktop modal, crossing into the native OAuth
+            // template is a fresh opt-in rather than inheriting an enabled
+            // custom query.
+            self.usage_query_enabled = false;
+            self.usage_query_timeout.set("10");
+            self.usage_query_auto_interval.set("5");
+            self.usage_query_coding_plan_provider.set("");
+        }
+        if should_persist && (template_changed || entering_official) {
+            self.touch_usage_query();
+        }
     }
 
     fn usage_query_custom_preset_with_variables(&self) -> String {
@@ -1761,82 +1849,75 @@ impl ProviderAddFormState {
         None
     }
 
-    // The model-mapping sub-page exposes only the three role models; the main
+    // The model-mapping sub-page exposes role models; the main
     // model (ANTHROPIC_MODEL) is edited via the top-level ClaudeFallbackModel row.
     pub fn claude_model_input(&self, index: usize) -> Option<&TextInput> {
-        match index {
-            0 => Some(&self.claude_haiku_model),
-            1 => Some(&self.claude_sonnet_model),
-            2 => Some(&self.claude_opus_model),
-            _ => None,
+        match ClaudeModelRole::from_index(index)? {
+            ClaudeModelRole::Haiku => Some(&self.claude_haiku_model),
+            ClaudeModelRole::Sonnet => Some(&self.claude_sonnet_model),
+            ClaudeModelRole::Opus => Some(&self.claude_opus_model),
+            ClaudeModelRole::Fable => Some(&self.claude_fable_model),
+            ClaudeModelRole::Subagent => Some(&self.claude_subagent_model),
         }
     }
 
     pub fn claude_model_input_mut(&mut self, index: usize) -> Option<&mut TextInput> {
-        match index {
-            0 => Some(&mut self.claude_haiku_model),
-            1 => Some(&mut self.claude_sonnet_model),
-            2 => Some(&mut self.claude_opus_model),
-            _ => None,
+        match ClaudeModelRole::from_index(index)? {
+            ClaudeModelRole::Haiku => Some(&mut self.claude_haiku_model),
+            ClaudeModelRole::Sonnet => Some(&mut self.claude_sonnet_model),
+            ClaudeModelRole::Opus => Some(&mut self.claude_opus_model),
+            ClaudeModelRole::Fable => Some(&mut self.claude_fable_model),
+            ClaudeModelRole::Subagent => Some(&mut self.claude_subagent_model),
         }
     }
 
     pub fn claude_model_supports_one_m(index: usize) -> bool {
-        matches!(index, 1 | 2)
+        ClaudeModelRole::from_index(index).is_some_and(ClaudeModelRole::supports_one_m)
     }
 
     pub fn claude_model_one_m_enabled(&self, index: usize) -> bool {
-        match index {
-            1 => self.claude_sonnet_one_m,
-            2 => self.claude_opus_one_m,
+        match ClaudeModelRole::from_index(index) {
+            Some(ClaudeModelRole::Sonnet) => self.claude_sonnet_one_m,
+            Some(ClaudeModelRole::Opus) => self.claude_opus_one_m,
+            Some(ClaudeModelRole::Fable) => self.claude_fable_one_m,
+            Some(ClaudeModelRole::Subagent) => self.claude_subagent_one_m,
             _ => false,
         }
     }
 
     fn set_claude_model_one_m_enabled(&mut self, index: usize, enabled: bool) {
-        match index {
-            1 => self.claude_sonnet_one_m = enabled,
-            2 => self.claude_opus_one_m = enabled,
+        match ClaudeModelRole::from_index(index) {
+            Some(ClaudeModelRole::Sonnet) => self.claude_sonnet_one_m = enabled,
+            Some(ClaudeModelRole::Opus) => self.claude_opus_one_m = enabled,
+            Some(ClaudeModelRole::Fable) => self.claude_fable_one_m = enabled,
+            Some(ClaudeModelRole::Subagent) => self.claude_subagent_one_m = enabled,
             _ => {}
         }
     }
 
     pub fn set_claude_model_from_config(&mut self, index: usize, value: &str) {
-        if !Self::claude_model_supports_one_m(index) {
-            if let Some(input) = self.claude_model_input_mut(index) {
-                input.set(value);
-            }
-            return;
-        }
-
         let (model, one_m) = split_claude_one_m_marker(value);
         if let Some(input) = self.claude_model_input_mut(index) {
             input.set(model);
         }
-        self.set_claude_model_one_m_enabled(index, one_m);
+        if Self::claude_model_supports_one_m(index) {
+            self.set_claude_model_one_m_enabled(index, one_m);
+        }
     }
 
     pub fn set_claude_model_from_picker(&mut self, index: usize, value: &str) {
         let preserve_one_m = self.claude_model_one_m_enabled(index);
         let (model, explicit_one_m) = split_claude_one_m_marker(value);
         if let Some(input) = self.claude_model_input_mut(index) {
-            input.set(if Self::claude_model_supports_one_m(index) {
-                model
-            } else {
-                value.trim().to_string()
-            });
+            input.set(model);
         }
         if Self::claude_model_supports_one_m(index) {
             self.set_claude_model_one_m_enabled(index, explicit_one_m || preserve_one_m);
         }
-        self.mark_claude_model_config_touched();
+        self.mark_claude_model_role_touched(index);
     }
 
     pub fn normalize_claude_model_input(&mut self, index: usize) -> bool {
-        if !Self::claude_model_supports_one_m(index) {
-            return false;
-        }
-
         let Some(raw) = self
             .claude_model_input(index)
             .map(|input| input.value.clone())
@@ -1844,17 +1925,19 @@ impl ProviderAddFormState {
             return false;
         };
         let (model, explicit_one_m) = split_claude_one_m_marker(&raw);
-        let enabled = if model.trim().is_empty() {
-            false
-        } else {
-            explicit_one_m || self.claude_model_one_m_enabled(index)
-        };
-        let changed = model != raw || enabled != self.claude_model_one_m_enabled(index);
+        let supports_one_m = Self::claude_model_supports_one_m(index);
+        let enabled = supports_one_m
+            && !model.trim().is_empty()
+            && (explicit_one_m || self.claude_model_one_m_enabled(index));
+        let changed =
+            model != raw || (supports_one_m && enabled != self.claude_model_one_m_enabled(index));
         if changed {
             if let Some(input) = self.claude_model_input_mut(index) {
                 input.set(model);
             }
-            self.set_claude_model_one_m_enabled(index, enabled);
+            if supports_one_m {
+                self.set_claude_model_one_m_enabled(index, enabled);
+            }
         }
         changed
     }
@@ -1874,7 +1957,7 @@ impl ProviderAddFormState {
 
         let enabled = !currently_enabled;
         self.set_claude_model_one_m_enabled(index, enabled);
-        self.mark_claude_model_config_touched();
+        self.mark_claude_model_role_touched(index);
         true
     }
 
@@ -1886,7 +1969,10 @@ impl ProviderAddFormState {
         if model.is_empty() {
             return String::new();
         }
-        if Self::claude_model_supports_one_m(index) && self.claude_model_one_m_enabled(index) {
+        if !Self::claude_model_supports_one_m(index) {
+            return split_claude_one_m_marker(model).0;
+        }
+        if self.claude_model_one_m_enabled(index) {
             format!("{model}[1M]")
         } else {
             model.to_string()
@@ -1904,7 +1990,8 @@ impl ProviderAddFormState {
         let (model, _) = split_claude_one_m_marker(&source.value);
         let one_m = Self::claude_model_supports_one_m(source_index)
             && self.claude_model_one_m_enabled(source_index);
-        for index in 0..3 {
+        for role in ClaudeModelRole::ALL {
+            let index = role.index();
             if let Some(input) = self.claude_model_input_mut(index) {
                 input.set(model.clone());
             }
@@ -1913,23 +2000,43 @@ impl ProviderAddFormState {
                 Self::claude_model_supports_one_m(index) && one_m,
             );
         }
-        self.mark_claude_model_config_touched();
+        self.mark_all_claude_model_roles_touched();
         true
     }
 
     pub fn claude_model_configured_count(&self) -> usize {
-        [
-            &self.claude_haiku_model,
-            &self.claude_sonnet_model,
-            &self.claude_opus_model,
-        ]
-        .into_iter()
-        .filter(|input| !input.is_blank_for_passive_display())
-        .count()
+        ClaudeModelRole::ALL
+            .into_iter()
+            .filter_map(|role| self.claude_model_input(role.index()))
+            .filter(|input| !input.is_blank_for_passive_display())
+            .count()
     }
 
-    pub fn mark_claude_model_config_touched(&mut self) {
-        self.claude_model_config_touched = true;
+    pub fn mark_claude_fallback_model_touched(&mut self) {
+        self.claude_fallback_model_touched = true;
+    }
+
+    pub fn mark_claude_model_role_touched(&mut self, index: usize) {
+        if let Some(touched) = self.claude_model_role_touched.get_mut(index) {
+            *touched = true;
+        }
+    }
+
+    pub fn mark_all_claude_model_roles_touched(&mut self) {
+        self.claude_model_role_touched.fill(true);
+    }
+
+    pub fn claude_model_role_was_touched(&self, index: usize) -> bool {
+        self.claude_model_role_touched
+            .get(index)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub fn any_claude_model_role_was_touched(&self) -> bool {
+        self.claude_model_role_touched
+            .iter()
+            .any(|touched| *touched)
     }
 
     pub fn toggle_claude_hide_attribution(&mut self) {
@@ -1950,6 +2057,33 @@ impl ProviderAddFormState {
     pub fn toggle_claude_disable_auto_upgrade(&mut self) {
         self.claude_disable_auto_upgrade = !self.claude_disable_auto_upgrade;
         self.claude_disable_auto_upgrade_touched = true;
+    }
+
+    pub fn supports_full_url_mode(&self) -> bool {
+        match self.app_type {
+            AppType::Claude => {
+                !self.is_claude_official_provider() && !self.is_claude_codex_oauth_provider()
+            }
+            AppType::Codex => !self.is_codex_official_provider(),
+            AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+        }
+    }
+
+    pub fn full_url_mode_enabled_for_field(&self, field: ProviderAddField) -> bool {
+        self.is_full_url
+            && self.supports_full_url_mode()
+            && matches!(
+                (&self.app_type, field),
+                (AppType::Claude, ProviderAddField::ClaudeBaseUrl)
+                    | (AppType::Codex, ProviderAddField::CodexBaseUrl)
+            )
+    }
+
+    pub fn toggle_full_url_mode(&mut self) -> bool {
+        if self.supports_full_url_mode() {
+            self.is_full_url = !self.is_full_url;
+        }
+        self.is_full_url
     }
 
     pub fn toggle_codex_fast_mode(&mut self) {
@@ -2443,17 +2577,6 @@ pub(crate) fn detect_balance_provider_for_usage_query(base_url: &str) -> bool {
 }
 
 impl UsageQueryTemplate {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Custom => "custom",
-            Self::General => "general",
-            Self::NewApi => "newapi",
-            Self::GitHubCopilot => "github_copilot",
-            Self::TokenPlan => "token_plan",
-            Self::Balance => "balance",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Custom => {
@@ -2480,18 +2603,13 @@ impl UsageQueryTemplate {
                     "Official"
                 }
             }
-        }
-    }
-
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "custom" => Some(Self::Custom),
-            "general" => Some(Self::General),
-            "newapi" => Some(Self::NewApi),
-            "github_copilot" => Some(Self::GitHubCopilot),
-            "token_plan" => Some(Self::TokenPlan),
-            "balance" => Some(Self::Balance),
-            _ => None,
+            Self::OfficialSubscription => {
+                if crate::cli::i18n::is_chinese() {
+                    "官方订阅"
+                } else {
+                    "Official Subscription"
+                }
+            }
         }
     }
 }

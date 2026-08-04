@@ -31,6 +31,7 @@ pub(super) enum PaginationFooterStatus {
     NextReady,
     LoadingPage(usize),
     LoadError,
+    LoadErrorMoveRetry,
     End,
 }
 
@@ -67,12 +68,12 @@ pub(super) fn with_pagination_footer<'a>(
         footer.total,
     );
     let range = fit_owned_label(&[range_full, range_compact], available);
-    let action = pagination_action_label(footer, available, tick, theme);
+    let action = pagination_action_spans(footer, available, tick, theme);
 
     match (range, action) {
-        (Some(range), Some((action, action_style)))
+        (Some(range), Some(action))
             if padded_width(&range)
-                .saturating_add(padded_width(&action))
+                .saturating_add(spans_display_width(&action))
                 .saturating_add(1)
                 <= available =>
         {
@@ -81,14 +82,10 @@ pub(super) fn with_pagination_footer<'a>(
                     Line::styled(format!(" {range} "), Style::default().fg(theme.dim))
                         .alignment(Alignment::Left),
                 )
-                .title_bottom(
-                    Line::styled(format!(" {action} "), action_style).alignment(Alignment::Right),
-                );
+                .title_bottom(Line::from(action).alignment(Alignment::Right));
         }
-        (_, Some((action, action_style))) => {
-            block = block.title_bottom(
-                Line::styled(format!(" {action} "), action_style).alignment(Alignment::Right),
-            );
+        (_, Some(action)) => {
+            block = block.title_bottom(Line::from(action).alignment(Alignment::Right));
         }
         (Some(range), None) => {
             block = block.title_bottom(
@@ -102,13 +99,17 @@ pub(super) fn with_pagination_footer<'a>(
     block
 }
 
-fn pagination_action_label(
+/// The right-hand footer action, already padded with its surrounding spaces.
+/// Busy states lead with the shared spinner glyph — the footer already spends
+/// its columns on a label of its own, so it takes the glyph-only size of the
+/// indicator family rather than a second "Refreshing".
+fn pagination_action_spans(
     footer: PaginationFooter,
     available: usize,
     tick: u64,
     theme: &super::theme::Theme,
-) -> Option<(String, Style)> {
-    let (labels, style): (Vec<String>, Style) = match footer.status {
+) -> Option<Vec<Span<'static>>> {
+    let (labels, style, spinner): (Vec<String>, Style, bool) = match footer.status {
         PaginationFooterStatus::Idle => return None,
         PaginationFooterStatus::NextBoundary => (
             vec![
@@ -117,6 +118,7 @@ fn pagination_action_label(
                 texts::tui_pagination_next_trigger_minimal().to_string(),
             ],
             selection_style(theme),
+            false,
         ),
         PaginationFooterStatus::PreviousBoundary => (
             vec![
@@ -125,51 +127,58 @@ fn pagination_action_label(
                 texts::tui_pagination_previous_trigger_minimal().to_string(),
             ],
             selection_style(theme),
+            false,
         ),
         PaginationFooterStatus::PreparingNext => (
-            vec![format!(
-                "{} {}",
-                pagination_spinner(tick),
-                texts::tui_pagination_preparing_next()
-            )],
+            vec![texts::tui_pagination_preparing_next().to_string()],
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
+            true,
         ),
         PaginationFooterStatus::NextReady => (
             vec![format!("> {}", texts::tui_pagination_next_ready())],
             Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
+            false,
         ),
         PaginationFooterStatus::LoadingPage(page) => (
-            vec![format!(
-                "{} {}",
-                pagination_spinner(tick),
-                texts::tui_pagination_loading_page(page)
-            )],
+            vec![texts::tui_pagination_loading_page(page)],
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
+            true,
         ),
         PaginationFooterStatus::LoadError => (
             vec![format!("! {}", texts::tui_pagination_load_failed())],
             Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            false,
+        ),
+        PaginationFooterStatus::LoadErrorMoveRetry => (
+            vec![format!(
+                "! {}",
+                texts::tui_pagination_load_failed_move_retry()
+            )],
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            false,
         ),
         PaginationFooterStatus::End => (
             vec![format!("[end] {}", texts::tui_pagination_end(footer.total))],
             Style::default().fg(theme.dim),
+            false,
         ),
     };
-    let label = fit_owned_label(&labels, available)?;
-    Some((label, style))
-}
 
-fn pagination_spinner(tick: u64) -> &'static str {
-    match tick % 4 {
-        0 => "⠋",
-        1 => "⠙",
-        2 => "⠹",
-        _ => "⠸",
+    // The glyph and its leading space are part of the action's footprint.
+    let spinner_width = if spinner { 2 } else { 0 };
+    let label = fit_owned_label(&labels, available.saturating_sub(spinner_width))?;
+
+    let mut spans = Vec::new();
+    if spinner {
+        spans.push(Span::raw(" "));
+        spans.push(refresh_spinner_span(tick, theme));
     }
+    spans.push(Span::styled(format!(" {label} "), style));
+    Some(spans)
 }
 
 fn fit_owned_label(labels: &[String], available: usize) -> Option<String> {
@@ -181,6 +190,13 @@ fn fit_owned_label(labels: &[String], available: usize) -> Option<String> {
 
 fn padded_width(label: &str) -> usize {
     UnicodeWidthStr::width(label).saturating_add(2)
+}
+
+pub(super) fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
 }
 
 pub(super) fn inactive_chip_style(theme: &super::theme::Theme) -> Style {
@@ -287,6 +303,88 @@ pub(super) fn truncate_to_display_width(text: &str, width: u16) -> String {
     out
 }
 
+/// Cut marker for clipped text: `…`, or `~` where unicode is not available.
+pub(super) fn truncation_marker() -> &'static str {
+    if icons::use_emoji() {
+        "…"
+    } else {
+        "~"
+    }
+}
+
+/// Longest prefix of `text` that fits `width` columns, with no cut marker.
+///
+/// Scanning is bounded the same way [`truncate_to_display_width`] bounds it, so
+/// a pathological input (tens of thousands of zero-width characters) cannot
+/// turn a single line into an unbounded walk.
+fn clip_to_display_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    const MAX_CHARS_PER_COLUMN: usize = 4;
+    const EXTRA_ZERO_WIDTH_CHARS: usize = 16;
+    let max_chars = width
+        .saturating_mul(MAX_CHARS_PER_COLUMN)
+        .saturating_add(EXTRA_ZERO_WIDTH_CHARS);
+
+    let mut out = String::new();
+    let mut used = 0usize;
+    for (count, c) in text.chars().enumerate() {
+        if count >= max_chars {
+            break;
+        }
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used.saturating_add(w) > width {
+            break;
+        }
+        out.push(c);
+        used = used.saturating_add(w);
+    }
+    out
+}
+
+/// Clip a styled line to `width` display columns, marking a cut with
+/// [`truncation_marker`]. Each span keeps its own style.
+///
+/// Every measurement stays in `usize`: a 70 000-character URL pasted into a
+/// provider config must clip, not wrap a `u16` into a plausible-looking small
+/// number that then drives a layout constraint.
+pub(super) fn truncate_spans_to_width<'a>(spans: Vec<Span<'a>>, width: u16) -> Vec<Span<'a>> {
+    let width = width as usize;
+    if width == 0 {
+        return Vec::new();
+    }
+    if spans_display_width(&spans) <= width {
+        return spans;
+    }
+
+    let marker = truncation_marker();
+    let marker_width = UnicodeWidthStr::width(marker);
+    let budget = width.saturating_sub(marker_width);
+
+    let mut out: Vec<Span<'a>> = Vec::with_capacity(spans.len().min(width).saturating_add(1));
+    let mut used = 0usize;
+    for span in spans {
+        if used >= budget {
+            break;
+        }
+        let span_width = UnicodeWidthStr::width(span.content.as_ref());
+        if used.saturating_add(span_width) <= budget {
+            used = used.saturating_add(span_width);
+            out.push(span);
+            continue;
+        }
+        let style = span.style;
+        let clipped = clip_to_display_width(span.content.as_ref(), budget.saturating_sub(used));
+        if !clipped.is_empty() {
+            out.push(Span::styled(clipped, style));
+        }
+        break;
+    }
+    out.push(Span::raw(marker));
+    out
+}
+
 /// Produce a small, single-line passive summary without measuring or cloning
 /// an arbitrary complete input. Passive rows always show a bounded prefix and
 /// an ellipsis when the source exceeds this fixed safety budget.
@@ -360,6 +458,27 @@ pub(super) fn render_page_frame(
     keys: &[(&str, &str)],
     summary: Option<String>,
 ) -> Rect {
+    render_page_frame_spans(
+        frame,
+        area,
+        theme,
+        app,
+        title,
+        keys,
+        summary.map(|summary| vec![Span::raw(summary)]),
+    )
+}
+
+/// [`render_page_frame`] for pages whose summary carries its own styling.
+pub(super) fn render_page_frame_spans(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    app: &App,
+    title: &str,
+    keys: &[(&str, &str)],
+    summary: Option<Vec<Span<'static>>>,
+) -> Rect {
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -384,7 +503,7 @@ pub(super) fn render_page_frame(
 
     render_page_key_bar(frame, chunks[0], theme, keys, app.focus == Focus::Content);
     if let Some(summary) = summary {
-        render_summary_bar(frame, chunks[1], theme, summary);
+        render_summary_bar_spans(frame, chunks[1], theme, summary);
     }
 
     *chunks.last().expect("page frame always has a body chunk")
@@ -404,53 +523,23 @@ pub(super) fn breadcrumb_path(segments: &[&str]) -> String {
     segments.join(" › ")
 }
 
-/// Centered guidance for empty list screens: a bold title, a muted
-/// subtitle, and key chips for the actions that create the first entry.
-/// The first action renders as the primary (accent) chip.
+/// Centered guidance for empty list screens: a bold title and a muted
+/// subtitle. Available actions stay in the page key bar so they are not
+/// duplicated in the body.
 pub(super) fn render_empty_state(
     frame: &mut Frame<'_>,
     area: Rect,
     theme: &super::theme::Theme,
     title: &str,
     subtitle: &str,
-    actions: &[(&str, &str)],
 ) {
     let title_style = Style::default().add_modifier(Modifier::BOLD);
     let subtitle_style = Style::default().fg(theme.comment);
-    let primary_style = if theme.no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(theme.on_accent)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    };
-    let secondary_style = if theme.no_color {
-        Style::default()
-    } else {
-        Style::default()
-            .fg(theme.dim)
-            .bg(theme.surface)
-            .add_modifier(Modifier::BOLD)
-    };
-
-    let mut content_lines = vec![
+    let content_lines = vec![
         Line::styled(title.to_string(), title_style),
         Line::raw(""),
         Line::styled(subtitle.to_string(), subtitle_style),
-        Line::raw(""),
     ];
-    for (idx, (key, label)) in actions.iter().enumerate() {
-        let style = if idx == 0 {
-            primary_style
-        } else {
-            secondary_style
-        };
-        content_lines.push(Line::from(vec![Span::styled(
-            format!("  {key}  {label}  "),
-            style,
-        )]));
-    }
 
     let top_padding = area.height.saturating_sub(content_lines.len() as u16) / 2;
     let mut lines = Vec::with_capacity(top_padding as usize + content_lines.len());
@@ -739,8 +828,12 @@ fn script_usage_compact_line(
             spans.push(Span::raw("  "));
         }
         if let Some(name) = display_usage_plan_name(item) {
+            let name = match name.trim() {
+                "five_hour" | "weekly_limit" => quota_tier_label(name.trim()),
+                other => other.to_string(),
+            };
             spans.push(Span::styled(
-                format!("{} ", name.trim()),
+                format!("{name} "),
                 Style::default().fg(theme.comment),
             ));
         }
@@ -1004,12 +1097,26 @@ pub(super) fn render_summary_bar(
     theme: &super::theme::Theme,
     summary: String,
 ) {
+    render_summary_bar_spans(frame, area, theme, vec![Span::raw(summary)]);
+}
+
+/// Summary bar for lines that carry their own styling — a live indicator, for
+/// instance. Unstyled spans still inherit the bar's dim ink.
+pub(super) fn render_summary_bar_spans(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    summary: Vec<Span<'static>>,
+) {
     let summary_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(Style::default().fg(theme.dim));
+    let mut spans = Vec::with_capacity(summary.len() + 1);
+    spans.push(Span::raw("  "));
+    spans.extend(summary);
     frame.render_widget(
-        Paragraph::new(Line::raw(format!("  {summary}")))
+        Paragraph::new(Line::from(spans))
             .style(Style::default().fg(theme.dim))
             .wrap(Wrap { trim: false })
             .block(summary_block),
@@ -1364,4 +1471,240 @@ fn bounded_preview_text(text: &str) -> String {
         out.push('…');
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Refresh indicators (spinner + label)
+// ---------------------------------------------------------------------------
+//
+// One family for every "still working" surface: a spinner glyph on the app's
+// accent, optionally followed by a label and the escalation percentage.
+//
+// * wide slots — a card title rail, a summary bar, an empty body — take the
+//   whole indicator, so the animation is named rather than merely present;
+// * tight slots — a pagination footer, a scope line that already carries its
+//   own status text — take the glyph alone. It is the same glyph on the same
+//   cadence, so the two read as one widget at two sizes.
+//
+// Hard rule: at most one indicator per section. Where two pipelines can be live
+// at once (the Usage page's own refresh and the background session import),
+// callers merge them into a single indicator instead of animating twice on one
+// line — two spinners in phase read as a rendering fault, not as two signals.
+
+/// Spinner frames, one per 200ms tick: a ~0.8s rotation.
+const SPINNER_FRAMES_UNICODE: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+/// ASCII icon mode keeps the cadence and swaps in the classic rotation, the
+/// same four frames the loading overlay has always used.
+const SPINNER_FRAMES_ASCII: [&str; 4] = ["|", "/", "-", "\\"];
+
+/// Ticks one sync round must survive before its indicator earns a number.
+/// 50 ticks × 200ms = 10s: routine incremental syncs finish long before that,
+/// so only first imports and Codex rebuilds ever show a percentage.
+pub(super) const SYNC_ESCALATION_TICKS: u64 = 50;
+
+/// The spinner glyph for a frame counter, in whichever alphabet the terminal
+/// advertised.
+pub(super) fn spinner_frame(tick: u64) -> &'static str {
+    let frames = if icons::use_emoji() {
+        SPINNER_FRAMES_UNICODE
+    } else {
+        SPINNER_FRAMES_ASCII
+    };
+    frames[(tick % frames.len() as u64) as usize]
+}
+
+/// Ink shared by the glyph and its label, so the pair reads as one widget.
+/// NoColor keeps the motion and drops the hue.
+pub(super) fn refresh_indicator_style(theme: &super::theme::Theme) -> Style {
+    if theme.no_color {
+        Style::default()
+    } else {
+        Style::default().fg(theme.accent)
+    }
+}
+
+/// The glyph alone, for slots too tight to spend columns on a label.
+pub(super) fn refresh_spinner_span(tick: u64, theme: &super::theme::Theme) -> Span<'static> {
+    Span::styled(spinner_frame(tick), refresh_indicator_style(theme))
+}
+
+/// The glyph, a caller-supplied label, and the escalation percentage when a
+/// slow round has earned one. An empty label degrades to the glyph alone.
+pub(super) fn labelled_spinner_spans(
+    tick: u64,
+    theme: &super::theme::Theme,
+    label: &str,
+    percent: Option<u8>,
+) -> Vec<Span<'static>> {
+    let mut text = String::from(spinner_frame(tick));
+    if !label.is_empty() {
+        text.push(' ');
+        text.push_str(label);
+    }
+    if let Some(percent) = percent {
+        text.push_str(&format!(" {percent}%"));
+    }
+    vec![Span::styled(text, refresh_indicator_style(theme))]
+}
+
+/// The generic indicator: the glyph plus the shared refresh label.
+pub(super) fn refresh_indicator_spans(
+    tick: u64,
+    theme: &super::theme::Theme,
+    percent: Option<u8>,
+) -> Vec<Span<'static>> {
+    labelled_spinner_spans(tick, theme, texts::tui_refreshing(), percent)
+}
+
+const INLINE_REFRESH_SEPARATOR: &str = " · ";
+
+/// Width consumed when the shared refresh indicator follows inline summary
+/// text, including the separator between them.
+pub(super) fn inline_refresh_indicator_width(
+    tick: u64,
+    theme: &super::theme::Theme,
+    percent: Option<u8>,
+) -> u16 {
+    let width = UnicodeWidthStr::width(INLINE_REFRESH_SEPARATOR).saturating_add(
+        spans_display_width(&refresh_indicator_spans(tick, theme, percent)),
+    );
+    u16::try_from(width).unwrap_or(u16::MAX)
+}
+
+/// Render summary text followed immediately by the shared refresh indicator.
+///
+/// The summary is shortened first when space is tight, so the complete
+/// `spinner + Refreshing` widget stays visible at the end of the actual text
+/// instead of being pushed to a right-aligned slot or clipped off-screen.
+pub(super) fn summary_with_refresh_indicator(
+    summary: String,
+    refreshing: bool,
+    tick: u64,
+    theme: &super::theme::Theme,
+    percent: Option<u8>,
+    available_width: u16,
+) -> Vec<Span<'static>> {
+    if !refreshing {
+        return vec![Span::raw(truncate_to_display_width(
+            &summary,
+            available_width,
+        ))];
+    }
+
+    let indicator = refresh_indicator_spans(tick, theme, percent);
+    let indicator_width = spans_display_width(&indicator);
+    let available = available_width as usize;
+    if available <= indicator_width {
+        return truncate_spans_to_width(indicator, available_width);
+    }
+
+    let separator_width = UnicodeWidthStr::width(INLINE_REFRESH_SEPARATOR);
+    let summary_width = available
+        .saturating_sub(indicator_width)
+        .saturating_sub(separator_width);
+    let summary_width = u16::try_from(summary_width).unwrap_or(u16::MAX);
+    let summary = truncate_to_display_width(&summary, summary_width);
+
+    let mut spans = Vec::with_capacity(indicator.len().saturating_add(2));
+    if !summary.is_empty() {
+        spans.push(Span::raw(summary));
+        spans.push(Span::raw(INLINE_REFRESH_SEPARATOR));
+    }
+    spans.extend(indicator);
+    spans
+}
+
+/// The indicator on its own row, for a body that has nothing else to show yet.
+pub(super) fn loading_indicator_line(
+    tick: u64,
+    theme: &super::theme::Theme,
+    label: &str,
+    percent: Option<u8>,
+) -> Line<'static> {
+    Line::from(labelled_spinner_spans(tick, theme, label, percent))
+}
+
+// Deterministic sync state for render tests. The services-side progress lives
+// in process-global atomics that other tests read concurrently, so the TUI
+// reads through this thread-local seam instead of poking the global.
+#[cfg(test)]
+thread_local! {
+    static SYNC_PROGRESS_OVERRIDE: std::cell::Cell<Option<Option<(u64, u64)>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) struct SyncProgressOverride;
+
+#[cfg(test)]
+impl SyncProgressOverride {
+    /// `Some((done, total))` fakes a live round, `None` fakes an idle one.
+    pub(super) fn set(progress: Option<(u64, u64)>) -> Self {
+        SYNC_PROGRESS_OVERRIDE.with(|cell| cell.set(Some(progress)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SyncProgressOverride {
+    fn drop(&mut self) {
+        SYNC_PROGRESS_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+fn session_usage_sync_snapshot() -> Option<(u64, u64)> {
+    #[cfg(test)]
+    if let Some(progress) = SYNC_PROGRESS_OVERRIDE.with(std::cell::Cell::get) {
+        return progress;
+    }
+    crate::services::session_usage::sync_progress::snapshot()
+        .map(|(done, total)| (done as u64, total as u64))
+}
+
+/// Whether a background session-log import round is running right now.
+pub(super) fn session_usage_sync_active() -> bool {
+    session_usage_sync_snapshot().is_some()
+}
+
+/// Background session-log import progress, once the round knows its file count.
+pub(super) fn session_usage_sync_progress() -> Option<(u64, u64)> {
+    session_usage_sync_snapshot().filter(|(_, total)| *total > 0)
+}
+
+/// Percentage for a sync round that has outlived [`SYNC_ESCALATION_TICKS`].
+/// Rounds that finish quickly, and rounds that do not know their total yet,
+/// stay numberless: the spinner and its label already say "working".
+pub(super) fn sync_escalation_percent(
+    started_tick: Option<u64>,
+    tick: u64,
+    progress: Option<(u64, u64)>,
+) -> Option<u8> {
+    let started = started_tick?;
+    if tick.saturating_sub(started) < SYNC_ESCALATION_TICKS {
+        return None;
+    }
+    let (done, total) = progress?;
+    if total == 0 {
+        return None;
+    }
+    Some((done.min(total).saturating_mul(100) / total) as u8)
+}
+
+pub(super) fn sync_escalation(app: &App) -> Option<u8> {
+    sync_escalation_percent(
+        app.usage_sync_round_started_tick,
+        app.tick,
+        session_usage_sync_progress(),
+    )
+}
+
+/// The indicator a surface shows while the background session import runs,
+/// with a percentage only for rounds slow enough to owe the user an
+/// explanation. `None` when idle.
+pub(super) fn session_sync_indicator_spans(
+    app: &App,
+    theme: &super::theme::Theme,
+) -> Option<Vec<Span<'static>>> {
+    session_usage_sync_active()
+        .then(|| refresh_indicator_spans(app.tick, theme, sync_escalation(app)))
 }

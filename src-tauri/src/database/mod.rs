@@ -46,7 +46,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // DAO 方法通过 impl Database 提供，无需额外导出
@@ -56,15 +56,13 @@ const DB_BACKUP_RETAIN: usize = 10;
 const USAGE_ROLLUP_RETAIN_DAYS: i64 = 30;
 const USAGE_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
-static DATABASE_PERMISSION_CHECK: Once = Once::new();
-
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
 ///
 /// 注意：本库 schema 与上游项目同步（WebDAV 亦会整库同步），本仓库不得自行
 /// 加表/加列或提升版本号；本地新增的持久化需求一律放独立 sidecar 存储
 /// （如 session_manager::scan_cache_store）。
-pub(crate) const SCHEMA_VERSION: i32 = 13;
+pub(crate) const SCHEMA_VERSION: i32 = 16;
 
 fn database_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -83,6 +81,40 @@ pub(crate) fn database_path() -> Result<PathBuf, AppError> {
     Ok(
         resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?
             .join("cc-switch.db"),
+    )
+}
+
+fn with_database_write_context(error: AppError, db_path: Option<&Path>) -> AppError {
+    let AppError::Database(message) = error else {
+        return error;
+    };
+    let normalized = message.to_ascii_lowercase();
+    const NOT_WRITABLE_MARKERS: &[&str] = &[
+        "readonly",
+        "read-only",
+        "unable to open database file",
+        "permission denied",
+        "access is denied",
+        "operation not permitted",
+    ];
+    if !NOT_WRITABLE_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return AppError::Database(message);
+    }
+
+    let path = db_path
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "cc-switch.db".to_string());
+    AppError::localized(
+        "database_not_writable",
+        format!(
+            "数据库不可写: {path}。请检查当前用户是否对数据库文件及其配置目录拥有写权限，并确认文件所有者正确。CC-Switch 不会自动修改现有数据库的所有权或权限。SQLite: {message}"
+        ),
+        format!(
+            "Database is not writable: {path}. Check that the current user can write to the database file and its config directory, and verify file ownership. CC-Switch does not automatically change ownership or permissions of an existing database. SQLite: {message}"
+        ),
     )
 }
 
@@ -190,8 +222,8 @@ pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError
 }
 
 // Create folders with 0o700 permissions.
-// Leave existing folders untouched. We fix permissions elsewhere, so this helper
-// must not chmod arbitrary existing parents or follow symlinked config paths.
+// Leave existing folders untouched so this helper never changes user-managed
+// permissions or follows symlinked config paths.
 pub(crate) fn create_secure_dir_all(path: &Path) -> Result<bool, AppError> {
     let path = resolve_create_dir_path(path)?;
 
@@ -453,26 +485,90 @@ impl Database {
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
+        Self::init_impl(true)
+    }
+
+    /// Daemon startup already owns `daemon.pid`; the type-level lease proves
+    /// there cannot be an older daemon to quiesce before this initialization.
+    #[cfg(unix)]
+    pub(crate) fn init_for_daemon(
+        _pidfile: &crate::daemon::pidfile::PidFile,
+    ) -> Result<Self, AppError> {
+        Self::init_impl(false)
+    }
+
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn init_impl(quiesce_daemon: bool) -> Result<Self, AppError> {
+        let result = Self::init_impl_inner(quiesce_daemon);
+        match result {
+            Ok(database) => Ok(database),
+            Err(error) => {
+                let db_path = database_path().ok();
+                Err(with_database_write_context(error, db_path.as_deref()))
+            }
+        }
+    }
+
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn init_impl_inner(quiesce_daemon: bool) -> Result<Self, AppError> {
         if let Err(err) = crate::config::validate_config_dir() {
             log::warn!("拒绝初始化数据库：配置目录校验失败: {err}");
             return Err(err);
         }
-        warn_insecure_permissions_once();
-
+        crate::config::create_managed_config_dir_all(&get_app_config_dir())?;
         let db_path = database_path()?;
+        let migration_probe = Self::existing_database_needs_migration(&db_path)?;
 
-        // 确保父目录存在
-        if let Some(parent) = db_path.parent() {
-            create_secure_dir_all(parent)?;
-        }
+        // Lock order is daemon.pid -> database init lock. Probing is strictly
+        // read-only. The migration coordinator snapshots the live database
+        // before it sends Shutdown, so backup failure cannot take a working
+        // proxy offline. An old daemon does not know the v16 session-import
+        // file lock, so it must fully exit before the reset.
+        #[cfg(unix)]
+        let (mut daemon_migration_guard, pre_migration_backup_created) = if migration_probe {
+            if quiesce_daemon {
+                let guard = crate::daemon::migration::quiesce_for_database_migration(&db_path)
+                    .map_err(AppError::Message)?;
+                let backup_created = guard.backup_created();
+                (Some(guard), backup_created)
+            } else {
+                (None, Self::create_pre_migration_backup(&db_path)?)
+            }
+        } else {
+            (None, false)
+        };
+
+        #[cfg(not(unix))]
+        let pre_migration_backup_created = if migration_probe {
+            Self::create_pre_migration_backup(&db_path)?
+        } else {
+            false
+        };
 
         #[cfg(unix)]
-        let _init_lock = db_path
+        let init_lock = db_path
             .parent()
             .map(acquire_database_init_lock)
             .transpose()?;
 
-        // 新建数据库文件时以 0o600 原子创建，已有文件的权限由 prompt_fix_permissions 处理
+        // Re-check after taking the init lock. This closes the probe-to-lock
+        // race with an already-running v15 TUI/foreground proxy and also
+        // protects daemon-owned startup, which intentionally bypasses
+        // self-quiescence because it already owns daemon.pid.
+        #[cfg(unix)]
+        if Self::existing_database_needs_migration(&db_path)? {
+            if let Err(error) =
+                crate::daemon::migration::ensure_no_external_database_holders(&db_path)
+            {
+                drop(init_lock);
+                if let Some(guard) = daemon_migration_guard {
+                    guard.resume_after_safe_abort();
+                }
+                return Err(AppError::Message(error));
+            }
+        }
+
+        // 新建数据库文件时以 0o600 原子创建；已有文件保持原样。
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -533,7 +629,7 @@ impl Database {
             db_path: Some(db_path.clone()),
         };
 
-        {
+        let version = {
             let conn = lock_conn!(db.conn);
             let version = Self::get_user_version(&conn)?;
             drop(conn);
@@ -542,15 +638,36 @@ impl Database {
                 return Err(Self::future_schema_error(version));
             }
 
-            if version > 0 && version < SCHEMA_VERSION {
-                log::info!(
-                    "Creating pre-migration database backup (v{version} -> v{SCHEMA_VERSION})"
-                );
-                db.backup_database_file().map_err(|err| {
-                    AppError::Database(format!(
-                        "Pre-migration backup failed; database migration was not started: {err}"
-                    ))
-                })?;
+            version
+        };
+
+        // New-version foreground processes and daemons rendezvous here before
+        // any schema reset. Keep the same guard through backup, migration, and
+        // startup maintenance so no session importer can publish an old cursor.
+        let migration_sync_guard = if version < SCHEMA_VERSION {
+            Some(crate::services::session_usage::acquire_session_sync_guard(
+                &db,
+            )?)
+        } else {
+            None
+        };
+
+        if version > 0 && version < SCHEMA_VERSION && !pre_migration_backup_created {
+            log::info!("Creating pre-migration database backup (v{version} -> v{SCHEMA_VERSION})");
+            db.backup_database_file().map_err(|err| {
+                AppError::Database(format!(
+                    "Pre-migration backup failed; database migration was not started: {err}"
+                ))
+            })?;
+        }
+
+        #[cfg(unix)]
+        if version < SCHEMA_VERSION {
+            if let Some(guard) = daemon_migration_guard.as_mut() {
+                // From this point create_tables/apply_schema_migrations may
+                // mutate the database. A previous binary must not be resumed
+                // automatically if one of those operations fails.
+                guard.suppress_safe_abort_resume();
             }
         }
 
@@ -566,13 +683,69 @@ impl Database {
         db.ensure_model_pricing_seeded()?;
         db.run_usage_maintenance("startup");
 
+        drop(migration_sync_guard);
+
+        #[cfg(unix)]
+        {
+            // The replacement daemon must be allowed to take both locks before
+            // it starts and restores the workers captured by the resume plan.
+            drop(init_lock);
+            if let Some(guard) = daemon_migration_guard {
+                guard.resume_after_success();
+            }
+        }
+
         Ok(db)
+    }
+
+    fn create_pre_migration_backup(path: &Path) -> Result<bool, AppError> {
+        log::info!(
+            "Creating pre-migration database backup before schema changes (target v{SCHEMA_VERSION})"
+        );
+        Self::backup_database_path(path)
+            .map(|backup| backup.is_some())
+            .map_err(|error| {
+                AppError::Database(format!(
+                    "Pre-migration backup failed; database migration was not started: {error}"
+                ))
+            })
+    }
+
+    pub(crate) fn existing_database_needs_migration(path: &Path) -> Result<bool, AppError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                #[cfg(unix)]
+                validate_existing_database_file(path)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(AppError::io(path, error)),
+        }
+
+        let conn = Connection::open_with_flags(path, readonly_database_open_flags())
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let version = Self::get_user_version(&conn)?;
+        if version >= SCHEMA_VERSION {
+            return Ok(false);
+        }
+        Self::has_user_tables(&conn)
     }
 
     /// 打开当前 schema 的只读快照连接。
     ///
     /// 用于 TUI 后台热刷新等只读路径；不会创建目录、建表、迁移、seed 或执行启动维护。
     pub fn open_readonly_current_schema() -> Result<Self, AppError> {
+        Self::open_readonly_current_schema_with_busy_timeout(Duration::from_secs(5))
+    }
+
+    /// Open the same read-only snapshot with a caller-owned lock budget.
+    ///
+    /// Latency-sensitive overlays use this variant so even the schema-version
+    /// probe cannot inherit the general five-second database timeout.
+    pub(crate) fn open_readonly_current_schema_with_busy_timeout(
+        busy_timeout: Duration,
+    ) -> Result<Self, AppError> {
         let db_path = database_path()?;
         if !db_path.exists() {
             return Err(AppError::Database(format!(
@@ -586,6 +759,8 @@ impl Database {
         let conn = Connection::open_with_flags(&db_path, readonly_database_open_flags())
             .map_err(|e| AppError::Database(e.to_string()))?;
         Self::configure_connection(&conn)?;
+        conn.busy_timeout(busy_timeout)
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         let version = Self::get_user_version(&conn)?;
         if version > SCHEMA_VERSION {
@@ -716,25 +891,6 @@ impl Database {
     }
 }
 
-fn warn_insecure_permissions_once() {
-    DATABASE_PERMISSION_CHECK.call_once(|| {
-        let issues = crate::config::check_permissions();
-        if issues.is_empty() {
-            return;
-        }
-
-        log::warn!("检测到不安全的 cc-switch 配置权限，请收紧后再继续使用");
-        for (path, current, expected) in issues {
-            log::warn!(
-                "不安全权限: path={} current={:03o} expected={:03o}",
-                path.display(),
-                current,
-                expected
-            );
-        }
-    });
-}
-
 /// 批量导入耐久性守卫：持有期间本连接 `synchronous=NORMAL`（WAL 下 COMMIT
 /// 不再逐次 fsync，HDD/macOS 上是首次导入的主要开销），Drop 时恢复**进入守卫
 /// 之前**读到的 synchronous 值（数值 0=OFF/1=NORMAL/2=FULL/3=EXTRA），而非硬
@@ -825,6 +981,16 @@ impl Database {
             conn: Mutex::new(conn),
             runtime_key: self.runtime_key.clone(),
             db_path: Some(db_path),
+        })
+    }
+
+    /// Lock-file path shared by every process that imports or rebuilds session
+    /// usage for this database. In-memory databases need only the process lock.
+    pub(crate) fn session_usage_lock_path(&self) -> Option<PathBuf> {
+        self.db_path.as_ref().map(|path| {
+            let mut lock_name = path.as_os_str().to_os_string();
+            lock_name.push(".session-usage.lock");
+            PathBuf::from(lock_name)
         })
     }
 }

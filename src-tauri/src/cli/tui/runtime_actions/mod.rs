@@ -4,13 +4,13 @@ use crate::app_config::AppType;
 use crate::cli::i18n::{set_language, texts};
 use crate::error::AppError;
 
-use super::app::{Action, App, Focus, Overlay, TextViewState, ToastKind};
+use super::app::{Action, App, Focus, Overlay, ToastKind};
 use super::data::UiData;
 use super::runtime_systems::{
     LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, RequestTracker, SessionReq, SkillsReq,
     StreamCheckReq, UpdateReq, WebDavReq,
 };
-use super::terminal::TuiTerminal;
+use super::terminal::{ClipboardCopyOutcome, TuiTerminal};
 
 mod claude_temp_launch;
 mod codex_temp_launch;
@@ -90,8 +90,10 @@ pub(crate) fn apply_preloaded_app_switch(
     next: AppType,
     next_data: UiData,
 ) {
+    let changing_app = app.app_type != next;
+    let was_sessions = matches!(app.route, super::route::Route::Sessions);
     app.clear_openclaw_daily_memory_search_state();
-    if app.app_type != next {
+    if changing_app {
         // A log-detail snapshot is scoped to one application. Clearing the
         // browsing source here prevents a matching request id in another app
         // from rendering the previous app's row.
@@ -100,6 +102,10 @@ pub(crate) fn apply_preloaded_app_switch(
     app.app_type = next;
     let original_route = app.route.clone();
     app.route = normalize_route_for_app(&app.app_type, &app.route);
+    if was_sessions && (changing_app || !matches!(app.route, super::route::Route::Sessions)) {
+        app.sessions.request_cost_cancel();
+    }
+    app.clear_out_of_scope_action_toast();
     for route in &mut app.route_stack {
         *route = normalize_route_for_app(&app.app_type, route);
     }
@@ -144,6 +150,59 @@ pub(super) struct RuntimeActionContext<'a> {
     update_check: &'a mut RequestTracker,
     model_fetch_req_tx: Option<&'a mpsc::Sender<ModelFetchReq>>,
     managed_auth_req_tx: Option<&'a mpsc::Sender<ManagedAuthReq>>,
+}
+
+fn queue_active_session_message_refresh(app: &mut App, tx: &mpsc::Sender<SessionReq>) {
+    if !app.sessions.request_message_source_refresh() {
+        return;
+    }
+    let _ = queue_pending_session_message_refresh(app, Some(tx));
+}
+
+/// Dispatch one remembered manual transcript refresh when paging state allows
+/// it. Returning `false` means no request was ready, so the caller may continue
+/// with ordinary adjacent-page prefetch. A refresh requested during a page
+/// crossing remains remembered in the pager and is retried by the event loop.
+pub(super) fn queue_pending_session_message_refresh(
+    app: &mut App,
+    tx: Option<&mpsc::Sender<SessionReq>>,
+) -> bool {
+    let Some(key) = app.sessions.messages_key.clone() else {
+        return false;
+    };
+    let Some((request_id, transcript_generation, refresh_page, refresh_message_key, reader)) =
+        app.sessions.next_message_source_refresh_request()
+    else {
+        return false;
+    };
+    let result = tx
+        .ok_or_else(|| "sessions worker is not running".to_string())
+        .and_then(|tx| {
+            tx.send(SessionReq::LoadMessagePage {
+                request_id,
+                key: key.clone(),
+                transcript_generation: transcript_generation.clone(),
+                page: refresh_page,
+                refresh_page,
+                refresh_message_key,
+                reader,
+            })
+            .map_err(|error| error.to_string())
+        });
+    if let Err(error) = result {
+        app.sessions.fail_message_page_request(
+            request_id,
+            &key,
+            &transcript_generation,
+            refresh_page,
+            error.clone(),
+        );
+        app.push_toast(
+            texts::tui_sessions_toast_messages_failed(&error),
+            ToastKind::Warning,
+        );
+    }
+    true
 }
 
 /// Start one materialized Sessions search and settle it immediately if its
@@ -474,6 +533,27 @@ pub(crate) fn handle_action(
 
     match action {
         Action::None => Ok(()),
+        Action::CopyToClipboard { text } => {
+            match ctx.terminal.copy_to_clipboard(&text) {
+                Ok(ClipboardCopyOutcome::Confirmed) => ctx
+                    .app
+                    .push_toast(texts::tui_toast_copied_to_clipboard(), ToastKind::Success),
+                Ok(ClipboardCopyOutcome::Requested) => ctx.app.push_copyable_toast(
+                    texts::tui_toast_clipboard_request_sent(),
+                    ToastKind::Info,
+                    text,
+                ),
+                Err(err) => {
+                    log::debug!("failed to copy TUI toast content to clipboard: {err}");
+                    ctx.app.push_copyable_toast(
+                        texts::tui_toast_copy_to_clipboard_failed(),
+                        ToastKind::Warning,
+                        text,
+                    );
+                }
+            }
+            Ok(())
+        }
         Action::ReloadData => {
             *ctx.data = UiData::load(&ctx.app.app_type)?;
             ctx.app.maybe_prompt_import_candidate(ctx.data);
@@ -481,7 +561,9 @@ pub(crate) fn handle_action(
         }
         // The top-level TUI dispatcher owns the usage worker channel. Keeping
         // these arms harmless also makes direct runtime-action tests exhaustive.
-        Action::UsageRefresh | Action::UsageLogDetailRefresh { .. } => Ok(()),
+        Action::UsageRefresh | Action::UsageRebuildCodex | Action::UsageLogDetailRefresh { .. } => {
+            Ok(())
+        }
         Action::SetAppType(next) => {
             ctx.app.sessions.clear_detail();
             let _ = ctx.app.sessions.take_message_cancel_pending();
@@ -518,40 +600,45 @@ pub(crate) fn handle_action(
             // start another scan here it bumps scan_active to a new id, so the
             // in-flight thread's partial/finished messages (carrying the old id)
             // get rejected — and if the worker were to drop the superseding
-            // Refresh, the UI would stay loading forever. Serialize from the entry
-            // side instead: while a scan is active, ignore `r` (a reload during an
-            // ongoing scan is a no-op by design). The automatic entry point
-            // (queue_sessions_refresh_if_needed) already guards on `loading`.
-            if ctx.app.sessions.scan_active.is_some() {
-                return Ok(());
-            }
+            // Refresh, the UI would stay loading forever. Serialize only the list
+            // scan from the entry side; the independently paged open transcript
+            // still records and dispatches its own revalidation request.
             let provider_id = ctx.app.app_type.as_str().to_string();
             let Some(tx) = ctx.session_req_tx else {
-                let request_id = ctx.app.sessions.start_scan(provider_id);
-                ctx.app
-                    .sessions
-                    .fail_scan(request_id, "sessions worker is not running".to_string());
-                ctx.app.push_toast(
-                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
-                    ToastKind::Warning,
-                );
+                if ctx.app.sessions.scan_active.is_none() {
+                    let request_id = ctx.app.sessions.start_scan(provider_id);
+                    ctx.app
+                        .sessions
+                        .fail_scan(request_id, "sessions worker is not running".to_string());
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_worker_unavailable(
+                            "sessions worker is not running",
+                        ),
+                        ToastKind::Warning,
+                    );
+                }
                 return Ok(());
             };
-            let request_id = ctx.app.sessions.start_scan(provider_id.clone());
-            if let Err(err) = tx.send(SessionReq::Refresh {
-                request_id,
-                scope_epoch: ctx.app.sessions.scope_epoch,
-                provider_id,
-                // Manual `r` reload forces a full re-parse (ignore the mtime/size
-                // snapshot); the fresh results still refresh the persistent cache.
-                force: true,
-            }) {
-                ctx.app.sessions.fail_scan(request_id, err.to_string());
-                ctx.app.push_toast(
-                    texts::tui_sessions_toast_refresh_failed(&err.to_string()),
-                    ToastKind::Warning,
-                );
+            if ctx.app.sessions.scan_active.is_none() {
+                let request_id = ctx.app.sessions.start_scan(provider_id.clone());
+                ctx.app.sessions.mark_manual_refresh(request_id);
+                if let Err(err) = tx.send(SessionReq::Refresh {
+                    request_id,
+                    scope_epoch: ctx.app.sessions.scope_epoch,
+                    provider_id,
+                    // Manual `r` reload forces a full re-parse (ignore the mtime/size
+                    // snapshot); the fresh results still refresh the persistent cache.
+                    force: true,
+                }) {
+                    ctx.app.sessions.fail_scan(request_id, err.to_string());
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_refresh_failed(&err.to_string()),
+                        ToastKind::Warning,
+                    );
+                    return Ok(());
+                }
             }
+            queue_active_session_message_refresh(ctx.app, tx);
             Ok(())
         }
         Action::SessionsDeepSearch { query } => {
@@ -641,18 +728,7 @@ pub(crate) fn handle_action(
                         ToastKind::Success,
                     );
                 }
-                Err(err) => {
-                    ctx.app.overlay = Overlay::TextView(TextViewState {
-                        title: texts::tui_sessions_resume_command().to_string(),
-                        lines: command.lines().map(|line| line.to_string()).collect(),
-                        scroll: 0,
-                        action: None,
-                    });
-                    ctx.app.push_toast(
-                        texts::tui_sessions_toast_resume_fallback(&err.to_string()),
-                        ToastKind::Warning,
-                    );
-                }
+                Err(err) => show_session_resume_fallback(ctx.app, command, &err),
             }
             Ok(())
         }
@@ -715,6 +791,13 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SwitchRoute(route) => {
+            let entering_sessions = !matches!(ctx.app.route, super::route::Route::Sessions)
+                && matches!(route, super::route::Route::Sessions);
+            let leaving_sessions = matches!(ctx.app.route, super::route::Route::Sessions)
+                && !matches!(route, super::route::Route::Sessions);
+            if leaving_sessions {
+                ctx.app.sessions.request_cost_cancel();
+            }
             if !matches!(route, super::route::Route::Sessions) {
                 ctx.app.sessions.deep_search_active = None;
                 ctx.app.sessions.deep_search_pending = None;
@@ -733,6 +816,12 @@ pub(crate) fn handle_action(
                 }
             }
             ctx.app.route = route;
+            if entering_sessions
+                && ctx.app.sessions.page_token().is_some()
+                && !ctx.app.sessions.rows.is_empty()
+            {
+                ctx.app.sessions.request_cost_overlay();
+            }
             ctx.app.maybe_prompt_import_candidate(ctx.data);
             if matches!(ctx.app.route, super::route::Route::SkillsDiscover)
                 && ctx.app.skills_discover_results.is_empty()
@@ -809,6 +898,7 @@ pub(crate) fn handle_action(
         Action::ProviderQuotaRefresh { .. } => Ok(()),
         Action::ProviderModelFetch {
             base_url,
+            is_full_url,
             api_key,
             custom_user_agent,
             codex_oauth,
@@ -818,6 +908,7 @@ pub(crate) fn handle_action(
         } => providers::model_fetch(
             &mut ctx,
             base_url,
+            is_full_url,
             api_key,
             custom_user_agent,
             codex_oauth,
@@ -943,9 +1034,12 @@ pub(crate) fn handle_action(
             );
             Ok(())
         }
-        Action::SetCodexUnifiedSessionHistory { enabled } => {
-            settings::set_codex_unified_session_history(&mut ctx, enabled)
+        Action::SetPreserveCodexOfficialAuth { enabled } => {
+            settings::set_preserve_codex_official_auth(&mut ctx, enabled)
         }
+        Action::SetCodexUnifiedSessionHistory { .. } => Err(AppError::Message(
+            "Codex history settings bypassed the background worker".to_string(),
+        )),
         Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyListenAddress { address } => {
             settings::set_proxy_listen_address(&mut ctx, address)
@@ -965,6 +1059,7 @@ pub(crate) fn handle_action(
             ctx.proxy_loading,
             app_type,
             enabled,
+            ctx.data.reload_token,
         ),
         Action::SetLanguage(lang) => {
             set_language(lang)?;
@@ -1005,6 +1100,15 @@ pub(crate) fn handle_action(
             Ok(())
         }
     }
+}
+
+fn show_session_resume_fallback(app: &mut App, command: String, err: &AppError) {
+    log::debug!("failed to launch a terminal for session resume: {err}");
+    app.push_copyable_toast(
+        texts::tui_sessions_toast_resume_fallback(),
+        ToastKind::Warning,
+        command,
+    );
 }
 
 fn session_terminal_target(preferred_terminal: Option<&str>) -> String {
@@ -1106,6 +1210,38 @@ mod tests {
         )
     }
 
+    fn run_action_with_sessions(
+        app: &mut App,
+        data: &mut UiData,
+        session_req_tx: &mpsc::Sender<SessionReq>,
+        action: Action,
+    ) -> Result<(), AppError> {
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+
+        handle_action(
+            &mut terminal,
+            app,
+            data,
+            None,
+            None,
+            None,
+            None,
+            &mut proxy_loading,
+            None,
+            Some(session_req_tx),
+            None,
+            &mut webdav_loading,
+            None,
+            &mut update_check,
+            None,
+            None,
+            action,
+        )
+    }
+
     fn app_with_base_session_manifest() -> (App, TempDir) {
         let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
         let store = crate::session_manager::paged_manifest::PagedManifestStore::open_at(
@@ -1147,6 +1283,58 @@ mod tests {
     }
 
     #[test]
+    fn returning_to_loaded_sessions_requests_a_fresh_cost_overlay() {
+        let (mut app, _manifest_dir) = app_with_base_session_manifest();
+        app.route = Route::Main;
+        let mut data = UiData::default();
+
+        run_action(&mut app, &mut data, Action::SwitchRoute(Route::Sessions))
+            .expect("return to Sessions");
+
+        assert!(matches!(app.route, Route::Sessions));
+        assert!(
+            app.sessions.take_cost_overlay_request(),
+            "route re-entry must recover discarded or stale background cost results"
+        );
+    }
+
+    #[test]
+    fn leaving_sessions_invalidates_the_active_cost_overlay() {
+        let (mut app, _manifest_dir) = app_with_base_session_manifest();
+        app.route = Route::Sessions;
+        let mut data = UiData::default();
+        app.sessions
+            .start_cost_overlay()
+            .expect("visible page cost request");
+        assert!(app.sessions.has_active_cost_overlay());
+
+        run_action(&mut app, &mut data, Action::SwitchRoute(Route::Main)).expect("leave Sessions");
+
+        assert!(
+            !app.sessions.has_active_cost_overlay(),
+            "leaving Sessions must invalidate the running projection immediately"
+        );
+    }
+
+    #[test]
+    fn switching_apps_from_sessions_invalidates_the_active_cost_overlay() {
+        let (mut app, _manifest_dir) = app_with_base_session_manifest();
+        app.route = Route::Sessions;
+        app.sessions
+            .start_cost_overlay()
+            .expect("visible page cost request");
+        assert!(app.sessions.has_active_cost_overlay());
+
+        let mut data = UiData::default();
+        apply_preloaded_app_switch(&mut app, &mut data, AppType::Codex, UiData::default());
+
+        assert!(
+            !app.sessions.has_active_cost_overlay(),
+            "an app switch must immediately retire the old app's projection"
+        );
+    }
+
+    #[test]
     fn deep_search_disconnected_sender_settles_matching_request() {
         let (mut app, _manifest_dir) = app_with_base_session_manifest();
         let (tx, rx) = mpsc::channel();
@@ -1168,6 +1356,120 @@ mod tests {
             app.toast.as_ref(),
             Some(toast) if toast.kind == ToastKind::Warning
         ));
+    }
+
+    #[test]
+    fn manual_sessions_refresh_also_revalidates_the_open_transcript() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        std::fs::write(
+            &source,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "message"}],
+                    }
+                })
+            ),
+        )
+        .expect("write transcript fixture");
+        let (reader, page) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source.to_string_lossy(),
+        )
+        .expect("open transcript fixture");
+        let mut app = App::new(Some(AppType::Codex));
+        app.sessions.provider_id = Some("codex".to_string());
+        let key = "codex:session:test".to_string();
+        app.sessions.detail_key = Some(key.clone());
+        let message_request = app.sessions.start_message_load(key.clone());
+        assert!(app
+            .sessions
+            .finish_message_load(message_request, &key, reader, page));
+        let mut data = UiData::default();
+        let (tx, rx) = mpsc::channel();
+
+        run_action_with_sessions(&mut app, &mut data, &tx, Action::SessionsRefresh)
+            .expect("manual refresh");
+
+        assert!(matches!(
+            rx.recv().expect("session-list refresh"),
+            SessionReq::Refresh {
+                provider_id,
+                force: true,
+                ..
+            } if provider_id == "codex"
+        ));
+        assert!(matches!(
+            rx.recv().expect("transcript refresh"),
+            SessionReq::LoadMessagePage {
+                key: queued_key,
+                page: 0,
+                refresh_page: 0,
+                refresh_message_key: Some(_),
+                ..
+            } if queued_key == key
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn manual_sessions_refresh_revalidates_transcript_while_list_scan_is_active() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        std::fs::write(
+            &source,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "message"}],
+                    }
+                })
+            ),
+        )
+        .expect("write transcript fixture");
+        let (reader, page) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source.to_string_lossy(),
+        )
+        .expect("open transcript fixture");
+        let mut app = App::new(Some(AppType::Codex));
+        app.sessions.provider_id = Some("codex".to_string());
+        let key = "codex:session:test".to_string();
+        app.sessions.detail_key = Some(key.clone());
+        let message_request = app.sessions.start_message_load(key.clone());
+        assert!(app
+            .sessions
+            .finish_message_load(message_request, &key, reader, page));
+        let scan_request = app.sessions.start_scan("codex".to_string());
+        let mut data = UiData::default();
+        let (tx, rx) = mpsc::channel();
+
+        run_action_with_sessions(&mut app, &mut data, &tx, Action::SessionsRefresh)
+            .expect("manual refresh during list scan");
+
+        assert_eq!(app.sessions.scan_active, Some(scan_request));
+        assert!(matches!(
+            rx.recv().expect("transcript refresh"),
+            SessionReq::LoadMessagePage {
+                key: queued_key,
+                page: 0,
+                refresh_page: 0,
+                refresh_message_key: Some(_),
+                ..
+            } if queued_key == key
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -1239,6 +1541,47 @@ mod tests {
         assert_eq!(session_terminal_target(Some("")), "terminal");
         assert_eq!(session_terminal_target(Some("iterm2")), "iterm");
         assert_eq!(session_terminal_target(Some("ghostty")), "ghostty");
+    }
+
+    #[test]
+    fn session_resume_fallback_uses_copyable_toast_without_opening_an_overlay() {
+        let mut app = App::new(Some(AppType::Codex));
+        let command = "codex resume session-1".to_string();
+        let err = AppError::Message("Terminal resume is only supported on macOS".to_string());
+
+        show_session_resume_fallback(&mut app, command.clone(), &err);
+
+        assert!(matches!(app.overlay, Overlay::None));
+        let toast = app.toast.as_ref().expect("fallback toast");
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert_eq!(toast.message, texts::tui_sessions_toast_resume_fallback());
+        assert!(!toast.message.contains("macOS"));
+        assert_eq!(toast.copy_text(), Some(command.as_str()));
+    }
+
+    #[test]
+    fn clipboard_action_keeps_recovery_command_after_sending_terminal_request() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.push_copyable_toast(
+            texts::tui_sessions_toast_resume_fallback(),
+            ToastKind::Warning,
+            "codex resume session-1",
+        );
+        let mut data = UiData::default();
+
+        run_action(
+            &mut app,
+            &mut data,
+            Action::CopyToClipboard {
+                text: "codex resume session-1".to_string(),
+            },
+        )
+        .expect("copy action");
+
+        let toast = app.toast.as_ref().expect("clipboard request toast");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert_eq!(toast.message, texts::tui_toast_clipboard_request_sent());
+        assert_eq!(toast.copy_text(), Some("codex resume session-1"));
     }
 
     fn write_invalid_legacy_config(home: &Path) {

@@ -528,6 +528,7 @@ pub(crate) mod usage {
     use crossterm::event::KeyCode;
 
     use super::Binding;
+    use crate::app_config::AppType;
     use crate::cli::i18n::texts;
     use crate::cli::tui::app::App;
     use crate::cli::tui::data::UiData;
@@ -543,6 +544,7 @@ pub(crate) mod usage {
         OpenLogs,
         OpenPricing,
         Reload,
+        RebuildCodex,
     }
 
     pub(crate) const BINDINGS: &[Binding<Intent>] = &[
@@ -612,6 +614,13 @@ pub(crate) mod usage {
             label: |_, _| texts::tui_key_refresh(),
             shown: |_, _| true,
         },
+        Binding {
+            display: "R",
+            keys: &[KeyCode::Char('R')],
+            intent: Intent::RebuildCodex,
+            label: |_, _| texts::tui_key_rebuild_codex_usage(),
+            shown: super::help_only,
+        },
     ];
 
     pub(crate) fn intent_for(key: KeyCode) -> Option<Intent> {
@@ -624,6 +633,9 @@ pub(crate) mod usage {
 
     pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
         super::help_items(BINDINGS, app, data)
+            .into_iter()
+            .filter(|(display, _)| *display != "R" || matches!(app.app_type, AppType::Codex))
+            .collect()
     }
 }
 

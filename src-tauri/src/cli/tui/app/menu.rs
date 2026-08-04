@@ -23,6 +23,15 @@ impl App {
         self.filter.active || !self.displayed_filter_input().value.trim().is_empty()
     }
 
+    pub(crate) fn displayed_filter_title(&self) -> &'static str {
+        match self.displayed_filter_scope() {
+            FilterScope::Global => crate::cli::i18n::texts::tui_filter_title(),
+            FilterScope::SessionMessages => {
+                crate::cli::i18n::texts::tui_session_message_page_filter_title()
+            }
+        }
+    }
+
     fn displayed_filter_scope(&self) -> FilterScope {
         if self.filter.active {
             return self.filter.scope;
@@ -74,6 +83,10 @@ impl App {
             proxy_visual_transition: None,
             quota_auto_target_key: None,
             quota_last_auto_tick: None,
+            usage_last_auto_sync_tick: None,
+            usage_proxy_activity_dirty: false,
+            usage_last_proxy_refresh_tick: None,
+            usage_sync_round_started_tick: None,
             prompt_import_prompted_apps: HashSet::new(),
             common_config_notice_confirmed: true,
             usage_query_notice_confirmed: true,
@@ -236,6 +249,7 @@ impl App {
         }
 
         self.route = route.clone();
+        self.clear_out_of_scope_action_toast();
         self.focus = route_default_focus(&route);
 
         let nav_item = Self::nav_item_for_route(&self.app_type, &route);
@@ -326,6 +340,28 @@ impl App {
         }
     }
 
+    /// Remember when the current session-usage sync round started, so a refresh
+    /// indicator can tell a two-second incremental sync from a multi-minute
+    /// first import.
+    /// The main loop feeds this the services-side snapshot's liveness once per
+    /// tick; the round's start tick is the first tick it was seen alive.
+    ///
+    /// KNOWN LIMIT: liveness is sampled once per tick, so two back-to-back
+    /// rounds that start and finish inside the same tick read as one long
+    /// round, and the second can inherit the first's escalation percentage for
+    /// a frame. Harmless — the number only ever appears after ten seconds of
+    /// continuous work — and the alternative is a round id the services side
+    /// does not publish.
+    pub(crate) fn note_session_sync_round(&mut self, active: bool) {
+        if !active {
+            self.usage_sync_round_started_tick = None;
+            return;
+        }
+        if self.usage_sync_round_started_tick.is_none() {
+            self.usage_sync_round_started_tick = Some(self.tick);
+        }
+    }
+
     fn expire_managed_auth_login_if_needed(&mut self) {
         let Some(login) = self.managed_auth_login.as_ref() else {
             return;
@@ -374,10 +410,60 @@ impl App {
         }
     }
 
+    /// Usage projection consumed by the current route.
+    ///
+    /// Fixed presets share one aggregate cache entry. Main deliberately asks
+    /// for that fixed projection even if the Usage page was left on a custom
+    /// range, while Usage routes keep following the user's active range.
+    pub(crate) fn usage_projection_for_current_route(&self) -> Option<data::UsageRangePreset> {
+        match &self.route {
+            Route::Main => Some(data::UsageRangePreset::ThirtyDays),
+            Route::Usage | Route::UsageLogs | Route::UsageLogDetail { .. } => {
+                Some(self.usage.range)
+            }
+            _ => None,
+        }
+    }
+
+    /// Range needed by the shared Usage/Pricing worker for the current route.
+    /// Pricing participates in on-demand and manual loads, but keeps its
+    /// existing refresh policy.
+    pub(crate) fn usage_pricing_load_range_for_current_route(
+        &self,
+    ) -> Option<data::UsageRangePreset> {
+        match &self.route {
+            Route::Pricing => Some(data::UsageRangePreset::SevenDays),
+            _ => self.usage_projection_for_current_route(),
+        }
+    }
+
+    /// Fixed projections that can refresh from proxy activity without
+    /// interrupting an interactive log query. Custom windows and nested log
+    /// routes retain the existing session-sync and manual-refresh paths.
+    pub(crate) fn proxy_refreshed_usage_projection_for_current_route(
+        &self,
+    ) -> Option<data::UsageRangePreset> {
+        match &self.route {
+            Route::Main => Some(data::UsageRangePreset::ThirtyDays),
+            Route::Usage if !matches!(self.usage.range, data::UsageRangePreset::Custom(_)) => {
+                Some(self.usage.range)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn should_poll_proxy_activity(&self) -> bool {
-        (matches!(self.route, Route::Main)
+        let fast_poll_due = (matches!(self.route, Route::Main)
             || matches!(self.overlay, Overlay::FailoverQueueManager { .. }))
-            && self.tick.is_multiple_of(PROXY_ACTIVITY_POLL_INTERVAL_TICKS)
+            && self.tick.is_multiple_of(PROXY_ACTIVITY_POLL_INTERVAL_TICKS);
+        let usage_poll_due = matches!(self.route, Route::Usage)
+            && self
+                .proxy_refreshed_usage_projection_for_current_route()
+                .is_some()
+            && self
+                .tick
+                .is_multiple_of(super::super::USAGE_PROXY_REFRESH_INTERVAL_TICKS);
+        fast_poll_due || usage_poll_due
     }
 
     pub(crate) fn reset_proxy_activity(&mut self, input_tokens: u64, output_tokens: u64) {
@@ -387,6 +473,8 @@ impl App {
         self.proxy_activity_last_input_tokens = Some(input_tokens);
         self.proxy_activity_last_output_tokens = Some(output_tokens);
         self.proxy_activity_last_provider_tokens = None;
+        self.usage_proxy_activity_dirty = false;
+        self.usage_last_proxy_refresh_tick = Some(self.tick);
     }
 
     pub(crate) fn observe_proxy_token_activity(&mut self, input_tokens: u64, output_tokens: u64) {
@@ -401,20 +489,26 @@ impl App {
             return;
         };
 
-        let (input_delta, output_delta) =
-            if input_tokens < previous_input || output_tokens < previous_output {
-                self.proxy_input_activity_samples.clear();
-                self.proxy_output_activity_samples.clear();
-                (0, 0)
-            } else {
-                (
-                    input_tokens.saturating_sub(previous_input),
-                    output_tokens.saturating_sub(previous_output),
-                )
-            };
+        let counters_reset = input_tokens < previous_input || output_tokens < previous_output;
+        let (input_delta, output_delta) = if counters_reset {
+            self.proxy_input_activity_samples.clear();
+            self.proxy_output_activity_samples.clear();
+            (0, 0)
+        } else {
+            (
+                input_tokens.saturating_sub(previous_input),
+                output_tokens.saturating_sub(previous_output),
+            )
+        };
 
         self.proxy_input_activity_samples.push(input_delta);
         self.proxy_output_activity_samples.push(output_delta);
+        // A proxy restart can reset its in-memory counters after it has already
+        // persisted usage that the current aggregate has not seen. Treat the
+        // rollback as activity: one conservative refresh is cheaper than
+        // leaving the visible fixed Usage projection stale until another
+        // request arrives.
+        self.usage_proxy_activity_dirty |= counters_reset || input_delta > 0 || output_delta > 0;
 
         if self.proxy_input_activity_samples.len() > PROXY_ACTIVITY_WINDOW {
             let overflow = self.proxy_input_activity_samples.len() - PROXY_ACTIVITY_WINDOW;
@@ -482,12 +576,49 @@ impl App {
         self.proxy_activity_last_provider_tokens = Some(provider_token_map.clone());
     }
 
+    /// Consume proxy usage activity once its aggregate refresh interval has
+    /// elapsed. Further traffic sets the bit again while a query is running,
+    /// which collapses a busy stream into at most one follow-up query.
+    pub(crate) fn take_proxy_usage_refresh_due(&mut self, interval_ticks: u64) -> bool {
+        if !self.usage_proxy_activity_dirty {
+            return false;
+        }
+        let last_tick = *self.usage_last_proxy_refresh_tick.get_or_insert(self.tick);
+        if self.tick.saturating_sub(last_tick) < interval_ticks {
+            return false;
+        }
+        self.usage_proxy_activity_dirty = false;
+        self.usage_last_proxy_refresh_tick = Some(self.tick);
+        true
+    }
+
     pub fn push_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
         self.toast = Some(Toast::new(message, kind));
     }
 
     pub fn push_persistent_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
         self.toast = Some(Toast::persistent(message, kind));
+    }
+
+    pub fn push_copyable_toast(
+        &mut self,
+        message: impl Into<String>,
+        kind: ToastKind,
+        text: impl Into<String>,
+    ) {
+        let scope = ToastActionScope::new(self.app_type.clone(), self.route.clone());
+        self.toast = Some(Toast::copyable(message, kind, text, scope));
+    }
+
+    pub(crate) fn clear_out_of_scope_action_toast(&mut self) {
+        let is_out_of_scope = self
+            .toast
+            .as_ref()
+            .and_then(|toast| toast.action.as_ref())
+            .is_some_and(|action| !action.is_available_in(&self.app_type, &self.route));
+        if is_out_of_scope {
+            self.toast = None;
+        }
     }
 
     pub(crate) fn clear_managed_auth_login_toast(&mut self) {
@@ -614,6 +745,24 @@ impl App {
             || self.form_text_input_is_active()
     }
 
+    fn toast_action_input_is_available(&self) -> bool {
+        !self.overlay.is_active()
+            && self.editor.is_none()
+            && self.form.is_none()
+            && !self.filter.active
+    }
+
+    pub(crate) fn available_toast_action(&self) -> Option<&ToastAction> {
+        if !self.toast_action_input_is_available() {
+            return None;
+        }
+        self.toast
+            .as_ref()?
+            .action
+            .as_ref()
+            .filter(|action| action.is_available_in(&self.app_type, &self.route))
+    }
+
     fn normalize_vim_navigation_key(&self, key: KeyEvent) -> KeyEvent {
         if self.text_input_is_active() {
             return key;
@@ -650,6 +799,18 @@ impl App {
             return Action::Quit;
         }
 
+        if key.modifiers.is_empty() {
+            if let (Some(action), KeyCode::Char(ch)) = (self.available_toast_action(), key.code) {
+                if action.shortcut() == ch {
+                    match action {
+                        ToastAction::CopyToClipboard { text, .. } => {
+                            return Action::CopyToClipboard { text: text.clone() };
+                        }
+                    }
+                }
+            }
+        }
+
         if self.managed_auth_login.is_some()
             && !self.overlay.is_active()
             && !self.text_input_is_active()
@@ -670,7 +831,9 @@ impl App {
 
         let key = self.normalize_vim_navigation_key(key);
 
-        if matches!(key.code, KeyCode::Char('?')) && self.help_shortcut_is_available() {
+        if matches!(key.code, KeyCode::Char('?') | KeyCode::Char('？'))
+            && self.help_shortcut_is_available()
+        {
             self.open_help(data);
             return Action::None;
         }

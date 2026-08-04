@@ -125,10 +125,6 @@ pub(super) fn render_mcp(
             theme,
             texts::tui_mcp_empty_title(),
             texts::tui_mcp_empty_subtitle(),
-            &[
-                ("a", texts::tui_key_add()),
-                ("i", texts::tui_mcp_action_import_existing()),
-            ],
         );
         return;
     }

@@ -3,24 +3,26 @@ use std::{collections::HashSet, path::PathBuf};
 
 use super::{provider_inspect, provider_usage_query};
 use crate::app_config::AppType;
+use crate::claude_model_config::{ClaudeModelRole, CLAUDE_DEFAULT_MODEL_ENV_KEY};
 use crate::cli::commands::provider_input::{
-    build_claude_settings_config_from_prompt, build_codex_settings_config_from_prompt,
-    build_gemini_api_key_settings_config, build_gemini_oauth_settings_config,
-    build_provider_from_add_template, codex_current_base_url_model,
-    common_snippet_has_effective_config, current_timestamp, display_provider_summary,
-    generate_provider_id_for_app, prompt_basic_fields, prompt_optional_fields,
-    prompt_settings_config, provider_uses_common_config, set_provider_common_config_meta,
-    supports_common_config, validate_provider_add_template, validate_provider_id_for_add,
-    OptionalFields, ProviderAddTemplate, SettingsConfigPromptResult,
+    apply_additive_template_field_overrides, build_claude_settings_config_from_prompt,
+    build_codex_settings_config_from_prompt, build_gemini_api_key_settings_config,
+    build_gemini_oauth_settings_config, build_provider_from_add_template,
+    codex_current_base_url_model, common_snippet_has_effective_config, current_timestamp,
+    display_provider_summary, generate_provider_id_for_app, prompt_basic_fields,
+    prompt_optional_fields, prompt_settings_config, provider_uses_common_config,
+    set_provider_common_config_meta, supports_common_config, validate_provider_add_template,
+    validate_provider_id_for_add, OptionalFields, ProviderAddTemplate, SettingsConfigPromptResult,
 };
 use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
+use crate::provider_preset_models::GEMINI_DEFAULT_MODEL;
 use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
 use indexmap::IndexMap;
-use inquire::{Confirm, Select};
+use inquire::{Confirm, Select, Text};
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 const CLAUDE_API_FORMAT_ANTHROPIC: &str = "anthropic";
@@ -33,9 +35,10 @@ const CLAUDE_API_FORMAT_CHOICES: [&str; 4] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_GEMINI_NATIVE,
 ];
-const CODEX_API_FORMAT_CHOICES: [&str; 2] = [
+const CODEX_API_FORMAT_CHOICES: [&str; 3] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_OPENAI_CHAT,
+    CLAUDE_API_FORMAT_ANTHROPIC,
 ];
 
 fn is_claude_official_provider(provider: &Provider) -> bool {
@@ -70,6 +73,7 @@ fn normalize_codex_api_format(raw: &str) -> &'static str {
         | CLAUDE_API_FORMAT_OPENAI_CHAT
         | "openai-chat"
         | "openai_chat_completions" => CLAUDE_API_FORMAT_OPENAI_CHAT,
+        "anthropic" | "anthropic_messages" | "anthropic-messages" => CLAUDE_API_FORMAT_ANTHROPIC,
         _ => CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     }
 }
@@ -135,7 +139,9 @@ fn effective_codex_api_format(provider: &Provider) -> &'static str {
         return normalize_codex_api_format(api_format);
     }
 
-    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+    if crate::proxy::providers::codex_provider_uses_anthropic(provider) {
+        CLAUDE_API_FORMAT_ANTHROPIC
+    } else if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
         CLAUDE_API_FORMAT_OPENAI_CHAT
     } else {
         CLAUDE_API_FORMAT_OPENAI_RESPONSES
@@ -244,12 +250,43 @@ fn apply_claude_api_format(provider: &mut Provider, api_format: &str) {
 
 fn apply_codex_api_format(provider: &mut Provider, api_format: &str) {
     let api_format = normalize_codex_api_format(api_format);
-    provider
-        .meta
-        .get_or_insert_with(ProviderMeta::default)
-        .api_format = Some(api_format.to_string());
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.api_format = Some(api_format.to_string());
+    if api_format != CLAUDE_API_FORMAT_ANTHROPIC {
+        meta.api_key_field = None;
+        meta.impersonate_claude_code = None;
+        meta.max_output_tokens = None;
+    }
     strip_codex_api_format_legacy_settings(provider);
     normalize_codex_settings_wire_api(provider);
+}
+
+fn apply_add_codex_anthropic_options(
+    app_type: &AppType,
+    provider: &mut Provider,
+    api_key_field: Option<ClaudeApiKeyField>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
+) {
+    if !matches!(app_type, AppType::Codex)
+        || effective_codex_api_format(provider) != CLAUDE_API_FORMAT_ANTHROPIC
+    {
+        return;
+    }
+
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    if let Some(api_key_field) = api_key_field {
+        meta.api_key_field = match api_key_field {
+            ClaudeApiKeyField::AuthToken => None,
+            ClaudeApiKeyField::ApiKey => Some(api_key_field.as_env_key().to_string()),
+        };
+    }
+    if impersonate_claude_code {
+        meta.impersonate_claude_code = Some(true);
+    }
+    if let Some(max_output_tokens) = max_output_tokens.filter(|value| *value > 0) {
+        meta.max_output_tokens = Some(max_output_tokens);
+    }
 }
 
 fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
@@ -278,6 +315,9 @@ fn apply_fixed_codex_api_format_if_needed(app_type: &AppType, provider: &mut Pro
     if provider.is_codex_official() {
         if let Some(meta) = provider.meta.as_mut() {
             meta.api_format = None;
+            meta.api_key_field = None;
+            meta.impersonate_claude_code = None;
+            meta.max_output_tokens = None;
             meta.codex_chat_reasoning = None;
         }
         if let Some(settings_obj) = provider.settings_config.as_object_mut() {
@@ -360,6 +400,94 @@ fn prompt_and_apply_codex_api_format(
 
     let api_format = prompt_codex_api_format(provider)?;
     apply_codex_api_format(provider, api_format);
+    if api_format == CLAUDE_API_FORMAT_ANTHROPIC {
+        prompt_and_apply_codex_anthropic_options(provider)?;
+    }
+    Ok(())
+}
+
+fn prompt_and_apply_codex_anthropic_options(provider: &mut Provider) -> Result<(), AppError> {
+    let current_api_key_field = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_key_field.as_deref())
+        .filter(|field| *field == "ANTHROPIC_API_KEY")
+        .map(|_| ClaudeApiKeyField::ApiKey)
+        .unwrap_or(ClaudeApiKeyField::AuthToken);
+    let fields = [ClaudeApiKeyField::AuthToken, ClaudeApiKeyField::ApiKey];
+    let labels = fields
+        .iter()
+        .map(|field| texts::tui_codex_anthropic_auth_field_value(field.as_env_key()).to_string())
+        .collect::<Vec<_>>();
+    let default_index = fields
+        .iter()
+        .position(|field| *field == current_api_key_field)
+        .unwrap_or(0);
+    let selected = Select::new(
+        texts::tui_label_codex_anthropic_auth_field(),
+        labels.clone(),
+    )
+    .with_starting_cursor(default_index)
+    .prompt()
+    .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+    let selected_field = fields
+        .get(
+            labels
+                .iter()
+                .position(|label| label == &selected)
+                .unwrap_or(default_index),
+        )
+        .copied()
+        .unwrap_or(ClaudeApiKeyField::AuthToken);
+
+    let impersonate_claude_code = Confirm::new(texts::tui_label_codex_impersonate_claude_code())
+        .with_default(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.impersonate_claude_code)
+                == Some(true),
+        )
+        .prompt()
+        .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+
+    let current_max_output_tokens = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.max_output_tokens)
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let max_output_tokens = if current_max_output_tokens.is_empty() {
+        Text::new(texts::tui_label_codex_max_output_tokens())
+            .with_placeholder("8192")
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_codex_max_output_tokens())
+            .with_initial_value(&current_max_output_tokens)
+            .prompt()
+    }
+    .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+    let max_output_tokens = if max_output_tokens.trim().is_empty() {
+        None
+    } else {
+        Some(max_output_tokens.trim().parse::<u64>().map_err(|_| {
+            AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
+                "最大输出 tokens 必须是正整数".to_string()
+            } else {
+                "max output tokens must be a positive integer".to_string()
+            })
+        })?)
+        .filter(|value| *value > 0)
+    };
+
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.api_key_field = match selected_field {
+        ClaudeApiKeyField::AuthToken => None,
+        ClaudeApiKeyField::ApiKey => Some(selected_field.as_env_key().to_string()),
+    };
+    meta.impersonate_claude_code = impersonate_claude_code.then_some(true);
+    meta.max_output_tokens = max_output_tokens;
     Ok(())
 }
 
@@ -572,6 +700,21 @@ pub enum ProviderCommand {
         /// Default model (Claude/Codex/Gemini field mode, optional)
         #[arg(long, conflicts_with_all = ["config", "config_file"])]
         model: Option<String>,
+        /// Claude Haiku role model ([1M] is ignored because Haiku does not support it)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        haiku_model: Option<String>,
+        /// Claude Sonnet role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        sonnet_model: Option<String>,
+        /// Claude Opus role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        opus_model: Option<String>,
+        /// Claude Fable role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        fable_model: Option<String>,
+        /// Claude Subagent role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        subagent_model: Option<String>,
         /// Raw settings_config as a JSON string (any app, advanced use)
         #[arg(long, conflicts_with = "config_file")]
         config: Option<String>,
@@ -587,12 +730,18 @@ pub enum ProviderCommand {
         /// Sort index (optional)
         #[arg(long)]
         sort_index: Option<usize>,
-        /// Claude API-key field to populate (default: auth-token)
+        /// Claude API-key field, or Codex Anthropic upstream auth field
         #[arg(long, value_enum)]
         api_key_field: Option<ClaudeApiKeyFieldArg>,
-        /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: responses|chat)
+        /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: responses|chat|anthropic)
         #[arg(long)]
         api_format: Option<String>,
+        /// Emulate the Claude Code client for a Codex Anthropic upstream
+        #[arg(long)]
+        impersonate_claude_code: bool,
+        /// Override max_tokens for a Codex Anthropic upstream
+        #[arg(long)]
+        max_output_tokens: Option<u64>,
         /// Attach the app-level common config snippet (Claude/Codex/Gemini)
         #[arg(long)]
         common_config: bool,
@@ -697,6 +846,11 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
             base_url,
             api_key,
             model,
+            haiku_model,
+            sonnet_model,
+            opus_model,
+            fable_model,
+            subagent_model,
             config,
             config_file,
             website_url,
@@ -704,6 +858,8 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
             sort_index,
             api_key_field,
             api_format,
+            impersonate_claude_code,
+            max_output_tokens,
             common_config,
             account_id,
             fast_mode,
@@ -716,6 +872,11 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                 base_url,
                 api_key,
                 model,
+                haiku_model,
+                sonnet_model,
+                opus_model,
+                fable_model,
+                subagent_model,
                 config,
                 config_file,
                 website_url,
@@ -723,6 +884,8 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                 sort_index,
                 api_key_field: api_key_field.map(ClaudeApiKeyField::from),
                 api_format,
+                impersonate_claude_code,
+                max_output_tokens,
                 common_config,
                 account_id,
                 fast_mode,
@@ -900,6 +1063,7 @@ fn delete_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 }
 
 /// Parsed flags for the non-interactive `provider add`.
+#[derive(Default)]
 struct AddProviderArgs {
     template: Option<ProviderAddTemplate>,
     name: Option<String>,
@@ -907,6 +1071,11 @@ struct AddProviderArgs {
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+    haiku_model: Option<String>,
+    sonnet_model: Option<String>,
+    opus_model: Option<String>,
+    fable_model: Option<String>,
+    subagent_model: Option<String>,
     config: Option<String>,
     config_file: Option<PathBuf>,
     website_url: Option<String>,
@@ -914,9 +1083,54 @@ struct AddProviderArgs {
     sort_index: Option<usize>,
     api_key_field: Option<ClaudeApiKeyField>,
     api_format: Option<String>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
     common_config: bool,
     account_id: Option<String>,
     fast_mode: bool,
+}
+
+impl AddProviderArgs {
+    fn has_claude_role_models(&self) -> bool {
+        [
+            &self.haiku_model,
+            &self.sonnet_model,
+            &self.opus_model,
+            &self.fable_model,
+            &self.subagent_model,
+        ]
+        .into_iter()
+        .any(Option::is_some)
+    }
+
+    fn claude_model_fields(&self) -> Vec<(&'static str, Option<String>)> {
+        [
+            (CLAUDE_DEFAULT_MODEL_ENV_KEY, self.model.clone()),
+            (
+                ClaudeModelRole::Haiku.model_env_key(),
+                self.haiku_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Sonnet.model_env_key(),
+                self.sonnet_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Opus.model_env_key(),
+                self.opus_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Fable.model_env_key(),
+                self.fable_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Subagent.model_env_key(),
+                self.subagent_model.clone(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| non_empty(value).map(|value| (key, Some(value))))
+        .collect()
+    }
 }
 
 /// Trim a flag value and drop it when empty.
@@ -951,6 +1165,20 @@ fn add_additive_requires_config_error(app_type: &AppType) -> AppError {
     } else {
         format!(
             "provider add for {} requires raw config via --config or --config-file (or use the TUI)",
+            app_type.as_str()
+        )
+    })
+}
+
+fn add_claude_role_models_unsupported_error(app_type: &AppType) -> AppError {
+    AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
+        format!(
+            "Haiku、Sonnet、Opus、Fable 和 Subagent 模型参数仅适用于 Claude，当前应用为 {}",
+            app_type.as_str()
+        )
+    } else {
+        format!(
+            "Haiku, Sonnet, Opus, Fable, and Subagent model flags are only valid for Claude; current app is {}",
             app_type.as_str()
         )
     })
@@ -1098,6 +1326,10 @@ fn build_add_settings_config(
         return Ok(raw.clone());
     }
 
+    if !matches!(app_type, AppType::Claude) && args.has_claude_role_models() {
+        return Err(add_claude_role_models_unsupported_error(app_type));
+    }
+
     match app_type {
         AppType::Claude => {
             let base_url = non_empty(args.base_url.clone())
@@ -1106,7 +1338,7 @@ fn build_add_settings_config(
             let api_key = non_empty(args.api_key.clone())
                 .ok_or_else(|| add_missing_field_error("--api-key"))?;
             let field = args.api_key_field.unwrap_or(ClaudeApiKeyField::AuthToken);
-            let model_fields = vec![("ANTHROPIC_MODEL", non_empty(args.model.clone()))];
+            let model_fields = args.claude_model_fields();
             let settings = build_claude_settings_config_from_prompt(
                 current,
                 field,
@@ -1148,7 +1380,7 @@ fn build_add_settings_config(
                     .unwrap_or_default();
                 let model = non_empty(args.model.clone())
                     .or_else(|| gemini_current_env(current, &["GEMINI_MODEL"]))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| GEMINI_DEFAULT_MODEL.to_string());
                 Ok(build_gemini_api_key_settings_config(
                     current, &api_key, &base_url, &model,
                 ))
@@ -1156,7 +1388,17 @@ fn build_add_settings_config(
             None => Ok(build_gemini_oauth_settings_config(current)),
         },
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
-            Err(add_additive_requires_config_error(app_type))
+            let current = current.ok_or_else(|| add_additive_requires_config_error(app_type))?;
+            let api_key = non_empty(args.api_key.clone());
+            let base_url = non_empty(args.base_url.clone());
+            let model = non_empty(args.model.clone());
+            apply_additive_template_field_overrides(
+                app_type,
+                current,
+                api_key.as_deref(),
+                base_url.as_deref(),
+                model.as_deref(),
+            )
         }
     }
 }
@@ -1193,7 +1435,13 @@ fn validate_codex_api_format(raw: &str) -> Result<&'static str, AppError> {
         "responses" | "openai_responses" | "openai-responses" => {
             Ok(CLAUDE_API_FORMAT_OPENAI_RESPONSES)
         }
-        other => Err(add_invalid_api_format_error(other, "responses, chat")),
+        "anthropic" | "anthropic_messages" | "anthropic-messages" => {
+            Ok(CLAUDE_API_FORMAT_ANTHROPIC)
+        }
+        other => Err(add_invalid_api_format_error(
+            other,
+            "responses, chat, anthropic",
+        )),
     }
 }
 
@@ -1310,8 +1558,9 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
         let has_field_input = raw_config.is_some()
             || args.base_url.is_some()
             || args.api_key.is_some()
-            || args.model.is_some();
-        if template.requires_settings_prompt() {
+            || args.model.is_some()
+            || args.has_claude_role_models();
+        if template.supports_field_overrides() {
             // Sponsor / third-party templates: fold the CLI field values into the
             // template's prefilled settings_config (base_url is inherited when
             // --base-url is omitted).
@@ -1346,6 +1595,13 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
         &mut provider,
         non_empty(args.api_format.clone()).as_deref(),
     )?;
+    apply_add_codex_anthropic_options(
+        &app_type,
+        &mut provider,
+        args.api_key_field,
+        args.impersonate_claude_code,
+        args.max_output_tokens,
+    );
     apply_add_codex_oauth_options(
         &app_type,
         &mut provider,
@@ -1857,6 +2113,46 @@ mod tests {
     }
 
     #[test]
+    fn noninteractive_add_uses_upstream_defaults_when_model_is_omitted() {
+        let mut prompt_result = None;
+        let codex = build_add_settings_config(
+            &AppType::Codex,
+            &AddProviderArgs {
+                base_url: Some("https://codex.example/v1".to_string()),
+                api_key: Some("sk-codex".to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            "Custom Codex",
+            &mut prompt_result,
+        )
+        .expect("build Codex settings");
+        assert!(codex["config"]
+            .as_str()
+            .expect("Codex config should be TOML")
+            .contains("model = \"gpt-5.6-sol\""));
+
+        let gemini = build_add_settings_config(
+            &AppType::Gemini,
+            &AddProviderArgs {
+                base_url: Some("https://gemini.example".to_string()),
+                api_key: Some("sk-gemini".to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            "Custom Gemini",
+            &mut prompt_result,
+        )
+        .expect("build Gemini settings");
+        assert_eq!(
+            gemini["env"]["GEMINI_MODEL"],
+            crate::provider_preset_models::GEMINI_DEFAULT_MODEL
+        );
+    }
+
+    #[test]
     fn claude_api_format_effective_value_prefers_meta_over_legacy_settings() {
         let mut provider = claude_provider(json!({
             "api_format": "openai_chat",
@@ -2119,6 +2415,23 @@ wire_api = "chat"
         assert_eq!(
             effective_codex_api_format(&provider),
             CLAUDE_API_FORMAT_OPENAI_CHAT
+        );
+    }
+
+    #[test]
+    fn codex_api_format_effective_value_reads_legacy_anthropic_wire_api() {
+        let provider = codex_provider(json!({
+            "config": r#"model_provider = "vendor"
+
+[model_providers.vendor]
+base_url = "https://vendor.example/v1"
+wire_api = "anthropic"
+"#
+        }));
+
+        assert_eq!(
+            effective_codex_api_format(&provider),
+            CLAUDE_API_FORMAT_ANTHROPIC
         );
     }
 

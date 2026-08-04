@@ -127,6 +127,7 @@ pub(crate) fn render_mcp_add_form(
 
 fn mcp_preview_value(mcp: &super::form::McpAddFormState) -> Value {
     const MAX_ENV_KEYS: usize = 128;
+    const MAX_HEADER_KEYS: usize = 128;
     const MAX_TAGS: usize = 128;
 
     let source = mcp.source_server();
@@ -177,7 +178,15 @@ fn mcp_preview_value(mcp: &super::form::McpAddFormState) -> Value {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
-    for key in ["type", "command", "args", "env", "url"] {
+    for key in [
+        "type",
+        "command",
+        "args",
+        "env",
+        "url",
+        "headers",
+        "http_headers",
+    ] {
         server.remove(key);
     }
     if mcp.server_type.is_remote() {
@@ -195,6 +204,24 @@ fn mcp_preview_value(mcp: &super::form::McpAddFormState) -> Value {
             "url".to_string(),
             Value::String(bounded_trimmed_text_for_display(&mcp.url.value)),
         );
+        if !mcp.header_rows.is_empty() {
+            let mut headers = serde_json::Map::new();
+            for row in mcp.header_rows.iter().take(MAX_HEADER_KEYS) {
+                let key = row.key.chars().take(128).collect::<String>();
+                headers.insert(
+                    key,
+                    Value::String(bounded_trimmed_text_for_display(&row.value)),
+                );
+            }
+            let hidden = mcp.header_rows.len().saturating_sub(MAX_HEADER_KEYS);
+            if hidden > 0 {
+                headers.insert(
+                    "…".to_string(),
+                    Value::String(format!("[preview truncated: {hidden} more entries]")),
+                );
+            }
+            server.insert("headers".to_string(), Value::Object(headers));
+        }
     } else {
         server.insert(
             "command".to_string(),
@@ -354,6 +381,7 @@ pub(crate) fn mcp_field_label_and_value(
         McpAddField::Args => texts::tui_label_args().to_string(),
         McpAddField::Url => texts::tui_label_url().to_string(),
         McpAddField::Env => texts::tui_label_env().to_string(),
+        McpAddField::Headers => texts::tui_label_headers().to_string(),
         McpAddField::AppClaude => texts::tui_label_app_claude().to_string(),
         McpAddField::AppCodex => texts::tui_label_app_codex().to_string(),
         McpAddField::AppGemini => texts::tui_label_app_gemini().to_string(),
@@ -366,7 +394,8 @@ pub(crate) fn mcp_field_label_and_value(
         McpAddField::Command => bounded_trimmed_text_for_display(&mcp.command.value),
         McpAddField::Args => mcp_args_summary(mcp),
         McpAddField::Url => bounded_trimmed_text_for_display(&mcp.url.value),
-        McpAddField::Env => mcp.env_summary(),
+        McpAddField::Env => mcp.key_value_summary(McpKeyValueKind::Env),
+        McpAddField::Headers => mcp.key_value_summary(McpKeyValueKind::Headers),
         McpAddField::AppClaude => {
             if mcp.apps.claude {
                 format!("[{}]", texts::tui_marker_active())
@@ -464,7 +493,9 @@ fn mcp_add_form_key_items(
         FormFocus::Fields => {
             if !editing {
                 let enter_action = match selected_field {
-                    Some(McpAddField::Type | McpAddField::Env) => texts::tui_key_open(),
+                    Some(McpAddField::Type | McpAddField::Env | McpAddField::Headers) => {
+                        texts::tui_key_open()
+                    }
                     Some(
                         McpAddField::AppClaude
                         | McpAddField::AppCodex

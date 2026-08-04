@@ -19,9 +19,11 @@ use super::{
     metrics::estimate_tokens_from_value,
     providers::{ClaudeAdapter, ProviderAdapter},
     response::{
-        build_anthropic_stream_response, build_buffered_codex_chat_response,
-        build_buffered_codex_chat_response_with_context, build_buffered_json_response,
-        build_buffered_passthrough_response, build_codex_chat_error_response,
+        build_anthropic_stream_response, build_buffered_codex_anthropic_response_with_context,
+        build_buffered_codex_chat_response, build_buffered_codex_chat_response_with_context,
+        build_buffered_json_response, build_buffered_passthrough_response,
+        build_codex_anthropic_response_with_context,
+        build_codex_anthropic_stream_response_with_context, build_codex_chat_error_response,
         build_codex_chat_response_with_context, build_codex_chat_stream_response_with_context,
         build_json_response, build_passthrough_response, is_sse_response, PreparedResponse,
     },
@@ -40,14 +42,38 @@ pub async fn get_status(State(state): State<ProxyServerState>) -> impl IntoRespo
     Json(state.snapshot_status().await)
 }
 
-/// Handle `GET /v1/models` — return merged model list from model routes
-/// and provider env configs.
+/// Handle `GET /models` and `GET /v1/models`.
 ///
-/// Emits a protocol superset (Anthropic + OpenAI) so that both
-/// Anthropic clients (via `ANTHROPIC_BASE_URL`) and OpenAI-style
-/// clients can consume the response.
-pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoResponse {
+/// Two serving modes:
+///
+/// 1. Codex catalog mode — when `config.toml` references the cc-switch-managed
+///    Codex model catalog, serve that catalog verbatim (Codex native envelope
+///    with a top-level `models` field). Missing or malformed catalog files
+///    fall back to an empty `{"models": []}` catalog (stale guard).
+/// 2. Merged discovery mode — otherwise return a protocol superset
+///    (Anthropic + OpenAI fields) merged from provider env configs and enabled
+///    model routes across all apps, so clients like Claude Code's `/model`
+///    picker can discover routable models through the proxy.
+pub async fn handle_models(State(state): State<ProxyServerState>) -> Response {
+    let generated_path = crate::codex_config::get_codex_model_catalog_path();
+    let active_catalog_path = match crate::codex_config::read_codex_config_text() {
+        Ok(config_text) => {
+            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &generated_path)
+        }
+        Err(_) => None,
+    };
+    if let Some(catalog_path) = active_catalog_path.as_ref() {
+        if catalog_path.exists() {
+            let text = std::fs::read_to_string(catalog_path).unwrap_or_default();
+            let catalog = serde_json::from_str(&text).unwrap_or(json!({ "models": [] }));
+            return Json(catalog).into_response();
+        }
+        // Stale guard: pointer is active but the catalog file is gone.
+        return Json(json!({ "models": [] })).into_response();
+    }
+
     let db = state.db;
+
     let mut model_ids: Vec<String> = Vec::new();
 
     // /v1/models 是模型发现端点，客户端（Claude Code、Codex 等）不会携带 app 标识，
@@ -113,7 +139,13 @@ pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoRe
         }
     }
 
-    // 3. Build protocol superset: Anthropic + OpenAI fields
+    if model_ids.is_empty() {
+        // Keep parity with the Codex stale guard: an empty discovery list uses
+        // the same minimal envelope so clients do not see divergent shapes.
+        return Json(json!({ "models": [] })).into_response();
+    }
+
+    // Build protocol superset: Anthropic + OpenAI fields
     let data: Vec<Value> = model_ids
         .iter()
         .map(|id| {
@@ -145,6 +177,7 @@ pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoRe
         "object": "list",
         "data": data
     }))
+    .into_response()
 }
 
 /// Map a model id to a human-readable display name for Anthropic's
@@ -315,6 +348,7 @@ async fn handle_claude_request(
             return proxy_error_response(error);
         }
     };
+    forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = body
         .get("stream")
@@ -379,10 +413,7 @@ async fn handle_claude_request(
         // 请求已发出以及它实际落到了哪个 provider。
         context
             .state
-            .record_provider_activity(
-                &forward_result.provider.id,
-                estimated_input_tokens.max(1),
-            )
+            .record_provider_activity(&forward_result.provider.id, estimated_input_tokens.max(1))
             .await;
         let success_sync = status.is_success().then(|| SuccessSyncInfo {
             app_type: context.app_type.clone(),
@@ -671,6 +702,7 @@ async fn handle_passthrough_request(
             return proxy_error_response(error);
         }
     };
+    forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = request_is_streaming(&context.app_type, &endpoint, &body);
     let codex_tool_context = matches!(context.app_type, AppType::Codex).then(|| {
@@ -738,15 +770,17 @@ async fn handle_passthrough_request(
         // 请求已发出以及它实际落到了哪个 provider。
         context
             .state
-            .record_provider_activity(
-                &forward_result.provider.id,
-                estimated_input_tokens.max(1),
-            )
+            .record_provider_activity(&forward_result.provider.id, estimated_input_tokens.max(1))
             .await;
         let converts_codex_chat = super::providers::should_convert_codex_responses_to_chat(
             &forward_result.provider,
             &endpoint,
         );
+        let converts_codex_anthropic =
+            super::providers::should_convert_codex_responses_to_anthropic(
+                &forward_result.provider,
+                &endpoint,
+            );
         let success_sync = status.is_success().then(|| SuccessSyncInfo {
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
@@ -755,6 +789,27 @@ async fn handle_passthrough_request(
             estimated_input_tokens,
         });
         let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response)
+                if converts_codex_anthropic
+                    && status.is_success()
+                    && !is_json_response(&response) =>
+            {
+                build_codex_anthropic_stream_response_with_context(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    context.streaming_idle_timeout(),
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+            }
+            super::forwarder::StreamingResponse::Live(response) if converts_codex_anthropic => {
+                build_codex_anthropic_response_with_context(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    true,
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+                .await
+            }
             super::forwarder::StreamingResponse::Live(response)
                 if converts_codex_chat && status.is_success() =>
             {
@@ -782,6 +837,15 @@ async fn handle_passthrough_request(
                 )
                 .await
             }
+            super::forwarder::StreamingResponse::Buffered(response) if converts_codex_anthropic => {
+                build_buffered_codex_anthropic_response_with_context(
+                    status,
+                    &response.headers,
+                    response.body,
+                    true,
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+            }
             super::forwarder::StreamingResponse::Buffered(response) if converts_codex_chat => {
                 build_buffered_codex_chat_response_with_context(
                     status,
@@ -800,7 +864,7 @@ async fn handle_passthrough_request(
             &context,
             forward_result.provider.clone(),
             true,
-            if converts_codex_chat {
+            if converts_codex_chat || converts_codex_anthropic {
                 UsageLogPolicy::Transformed
             } else {
                 UsageLogPolicy::Passthrough
@@ -901,10 +965,7 @@ async fn handle_passthrough_request(
     // 请求已发出以及它实际落到了哪个 provider。
     context
         .state
-        .record_provider_activity(
-            &forward_result.provider.id,
-            estimated_input_tokens.max(1),
-        )
+        .record_provider_activity(&forward_result.provider.id, estimated_input_tokens.max(1))
         .await;
     let converts_codex_chat = super::providers::should_convert_codex_responses_to_chat(
         &forward_result.provider,
@@ -1157,6 +1218,43 @@ async fn finish_codex_live_aware_response(
         estimated_input_tokens,
     });
 
+    if super::providers::should_convert_codex_responses_to_anthropic(&provider, endpoint) {
+        let request_log = Some(RequestLogContext::from_handler(
+            context,
+            provider.clone(),
+            false,
+            UsageLogPolicy::Transformed,
+        ));
+        let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response) => {
+                build_codex_anthropic_response_with_context(
+                    response,
+                    remaining_timeout(non_streaming_timeout, request_started_at),
+                    false,
+                    tool_context,
+                )
+                .await
+            }
+            super::forwarder::StreamingResponse::Buffered(response) => {
+                build_buffered_codex_anthropic_response_with_context(
+                    response.status,
+                    &response.headers,
+                    response.body,
+                    false,
+                    tool_context,
+                )
+            }
+        };
+        return ResponseHandler::finish_buffered(
+            &context.state,
+            response_result,
+            status,
+            success_sync,
+            request_log,
+        )
+        .await;
+    }
+
     if super::providers::should_convert_codex_responses_to_chat(&provider, endpoint) {
         return match response {
             super::forwarder::StreamingResponse::Live(response)
@@ -1332,12 +1430,29 @@ fn passthrough_usage_log_policy(
     endpoint: &str,
 ) -> UsageLogPolicy {
     if matches!(app_type, AppType::Codex)
-        && super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+        && (super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+            || super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint))
     {
         UsageLogPolicy::Transformed
     } else {
         UsageLogPolicy::Passthrough
     }
+}
+
+fn is_json_response(response: &super::forwarder::LiveResponse) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| {
+            let media_type = content_type
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            media_type == "application/json" || media_type.ends_with("+json")
+        })
 }
 
 fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<Duration> {

@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     backend::TestBackend,
     buffer::Buffer,
-    style::{Color, Modifier},
+    style::{Color, Modifier, Style},
     Terminal,
 };
 use serde_json::{json, Value};
@@ -19,19 +19,20 @@ use crate::{
     cli::tui::{
         app,
         app::{
-            Action, App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit,
-            Focus, Overlay, SettingsItem, TextInputState, TextSubmit, UsagePane,
+            Action, App, CodexHistoryConfirmMode, CodexHistoryConfirmState, ConfigItem,
+            ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit, Focus, Overlay, SettingsItem,
+            TextInputState, TextSubmit, UsagePane,
         },
         data::{
             ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot, ModelRouteSnapshot,
             OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderHealthSnapshot, ProviderRow,
             ProvidersSnapshot, ProxySnapshot, ProxyTargetSnapshot, SkillsSnapshot, UiData,
-            UsageLogRow, UsageProviderStatsRow, UsageRangePreset, UsageSnapshot,
-            UsageSummarySnapshot, UsageTrendBucket,
+            UsageDailyModelBucket, UsageLogRow, UsageProviderStatsRow, UsageRangePreset,
+            UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
         },
         form::{
-            ClaudeModelPickerColumn, FormFocus, FormState, PromptMetaFormState, ProviderAddField,
-            TextInput, UsageQueryField,
+            ClaudeModelPickerColumn, FormFocus, FormState, McpKeyValueKind, PromptMetaFormState,
+            ProviderAddField, TextInput, UsageQueryField,
         },
         route::{NavItem, Route},
         theme::theme_for,
@@ -142,6 +143,56 @@ fn passive_text_helpers_bound_leading_space_and_zero_width_inputs() {
 }
 
 #[test]
+fn span_truncation_clips_styled_lines_at_every_boundary_width() {
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Span;
+
+    let spans = || {
+        vec![
+            Span::raw("abc"),
+            Span::styled("def", Style::default().fg(Color::Red)),
+            Span::raw("ghi"),
+        ]
+    };
+    let text = |spans: Vec<Span<'_>>| {
+        spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect::<String>()
+    };
+
+    // Fits: untouched, styles and all.
+    assert_eq!(super::truncate_spans_to_width(spans(), 9), spans());
+    assert_eq!(super::truncate_spans_to_width(spans(), 99), spans());
+
+    // Cut mid-span, cut on a span boundary, and cut down to the marker alone.
+    // The marker follows the icon mode, which is process-global here.
+    let cut = super::truncation_marker();
+    assert_eq!(
+        text(super::truncate_spans_to_width(spans(), 8)),
+        format!("abcdefg{cut}")
+    );
+    assert_eq!(
+        text(super::truncate_spans_to_width(spans(), 4)),
+        format!("abc{cut}")
+    );
+    assert_eq!(text(super::truncate_spans_to_width(spans(), 1)), cut);
+    assert!(super::truncate_spans_to_width(spans(), 0).is_empty());
+
+    // The styled middle span keeps its style when it is the one clipped.
+    let clipped = super::truncate_spans_to_width(spans(), 6);
+    assert_eq!(text(clipped.clone()), format!("abcde{cut}"));
+    assert_eq!(clipped[1].style.fg, Some(Color::Red));
+
+    // A pathological value clips instead of walking the whole string.
+    let huge = vec![Span::raw("x".repeat(70_000))];
+    assert_eq!(
+        super::spans_display_width(&super::truncate_spans_to_width(huge, 20)),
+        20
+    );
+}
+
+#[test]
 fn visible_selection_window_stays_fixed_around_edges_and_selection() {
     assert_eq!(super::visible_selection_window(0, 0, 10), 0..0);
     assert_eq!(super::visible_selection_window(100, 0, 10), 0..10);
@@ -176,6 +227,72 @@ fn provider_form_shows_api_key_in_table_value() {
 }
 
 #[test]
+fn provider_full_url_badge_stays_in_value_and_is_localized() {
+    let _lock = lock_env();
+    for (language, badge) in [
+        (Language::English, "[Full URL]"),
+        (Language::Chinese, "[完整 URL]"),
+    ] {
+        let _language = use_test_language(language);
+        for (app_type, field) in [
+            (AppType::Claude, ProviderAddField::ClaudeBaseUrl),
+            (AppType::Codex, ProviderAddField::CodexBaseUrl),
+        ] {
+            let mut form = crate::cli::tui::form::ProviderAddFormState::new(app_type);
+            match field {
+                ProviderAddField::ClaudeBaseUrl => {
+                    form.claude_base_url.set("https://relay.example/request")
+                }
+                ProviderAddField::CodexBaseUrl => {
+                    form.codex_base_url.set("https://relay.example/request")
+                }
+                _ => unreachable!(),
+            }
+            let (label_before, value_before) = super::provider_field_label_and_value(&form, field);
+            form.is_full_url = true;
+            let (label_after, value_after) = super::provider_field_label_and_value(&form, field);
+
+            assert_eq!(label_after, label_before);
+            assert_eq!(value_before, "https://relay.example/request");
+            assert_eq!(
+                value_after,
+                format!("{badge} https://relay.example/request")
+            );
+        }
+    }
+}
+
+#[test]
+fn provider_full_url_badge_remains_visible_while_editing_on_narrow_terminal() {
+    let _lock = lock_env();
+    let _language = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::Fields;
+    form.claude_base_url
+        .set("https://relay.example/custom/chat/completions");
+    form.is_full_url = true;
+    form.field_idx = form
+        .fields()
+        .iter()
+        .position(|field| *field == ProviderAddField::ClaudeBaseUrl)
+        .expect("Claude Base URL field");
+    assert!(form.begin_main_text_edit(ProviderAddField::ClaudeBaseUrl));
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        72,
+        24,
+    ));
+    assert!(rendered.contains("[Full URL]"), "{rendered}");
+    assert!(rendered.contains("pletions"), "{rendered}");
+}
+
+#[test]
 fn claude_model_picker_renders_role_scoped_one_m_controls_and_dynamic_keys() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
@@ -187,6 +304,8 @@ fn claude_model_picker_renders_role_scoped_one_m_controls_and_dynamic_keys() {
     form.claude_haiku_model.set("haiku-model");
     form.set_claude_model_from_config(1, "sonnet-model[1M]");
     form.set_claude_model_from_config(2, "opus-model");
+    form.set_claude_model_from_config(3, "fable-model[1M]");
+    form.set_claude_model_from_config(4, "subagent-model");
     app.form = Some(FormState::ProviderAdd(form));
     app.overlay = Overlay::ClaudeModelPicker {
         selected: 1,
@@ -209,6 +328,8 @@ fn claude_model_picker_renders_role_scoped_one_m_controls_and_dynamic_keys() {
     assert!(one_m.contains("Default Haiku Model"), "{one_m}");
     assert!(one_m.contains("Default Sonnet Model"), "{one_m}");
     assert!(one_m.contains("Default Opus Model"), "{one_m}");
+    assert!(one_m.contains("Default Fable Model"), "{one_m}");
+    assert!(one_m.contains("Subagent Model"), "{one_m}");
     assert!(!one_m.contains("Reasoning Model"), "{one_m}");
     assert!(one_m.contains("switch column"), "{one_m}");
     assert!(one_m.contains("toggle"), "{one_m}");
@@ -375,7 +496,7 @@ fn mcp_preview_shows_environment_values_in_plaintext() {
     form.id.set("server");
     form.name.set("Server");
     form.command.set("node");
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: secret.to_string(),
     });
@@ -433,7 +554,51 @@ fn mcp_preview_shows_custom_header_values_in_plaintext() {
     assert!(all.contains(secret), "{all}");
     assert!(all.contains("safe-but-hidden-too"), "{all}");
     assert!(all.contains("X-Custom-Auth"), "{all}");
-    assert!(!all.contains("[redacted]"), "{all}");
+    assert!(all.contains("User-Agent"), "{all}");
+    assert!(!all.contains("********"), "{all}");
+}
+
+#[test]
+fn mcp_preview_shows_legacy_codex_http_header_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "legacy-http-header-super-secret";
+    let server = crate::app_config::McpServer {
+        id: "remote".to_string(),
+        name: "Remote".to_string(),
+        server: json!({
+            "type": "http",
+            "url": "https://example.test/mcp",
+            "http_headers": {
+                "Authorization": secret
+            }
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+    let mut form = crate::cli::tui::form::McpAddFormState::from_server(&server);
+    form.focus = FormFocus::JsonPreview;
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("Authorization"), "{all}");
+    assert!(!all.contains("********"), "{all}");
+    assert!(all.contains(secret), "{all}");
+    assert!(!all.contains("http_headers"), "{all}");
 }
 
 #[test]
@@ -521,7 +686,7 @@ fn mcp_plaintext_preview_never_mutates_the_serialized_form_payload() {
         "--api-key".to_string(),
         "persistence-secret".to_string(),
     ]);
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: "environment-secret".to_string(),
     });
@@ -552,12 +717,15 @@ fn mcp_env_picker_renders_environment_values_in_plaintext() {
     app.route = Route::Mcp;
     app.focus = Focus::Content;
     let mut form = crate::cli::tui::form::McpAddFormState::new();
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: secret.to_string(),
     });
     app.form = Some(FormState::McpAdd(form));
-    app.overlay = Overlay::McpEnvPicker { selected: 0 };
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Env,
+        selected: 0,
+    };
 
     let all = all_text(&render_with_size(
         &app,
@@ -571,6 +739,77 @@ fn mcp_env_picker_renders_environment_values_in_plaintext() {
 }
 
 #[test]
+fn mcp_headers_picker_shows_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "Bearer picker-super-secret";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.header_rows
+        .push(crate::cli::tui::form::McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: secret.to_string(),
+        });
+    app.form = Some(FormState::McpAdd(form));
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Headers,
+        selected: 0,
+    };
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(rendered.contains("Authorization"), "{rendered}");
+    assert!(rendered.contains(secret), "{rendered}");
+    assert!(!rendered.contains("********"), "{rendered}");
+    assert!(!rendered.contains("v show"), "{rendered}");
+}
+
+#[test]
+fn mcp_remote_json_preview_shows_header_values_without_mutating_payload() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "Bearer preview-super-secret";
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.focus = FormFocus::JsonPreview;
+    form.server_type = crate::cli::tui::form::McpTransport::Http;
+    form.url.set("https://example.com/mcp");
+    form.header_rows
+        .push(crate::cli::tui::form::McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: secret.to_string(),
+        });
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["headers"]["Authorization"],
+        secret
+    );
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(form));
+
+    let preview = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(preview.contains("Authorization"), "{preview}");
+    assert!(!preview.contains("********"), "{preview}");
+    assert!(preview.contains(secret), "{preview}");
+}
+
+#[test]
 fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
@@ -579,7 +818,7 @@ fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     let selected = 9_999usize;
     let mut form = crate::cli::tui::form::McpAddFormState::new();
     form.env_rows = (0..10_000)
-        .map(|index| crate::cli::tui::form::McpEnvVarRow {
+        .map(|index| crate::cli::tui::form::McpKeyValueRow {
             key: format!("ENV-{index:05}"),
             value: format!("secret-{index}"),
         })
@@ -590,7 +829,10 @@ fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     app.route = Route::Mcp;
     app.focus = Focus::Content;
     app.form = Some(FormState::McpAdd(form));
-    app.overlay = Overlay::McpEnvPicker { selected };
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Env,
+        selected,
+    };
 
     let all = all_text(&render_with_size(
         &app,
@@ -617,13 +859,15 @@ fn mcp_env_value_editor_shows_the_active_value_in_plaintext() {
     app.form = Some(FormState::McpAdd(
         crate::cli::tui::form::McpAddFormState::new(),
     ));
-    app.overlay = Overlay::McpEnvEntryEditor(crate::cli::tui::app::McpEnvEntryEditorState {
-        row: None,
-        return_selected: 0,
-        field: crate::cli::tui::app::McpEnvEditorField::Value,
-        key: TextInput::new("CUSTOM_VALUE"),
-        value: TextInput::new(secret),
-    });
+    app.overlay =
+        Overlay::McpKeyValueEntryEditor(crate::cli::tui::app::McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
+            row: None,
+            return_selected: 0,
+            field: crate::cli::tui::app::McpKeyValueEditorField::Value,
+            key: TextInput::new("CUSTOM_VALUE"),
+            value: TextInput::new(secret),
+        });
 
     let all = all_text(&render_with_size(
         &app,
@@ -789,40 +1033,14 @@ fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
 
     assert!(all.contains("No local sessions found"), "{all}");
     assert!(all.contains("local session files"), "{all}");
-    assert!(all.contains("database"), "{all}");
-    assert!(all.contains("←→ switch panel"), "{all}");
+    assert!(all.contains("usage database"), "{all}");
+    assert!(all.contains("Cost"), "{all}");
+    assert!(!all.contains("without using the database"), "{all}");
+    assert!(all.contains("switch panel"), "{all}");
+    assert!(all.contains("PgUp/PgDn"), "{all}");
+    assert!(all.contains(texts::tui_key_page()), "{all}");
     assert!(!all.contains("←→/h/l"), "{all}");
     assert!(!all.contains("show all"), "{all}");
-}
-
-#[test]
-fn tui_session_project_picker_keeps_secondary_page_keys_out_of_the_key_bar() {
-    let _lang = use_test_language(Language::English);
-    let mut app = App::new(Some(AppType::Claude));
-    app.route = Route::Sessions;
-    app.focus = Focus::Content;
-    app.overlay = Overlay::SessionProjectPicker(app::SessionProjectPickerState {
-        input: crate::cli::tui::text_edit::TextInput::new(""),
-        selected_idx: 0,
-        path_scroll: 0,
-        filtered_indices: None,
-        pinned_scope: None,
-        filter_error: None,
-    });
-
-    let all = all_text(&render_with_size(
-        &app,
-        &minimal_data(&app.app_type),
-        160,
-        40,
-    ));
-
-    assert!(all.contains("↑↓"), "{all}");
-    assert!(all.contains("Shift+←→"), "{all}");
-    assert!(all.contains(texts::tui_key_scroll()), "{all}");
-    assert!(!all.contains('⇧'), "{all}");
-    assert!(!all.contains("PgUp"), "{all}");
-    assert!(!all.contains("PgDn"), "{all}");
 }
 
 #[test]
@@ -1343,6 +1561,8 @@ fn tui_usage_narrow_width_renders_without_losing_primary_sections() {
 
 #[test]
 fn tui_manual_usage_refresh_status_stays_visible_at_eighty_columns() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
     let _lang = use_test_language(Language::English);
     let mut app = App::new(Some(AppType::Claude));
     app.focus = Focus::Content;
@@ -1358,16 +1578,38 @@ fn tui_manual_usage_refresh_status_stays_visible_at_eighty_columns() {
     });
 
     app.route = Route::Usage;
-    let usage = all_text(&render_with_size(&app, &data, 80, 28));
-    assert!(usage.contains("Refreshing"), "{usage}");
+    let usage = render_with_size(&app, &data, 80, 28);
+    assert_refresh_status_is_visible_and_accented(&app, &usage);
+
+    let wide_usage = render_with_size(&app, &data, 160, 28);
+    let wide_text = all_text(&wide_usage);
+    let summary_row = line_at(&wide_usage, line_index(&wide_text, "Refreshing") as u16);
+    assert!(
+        summary_row.contains("avg latency · ⠋ Refreshing"),
+        "the unified refresh status should immediately follow the summary: {summary_row}"
+    );
 
     app.route = Route::UsageLogs;
-    let logs = all_text(&render_with_size(&app, &data, 80, 28));
-    assert!(logs.contains("Refreshing"), "{logs}");
+    let logs = render_with_size(&app, &data, 80, 28);
+    assert_refresh_status_is_visible_and_accented(&app, &logs);
 
     app.route = Route::Pricing;
     let pricing = all_text(&render_with_size(&app, &data, 80, 28));
     assert!(pricing.contains("Refreshing"), "{pricing}");
+}
+
+fn assert_refresh_status_is_visible_and_accented(app: &App, buf: &Buffer) {
+    let all = all_text(buf);
+    let row = line_index(&all, "Refreshing") as u16;
+    let refresh_x = cell_column_of(buf, row, "Refreshing")
+        .unwrap_or_else(|| panic!("missing Refreshing in:\n{all}"));
+
+    let theme = theme_for(&app.app_type);
+    assert_eq!(
+        buf[(refresh_x, row)].fg,
+        theme.accent,
+        "refresh status should use the theme accent"
+    );
 }
 
 #[test]
@@ -1499,8 +1741,16 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
         summary: Some("Tighten worker routing".to_string()),
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/session.jsonl".to_string()),
+        usage: Some(crate::session_manager::SessionUsageSummary {
+            input_tokens: 4_800,
+            output_tokens: 1_900_000,
+            cache_read_tokens: 347_700_000,
+            cache_creation_tokens: 12_200_000,
+            estimated_cost_usd: Some(0.42),
+        }),
         resume_command: Some("codex resume abcdef123456".to_string()),
     });
     app.sessions
@@ -1526,6 +1776,25 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
     assert!(all.contains("Time"), "{all}");
     assert!(all.contains("Work Dir"), "{all}");
     assert!(all.contains("Title"), "{all}");
+    // Tokens and Cost each own a labelled Overview row, aligned with the rest
+    // of the pane instead of sharing one bare line.
+    let tokens_line = line_with(&all, "In: 4.8k");
+    assert!(tokens_line.contains("Tokens"), "{tokens_line}");
+    for value in ["Out: 1.9M", "CR: 347.7M"] {
+        assert!(
+            tokens_line.contains(value),
+            "{value} missing in {tokens_line}"
+        );
+    }
+    assert!(
+        !tokens_line.contains("$0.42"),
+        "the Cost value now lives on its own row: {tokens_line}"
+    );
+    let cost_line = all
+        .lines()
+        .find(|line| line.contains("Cost") && line.contains("$0.42"))
+        .unwrap_or_else(|| panic!("missing labelled Overview Cost row in:\n{all}"));
+    assert!(cost_line.contains("$0.42"), "{cost_line}");
     assert!(all.contains("Resume Command"), "{all}");
     assert!(all.contains("Refactor proxy routing"), "{all}");
     assert!(!all.contains("Tighten worker routing"), "{all}");
@@ -1535,7 +1804,108 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
 }
 
 #[test]
-fn tui_sessions_page_boundary_uses_compact_bottom_border_cta() {
+fn tui_sessions_transcript_footer_reports_the_complete_logical_history() {
+    let _lang = use_test_language(Language::English);
+    let temp = tempfile::tempdir().expect("transcript fixture directory");
+    let source = temp.path().join("session.jsonl");
+    let body = (0_usize..205)
+        .map(|index| {
+            serde_json::json!({
+                "type": "response_item",
+                "timestamp": index as i64,
+                "payload": {
+                    "type": "message",
+                    "role": if index.is_multiple_of(2) { "user" } else { "assistant" },
+                    "content": [{
+                        "type": "input_text",
+                        "text": format!("complete-message-{index}")
+                    }]
+                }
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&source, body).expect("write transcript fixture");
+    let source_text = source.to_string_lossy().into_owned();
+    let (reader, _) = crate::session_manager::transcript::open_transcript_at(
+        &temp.path().join("config"),
+        "codex",
+        &source_text,
+    )
+    .expect("open transcript fixture");
+    let first = reader
+        .load_page(0, &|| false)
+        .expect("first transcript page");
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "codex".to_string(),
+        session_id: "complete-history".to_string(),
+        title: Some("Complete history".to_string()),
+        source_path: Some(source_text),
+        ..crate::session_manager::SessionMeta::default()
+    });
+    let key = app::session_key(&app.sessions.rows[0]);
+    app.sessions.open_detail(key.clone());
+    app.sessions.pane = app::SessionsPane::Detail;
+    let request_id = app.sessions.start_message_load(key.clone());
+    assert!(app
+        .sessions
+        .finish_message_load(request_id, &key, reader, first));
+    app.sessions.messages_truncated = true;
+    assert_eq!(app.sessions.selected_message_absolute(), 0);
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        180,
+        40,
+    ));
+
+    assert!(all.contains("┌ Messages ─"), "{all}");
+    assert!(!all.contains("Messages ·"), "{all}");
+    assert!(!all.contains("Full history"), "{all}");
+    assert!(!all.contains("Body preview shortened"), "{all}");
+    assert!(all.contains("Page 1 · 1–100 of 205"), "{all}");
+    assert!(!all.contains("End of list · 205 total"), "{all}");
+    assert!(all.contains("complete-message-0"), "{all}");
+    assert!(!all.contains("complete-message-100"), "{all}");
+
+    let previous_gate = app.sessions.message_pagination.clone();
+    app.sessions.message_pagination.select(199);
+    assert!(!app
+        .sessions
+        .begin_message_page_cross(1, previous_gate, None));
+    let (page_request, generation, _refresh_page, _refresh_key, _reader) = app
+        .sessions
+        .next_message_page_request(1)
+        .expect("message page request");
+    assert!(app.sessions.fail_message_page_request(
+        page_request,
+        &key,
+        &generation,
+        1,
+        "offline".to_string(),
+    ));
+    let failed = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        180,
+        40,
+    ));
+    assert!(
+        failed.contains("Load failed · Move again to retry"),
+        "{failed}"
+    );
+    assert!(!failed.contains("Enter to retry"), "{failed}");
+}
+
+#[test]
+fn tui_sessions_seamless_page_cross_uses_loading_footer() {
     use crate::cli::tui::input::{ScrollDirection, WheelGestureId};
 
     let _lang = use_test_language(Language::English);
@@ -1560,8 +1930,10 @@ fn tui_sessions_page_boundary_uses_compact_bottom_border_cta() {
                 summary: None,
                 project_dir: Some("/tmp/project".to_string()),
                 created_at: Some(1_735_689_600_000 - index),
+                source_mtime_ns: None,
                 last_active_at: Some(1_735_689_900_000 - index),
                 source_path: Some(format!("/tmp/session-{index}.jsonl")),
+                usage: None,
                 resume_command: Some(format!("claude --resume session-{index}")),
             })
             .expect("manifest fixture row");
@@ -1589,9 +1961,9 @@ fn tui_sessions_page_boundary_uses_compact_bottom_border_cta() {
         180,
         40,
     ));
-    assert!(all.contains("next page"), "{all}");
-    assert!(all.contains("Enter"), "{all}");
-    assert!(all.contains("Session 99"), "{all}");
+    assert!(all.contains("Loading page 2"), "{all}");
+    assert!(!all.contains("Enter to load"), "{all}");
+    assert!(all.contains("Session 0"), "{all}");
     assert!(!all.contains("Session 100"), "{all}");
 }
 
@@ -1763,8 +2135,10 @@ fn tui_sessions_list_time_column_uses_relative_time_before_date() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_600_000),
         source_path: Some("/tmp/recent.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume abcdef123456".to_string()),
     });
     app.sessions.rows.push(crate::session_manager::SessionMeta {
@@ -1774,17 +2148,32 @@ fn tui_sessions_list_time_column_uses_relative_time_before_date() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_084_800_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_084_800_000),
         source_path: Some("/tmp/old.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume old-session".to_string()),
     });
 
-    let content = content_text(
+    let content = all_text(&render_with_size(
         &app,
-        &render_with_size(&app, &minimal_data(&app.app_type), 160, 40),
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    let header_row = line_with(&content, "Title");
+    assert!(
+        header_row.contains("│ Title")
+            && header_row.contains("Time")
+            && header_row.contains("Cost │"),
+        "session table should render Title, Time, and Cost columns:\n{content}"
     );
     let recent_row = line_with(&content, "Recent session");
     assert!(recent_row.contains("5 min ago"), "{recent_row}");
+    assert!(
+        recent_row.contains(" - │"),
+        "a session without metrics should render an empty Cost marker: {recent_row}"
+    );
 
     let old_row = line_with(&content, "Old session");
     let expected = chrono::DateTime::from_timestamp_millis(1_735_084_800_000)
@@ -1797,6 +2186,66 @@ fn tui_sessions_list_time_column_uses_relative_time_before_date() {
     assert!(
         !old_row.contains(&expected.format("%Y/%m/%d %H:%M").to_string()),
         "{old_row}"
+    );
+}
+
+#[test]
+fn tui_sessions_cost_column_keeps_the_title_visible_at_eighty_columns() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "codex".to_string(),
+        session_id: "session-1".to_string(),
+        title: Some("Fix routing".to_string()),
+        usage: Some(crate::session_manager::SessionUsageSummary {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            estimated_cost_usd: Some(1.25),
+            ..crate::session_manager::SessionUsageSummary::default()
+        }),
+        ..crate::session_manager::SessionMeta::default()
+    });
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        80,
+        24,
+    ));
+    // Title outranks every other column, so an 80-column pane spends its width
+    // on the whole Title instead of squeezing it next to Cost.
+    let session_row = line_with(&rendered, "Fix routing");
+    assert!(
+        session_row.contains("Fix routing"),
+        "the 80-column session row should retain the complete Title: {session_row}"
+    );
+    let header_row = line_with(&rendered, "Title");
+    let list_header = header_row
+        .split('│')
+        .find(|segment| segment.contains("Title"))
+        .unwrap_or_else(|| panic!("missing session list header in:\n{rendered}"));
+    assert!(
+        list_header.contains("Time"),
+        "Time outranks Cost when the list narrows: {header_row}"
+    );
+    assert!(
+        !list_header.contains("Cost"),
+        "Cost is the first column to yield: {header_row}"
+    );
+    // The exact amount stays one pane away, on its own Overview row.
+    let overview_tokens = line_with(&rendered, "In:");
+    assert!(
+        overview_tokens.contains("In:"),
+        "the Overview keeps a token breakdown even when narrow: {overview_tokens}"
+    );
+    let overview_cost = line_with(&rendered, "$1.25");
+    assert!(
+        overview_cost.contains("$1.25"),
+        "the Overview keeps the exact cost: {overview_cost}"
     );
 }
 
@@ -1815,8 +2264,10 @@ fn tui_sessions_filters_rows_by_current_app() {
         summary: None,
         project_dir: Some("/tmp/claude-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/claude.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume claude-session".to_string()),
     });
     app.sessions.rows.push(crate::session_manager::SessionMeta {
@@ -1826,8 +2277,10 @@ fn tui_sessions_filters_rows_by_current_app() {
         summary: None,
         project_dir: Some("/tmp/codex-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/codex.jsonl".to_string()),
+        usage: None,
         resume_command: Some("codex resume codex-session".to_string()),
     });
 
@@ -1856,8 +2309,10 @@ fn tui_sessions_slash_search_filters_user_role_messages() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/session.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume abcdef123456".to_string()),
     });
     app.sessions
@@ -1917,8 +2372,10 @@ fn tui_sessions_search_filters_loaded_message_content() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/session.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume abcdef123456".to_string()),
     });
     app.sessions
@@ -1963,8 +2420,10 @@ fn tui_sessions_search_matches_localized_user_role_label() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/session.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume abcdef123456".to_string()),
     });
     app.sessions
@@ -2009,8 +2468,10 @@ fn tui_sessions_session_and_message_filters_are_independent() {
         summary: None,
         project_dir: Some("/tmp/ai-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/ai.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume ai-session".to_string()),
     });
     app.sessions.rows.push(crate::session_manager::SessionMeta {
@@ -2020,8 +2481,10 @@ fn tui_sessions_session_and_message_filters_are_independent() {
         summary: None,
         project_dir: Some("/tmp/billing-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
         last_active_at: Some(1_735_689_800_000),
         source_path: Some("/tmp/billing.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume billing-session".to_string()),
     });
     app.sessions
@@ -2671,6 +3134,7 @@ fn codex_provider_form_renders_toml_values_in_plaintext() {
             )
         }
     });
+    form.codex_model.set("gpt-5.4");
     app.form = Some(FormState::ProviderAdd(form));
 
     let all = all_text(&render_with_size(
@@ -3033,6 +3497,7 @@ fn provider_form_usage_query_page_omits_duplicate_side_panel_status_and_inline_k
 
     let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
     form.focus = FormFocus::Fields;
+    form.claude_base_url.set("https://relay.example.test");
     form.open_usage_query_page();
     form.toggle_usage_query_enabled();
     app.form = Some(FormState::ProviderAdd(form));
@@ -4203,6 +4668,7 @@ fn settings_page_groups_items_with_unlabeled_dividers() {
     let visible_apps = line_index(&content, texts::tui_settings_visible_apps_mode_label());
     let openclaw_dir = line_index(&content, texts::tui_settings_openclaw_config_dir_label());
     let claude_integration = line_index(&content, texts::enable_claude_plugin_integration_label());
+    let codex_login = line_index(&content, texts::codex_preserve_official_auth_label());
     let codex_history = line_index(&content, texts::codex_unified_session_history_label());
     let proxy = line_index(&content, texts::tui_config_item_proxy());
 
@@ -4216,7 +4682,10 @@ fn settings_page_groups_items_with_unlabeled_dividers() {
         "{content}"
     );
     assert!(
-        dividers[1] < claude_integration && codex_history < dividers[2],
+        dividers[1] < claude_integration
+            && claude_integration < codex_login
+            && codex_login < codex_history
+            && codex_history < dividers[2],
         "{content}"
     );
     assert!(dividers[2] < proxy, "{content}");
@@ -4247,15 +4716,30 @@ fn settings_section_rows_do_not_shift_selection_or_break_narrow_scrolling() {
         .expect("CheckForUpdates missing from SettingsItem::ALL");
 
     let buf = render_with_size(&app, &minimal_data(&app.app_type), 50, 18);
-    let update_value = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let content_x = content_origin_x(&app, &buf);
+    let version_major = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .next()
+        .expect("package version should have a major component");
+    let version_prefix = format!("v{version_major}");
     let selected_y = (0..buf.area.height)
-        .find(|y| line_at(&buf, *y).contains(&update_value))
+        .find(|y| {
+            line_at(&buf, *y).contains(&version_prefix)
+                && (content_x..buf.area.width)
+                    .any(|x| buf[(x, *y)].modifier.contains(Modifier::REVERSED))
+        })
         .unwrap_or_else(|| {
             panic!(
                 "selected setting should scroll into view:\n{}",
                 all_text(&buf)
             )
         });
+    let selected_line = line_at(&buf, selected_y);
+    assert!(
+        selected_line.contains("Check"),
+        "selected update row should remain identifiable when truncated:\n{}",
+        all_text(&buf)
+    );
     let divider_y = (0..buf.area.height)
         .filter(|y| contains_continuous_divider_row(&line_at(&buf, *y)))
         .next_back()
@@ -5235,7 +5719,7 @@ fn prompt_form_content_key_bar_shows_ctrl_o_external_editor_hint() {
 }
 
 #[test]
-fn home_restores_main_logo_and_home_labels() {
+fn home_replaces_the_logo_hero_with_the_usage_chart() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -5246,9 +5730,14 @@ fn home_restores_main_logo_and_home_labels() {
 
     let buf = render(&app, &data);
     let all = all_text(&buf);
-    assert!(all.contains("___  ___"));
-    assert!(all.contains("\\___|\\___|"));
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(all.contains("Connection Details"));
+    assert_eq!(
+        line_index(&all, "Connection Details"),
+        line_index(&all, "CC-Switch") + 1,
+        "connection details should start directly below the home title"
+    );
 }
 
 #[test]
@@ -5334,7 +5823,8 @@ fn home_does_not_repeat_welcome_title_in_body() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    let needle = "CC-Switch Interactive Mode";
+    assert!(!all.contains("Interactive Mode"), "{all}");
+    let needle = "CC-Switch";
     let count = all.matches(needle).count();
     assert_eq!(count, 1, "expected welcome title once, got {count}");
 }
@@ -5471,8 +5961,8 @@ fn home_hides_proxy_dashboard_when_proxy_is_off() {
     let all = all_text(&buf);
     let footer = line_at(&buf, buf.area.height - 1);
 
-    assert!(all.contains("___  ___"));
-    assert!(all.contains("\\___|\\___|"));
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("127.0.0.1:15721"), "{all}");
@@ -5592,7 +6082,8 @@ fn home_footer_shows_proxy_on_shortcut_when_stopped() {
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!footer.contains("NAV"), "{footer}");
     assert!(!footer.contains("ACT"), "{footer}");
-    assert!(all.contains("___  ___"));
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"));
 }
 
@@ -5661,7 +6152,8 @@ fn home_proxy_dashboard_keeps_current_app_off_semantics_when_another_app_is_acti
     let footer = line_at(&buf, buf.area.height - 1);
 
     assert!(footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("Shared runtime ready"), "{all}");
     assert!(!all.contains("x1.00"), "{all}");
@@ -5698,7 +6190,8 @@ fn home_proxy_dashboard_stays_off_for_current_worker_without_takeover() {
     );
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
 }
 
 #[test]
@@ -5722,7 +6215,8 @@ fn home_proxy_dashboard_hides_attach_cta_for_foreground_runtime_owned_elsewhere(
     let footer = line_at(&buf, buf.area.height - 1);
 
     assert!(!footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
 }
 
@@ -5773,7 +6267,8 @@ fn home_proxy_dashboard_shows_idle_baseline_without_header_copy() {
     let shared_buf = render(&app, &shared_runtime);
     let shared_text = all_text(&shared_buf);
     let shared_footer = line_at(&shared_buf, shared_buf.area.height - 1);
-    assert!(shared_text.contains("___  ___"), "{shared_text}");
+    assert!(!shared_text.contains("___  ___"), "{shared_text}");
+    assert!(shared_text.contains("Usage · 30d"), "{shared_text}");
     assert!(!shared_text.contains("Proxy Dashboard"), "{shared_text}");
     assert!(!shared_text.contains("x1.25"), "{shared_text}");
     assert!(shared_footer.contains("proxy on"), "{shared_footer}");
@@ -5916,7 +6411,8 @@ fn home_proxy_dashboard_marks_unsupported_apps_without_proxy_cta() {
     assert!(!all.contains("start proxy"));
     assert!(!all.contains("stop proxy"));
     assert!(!footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("Claude Test Provider"), "{all}");
 }
@@ -5968,7 +6464,8 @@ fn home_proxy_dashboard_keeps_current_app_route_separate_from_global_proxy_route
     let all = all_text(&buf);
     let footer = line_at(&buf, buf.area.height - 1);
 
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Latest proxy route"));
@@ -5996,7 +6493,8 @@ fn home_proxy_dashboard_hides_internal_target_identifiers() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains("___  ___"));
+    assert!(!all.contains("___  ___"), "{all}");
+    assert!(all.contains("Usage · 30d"), "{all}");
     assert!(!all.contains("Proxy Dashboard"));
     assert!(!all.contains("Claude Test Provider"));
     assert!(!all.contains("Current app route"));
@@ -6668,7 +7166,7 @@ fn breadcrumb_title_strips_leading_emoji_in_ascii_mode() {
 }
 
 #[test]
-fn nav_drops_emoji_icons_in_ascii_mode() {
+fn nav_respects_icon_mode_and_home_title_stays_plain() {
     let _lock = lock_env();
     let _icons_lock = lock_test_home_and_settings();
     let _lang = use_test_language(Language::English);
@@ -6683,8 +7181,8 @@ fn nav_drops_emoji_icons_in_ascii_mode() {
         "emoji mode should render the nav provider icon: {emoji_view}"
     );
     assert!(
-        emoji_view.contains('🎯'),
-        "emoji mode should render the home title icon: {emoji_view}"
+        !emoji_view.contains('🎯'),
+        "the home title should stay plain in emoji mode: {emoji_view}"
     );
 
     let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
@@ -7032,6 +7530,71 @@ fn prompts_page_uses_space_toggle_and_add_key() {
 }
 
 #[test]
+fn codex_history_enable_confirm_renders_warning_and_inline_action_list() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::CodexHistoryConfirm(CodexHistoryConfirmState {
+        mode: CodexHistoryConfirmMode::Enable,
+        show_restore_checkbox: false,
+        restore_checked: false,
+    });
+
+    let rendered = render_with_size(&app, &minimal_data(&app.app_type), 120, 32);
+    let all = all_text(&rendered);
+    let flattened = all.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(all.contains("Unified Codex session history"), "{all}");
+    assert!(flattened.contains("encrypted_content reasoning"), "{all}");
+    assert!(flattened.contains("Enter enable"), "{all}");
+    assert!(flattened.contains("Y migrate and enable"), "{all}");
+    assert!(flattened.contains("Esc cancel"), "{all}");
+    assert!(
+        !all.contains("Space=toggle") && !all.contains("Space toggle"),
+        "{all}"
+    );
+
+    let theme = theme_for(&app.app_type);
+    let button_widths = [
+        ("Enter", "enable"),
+        ("Y", "migrate and enable"),
+        ("Esc", "cancel"),
+    ]
+    .map(|(key, label)| {
+        let y = (0..rendered.area.height)
+            .find(|&y| {
+                let row = line_at(&rendered, y);
+                row.contains(key) && row.contains(label)
+            })
+            .unwrap_or_else(|| panic!("missing {key} action row in:\n{all}"));
+        let row = line_at(&rendered, y);
+        let byte = row
+            .find(key)
+            .unwrap_or_else(|| panic!("missing {key} in row: {row}"));
+        let x = UnicodeWidthStr::width(&row[..byte]) as u16;
+        assert_eq!(rendered[(x, y)].bg, theme.surface, "{row}");
+
+        let mut left = x;
+        while left > 0 && rendered[(left - 1, y)].bg == theme.surface {
+            left -= 1;
+        }
+        let mut right = x;
+        while right < rendered.area.width && rendered[(right, y)].bg == theme.surface {
+            right += 1;
+        }
+        right - left
+    });
+    assert_eq!(button_widths, [button_widths[0]; 3], "{all}");
+    assert!(
+        button_widths[0] <= 30,
+        "action button backgrounds should stay compact: {all}"
+    );
+}
+
+#[test]
 fn editor_unsaved_changes_confirm_overlay_shows_three_actions_and_is_compact() {
     let _lock = lock_env();
 
@@ -7362,7 +7925,7 @@ fn user_agent_picker_renders_custom_clear_and_all_upstream_presets() {
 }
 
 #[test]
-fn provider_api_format_proxy_notice_overlay_uses_close_actions() {
+fn provider_api_format_proxy_notice_overlay_uses_single_close_action() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -7383,7 +7946,10 @@ fn provider_api_format_proxy_notice_overlay_uses_close_actions() {
         all.contains("Enter close"),
         "expected Enter close hint: {all}"
     );
-    assert!(all.contains("Esc close"), "expected Esc close hint: {all}");
+    assert!(
+        !all.contains("Esc close"),
+        "should not repeat the close action: {all}"
+    );
     assert!(
         !all.contains("Enter confirm"),
         "should not show confirm hint: {all}"
@@ -7541,6 +8107,169 @@ fn toast_renders_as_centered_overlay() {
     assert!(
         right_border > 2,
         "toast message should not hug the right border: {row:?}"
+    );
+}
+
+#[test]
+fn copyable_toast_keeps_command_and_action_inside_compact_toast_layout() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    let command = "codex resume session-1";
+    app.push_copyable_toast(
+        "Could not open a terminal",
+        crate::cli::tui::app::ToastKind::Warning,
+        command,
+    );
+    let data = minimal_data(&app.app_type);
+
+    let buf = render(&app, &data);
+    let rendered = all_text(&buf);
+    assert!(rendered.contains(command), "{rendered}");
+    assert!(
+        rendered.contains(&format!("c {}", texts::tui_key_copy())),
+        "{rendered}"
+    );
+
+    let theme = theme_for(&app.app_type);
+    let content = super::content_pane_rect(buf.area, &theme);
+    let toast = app.toast.as_ref().expect("copyable toast");
+    let message = format!(
+        "{} {}",
+        texts::tui_toast_prefix_warning().trim(),
+        toast.message
+    );
+    let layout_text = super::toast_layout_text(toast, &message);
+    let area = super::toast_rect(content, &layout_text);
+    assert_eq!(area.height, 6, "copyable toast should stay compact");
+
+    let action_label = format!("c {}", texts::tui_key_copy());
+    let action_row = line_index(&rendered, &action_label) as u16;
+    let message_row = line_index(&rendered, "Could not open a terminal") as u16;
+    let command_row = line_index(&rendered, command) as u16;
+    assert_eq!(
+        action_row,
+        area.y + area.height - 2,
+        "toast action should occupy the final row inside the border"
+    );
+    assert!(
+        message_row < command_row && command_row + 1 < action_row,
+        "toast action should render below the body with a blank row between:\n{rendered}"
+    );
+
+    assert_ne!(
+        theme.accent, theme.warn,
+        "Codex accent should differ from the warning color"
+    );
+    let border_cell = &buf[(area.x, area.y + area.height / 2)];
+    assert_eq!(border_cell.fg, theme.accent);
+    let action_cell = (area.x..area.x.saturating_add(area.width))
+        .map(|x| &buf[(x, action_row)])
+        .find(|cell| cell.symbol() == "c")
+        .expect("copy shortcut cell");
+    assert_eq!(action_cell.bg, theme.accent);
+}
+
+#[test]
+fn copyable_toast_layout_keeps_the_complete_action_text() {
+    let mut app = App::new(Some(AppType::Codex));
+    let command = format!("codex resume {}", "session-segment-".repeat(12));
+    app.push_copyable_toast(
+        "Could not open a terminal",
+        crate::cli::tui::app::ToastKind::Warning,
+        command.clone(),
+    );
+    let toast = app.toast.as_ref().expect("copyable toast");
+
+    let layout = super::toast_layout_text(toast, "Could not open a terminal");
+
+    assert!(layout.contains(&command), "{layout}");
+    assert!(!layout.contains('…'), "{layout}");
+}
+
+#[test]
+fn copyable_toast_keeps_action_single_row_and_prioritizes_command_when_narrow() {
+    let mut app = App::new(Some(AppType::Codex));
+    app.push_copyable_toast(
+        "Could not open a terminal",
+        crate::cli::tui::app::ToastKind::Warning,
+        "codex resume session-1",
+    );
+    let toast = app.toast.as_ref().expect("copyable toast");
+    let theme = theme_for(&app.app_type);
+
+    let lines = super::toast_content_lines(
+        toast,
+        "Could not open a terminal",
+        6,
+        3,
+        &theme,
+        Style::default(),
+    );
+    let text = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(text.len(), 3, "{text:?}");
+    assert!(text.iter().all(|line| line.width() <= 6), "{text:?}");
+    assert!(text[2].starts_with(" c"), "{text:?}");
+    assert!(text[0].contains("codex"), "{text:?}");
+    assert!(text[1].is_empty(), "{text:?}");
+    assert!(
+        !text[..2].join("").contains("Could"),
+        "the recovery command should win a constrained body budget: {text:?}"
+    );
+}
+
+#[test]
+fn copyable_toast_is_hidden_while_its_action_is_unavailable() {
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Sessions;
+    app.push_copyable_toast(
+        "Could not open a terminal",
+        crate::cli::tui::app::ToastKind::Warning,
+        "codex resume session-1",
+    );
+    app.filter.active = true;
+    let data = minimal_data(&app.app_type);
+
+    let rendered = all_text(&render(&app, &data));
+
+    assert!(
+        !rendered.contains("Could not open a terminal"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("codex resume session-1"), "{rendered}");
+}
+
+#[test]
+fn copyable_toast_is_not_rendered_outside_its_origin_context() {
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Sessions;
+    let command = "codex resume session-1";
+    app.push_copyable_toast(
+        "Could not open a terminal",
+        crate::cli::tui::app::ToastKind::Warning,
+        command,
+    );
+    app.route = Route::Providers;
+    let data = minimal_data(&app.app_type);
+
+    let rendered = all_text(&render(&app, &data));
+
+    assert!(!rendered.contains(command), "{rendered}");
+    assert!(
+        !rendered.contains("Could not open a terminal"),
+        "{rendered}"
     );
 }
 
@@ -8220,7 +8949,6 @@ fn openclaw_tools_route_shows_edit_and_delete_shortcuts_for_structured_rows() {
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
 
     assert!(all.contains("Enter"), "{all}");
-    assert!(all.contains("e"), "{all}");
     assert!(all.contains("Del/Backspace"), "{all}");
     assert!(all.contains(texts::tui_key_edit()), "{all}");
     assert!(all.contains(texts::tui_key_delete()), "{all}");
@@ -11582,6 +12310,57 @@ fn provider_form_model_field_hints_enter_edit_and_f_fetch() {
 }
 
 #[test]
+fn provider_base_url_key_bar_advertises_full_url_shortcut() {
+    for field in [
+        ProviderAddField::ClaudeBaseUrl,
+        ProviderAddField::CodexBaseUrl,
+    ] {
+        let keys = super::add_form_key_items(FormFocus::Fields, false, Some(field));
+        assert_eq!(
+            keys.iter()
+                .find(|(key, _label)| *key == "f")
+                .map(|(_key, label)| *label),
+            Some(texts::tui_full_url_label())
+        );
+    }
+
+    let editing = super::add_form_key_items(
+        FormFocus::Fields,
+        true,
+        Some(ProviderAddField::ClaudeBaseUrl),
+    );
+    assert!(editing.iter().all(|(key, _label)| *key != "f"));
+}
+
+#[test]
+fn provider_base_url_key_bar_keeps_full_url_shortcut_visible_when_narrow() {
+    let _lock = lock_env();
+    let _language = use_test_language(Language::English);
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::Fields;
+    form.field_idx = form
+        .fields()
+        .iter()
+        .position(|field| *field == ProviderAddField::ClaudeBaseUrl)
+        .expect("Claude Base URL field");
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        72,
+        24,
+    ));
+    assert!(
+        rendered.contains("f Full URL") || rendered.contains("f=Full URL"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn form_toggle_key_bars_show_enter_without_space() {
     let cases = [
         super::add_form_key_items(
@@ -12222,4 +13001,1493 @@ fn openclaw_agents_render_windows_ten_thousand_fallbacks_and_borrows_huge_extra(
             .map(str::len),
         Some(1_000_000)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Home usage chart
+// ---------------------------------------------------------------------------
+
+/// A 30-day axis with the supplied models spread over the three most recent
+/// days. Each entry is `(model, billable tokens/day, USD/day)`; both scale with
+/// the day multiplier, so the ranking is the same on every day of the window.
+///
+/// Costs are deliberately *not* proportional to tokens: the card ranks by cost
+/// and sizes bars by real tokens, and a fixture where the two agree could not
+/// tell a correct implementation from one that confuses them.
+fn usage_with_daily_models(models: &[(&str, u64, f64)]) -> UsageSnapshot {
+    use chrono::{Days, Local};
+
+    let today = Local::now().date_naive();
+    let start = today.checked_sub_days(Days::new(29)).unwrap_or(today);
+    let trends_30d = (0..30)
+        .map(|offset| {
+            let date = start.checked_add_days(Days::new(offset)).unwrap_or(start);
+            UsageTrendBucket {
+                key: date.format("%Y-%m-%d").to_string(),
+                label: date.format("%m/%d").to_string(),
+                ..UsageTrendBucket::default()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut daily_models = Vec::new();
+    for (offset, bucket) in trends_30d.iter().rev().take(3).enumerate() {
+        let multiplier = offset as u64 + 1;
+        for (model, tokens, cost) in models {
+            let day_tokens = tokens.saturating_mul(multiplier);
+            daily_models.push(UsageDailyModelBucket {
+                date_key: bucket.key.clone(),
+                model: (*model).to_string(),
+                is_other: false,
+                total_tokens: day_tokens,
+                total_cost_usd: cost * multiplier as f64,
+                // A third input, two thirds output, with cache traffic an order
+                // of magnitude larger — the shape a real Claude day has.
+                input_tokens: day_tokens / 3,
+                output_tokens: day_tokens - day_tokens / 3,
+                cache_read_tokens: day_tokens.saturating_mul(20),
+                cache_creation_tokens: day_tokens.saturating_mul(4),
+            });
+        }
+    }
+
+    UsageSnapshot {
+        trends_30d,
+        daily_models,
+        last_synced_at: Some(chrono::Local::now().timestamp() - 7_200),
+        ..UsageSnapshot::default()
+    }
+}
+
+/// The standard five-model fixture: `claude-opus` is small in tokens and by far
+/// the most expensive, so a token-ranked implementation would fold it into
+/// "Other" and a cost-ranked one puts it first.
+const HOME_CHART_MODELS: [(&str, u64, f64); 5] = [
+    ("claude-opus", 1_000, 6.0),
+    ("claude-sonnet", 5_000, 3.0),
+    ("claude-haiku", 4_000, 1.5),
+    ("gpt-5.4", 3_000, 0.75),
+    ("mystery-model", 2_000, 0.25),
+];
+
+fn row_of(buf: &Buffer, needle: &str) -> Option<u16> {
+    (0..buf.area.height).find(|y| line_at(buf, *y).contains(needle))
+}
+
+/// Ratatui draws box-drawing rails in every icon mode, so a whole rendered row
+/// is never ASCII. ASCII-mode spinner assertions check the braille block
+/// instead: no `⠋⠙⠹⠸` may survive the downgrade.
+fn contains_braille(text: &str) -> bool {
+    text.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
+}
+
+/// Card title as it renders for the active icon mode.
+fn usage_card_title() -> String {
+    if crate::cli::tui::icons::use_emoji() {
+        "Usage · 30d".to_string()
+    } else {
+        "Usage - 30d".to_string()
+    }
+}
+
+/// The Chinese card title as the test backend lays it out: ratatui pads every
+/// double-width grapheme with a blank cell.
+fn zh_usage_card_title() -> String {
+    let separator = if crate::cli::tui::icons::use_emoji() {
+        " · "
+    } else {
+        " - "
+    };
+    buffer_cell_text(&format!("用量{separator}近 30 天"))
+}
+
+/// Text strictly inside the home usage card, both rails excluded. Ratatui
+/// draws box-drawing borders in every icon mode, so ASCII assertions have to
+/// look at the card body rather than the whole region.
+fn usage_card_inner_text(buf: &Buffer) -> String {
+    usage_card_inner_text_with_title(buf, &usage_card_title())
+}
+
+fn usage_card_inner_text_with_title(buf: &Buffer, title: &str) -> String {
+    let top = row_of(buf, title).expect("usage card title row");
+    let left = (0..buf.area.width)
+        .find(|x| buf[(*x, top)].symbol() == "┌")
+        .expect("usage card left rail");
+    let right = ((left + 1)..buf.area.width)
+        .find(|x| buf[(*x, top)].symbol() == "┐")
+        .expect("usage card right rail");
+    let bottom = ((top + 1)..buf.area.height)
+        .find(|y| buf[(left, *y)].symbol() == "└")
+        .expect("usage card bottom rail");
+
+    let mut out = String::new();
+    for y in (top + 1)..bottom {
+        for x in (left + 1)..right {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn home_usage_chart_renders_title_bars_and_legend() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    let buf = render(&app, &data);
+
+    // The card chrome carries the title and the status, like its siblings.
+    let title_row = line_at(&buf, row_of(&buf, "Usage · 30d").expect("card title row"));
+    assert!(title_row.contains("┌ Usage · 30d ─"), "{title_row}");
+    assert!(title_row.contains("Last updated: 2h ago"), "{title_row}");
+
+    let card = usage_card_inner_text(&buf);
+    assert!(card.contains('█'), "bars should render:\n{card}");
+
+    // Breathing room: a blank row under the title rail and a blank column on
+    // both sides of every content row.
+    let rows = card.lines().collect::<Vec<_>>();
+    assert!(
+        rows[0].trim().is_empty(),
+        "the card opens with a blank row:\n{card}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.starts_with(' ') && row.ends_with(' ')),
+        "content never touches the side rails:\n{card}"
+    );
+
+    // 120 columns is wide enough for the models column.
+    assert!(card.contains("Models by Cost"), "{card}");
+    assert!(card.contains("● claude-opus"), "{card}");
+    assert!(
+        card.contains("● Other"),
+        "the list needs a residual bucket:\n{card}"
+    );
+    let opus_row = card
+        .lines()
+        .find(|line| line.contains("● claude-opus"))
+        .expect("a model row");
+    assert!(opus_row.contains('%'), "{opus_row}");
+    assert!(opus_row.contains('$'), "{opus_row}");
+
+    // Near the split floor the expanded list yields enough room to keep the
+    // chart readable, remaining under the detail line's floor: the
+    // rows stay one-liners.
+    assert!(!card.contains("In: "), "{card}");
+}
+
+#[test]
+fn home_usage_chart_lists_the_token_breakdown_under_each_model() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    // 160 columns leaves the list its revised 59-column cap: ample detail room.
+    let card = usage_card_inner_text(&render_with_size(&app, &data, 160, 45));
+
+    let opus = card
+        .lines()
+        .position(|line| line.contains("● claude-opus"))
+        .expect("the opus row");
+    let detail = card.lines().nth(opus + 1).expect("its detail line");
+    for label in ["In: ", "Out: ", "CR: ", "CW: "] {
+        assert!(detail.contains(label), "{label} missing in {detail:?}");
+    }
+    assert!(detail.contains('•'), "{detail:?}");
+    // Indented under the name and confined to the list column: everything left
+    // of the list rule still belongs to the chart.
+    let (chart_half, list_half) = detail.rsplit_once('│').expect("the list rule");
+    assert!(!chart_half.contains("In: "), "{detail:?}");
+    assert!(
+        list_half.starts_with("    In: "),
+        "the detail line hangs under the model name: {detail:?}"
+    );
+
+    // The residual bucket aggregates its folded models, so it has a line too.
+    let other = card
+        .lines()
+        .position(|line| line.contains("● Other"))
+        .expect("the residual row");
+    assert!(
+        card.lines()
+            .nth(other + 1)
+            .is_some_and(|line| line.contains("In: ") && line.contains("CW: ")),
+        "the residual row carries a detail line too:\n{card}"
+    );
+}
+
+#[test]
+fn home_usage_chart_drops_only_the_detail_lines_when_the_list_is_short() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    // Wide enough for the detail line, one card row too short for
+    // the header plus two rows per model. Main no longer reserves a blank row
+    // above the connection card, so the terminal fixture is one row shorter.
+    let card = usage_card_inner_text(&render_with_size(&app, &data, 160, 32));
+
+    assert!(card.contains("Models by Cost"), "{card}");
+    for model in ["● claude-opus", "● gpt-5.4", "● Other"] {
+        assert!(card.contains(model), "{model} missing:\n{card}");
+    }
+    assert!(
+        !card.contains("In: "),
+        "the names survive, the detail lines go:\n{card}"
+    );
+}
+
+#[test]
+fn home_usage_chart_bars_span_the_whole_card_width() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let card = usage_card_inner_text(&buf);
+    let axis = card
+        .lines()
+        .find(|line| line.contains('└'))
+        .expect("the chart axis");
+    // y label column + the axis corner + one column per body cell, and the
+    // whole chart column ends where the list rule starts.
+    let rule = axis.chars().filter(|ch| *ch == '│').count();
+    assert_eq!(rule, 1, "the list rule spans the card height:\n{card}");
+    let drawn = axis.chars().filter(|ch| *ch == '─').count();
+    assert!(
+        drawn >= 58,
+        "a 160-column terminal should leave the revised-list chart ~60 columns, got {drawn}:\n{card}"
+    );
+}
+
+#[test]
+fn home_swaps_usage_chart_for_proxy_dashboard_while_the_proxy_routes_this_app() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    // Routed: the proxy activity dashboard owns the home page and the usage
+    // chart (with its "• live" badge) is not rendered at all.
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+    data.proxy.running = true;
+    data.proxy.claude_takeover = true;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Proxy Dashboard"), "{all}");
+    assert!(!all.contains("• live"), "{all}");
+    assert!(!all.contains("Last updated"), "{all}");
+
+    // Not routed: the usage chart comes back.
+    data.proxy.claude_takeover = false;
+    data.proxy.running = false;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(!all.contains("Proxy Dashboard"), "{all}");
+}
+
+#[test]
+fn home_usage_chart_shows_an_empty_hint_per_app_family() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+    let all = all_text(&render(&app, &data));
+    assert!(all.contains("No usage yet - first sync pending"), "{all}");
+
+    let mut openclaw = App::new(Some(AppType::OpenClaw));
+    openclaw.route = Route::Main;
+    openclaw.focus = Focus::Content;
+    let openclaw_data = minimal_data(&openclaw.app_type);
+    let openclaw_text = all_text(&render(&openclaw, &openclaw_data));
+    assert!(
+        openclaw_text.contains("only records proxy traffic"),
+        "{openclaw_text}"
+    );
+}
+
+#[test]
+fn home_usage_chart_spins_while_the_first_aggregate_loads() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::ThirtyDays);
+
+    let data = minimal_data(&app.app_type);
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains("⠸ Refreshing"),
+        "the first aggregate uses the shared refresh indicator:\n{all}"
+    );
+}
+
+#[test]
+fn home_usage_chart_degrades_on_small_terminals_without_panicking() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage =
+        usage_with_daily_models(&[("claude-opus", 5_000, 6.0), ("claude-haiku", 1_000, 1.0)]);
+
+    // 80x23 leaves the card two body rows: the top pad plus one content row.
+    // The list header survives; the graph disappears first.
+    let small_buf = render_with_size(&app, &data, 80, 23);
+    let small = all_text(&small_buf);
+    assert!(small.contains("Usage · 30d"), "{small}");
+    assert!(small.contains("Models by Cost"), "{small}");
+    let small_card = usage_card_inner_text(&small_buf);
+    assert_eq!(small_card.lines().count(), 2, "{small_card}");
+    assert!(
+        small_card
+            .lines()
+            .next()
+            .is_some_and(|row| row.trim().is_empty()),
+        "the card opens with its blank pad row:\n{small_card:?}"
+    );
+    assert!(
+        !small_card.contains('█') && !small_card.contains('└'),
+        "the compact card must not draw a monochrome graph:\n{small_card:?}"
+    );
+
+    // Extra height reveals the model rows and detail lines, but horizontal
+    // space still belongs to the list rather than a chart-only fallback.
+    let tall_buf = render_with_size(&app, &data, 80, 40);
+    let tall = all_text(&tall_buf);
+    assert!(tall.contains("Models by Cost"), "{tall}");
+    let tall_card = usage_card_inner_text(&tall_buf);
+    assert!(tall_card.contains("● claude-opus"), "{tall_card}");
+    assert!(
+        !tall_card.contains('█') && !tall_card.contains('└'),
+        "narrow terminals keep the list and omit every graph form:\n{tall_card}"
+    );
+
+    // Anything smaller must still render without panicking.
+    for (width, height) in [(60u16, 20u16), (40, 14), (30, 10), (20, 8)] {
+        let buf = render_with_size(&app, &data, width, height);
+        assert_eq!(buf.area.width, width);
+    }
+}
+
+#[test]
+fn home_usage_chart_keeps_the_chart_region_ascii_in_ascii_icon_mode() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 5;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[
+        ("claude-opus", 5_000, 6.0),
+        ("claude-sonnet", 4_000, 3.0),
+        ("claude-haiku", 3_000, 1.5),
+        (
+            "a-very-long-model-identifier-that-needs-truncating",
+            2_500,
+            0.75,
+        ),
+        ("gpt-5.4", 2_000, 0.25),
+    ]);
+
+    // A wide terminal so the assertion covers the models column too.
+    let buf = render_with_size(&app, &data, 160, 45);
+    let chart = usage_card_inner_text(&buf);
+
+    assert!(
+        chart.is_ascii(),
+        "ascii icon mode must not leak unicode glyphs:\n{chart}"
+    );
+    assert!(chart.contains('#'), "ascii bars should render:\n{chart}");
+    assert!(chart.contains("Models by Cost"), "{chart}");
+    // Model rows of the list column: `<glyph> <name> <share> <cost>`.
+    let list_rows = chart
+        .lines()
+        .filter_map(|line| line.rsplit_once('|').map(|(_, list)| list))
+        .filter_map(|list| {
+            let rest = list.strip_prefix(' ')?;
+            let mut chars = rest.chars();
+            let glyph = chars.next()?;
+            // A dot is followed by a space; headers and detail lines are not.
+            (chars.next() == Some(' ') && !glyph.is_whitespace())
+                .then(|| (glyph, rest[1..].trim().to_string()))
+        })
+        .collect::<Vec<_>>();
+
+    // Cost ranks the list, and claude-opus is the costliest here despite
+    // carrying the fewest tokens.
+    assert!(
+        list_rows
+            .first()
+            .is_some_and(|(_, text)| text.starts_with("claude-opus")),
+        "the costliest model leads the list, got {list_rows:?}:\n{chart}"
+    );
+
+    // Without color the dot is the only thing telling two series apart, so
+    // every slot has to draw its own glyph.
+    let list_dots = list_rows
+        .iter()
+        .map(|(glyph, _)| *glyph)
+        .collect::<Vec<_>>();
+    let distinct = list_dots
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert!(
+        distinct >= 2,
+        "ascii mode must not collapse every series onto one dot, got {list_dots:?}:\n{chart}"
+    );
+    assert!(
+        list_dots.iter().all(char::is_ascii),
+        "{list_dots:?} must stay ascii"
+    );
+
+    let long_row = chart
+        .lines()
+        .find(|line| line.contains("a-very-long-model-identifier-that-"))
+        .expect("the long model row");
+    assert!(
+        long_row.contains('~'),
+        "long names use the ascii ellipsis:\n{long_row}"
+    );
+    // The detail line falls back to the ascii separator.
+    let detail = chart
+        .lines()
+        .find(|line| line.contains("In: "))
+        .expect("a detail line");
+    assert!(detail.contains(" - Out: "), "{detail:?}");
+    assert!(detail.contains(" - CW: "), "{detail:?}");
+
+    // The loading spinner shares the gate.
+    let mut loading = App::new(Some(AppType::Claude));
+    loading.route = Route::Main;
+    loading.focus = Focus::Content;
+    loading.tick = 5;
+    loading
+        .usage
+        .start_loading(AppType::Claude, UsageRangePreset::ThirtyDays);
+    let loading_buf = render_with_size(&loading, &minimal_data(&loading.app_type), 160, 45);
+    let loading_region = usage_card_inner_text(&loading_buf);
+    assert!(
+        loading_region.contains("/ Refreshing"),
+        "the ascii body uses the shared refresh indicator:\n{loading_region}"
+    );
+    assert!(
+        loading_region.is_ascii(),
+        "ascii spinner must stay ascii:\n{loading_region}"
+    );
+}
+
+#[test]
+fn home_connection_card_carries_the_webdav_status_line() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.webdav_sync = Some(crate::settings::WebDavSyncSettings {
+        enabled: true,
+        base_url: "https://dav.example.com".to_string(),
+        remote_root: "cc-switch-sync".to_string(),
+        profile: "default".to_string(),
+        username: "user".to_string(),
+        password: "secret".to_string(),
+        auto_sync: false,
+        status: crate::settings::WebDavSyncStatus {
+            last_sync_at: Some(1_700_000_000),
+            ..crate::settings::WebDavSyncStatus::default()
+        },
+    });
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    let webdav_line = all
+        .lines()
+        .find(|line| line.contains("WebDAV Sync"))
+        .expect("the connection card should carry a WebDAV line");
+
+    assert!(webdav_line.contains('✓'), "{webdav_line}");
+    assert!(webdav_line.contains("OK"), "{webdav_line}");
+    assert!(webdav_line.contains("2023/11"), "{webdav_line}");
+    // The standalone card is gone: no second WebDAV section title.
+    assert_eq!(all.matches("WebDAV Sync").count(), 1, "{all}");
+}
+
+/// The connection card is sized from its line *count*, so it must not wrap:
+/// ratatui word-wraps, and any estimate of that would eventually clip the last
+/// line — the WebDAV one — out of the card.
+#[test]
+fn home_connection_card_truncates_instead_of_wrapping_on_narrow_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_current = true;
+    data.providers.rows[0].api_url = Some(format!(
+        "https://{}.example.com/v1",
+        "long-host-".repeat(12)
+    ));
+
+    let buf = render_with_size(&app, &data, 90, 30);
+    let all = all_text(&buf);
+
+    let api_line = all
+        .lines()
+        .find(|line| line.contains("API URL"))
+        .expect("the API URL row");
+    assert!(
+        api_line.contains('…'),
+        "the oversized URL is clipped, not wrapped:\n{api_line}"
+    );
+    assert!(
+        !all.contains("long-host-long-host-long-host-long-host-"),
+        "no second row carries the overflow:\n{all}"
+    );
+    // Every card line is still on screen, the WebDAV one included. The labels
+    // are padded to a fixed column, which also keeps the header's own
+    // "Provider:" badge out of the count.
+    for label in ["Provider      :", "API URL       :", "WebDAV Sync   :"] {
+        assert_eq!(
+            all.lines().filter(|line| line.contains(label)).count(),
+            1,
+            "{label} must appear exactly once:\n{all}"
+        );
+    }
+}
+
+#[test]
+fn home_keeps_webdav_visible_below_a_long_quota_on_narrow_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_current = true;
+    data.providers.rows[0].provider.settings_config =
+        json!({"env": {"ANTHROPIC_BASE_URL": "https://relay.example.test"}});
+    data.providers.rows[0].provider.meta = Some(crate::provider::ProviderMeta {
+        usage_script: Some(crate::provider::UsageScript {
+            enabled: true,
+            language: "javascript".to_string(),
+            code: String::new(),
+            timeout: None,
+            api_key: None,
+            base_url: None,
+            access_token: None,
+            user_id: None,
+            template_type: Some("general".to_string()),
+            auto_query_interval: None,
+            coding_plan_provider: None,
+        }),
+        ..crate::provider::ProviderMeta::default()
+    });
+    let target =
+        crate::cli::tui::data::quota_target_for_provider(&app.app_type, &data.providers.rows[0])
+            .expect("usage script provides a quota target");
+    data.quota.finish(
+        target,
+        crate::cli::provider_quota::ProviderUsageQuota::Script(crate::provider::UsageResult {
+            success: true,
+            data: Some(vec![crate::provider::UsageData {
+                plan_name: Some("an-extremely-long-provider-controlled-plan-name".to_string()),
+                extra: None,
+                is_valid: Some(true),
+                invalid_message: None,
+                total: Some(100.0),
+                used: Some(42.0),
+                remaining: Some(58.0),
+                unit: Some("%".to_string()),
+            }]),
+            error: None,
+        }),
+    );
+    let mut webdav = crate::settings::WebDavSyncSettings {
+        enabled: true,
+        base_url: "https://dav.example.com".to_string(),
+        remote_root: "cc-switch-sync".to_string(),
+        profile: "default".to_string(),
+        username: "user".to_string(),
+        password: "secret".to_string(),
+        auto_sync: false,
+        status: crate::settings::WebDavSyncStatus::default(),
+    };
+    webdav.status.last_error = Some("auth failed".to_string());
+    data.config.webdav_sync = Some(webdav);
+
+    let all = all_text(&render_with_size(&app, &data, 70, 30));
+    let quota_row = all
+        .lines()
+        .find(|line| line.contains("Quota"))
+        .expect("quota row");
+    let webdav_row = all
+        .lines()
+        .find(|line| line.contains("WebDAV Sync"))
+        .expect("WebDAV keeps its own row");
+
+    assert!(quota_row.contains("an-extremely"), "{quota_row}");
+    assert!(webdav_row.contains("Error"), "{webdav_row}");
+    assert!(webdav_row.contains("auth failed"), "{webdav_row}");
+}
+
+/// A pathological value must clip, not drive the layout through a wrapped
+/// `u16`. In a debug build the old `line.width() as u16 + 2` would also be one
+/// overflow away from a panic.
+#[test]
+fn home_connection_card_survives_an_absurdly_long_url() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_current = true;
+    data.providers.rows[0].api_url = Some(format!("https://{}", "u".repeat(70_000)));
+
+    for (width, height) in [(160u16, 45u16), (120, 40), (60, 20), (30, 12)] {
+        let buf = render_with_size(&app, &data, width, height);
+        assert_eq!(buf.area.width, width);
+        let all = all_text(&buf);
+        // The card keeps its normal footprint: three labelled rows, one each.
+        assert_eq!(
+            all.lines().filter(|line| line.contains("WebDAV")).count(),
+            usize::from(width >= 60),
+            "the last card line must survive at {width}x{height}:\n{all}"
+        );
+    }
+}
+
+/// NoColor terminals get the same per-slot glyphs as ASCII ones: `●` in one ink
+/// is four identical dots.
+#[test]
+fn home_usage_chart_uses_distinct_slot_glyphs_without_color() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    let card = usage_card_inner_text(&render_with_size(&app, &data, 160, 45));
+
+    assert!(
+        !card.contains('●'),
+        "a single shape carries no information without color:\n{card}"
+    );
+    let dots = ['*', '#', '%', '@', '.']
+        .into_iter()
+        .filter(|glyph| {
+            card.contains(&format!("{glyph} claude")) || card.contains(&format!("{glyph} Other"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        dots.len() >= 2,
+        "expected distinct slot glyphs, got {dots:?}:\n{card}"
+    );
+}
+
+/// The card has to survive a Chinese locale: the heading is wider, and the
+/// layout must neither panic nor lose the list.
+#[test]
+fn home_usage_chart_renders_in_chinese() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let all = all_text(&buf);
+    assert!(all.contains(&buffer_cell_text("用量")), "{all}");
+    assert!(all.contains(&buffer_cell_text("最近更新")), "{all}");
+
+    let card = usage_card_inner_text_with_title(&buf, &zh_usage_card_title());
+    assert!(
+        card.contains(&buffer_cell_text("模型花费")),
+        "the ZH list heading:\n{card}"
+    );
+    assert!(
+        card.contains(&buffer_cell_text("其他")),
+        "the ZH residual bucket:\n{card}"
+    );
+    assert!(card.contains('█'), "bars still render:\n{card}");
+    assert!(
+        card.lines()
+            .all(|row| row.starts_with(' ') && row.ends_with(' ')),
+        "content never touches the side rails:\n{card}"
+    );
+
+    // 130x40 is the other size the card is eyeballed at; it must not panic.
+    let narrow = all_text(&render_with_size(&app, &data, 130, 40));
+    assert!(narrow.contains(&buffer_cell_text("用量")), "{narrow}");
+}
+
+#[test]
+fn spinner_frame_cycles_four_frames_per_alphabet() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let unicode = (0..5).map(super::spinner_frame).collect::<Vec<_>>();
+    assert_eq!(unicode, vec!["⠋", "⠙", "⠹", "⠸", "⠋"]);
+
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+    let ascii = (0..5).map(super::spinner_frame).collect::<Vec<_>>();
+    assert_eq!(ascii, vec!["|", "/", "-", "\\", "|"]);
+    assert!(
+        ascii.iter().all(|frame| frame.is_ascii()),
+        "no braille leaks into ascii mode: {ascii:?}"
+    );
+}
+
+#[test]
+fn refresh_indicator_carries_the_accent_and_the_shared_label() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let theme = theme_for(&AppType::Claude);
+
+    let spans = super::refresh_indicator_spans(1, &theme, None);
+    let text = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(text, "⠙ Refreshing");
+    assert!(
+        spans.iter().all(|span| span.style.fg == Some(theme.accent)),
+        "the glyph and its label share the accent: {spans:?}"
+    );
+
+    // The escalation percentage rides the same indicator.
+    let escalated = super::refresh_indicator_spans(1, &theme, Some(42));
+    let escalated_text = escalated
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(escalated_text, "⠙ Refreshing 42%");
+
+    // Tight slots take the glyph alone, off the same frame source.
+    let glyph = super::refresh_spinner_span(1, &theme);
+    assert_eq!(glyph.content.as_ref(), "⠙");
+    assert_eq!(glyph.style.fg, Some(theme.accent));
+}
+
+#[test]
+fn inline_refresh_indicator_follows_the_summary_and_keeps_its_full_label() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let theme = theme_for(&AppType::Claude);
+
+    let spans =
+        super::summary_with_refresh_indicator("1234567890".to_string(), true, 1, &theme, None, 20);
+    let text = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(text, "1234… · ⠙ Refreshing");
+    assert_eq!(super::inline_refresh_indicator_width(1, &theme, None), 15);
+    assert_eq!(super::spans_display_width(&spans), 20);
+    assert_eq!(
+        spans.last().and_then(|span| span.style.fg),
+        Some(theme.accent)
+    );
+}
+
+#[test]
+fn refresh_indicator_reuses_the_chinese_refresh_wording() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let theme = theme_for(&AppType::Claude);
+
+    let text = super::refresh_indicator_spans(2, &theme, Some(42))
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(text, "⠹ 正在刷新 42%");
+}
+
+#[test]
+fn refresh_indicator_drops_its_hue_under_no_color() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let theme = theme_for(&AppType::Claude);
+
+    let spans = super::refresh_indicator_spans(0, &theme, None);
+    assert!(
+        spans.iter().all(|span| span.style.fg.is_none()),
+        "NoColor keeps the motion and drops the hue: {spans:?}"
+    );
+    assert!(
+        spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .contains("Refreshing"),
+        "the label survives NoColor: {spans:?}"
+    );
+}
+
+#[test]
+fn sync_escalation_stays_wordless_until_a_round_outlives_ten_seconds() {
+    // 50 ticks at the 200ms tick rate.
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 49, Some((5, 10))),
+        None
+    );
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 50, Some((5, 10))),
+        Some(50)
+    );
+    // The threshold is measured from the round's own start tick.
+    assert_eq!(
+        super::sync_escalation_percent(Some(10), 59, Some((5, 10))),
+        None
+    );
+    assert_eq!(
+        super::sync_escalation_percent(Some(10), 60, Some((5, 10))),
+        Some(50)
+    );
+
+    // No round in flight, and rounds that do not know their total yet, stay
+    // wordless however long they run.
+    assert_eq!(
+        super::sync_escalation_percent(None, 5_000, Some((5, 10))),
+        None
+    );
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 5_000, Some((5, 0))),
+        None
+    );
+    assert_eq!(super::sync_escalation_percent(Some(0), 5_000, None), None);
+
+    // Floors, and never overshoots on a total that shrank mid-round.
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 50, Some((1, 3))),
+        Some(33)
+    );
+    assert_eq!(
+        super::sync_escalation_percent(Some(0), 50, Some((7, 3))),
+        Some(100)
+    );
+}
+
+#[test]
+fn sync_round_tracking_starts_on_the_first_live_tick_and_resets_between_rounds() {
+    let mut app = App::new(Some(AppType::Claude));
+
+    app.tick = 7;
+    app.note_session_sync_round(false);
+    assert_eq!(app.usage_sync_round_started_tick, None);
+
+    app.note_session_sync_round(true);
+    assert_eq!(app.usage_sync_round_started_tick, Some(7));
+
+    app.tick = 30;
+    app.note_session_sync_round(true);
+    assert_eq!(
+        app.usage_sync_round_started_tick,
+        Some(7),
+        "a running round keeps the tick it started on"
+    );
+
+    app.note_session_sync_round(false);
+    assert_eq!(app.usage_sync_round_started_tick, None);
+
+    app.tick = 42;
+    app.note_session_sync_round(true);
+    assert_eq!(
+        app.usage_sync_round_started_tick,
+        Some(42),
+        "the next round starts its own clock"
+    );
+}
+
+#[test]
+fn sync_escalation_reads_the_live_round_against_the_app_clock() {
+    let _override = super::SyncProgressOverride::set(Some((21, 50)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.tick = 10;
+    app.note_session_sync_round(true);
+
+    app.tick = 59;
+    assert_eq!(super::sync_escalation(&app), None);
+
+    app.tick = 60;
+    assert_eq!(super::sync_escalation(&app), Some(42));
+}
+
+#[test]
+fn home_usage_card_rail_spins_without_a_counter_while_syncing() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.note_session_sync_round(true);
+
+    let mut data = minimal_data(&app.app_type);
+    // Data on screen keeps the body quiet, so the rail owns the indicator.
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+
+    assert!(
+        rail.contains("⠸ Refreshing"),
+        "the spinner and its label own the rail:\n{rail}"
+    );
+    assert!(!rail.contains("1234/18704"), "{rail}");
+    assert!(!rail.contains("18704"), "{rail}");
+    assert!(!rail.to_lowercase().contains("sync"), "{rail}");
+    assert!(
+        !rail.contains('%'),
+        "a short round earns no number:\n{rail}"
+    );
+    // The rail is exclusive: no stale-timestamp text behind the indicator.
+    assert!(!rail.contains("Last updated"), "{rail}");
+}
+
+#[test]
+fn home_usage_card_rail_spins_while_existing_data_refreshes() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::ThirtyDays);
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+    let card = usage_card_inner_text(&buf);
+
+    assert!(rail.contains("⠸ Refreshing"), "{rail}");
+    assert!(!rail.contains("Last updated"), "{rail}");
+    assert!(
+        !card.contains("Refreshing"),
+        "existing data remains visible while the rail owns the indicator:\n{card}"
+    );
+}
+
+#[test]
+fn home_usage_card_rail_earns_a_percentage_after_ten_seconds() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 4;
+    app.note_session_sync_round(true);
+    app.tick = 4 + super::SYNC_ESCALATION_TICKS;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+
+    assert!(
+        rail.contains("Refreshing 6%"),
+        "a slow round appends its share to the one indicator:\n{rail}"
+    );
+    assert!(!rail.contains("1234/18704"), "{rail}");
+}
+
+#[test]
+fn home_usage_card_shows_one_indicator_across_its_rail_and_body() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    // An import round *and* the card's own first aggregate, both in flight.
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.note_session_sync_round(true);
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::ThirtyDays);
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 160, 45);
+    let card = usage_card_inner_text(&buf);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+
+    // The body owns the shared indicator, so the rail steps back to its
+    // resting status.
+    assert!(card.contains("⠸ Refreshing"), "{card}");
+    assert!(
+        !rail.contains('⠸'),
+        "the rail must not spin alongside the body:\n{rail}"
+    );
+    assert!(!rail.contains("Refreshing"), "{rail}");
+    assert_eq!(
+        card.matches('⠸').count(),
+        1,
+        "exactly one spinner inside the card:\n{card}"
+    );
+}
+
+#[test]
+fn home_usage_card_rail_keeps_its_spinner_ascii_in_ascii_icon_mode() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.note_session_sync_round(true);
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
+
+    let buf = render_with_size(&app, &data, 160, 45);
+    let title_row = row_of(&buf, &usage_card_title()).expect("usage card title row");
+    let rail = line_at(&buf, title_row);
+
+    assert!(rail.contains("\\ Refreshing"), "{rail}");
+    assert!(
+        !contains_braille(&rail),
+        "no braille leaks into ascii mode:\n{rail}"
+    );
+}
+
+#[test]
+fn usage_summary_bar_merges_a_manual_refresh_and_a_background_import() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    // Both pipelines live at once: this bar used to animate twice.
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.tick = 1;
+    app.note_session_sync_round(true);
+    app.usage.start_manual_session_refresh();
+    let data = minimal_data(&app.app_type);
+
+    let buf = render_with_size(&app, &data, 120, 40);
+    let summary_row = row_of(&buf, "avg latency").expect("the usage summary bar");
+    let summary = line_at(&buf, summary_row);
+    assert!(summary.contains("avg latency · ⠙ Refreshing"), "{summary}");
+    assert_eq!(
+        summary.matches("Refreshing").count(),
+        1,
+        "one bar, one indicator:\n{summary}"
+    );
+    assert_eq!(
+        summary.matches('⠙').count(),
+        1,
+        "one bar, one spinner:\n{summary}"
+    );
+    assert!(!summary.contains("importing local usage"), "{summary}");
+    assert!(!summary.contains("1234/18704"), "{summary}");
+
+    // The detail bar merges the same two pipelines.
+    app.route = Route::UsageLogs;
+    let logs_buf = render_with_size(&app, &data, 120, 40);
+    let logs_row = row_of(&logs_buf, "model stats").expect("the usage detail summary bar");
+    let logs = line_at(&logs_buf, logs_row);
+    assert_eq!(logs.matches("Refreshing").count(), 1, "{logs}");
+    assert_eq!(logs.matches('⠙').count(), 1, "{logs}");
+
+    // Idle again: the summary bar carries no indicator at all.
+    let _idle = super::SyncProgressOverride::set(None);
+    let mut idle_app = App::new(Some(AppType::Claude));
+    idle_app.route = Route::Usage;
+    idle_app.focus = Focus::Content;
+    idle_app.tick = 1;
+    idle_app.note_session_sync_round(false);
+    let idle_buf = render_with_size(&idle_app, &data, 120, 40);
+    let idle_row = row_of(&idle_buf, "avg latency").expect("the usage summary bar");
+    let idle = line_at(&idle_buf, idle_row);
+    assert!(!idle.contains("Refreshing"), "{idle}");
+    assert!(!idle.contains('⠙') && !idle.contains('⠋'), "{idle}");
+}
+
+#[test]
+fn usage_summary_bar_spins_for_a_background_import_alone() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((21, 50)));
+
+    // No manual refresh: the import alone still earns the bar's indicator.
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.tick = 4;
+    app.note_session_sync_round(true);
+
+    // One tick short of the threshold: the indicator is there, the number is not.
+    app.tick = 3 + super::SYNC_ESCALATION_TICKS;
+    let early = render_with_size(&app, &minimal_data(&app.app_type), 120, 40);
+    let early_row = row_of(&early, "avg latency").expect("the usage summary bar");
+    let early_summary = line_at(&early, early_row);
+    assert!(early_summary.contains(" · ⠙ Refreshing"), "{early_summary}");
+    assert!(
+        !early_summary.contains('%'),
+        "a round under ten seconds earns no number:\n{early_summary}"
+    );
+
+    // 50 ticks in, the percentage joins the same indicator.
+    app.tick = 4 + super::SYNC_ESCALATION_TICKS;
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 120, 40);
+    let summary_row = row_of(&buf, "avg latency").expect("the usage summary bar");
+    let summary = line_at(&buf, summary_row);
+    assert!(
+        summary.contains(" · ⠹ Refreshing 42%"),
+        "the escalation rides the merged indicator:\n{summary}"
+    );
+    assert_eq!(summary.matches("Refreshing").count(), 1, "{summary}");
+    assert_eq!(summary.matches('%').count(), 1, "{summary}");
+}
+
+#[test]
+fn usage_summary_bar_keeps_its_spinner_ascii_in_ascii_icon_mode() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.tick = 1;
+    app.note_session_sync_round(true);
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 120, 40);
+    let summary_row = row_of(&buf, "avg latency").expect("the usage summary bar");
+    let summary = line_at(&buf, summary_row);
+    assert!(summary.contains("/ Refreshing"), "{summary}");
+    assert!(
+        !contains_braille(&summary),
+        "no braille leaks into ascii mode:\n{summary}"
+    );
+}
+
+#[test]
+fn sessions_scope_line_spins_while_a_scan_is_in_flight() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.tick = 1;
+    app.sessions.loading = true;
+    let data = minimal_data(&app.app_type);
+
+    let buf = render_with_size(&app, &data, 120, 40);
+    let scope_row = row_of(&buf, "Scope").expect("the sessions scope line");
+    let scope = line_at(&buf, scope_row);
+    assert_eq!(
+        scope.matches('⠙').count(),
+        1,
+        "one scope line, one spinner:\n{scope}"
+    );
+    assert!(
+        scope.contains(" · ⠙ Refreshing"),
+        "the sessions scope uses the shared labelled indicator:\n{scope}"
+    );
+
+    // A finished scan drops the indicator entirely.
+    app.sessions.loading = false;
+    app.sessions.loaded_once = true;
+    let done_buf = render_with_size(&app, &data, 120, 40);
+    let done_row = row_of(&done_buf, "Scope").expect("the sessions scope line");
+    let done = line_at(&done_buf, done_row);
+    assert!(!done.contains('⠙'), "{done}");
+    assert!(!done.contains("Refreshing"), "{done}");
+}
+
+#[test]
+fn sessions_scope_line_keeps_its_spinner_ascii_in_ascii_icon_mode() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.tick = 1;
+    app.sessions.loading = true;
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 120, 40);
+    let scope_row = row_of(&buf, "Scope").expect("the sessions scope line");
+    let scope = line_at(&buf, scope_row);
+    assert!(scope.contains("/ Refreshing"), "{scope}");
+    assert!(
+        !contains_braille(&scope),
+        "no braille leaks into ascii mode:\n{scope}"
+    );
+}
+
+#[test]
+fn pagination_footer_busy_state_uses_the_shared_spinner_glyph() {
+    use crate::cli::tui::input::{ScrollDirection, WheelGestureId};
+
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Recent;
+    app.tick = 2;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.logs_total = 205;
+    data.usage.recent_logs = (0..100)
+        .map(|index| UsageLogRow {
+            request_id: format!("p0-{index}"),
+            model: format!("model-{index}"),
+            created_at: 1_000 - index,
+            cursor_rowid: index + 1,
+            ..UsageLogRow::default()
+        })
+        .collect();
+    app.on_usage_logs_wheel(
+        ScrollDirection::Down,
+        10_000,
+        WheelGestureId::from_raw(1),
+        &data,
+    );
+    assert!(app.usage.log_pager.start_request(
+        1,
+        9,
+        crate::cli::tui::data::UsageLogPageDirection::Older,
+    ));
+
+    let buf = render_with_size(&app, &data, 180, 40);
+    let row = row_of(&buf, "Loading page 2").expect("the paging footer");
+    let footer = line_at(&buf, row);
+    assert_eq!(
+        footer.matches('⠹').count(),
+        1,
+        "one footer, one spinner:\n{footer}"
+    );
+    // A footer cell is too tight for a second label next to "Loading page 2".
+    assert!(!footer.contains("Refreshing"), "{footer}");
+    // The range label still shares the rail with the busy action.
+    assert!(footer.contains("Page 1"), "{footer}");
+}
+
+#[test]
+fn pagination_footer_keeps_its_spinner_ascii_in_ascii_icon_mode() {
+    use crate::cli::tui::input::{ScrollDirection, WheelGestureId};
+
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Recent;
+    app.tick = 2;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.logs_total = 205;
+    data.usage.recent_logs = (0..100)
+        .map(|index| UsageLogRow {
+            request_id: format!("p0-{index}"),
+            model: format!("model-{index}"),
+            created_at: 1_000 - index,
+            cursor_rowid: index + 1,
+            ..UsageLogRow::default()
+        })
+        .collect();
+    app.on_usage_logs_wheel(
+        ScrollDirection::Down,
+        10_000,
+        WheelGestureId::from_raw(1),
+        &data,
+    );
+    assert!(app.usage.log_pager.start_request(
+        1,
+        9,
+        crate::cli::tui::data::UsageLogPageDirection::Older,
+    ));
+
+    let buf = render_with_size(&app, &data, 180, 40);
+    let row = row_of(&buf, "Loading page 2").expect("the paging footer");
+    let footer = line_at(&buf, row);
+    assert!(footer.contains("- Loading page 2"), "{footer}");
+    assert!(
+        !contains_braille(&footer),
+        "no braille leaks into ascii mode:\n{footer}"
+    );
+}
+
+#[test]
+fn home_usage_card_rail_falls_back_to_the_glyph_when_the_label_will_not_fit() {
+    let _lock = lock_env();
+    let _icons_lock = lock_test_home_and_settings();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _override = super::SyncProgressOverride::set(Some((1_234, 18_704)));
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    app.tick = 3;
+    app.note_session_sync_round(true);
+    let data = minimal_data(&app.app_type);
+
+    // 52 columns leave the rail too little room for " ⠸ Refreshing ": it keeps
+    // the glyph rather than dropping the signal.
+    let narrow = render_with_size(&app, &data, 52, 45);
+    let narrow_row = row_of(&narrow, &usage_card_title()).expect("usage card title row");
+    let narrow_rail = line_at(&narrow, narrow_row);
+    assert!(narrow_rail.contains('⠸'), "{narrow_rail}");
+    assert!(!narrow_rail.contains("Refreshing"), "{narrow_rail}");
+
+    // Eight more columns and the label comes back.
+    let wide = render_with_size(&app, &data, 60, 45);
+    let wide_row = row_of(&wide, &usage_card_title()).expect("usage card title row");
+    let wide_rail = line_at(&wide, wide_row);
+    assert!(wide_rail.contains("⠸ Refreshing"), "{wide_rail}");
 }

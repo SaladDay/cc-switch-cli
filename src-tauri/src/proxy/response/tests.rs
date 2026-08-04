@@ -273,6 +273,87 @@ async fn codex_chat_buffered_response_restores_tool_context_identity() {
 }
 
 #[tokio::test]
+async fn codex_anthropic_buffered_success_converts_to_responses_shape() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+    let prepared = build_buffered_codex_anthropic_response_with_context(
+        reqwest::StatusCode::OK,
+        &headers,
+        Bytes::from_static(
+            br#"{"id":"msg_123","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}"#,
+        ),
+        false,
+        Default::default(),
+    )
+    .expect("convert Anthropic success response");
+
+    assert_eq!(prepared.response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&buffered_body(prepared.response).await).expect("response json");
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["model"], "claude-sonnet-4-6");
+    assert_eq!(body["output"][0]["type"], "message");
+    assert_eq!(body["output"][0]["content"][0]["text"], "hello");
+    assert_eq!(body["usage"]["input_tokens"], 3);
+    assert_eq!(body["usage"]["output_tokens"], 2);
+}
+
+#[tokio::test]
+async fn codex_anthropic_json_success_can_be_synthesized_as_responses_sse() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+    let prepared = build_buffered_codex_anthropic_response_with_context(
+        reqwest::StatusCode::OK,
+        &headers,
+        Bytes::from_static(
+            br#"{"id":"msg_stream","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}"#,
+        ),
+        true,
+        Default::default(),
+    )
+    .expect("synthesize Responses SSE");
+
+    assert_eq!(
+        prepared
+            .response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let body = buffered_body(prepared.response).await;
+    let body = String::from_utf8(body.to_vec()).expect("SSE text");
+    assert!(body.contains("event: response.created"), "{body}");
+    assert!(body.contains("event: response.output_text.delta"), "{body}");
+    assert!(body.contains("event: response.completed"), "{body}");
+}
+
+#[tokio::test]
+async fn codex_anthropic_buffered_error_converts_to_responses_error() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+    let prepared = build_buffered_codex_anthropic_response_with_context(
+        reqwest::StatusCode::BAD_GATEWAY,
+        &headers,
+        Bytes::from_static(
+            br#"{"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}"#,
+        ),
+        false,
+        Default::default(),
+    )
+    .expect("convert Anthropic error response");
+
+    assert_eq!(prepared.response.status(), StatusCode::BAD_GATEWAY);
+    let body: serde_json::Value =
+        serde_json::from_slice(&buffered_body(prepared.response).await).expect("response json");
+    assert_eq!(body["error"]["type"], "overloaded_error");
+    assert_eq!(body["error"]["message"], "upstream overloaded");
+}
+
+#[tokio::test]
 async fn codex_chat_buffered_transform_strips_hop_by_hop_headers() {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

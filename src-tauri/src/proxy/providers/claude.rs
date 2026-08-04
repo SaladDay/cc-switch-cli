@@ -13,6 +13,10 @@ pub struct ClaudeAdapter;
 const ANTHROPIC_THINKING_PLACEHOLDER: &str = "tool call";
 const ANTHROPIC_REDACTED_THINKING_PLACEHOLDER: &str = "[redacted thinking]";
 const REASONING_VENDOR_HINTS: &[&str] = &["moonshot", "kimi", "deepseek", "mimo", "xiaomimimo"];
+// ChatGPT Codex selects model cohorts from this header pair. Keep both values
+// aligned with a real Codex CLI release new enough for the newest preset model.
+const CODEX_OAUTH_ORIGINATOR: &str = "codex_cli_rs";
+const CODEX_OAUTH_CLIENT_VERSION: &str = "0.144.1";
 
 pub fn get_claude_api_format(provider: &Provider) -> &'static str {
     if let Some(meta) = provider.meta.as_ref() {
@@ -614,7 +618,8 @@ impl ProviderAdapter for ClaudeAdapter {
             }
             AuthStrategy::CodexOAuth => request
                 .header("Authorization", format!("Bearer {}", auth.api_key))
-                .header("originator", "cc-switch"),
+                .header("originator", CODEX_OAUTH_ORIGINATOR)
+                .header("version", CODEX_OAUTH_CLIENT_VERSION),
             AuthStrategy::Google => request.header("x-goog-api-key", &auth.api_key),
             AuthStrategy::GoogleOAuth => {
                 let token = auth.access_token.as_ref().unwrap_or(&auth.api_key);

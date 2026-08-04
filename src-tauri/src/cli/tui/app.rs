@@ -11,9 +11,9 @@ use crate::services::skill::SyncMethod;
 
 use super::data::UiData;
 use super::form::{
-    ClaudeModelPickerColumn, CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType,
-    McpAddField, McpAddFormState, McpTransport, PromptMetaField, PromptMetaFormState,
-    ProviderAddField, ProviderAddFormState,
+    ClaudeModelPickerColumn, ClaudeModelRole, CodexWireApi, FormFocus, FormMode, FormState,
+    GeminiAuthType, McpAddField, McpAddFormState, McpKeyValueKind, McpTransport, PromptMetaField,
+    PromptMetaFormState, ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};
 use super::text_edit::{TextEditCommand, TextInput, TextInputPolicy};
@@ -31,6 +31,7 @@ mod form_handlers;
 mod helpers;
 mod menu;
 mod overlay_handlers;
+mod page_window;
 pub(crate) mod paged_list;
 #[cfg(test)]
 mod tests;
@@ -50,13 +51,14 @@ pub(crate) use types::{
     SessionPageToken, SessionRowIdentity, MODEL_FETCH_QUERY_MAX_BYTES, MODEL_FETCH_QUERY_MAX_CHARS,
 };
 pub use types::{
-    CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterScope, FilterState, Focus,
-    LoadingKind, ManagedAuthLoginState, Overlay, PricingState, SessionProjectPickerState,
-    SessionsPane, SessionsState, SkillsDiscoverSource, TextInputState, TextSubmit, TextViewAction,
-    TextViewState, Toast, ToastKind, UsageMetric, UsagePane, UsageState,
+    CodexHistoryConfirmMode, CodexHistoryConfirmState, CommonSnippetViewSource, ConfirmAction,
+    ConfirmOverlay, FilterScope, FilterState, Focus, LoadingKind, ManagedAuthLoginState, Overlay,
+    PricingState, SessionProjectPickerState, SessionsPane, SessionsState, SkillsDiscoverSource,
+    TextInputState, TextSubmit, TextViewAction, TextViewState, Toast, ToastAction,
+    ToastActionScope, ToastKind, UsageMetric, UsagePane, UsageState,
 };
 #[cfg(test)]
-pub(crate) use types::{McpEnvEditorField, McpEnvEntryEditorState};
+pub(crate) use types::{McpKeyValueEditorField, McpKeyValueEntryEditorState};
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {
     app_type.supports_failover()

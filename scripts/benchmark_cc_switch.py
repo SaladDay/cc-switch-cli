@@ -28,16 +28,18 @@ import tempfile
 import termios
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 
 BENCH = "ccswitch-bench"
 SCHEMA_VERSION = 10
 OPERATION_SET_FULL = "full"
 OPERATION_SET_CI_BLOCKING = "ci-blocking"
+OPERATION_SET_SESSION_COST = "session-cost"
 CI_CLI_OPERATIONS = {
     "startup_version",
     "startup_provider_current",
@@ -58,8 +60,15 @@ CI_TUI_OPERATIONS = {
     "open_providers",
     "provider_switch_a_to_b",
 }
+SESSION_COST_CLI_OPERATIONS = {"usage_query_show"}
+SESSION_COST_TUI_OPERATIONS = {
+    "open_usage",
+    "open_sessions_route",
+    "open_sessions_loaded",
+    "sessions_next_page",
+    "sessions_manual_refresh_metadata",
+}
 PROVIDER_SWITCH_CONFLICT_INPUT = b"\x1b[B\n" * 32
-TUI_PROVIDER_SWITCH_CONFLICT_INPUT = b"c" * 32
 
 
 class BenchmarkAbort(RuntimeError):
@@ -78,6 +87,11 @@ def operation_enabled(operation_set: str, surface: str, operation: str) -> bool:
             return operation in CI_CLI_OPERATIONS
         if surface == "TUI":
             return operation in CI_TUI_OPERATIONS
+    if operation_set == OPERATION_SET_SESSION_COST:
+        if surface == "CLI":
+            return operation in SESSION_COST_CLI_OPERATIONS
+        if surface == "TUI":
+            return operation in SESSION_COST_TUI_OPERATIONS
     return False
 
 
@@ -330,14 +344,19 @@ def snapshot_paths(paths: Paths) -> Snapshot:
     return snap
 
 
-def connect_db(paths: Paths) -> sqlite3.Connection:
+@contextmanager
+def connect_db(paths: Paths) -> Iterator[sqlite3.Connection]:
     paths.cc_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(paths.db_path)
     conn.execute("PRAGMA busy_timeout = 5000")
     # cc-switch checks that .db files have 0600 permissions on Unix.
     if sys.platform != "win32":
         paths.db_path.chmod(0o600)
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def checkpoint_db(paths: Paths) -> None:
@@ -1587,18 +1606,6 @@ def tui_filter_mode_active(screen: str) -> bool:
     )
 
 
-def tui_provider_action_marker(screen: str) -> bool:
-    compact = screen.replace(" ", "")
-    return (
-        "Space=switch" in screen
-        or "Space=切换" in screen
-        or "Spaceswitch" in compact
-        or "Space切换" in compact
-        or "Space=add/remove" in screen
-        or "Spaceadd/remove" in compact
-    )
-
-
 def tui_provider_row_marker(screen: str, provider_id: str, marker_text: str | None) -> bool:
     if marker_text is not None and screen_contains_compact(screen, marker_text):
         return True
@@ -1617,12 +1624,14 @@ def tui_select_provider(
     marker_text: str | None = None,
     query: str | None = None,
 ) -> float:
+    filter_query = query or provider_id
     session.send(b"\x1b[C")
     time.sleep(0.08)
     return tui_filter(
         session,
-        query or provider_id,
-        lambda s: tui_provider_row_marker(s, provider_id, marker_text) and tui_provider_action_marker(s),
+        filter_query,
+        lambda s: screen_contains_compact(s, filter_query)
+        and tui_provider_row_marker(s, provider_id, marker_text),
     )
 
 
@@ -1637,23 +1646,26 @@ def tui_providers_marker(screen: str, app: str | None = None) -> bool:
     def has_provider_pair(target_app: str) -> bool:
         compact_screen = screen.replace(" ", "")
         app_title = target_app.title()
-        current_url = f"https://bench-{target_app}-a." in screen
-        alternate_provider = (
-            f"bench-{target_app}-b." in screen
-            or f"Bench{app_title}B" in compact_screen
-            or f"{BENCH}-{target_app}-b" in screen
+        return (
+            f"Bench{app_title}A" in compact_screen
+            and f"Bench{app_title}B" in compact_screen
         )
-        return current_url and alternate_provider
 
     if app is not None:
         return has_provider_pair(app)
     return has_provider_pair("claude") or has_provider_pair("codex")
 
 
-def tui_sessions_loaded_marker(screen: str, app: str | None = None) -> bool:
-    if app is not None and f"{BENCH}-session-{app}" not in screen:
+def tui_sessions_loaded_marker(
+    screen: str,
+    app: str | None,
+    manifest_published: bool,
+) -> bool:
+    _ = app
+    if not manifest_published:
         return False
-    return (
+    compact = screen.replace(" ", "")
+    structured_headers = (
         (
             "Sessions" in screen
             and "Title" in screen
@@ -1667,14 +1679,73 @@ def tui_sessions_loaded_marker(screen: str, app: str | None = None) -> bool:
             and "消息" in screen
         )
     )
+    # Narrow layouts can clip the flexible Title header and benchmark row.
+    # The published-page summary plus the stable Messages pane still
+    # distinguishes a loaded Sessions page from its scanning placeholder.
+    published_summary = re.search(r"\d+/\d+(?:sessions|个会话)", compact) is not None
+    return structured_headers or published_summary
 
 
-def tui_sessions_route_marker(screen: str, app: str) -> bool:
+def tui_sessions_route_marker(
+    screen: str,
+    app: str,
+    manifest_published: bool,
+) -> bool:
     return (
         "Scanning local sessions" in screen
         or "正在扫描本地会话" in screen
-        or tui_sessions_loaded_marker(screen, app)
+        or tui_sessions_loaded_marker(screen, app, manifest_published)
     )
+
+
+def tui_sessions_page_marker(screen: str, page: int, start: int) -> bool:
+    compact = screen.replace(" ", "")
+    return any(
+        marker in compact
+        for marker in (
+            f"Page{page}·{start}",
+            f"P{page}·{start}",
+            f"第{page}页·{start}",
+            f"{page}页·{start}",
+        )
+    )
+
+
+def tui_sessions_end_marker(screen: str, total: int) -> bool:
+    compact = screen.replace(" ", "")
+    return any(
+        marker in compact
+        for marker in (
+            f"Endoflist·{total}total",
+            f"列表结束·共{total}条",
+        )
+    )
+
+
+def tui_sessions_next_page_marker(screen: str, total: int) -> bool:
+    return tui_sessions_page_marker(screen, 2, 101) or tui_sessions_end_marker(
+        screen, total
+    )
+
+
+def tui_usage_loaded_marker(screen: str) -> bool:
+    compact = screen.replace(" ", "")
+    if "Loading..." in screen or "正在加载中..." in screen:
+        return False
+    has_title = "UsageStatistics" in compact or "使用统计" in compact
+    has_nonzero_summary = (
+        re.search(r"[1-9][\d,]*requests", compact) is not None
+        or re.search(r"[1-9][\d,]*请求", compact) is not None
+    )
+    return has_title and has_nonzero_summary
+
+
+def session_manifest_pointer_snapshot(paths: Paths, app: str) -> bytes | None:
+    pointer = paths.cc_dir / "session-pages-v1" / app / "current.json"
+    try:
+        return pointer.read_bytes()
+    except OSError:
+        return None
 
 
 def benchmark_tui(
@@ -1683,6 +1754,7 @@ def benchmark_tui(
     paths: Paths,
     iterations: int,
     warmup: int,
+    sessions_per_app: int,
     operation_set: str,
     fail_fast: bool,
 ) -> None:
@@ -1767,7 +1839,7 @@ def benchmark_tui(
                         session,
                         0,
                         nav["usage"],
-                        lambda s: "Usage Statistics" in s or "使用统计" in s or "Usage Trend" in s or "使用趋势" in s,
+                        tui_usage_loaded_marker,
                     )[1],
                 )
 
@@ -1780,7 +1852,11 @@ def benchmark_tui(
                         session,
                         0,
                         nav["sessions"],
-                        lambda s: tui_sessions_route_marker(s, app),
+                        lambda s: tui_sessions_route_marker(
+                            s,
+                            app,
+                            session_manifest_pointer_snapshot(paths, app) is not None,
+                        ),
                     )[1],
                 )
 
@@ -1793,12 +1869,83 @@ def benchmark_tui(
                         session,
                         0,
                         nav["sessions"],
-                        lambda s: tui_sessions_loaded_marker(s, app),
+                        lambda s: tui_sessions_loaded_marker(
+                            s,
+                            app,
+                            session_manifest_pointer_snapshot(paths, app) is not None,
+                        ),
                     )[1],
                 )
 
+            def sessions_next_page_body(session: TuiSession) -> float:
+                tui_goto(
+                    session,
+                    0,
+                    nav["sessions"],
+                    lambda s: tui_sessions_loaded_marker(
+                        s,
+                        app,
+                        session_manifest_pointer_snapshot(paths, app) is not None,
+                    ),
+                )
+                session.clear()
+                started = time.perf_counter()
+                # Move by several visible windows. PageDown is stable across
+                # xterm/PTY variants whereas End has multiple escape encodings.
+                for _ in range(6):
+                    session.key(b"\x1b[6~", 0.02)
+                session.wait_for(
+                    lambda s: tui_sessions_next_page_marker(s, sessions_per_app),
+                    timeout=20,
+                )
+                return (time.perf_counter() - started) * 1000
+
+            if sessions_per_app > 100 and tui_enabled("sessions_next_page"):
+                run_tui_op(app, "sessions_next_page", record, sessions_next_page_body)
+
+            def sessions_manual_refresh_metadata_body(session: TuiSession) -> float:
+                tui_goto(
+                    session,
+                    0,
+                    nav["sessions"],
+                    lambda s: tui_sessions_loaded_marker(
+                        s,
+                        app,
+                        session_manifest_pointer_snapshot(paths, app) is not None,
+                    ),
+                )
+                before = session_manifest_pointer_snapshot(paths, app)
+                if before is None:
+                    raise RuntimeError("session manifest pointer was not published before refresh")
+                session.clear()
+                started = time.perf_counter()
+                session.send("r")
+                session.wait_for(
+                    lambda _screen: session_manifest_pointer_snapshot(paths, app)
+                    != before,
+                    timeout=20,
+                )
+                return (time.perf_counter() - started) * 1000
+
+            if tui_enabled("sessions_manual_refresh_metadata"):
+                run_tui_op(
+                    app,
+                    "sessions_manual_refresh_metadata",
+                    record,
+                    sessions_manual_refresh_metadata_body,
+                )
+
             def detail_body(session: TuiSession) -> float:
-                tui_goto(session, 0, nav["sessions"], lambda s: tui_sessions_loaded_marker(s, app))
+                tui_goto(
+                    session,
+                    0,
+                    nav["sessions"],
+                    lambda s: tui_sessions_loaded_marker(
+                        s,
+                        app,
+                        session_manifest_pointer_snapshot(paths, app) is not None,
+                    ),
+                )
                 session.wait_for(
                     lambda s: f"{BENCH}-session" in s
                     and ("sessions" in s or "个会话" in s or "Sessions" in s or "会话" in s),
@@ -1842,8 +1989,6 @@ def benchmark_tui(
                 session.clear()
                 start_switch = time.perf_counter()
                 session.send(b" ")
-                time.sleep(0.15)
-                session.send(TUI_PROVIDER_SWITCH_CONFLICT_INPUT)
                 wait_until_tui(session, lambda: effective_current_provider(paths, app) == b, timeout=8)
                 return (time.perf_counter() - start_switch) * 1000
 
@@ -1960,17 +2105,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--providers-per-app", type=int, default=30)
     parser.add_argument("--usage-rows", type=int, default=2000)
-    parser.add_argument("--sessions-per-app", type=int, default=20)
+    parser.add_argument(
+        "--sessions-per-app",
+        type=int,
+        default=None,
+        help=(
+            "Synthetic sessions per app (default: 120 for the session-cost TUI "
+            "suite so paging is exercised; otherwise 20)"
+        ),
+    )
     parser.add_argument("--mcp-rows", type=int, default=8)
     parser.add_argument("--skill-rows", type=int, default=8)
     parser.add_argument("--skip-cli", action="store_true")
     parser.add_argument("--skip-tui", action="store_true")
-    parser.add_argument("--operation-set", choices=[OPERATION_SET_FULL, OPERATION_SET_CI_BLOCKING], default=OPERATION_SET_FULL)
+    parser.add_argument(
+        "--operation-set",
+        choices=[
+            OPERATION_SET_FULL,
+            OPERATION_SET_CI_BLOCKING,
+            OPERATION_SET_SESSION_COST,
+        ],
+        default=OPERATION_SET_FULL,
+    )
     parser.add_argument("--real-env", action="store_true", help="Run against the real user environment after taking a snapshot. Default is a temporary sandbox.")
     parser.add_argument("--redact-paths", action="store_true", help="Redact local filesystem paths from the JSON result.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop after the first recorded benchmark failure but still write results.")
     parser.add_argument("--json-output", type=Path)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.sessions_per_app is None:
+        args.sessions_per_app = (
+            120
+            if args.operation_set == OPERATION_SET_SESSION_COST and not args.skip_tui
+            else 20
+        )
+    if (
+        args.operation_set == OPERATION_SET_SESSION_COST
+        and not args.skip_tui
+        and args.sessions_per_app <= 100
+    ):
+        parser.error(
+            "--operation-set session-cost requires --sessions-per-app >= 101 "
+            "unless --skip-tui is used"
+        )
+    return args
 
 
 def main() -> int:
@@ -2025,7 +2202,16 @@ def main() -> int:
                 benchmark_cli(metrics, binary, paths, args.iterations, args.warmup, first_sessions, args.operation_set, args.fail_fast)
             if not args.skip_tui:
                 log("Running TUI benchmarks...")
-                benchmark_tui(metrics, binary, paths, args.iterations, args.warmup, args.operation_set, args.fail_fast)
+                benchmark_tui(
+                    metrics,
+                    binary,
+                    paths,
+                    args.iterations,
+                    args.warmup,
+                    args.sessions_per_app,
+                    args.operation_set,
+                    args.fail_fast,
+                )
         except BenchmarkAbort as exc:
             log(f"Benchmark stopped after recorded failure: {exc}")
         summaries = metrics.summaries()

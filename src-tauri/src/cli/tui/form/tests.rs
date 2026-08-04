@@ -153,12 +153,9 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "* FennoAI",
             "* RunAPI",
             "* Cubence",
+            "* PackyCode",
             "* AICodeMirror"
         ]
-    );
-    assert!(
-        !opencode_labels.contains(&"* PackyCode"),
-        "OpenCode should expose only explicitly supported sponsor presets"
     );
     assert!(
         !opencode_labels.contains(&"* ClaudeAPI"),
@@ -168,7 +165,15 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
     let hermes_labels = ProviderAddFormState::new(AppType::Hermes).template_labels();
     assert_eq!(
         hermes_labels,
-        vec!["Custom", "* Qiniu", "* FennoAI", "* RunAPI", "* Cubence"]
+        vec![
+            "Custom",
+            "* Qiniu",
+            "* FennoAI",
+            "* RunAPI",
+            "* Cubence",
+            "* PackyCode",
+            "* AICodeMirror"
+        ]
     );
 
     let openclaw_labels = ProviderAddFormState::new(AppType::OpenClaw).template_labels();
@@ -180,12 +185,9 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "* FennoAI",
             "* RunAPI",
             "* Cubence",
+            "* PackyCode",
             "* AICodeMirror"
         ]
-    );
-    assert!(
-        !openclaw_labels.contains(&"* PackyCode"),
-        "OpenClaw should expose only explicitly supported sponsor presets"
     );
     assert!(
         !openclaw_labels.contains(&"* ClaudeAPI"),
@@ -238,8 +240,18 @@ fn cli_provider_templates_match_tui_serializer_output() {
         ),
         (AppType::OpenCode, ProviderAddTemplate::Cubence, "* Cubence"),
         (AppType::OpenCode, ProviderAddTemplate::Runapi, "* RunAPI"),
+        (
+            AppType::OpenCode,
+            ProviderAddTemplate::Packycode,
+            "* PackyCode",
+        ),
         (AppType::Hermes, ProviderAddTemplate::Cubence, "* Cubence"),
         (AppType::Hermes, ProviderAddTemplate::Runapi, "* RunAPI"),
+        (
+            AppType::Hermes,
+            ProviderAddTemplate::Packycode,
+            "* PackyCode",
+        ),
         (
             AppType::OpenClaw,
             ProviderAddTemplate::Aicodemirror,
@@ -247,6 +259,11 @@ fn cli_provider_templates_match_tui_serializer_output() {
         ),
         (AppType::OpenClaw, ProviderAddTemplate::Cubence, "* Cubence"),
         (AppType::OpenClaw, ProviderAddTemplate::Runapi, "* RunAPI"),
+        (
+            AppType::OpenClaw,
+            ProviderAddTemplate::Packycode,
+            "* PackyCode",
+        ),
         (AppType::Claude, ProviderAddTemplate::Qiniu, "* Qiniu"),
         (AppType::Codex, ProviderAddTemplate::Qiniu, "* Qiniu"),
         (AppType::Gemini, ProviderAddTemplate::Qiniu, "* Qiniu"),
@@ -362,8 +379,10 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
         form.claude_api_format,
         crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses
     );
-    assert_eq!(form.claude_model.value, "gpt-5.4");
-    assert_eq!(form.claude_haiku_model.value, "gpt-5.4-mini");
+    assert_eq!(form.claude_model.value, "gpt-5.6-sol");
+    assert_eq!(form.claude_haiku_model.value, "gpt-5.6-luna");
+    assert_eq!(form.claude_sonnet_model.value, "gpt-5.6-sol");
+    assert_eq!(form.claude_opus_model.value, "gpt-5.6-sol");
     assert!(!form.codex_fast_mode);
     assert!(form.claude_hide_attribution);
 
@@ -394,6 +413,14 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
         provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
         "https://chatgpt.com/backend-api/codex"
     );
+    assert_eq!(
+        provider["settingsConfig"]["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+        "372000"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+        "372000"
+    );
     assert!(
         provider["settingsConfig"]["env"]
             .get("ANTHROPIC_AUTH_TOKEN")
@@ -417,6 +444,7 @@ fn provider_edit_form_codex_oauth_loads_account_and_fast_mode() {
         "meta": {
             "providerType": "codex_oauth",
             "apiFormat": "openai_responses",
+            "isFullUrl": true,
             "codexFastMode": true,
             "authBinding": {
                 "source": "managed_account",
@@ -432,10 +460,50 @@ fn provider_edit_form_codex_oauth_loads_account_and_fast_mode() {
     assert!(form.is_claude_codex_oauth_provider());
     assert_eq!(form.codex_oauth_account_id.as_deref(), Some("acc-123"));
     assert!(form.codex_fast_mode);
+    assert!(
+        !form.is_full_url,
+        "managed Codex OAuth must ignore stale full-URL metadata"
+    );
     assert_eq!(
         form.claude_api_format,
         crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses
     );
+    assert!(form.to_provider_json_value()["meta"]
+        .get("isFullUrl")
+        .is_none());
+}
+
+#[test]
+fn provider_add_form_full_url_support_matches_upstream_apps() {
+    for app_type in [AppType::Claude, AppType::Codex] {
+        assert!(ProviderAddFormState::new(app_type).supports_full_url_mode());
+    }
+    for app_type in [
+        AppType::Gemini,
+        AppType::OpenCode,
+        AppType::Hermes,
+        AppType::OpenClaw,
+    ] {
+        assert!(!ProviderAddFormState::new(app_type).supports_full_url_mode());
+    }
+}
+
+#[test]
+fn provider_add_form_template_change_clears_hidden_full_url_state() {
+    for (app_type, template) in [
+        (AppType::Claude, "Claude Official"),
+        (AppType::Claude, "Codex"),
+        (AppType::Codex, "OpenAI Official"),
+    ] {
+        let mut form = ProviderAddFormState::new(app_type.clone());
+        form.is_full_url = true;
+        form.apply_template(template_index_by_label(app_type, template), &[]);
+
+        assert!(!form.is_full_url, "{template} must clear Full URL mode");
+        assert!(form.to_provider_json_value()["meta"]
+            .get("isFullUrl")
+            .is_none());
+    }
 }
 
 #[test]
@@ -448,7 +516,13 @@ fn provider_add_form_aicodemirror_preset_keeps_affiliate_register_url_in_metadat
 
     assert_eq!(
         aicodemirror.register_url(),
-        "https://www.aicodemirror.com/register?invitecode=77V9EA"
+        "https://www.aicodemirror.ai/register?invitecode=9915W3"
+    );
+    assert!(
+        super::provider_templates::provider_sponsor_presets(&AppType::Hermes)
+            .iter()
+            .any(|preset| preset.id() == "aicodemirror"),
+        "AICodeMirror should be available for Hermes when the upstream preset is configured"
     );
 }
 
@@ -462,7 +536,7 @@ fn provider_add_form_claudeapi_preset_keeps_affiliate_register_url_in_metadata()
 
     assert_eq!(
         claudeapi.register_url(),
-        "https://console.claudeapi.com/register?source=cc-switch-cli"
+        "https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii"
     );
 }
 
@@ -528,10 +602,10 @@ fn provider_add_form_claudeapi_template_claude_sets_base_url_and_partner_meta() 
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "ClaudeAPI");
-    assert_eq!(provider["websiteUrl"], "https://console.claudeapi.com");
+    assert_eq!(provider["websiteUrl"], "https://www.apito.ai");
     assert_eq!(
         provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
-        "https://gw.claudeapi.com"
+        "https://gw.apito.ai"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "claudeapi");
@@ -583,7 +657,7 @@ fn provider_add_form_dds_template_codex_sets_base_url_and_partner_meta() {
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://www.ddshub.cc\""));
-    assert!(cfg.contains("model = \"gpt-5.4\""));
+    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     let meta = provider["meta"]
@@ -677,6 +751,10 @@ fn provider_add_form_cubence_template_gemini_sets_base_url_and_partner_meta() {
         provider["settingsConfig"]["env"]["GOOGLE_GEMINI_BASE_URL"],
         "https://api.cubence.com"
     );
+    assert_eq!(
+        provider["settingsConfig"]["env"]["GEMINI_MODEL"],
+        "gemini-3.6-flash"
+    );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
 }
@@ -690,13 +768,18 @@ fn provider_add_form_cubence_template_opencode_sets_base_url_and_partner_meta() 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "Cubence");
     assert_eq!(provider["websiteUrl"], "https://cubence.com");
-    assert_eq!(
-        provider["settingsConfig"]["npm"],
-        "@ai-sdk/openai-compatible"
-    );
+    assert_eq!(provider["settingsConfig"]["npm"], "@ai-sdk/anthropic");
     assert_eq!(
         provider["settingsConfig"]["options"]["baseURL"],
         "https://api.cubence.com/v1"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
+        "Claude Sonnet 5"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["models"]["claude-opus-5"]["name"],
+        "Claude Opus 5"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
@@ -712,10 +795,21 @@ fn provider_add_form_cubence_template_hermes_sets_base_url_and_partner_meta() {
     let settings = provider["settingsConfig"].as_object().unwrap();
     assert_eq!(provider["name"], "Cubence");
     assert_eq!(provider["websiteUrl"], "https://cubence.com");
-    assert_eq!(settings.get("api_mode"), Some(&json!("chat_completions")));
+    assert_eq!(settings.get("api_mode"), Some(&json!("anthropic_messages")));
     assert_eq!(
         settings.get("base_url"),
         Some(&json!("https://api.cubence.com"))
+    );
+    assert_eq!(
+        settings.get("models"),
+        Some(&json!([
+            { "id": "claude-opus-5", "name": "Claude Opus 5" },
+            { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
+            {
+                "id": "claude-haiku-4-5-20251001",
+                "name": "Claude Haiku 4.5"
+            },
+        ]))
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
@@ -734,7 +828,24 @@ fn provider_add_form_cubence_template_openclaw_sets_base_url_and_partner_meta() 
         provider["settingsConfig"]["baseUrl"],
         "https://api.cubence.com"
     );
-    assert_eq!(provider["settingsConfig"]["api"], "openai-completions");
+    assert_eq!(provider["settingsConfig"]["api"], "anthropic-messages");
+    assert_eq!(
+        provider["settingsConfig"]["models"],
+        json!([
+            {
+                "id": "claude-opus-5",
+                "name": "Claude Opus 5",
+                "contextWindow": 1000000,
+                "cost": { "input": 5, "output": 25 },
+            },
+            {
+                "id": "claude-sonnet-5",
+                "name": "Claude Sonnet 5",
+                "contextWindow": 1000000,
+                "cost": { "input": 3, "output": 15 },
+            },
+        ])
+    );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
 }
@@ -759,6 +870,38 @@ fn provider_add_form_runapi_template_claude_sets_upstream_partner_shape() {
 }
 
 #[test]
+fn provider_add_form_claude_sponsor_template_is_independent_of_previous_codex_template() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+
+    form.apply_template(template_index_by_label(AppType::Claude, "Codex"), &[]);
+    form.apply_template(runapi_template_index(AppType::Claude), &[]);
+
+    let provider = form.to_provider_json_value();
+    let env = provider["settingsConfig"]["env"]
+        .as_object()
+        .expect("RunAPI settingsConfig.env should be an object");
+    assert_eq!(
+        env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
+        Some("https://runapi.co")
+    );
+    assert!(
+        crate::claude_model_config::CLAUDE_MODEL_OVERRIDE_ENV_KEYS
+            .iter()
+            .all(|key| !env.contains_key(*key)),
+        "Claude sponsor presets must not inherit Codex model overrides"
+    );
+    assert!(
+        crate::claude_model_config::CLAUDE_CONTEXT_WINDOW_ENV_KEYS
+            .iter()
+            .all(|key| !env.contains_key(*key)),
+        "Claude sponsor presets must not inherit Codex context limits"
+    );
+    assert!(provider["meta"].get("providerType").is_none());
+    assert!(provider["meta"].get("apiFormat").is_none());
+    assert!(provider["settingsConfig"].get("attribution").is_none());
+}
+
+#[test]
 fn provider_add_form_runapi_template_codex_sets_v1_base_url() {
     let mut form = ProviderAddFormState::new(AppType::Codex);
 
@@ -775,7 +918,7 @@ fn provider_add_form_runapi_template_codex_sets_v1_base_url() {
     assert!(cfg.contains("[model_providers.custom]"));
     assert!(cfg.contains("name = \"RunAPI\""));
     assert!(cfg.contains("base_url = \"https://runapi.co/v1\""));
-    assert!(cfg.contains("model = \"gpt-5.4\""));
+    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert_eq!(provider["meta"]["partnerPromotionKey"], "runapi");
 }
@@ -800,13 +943,10 @@ fn provider_add_form_runapi_template_opencode_matches_upstream_anthropic_shape()
         "blank OpenCode API keys should be omitted on save"
     );
     assert_eq!(
-        settings["models"]["claude-sonnet-4-6"]["name"],
-        "Claude Sonnet 4.6"
+        settings["models"]["claude-sonnet-5"]["name"],
+        "Claude Sonnet 5"
     );
-    assert_eq!(
-        settings["models"]["claude-opus-4-8"]["name"],
-        "Claude Opus 4.8"
-    );
+    assert_eq!(settings["models"]["claude-opus-5"]["name"], "Claude Opus 5");
     assert_eq!(
         settings["models"]["claude-haiku-4-5"]["name"],
         "Claude Haiku 4.5"
@@ -835,8 +975,8 @@ fn provider_add_form_runapi_template_hermes_matches_upstream_anthropic_shape() {
     assert_eq!(
         settings["models"],
         json!([
-            { "id": "claude-opus-4-8", "name": "Claude Opus 4.8" },
-            { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6" },
+            { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
+            { "id": "claude-opus-5", "name": "Claude Opus 5" },
             { "id": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },
         ])
     );
@@ -864,13 +1004,13 @@ fn provider_add_form_runapi_template_openclaw_matches_upstream_anthropic_shape()
         settings["models"],
         json!([
             {
-                "id": "claude-opus-4-8",
-                "name": "Claude Opus 4.8",
+                "id": "claude-sonnet-5",
+                "name": "Claude Sonnet 5",
                 "contextWindow": 1000000,
             },
             {
-                "id": "claude-sonnet-4-6",
-                "name": "Claude Sonnet 4.6",
+                "id": "claude-opus-5",
+                "name": "Claude Opus 5",
                 "contextWindow": 1000000,
             },
             {
@@ -1859,7 +1999,7 @@ fn provider_add_form_packycode_template_claude_sets_partner_meta_and_base_url() 
     assert_eq!(provider["websiteUrl"], "https://www.packyapi.com");
     assert_eq!(
         provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
-        "https://www.packyapi.com"
+        "https://www.packyapi.ai"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "packycode");
@@ -1883,7 +2023,7 @@ fn provider_add_form_packycode_template_codex_sets_partner_meta_and_base_url() {
     assert!(cfg.contains("[model_providers.custom]"));
     assert!(cfg.contains("name = \"PackyCode\""));
     assert!(!cfg.contains("[model_providers.packycode]"));
-    assert!(cfg.contains("base_url = \"https://www.packyapi.com/v1\""));
+    assert!(cfg.contains("base_url = \"https://www.packyapi.ai/v1\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     assert_eq!(provider["meta"]["isPartner"], true);
@@ -1896,6 +2036,7 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
     form.claude_api_format = ClaudeApiFormat::OpenAiChat;
     form.codex_chat_reasoning.supports_thinking = Some(true);
     form.codex_chat_reasoning.supports_effort = Some(true);
+    form.codex_prompt_cache_routing = PromptCacheRoutingMode::Disabled;
     form.codex_local_routing_field_idx = 3;
     form.apply_codex_model_catalog_value(json!([
         { "model": "deepseek-chat", "displayName": "DeepSeek Chat" }
@@ -1912,6 +2053,10 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
         vec![CodexLocalRoutingField::Enabled]
     );
     assert_eq!(form.codex_chat_reasoning, Default::default());
+    assert_eq!(
+        form.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Auto
+    );
     assert!(form.codex_model_catalog.is_empty());
 
     let provider = form.to_provider_json_value();
@@ -1921,6 +2066,7 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
 
     form.claude_api_format = ClaudeApiFormat::OpenAiChat;
     form.codex_chat_reasoning.supports_thinking = Some(true);
+    form.codex_prompt_cache_routing = PromptCacheRoutingMode::Enabled;
     form.apply_codex_model_catalog_value(json!([{ "model": "qwen-coder" }]))
         .expect("catalog should apply");
 
@@ -1929,6 +2075,10 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
     assert!(form.is_codex_official_provider());
     assert!(!form.codex_local_routing_enabled());
     assert_eq!(form.codex_chat_reasoning, Default::default());
+    assert_eq!(
+        form.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Auto
+    );
     assert!(form.codex_model_catalog.is_empty());
     let official_provider = form.to_provider_json_value();
     assert!(official_provider["meta"].get("apiFormat").is_none());
@@ -1938,6 +2088,34 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
     assert!(official_provider["settingsConfig"]
         .get("modelCatalog")
         .is_none());
+}
+
+#[test]
+fn provider_add_form_codex_sponsor_switch_clears_previous_template_credentials_and_features() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.apply_template(packycode_template_index(AppType::Codex), &[]);
+    form.codex_api_key.set("previous-sponsor-secret");
+    form.toggle_codex_goal_mode();
+    form.toggle_codex_remote_compaction();
+
+    form.apply_template(runapi_template_index(AppType::Codex), &[]);
+
+    assert!(form.codex_api_key.is_blank());
+    assert!(!form.codex_goal_mode);
+    assert!(!form.codex_goal_mode_touched);
+    assert!(!form.codex_remote_compaction);
+    assert!(!form.codex_remote_compaction_touched);
+
+    let provider = form.to_provider_json_value();
+    assert!(
+        provider["settingsConfig"].get("auth").is_none(),
+        "a new sponsor must not inherit the previous sponsor's API key"
+    );
+    let config = provider["settingsConfig"]["config"]
+        .as_str()
+        .expect("Codex config should be a string");
+    assert!(!config.contains("goals = true"), "{config}");
+    assert!(config.contains("name = \"RunAPI\""), "{config}");
 }
 
 #[test]
@@ -1953,7 +2131,7 @@ fn provider_add_form_packycode_template_gemini_sets_partner_meta_and_base_url() 
     assert_eq!(provider["websiteUrl"], "https://www.packyapi.com");
     assert_eq!(
         provider["settingsConfig"]["env"]["GOOGLE_GEMINI_BASE_URL"],
-        "https://www.packyapi.com"
+        "https://www.packyapi.ai"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "packycode");
@@ -1967,10 +2145,10 @@ fn provider_add_form_aicodemirror_template_claude_sets_partner_meta_and_base_url
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "AICodeMirror");
-    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.ai");
     assert_eq!(
         provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
-        "https://api.aicodemirror.com/api/claudecode"
+        "https://api.aicodemirror.ai/api/claudecode"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
@@ -1984,12 +2162,12 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "AICodeMirror");
-    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.ai");
     let cfg = provider["settingsConfig"]["config"]
         .as_str()
         .expect("settingsConfig.config should be string");
-    assert!(cfg.contains("base_url = \"https://api.aicodemirror.com/api/codex/backend-api/codex\""));
-    assert!(cfg.contains("model = \"gpt-5.4\""));
+    assert!(cfg.contains("base_url = \"https://api.aicodemirror.ai/api/codex/backend-api/codex\""));
+    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     assert_eq!(provider["meta"]["isPartner"], true);
@@ -2007,11 +2185,11 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
 }
 
 #[test]
-fn provider_add_form_codex_custom_defaults_to_blank_base_url_and_gpt_5_4() {
+fn provider_add_form_codex_custom_defaults_to_upstream_model() {
     let form = ProviderAddFormState::new(AppType::Codex);
 
     assert_eq!(form.codex_base_url.value, "");
-    assert_eq!(form.codex_model.value, "gpt-5.4");
+    assert_eq!(form.codex_model.value, "gpt-5.6-sol");
 }
 
 #[test]
@@ -2022,10 +2200,10 @@ fn provider_add_form_aicodemirror_template_gemini_sets_partner_meta_and_base_url
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "AICodeMirror");
-    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.ai");
     assert_eq!(
         provider["settingsConfig"]["env"]["GOOGLE_GEMINI_BASE_URL"],
-        "https://api.aicodemirror.com/api/gemini"
+        "https://api.aicodemirror.ai/api/gemini"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
@@ -2143,6 +2321,24 @@ fn provider_add_form_claude_api_format_round_trips_gemini_native_meta() {
 }
 
 #[test]
+fn provider_add_form_codex_round_trips_full_url_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.id.set("codex-full-url");
+    form.name.set("Codex Full URL");
+    form.codex_base_url
+        .set("https://relay.example/custom/responses");
+    form.is_full_url = true;
+
+    let saved = form.to_provider_json_value();
+    assert_eq!(saved["meta"]["isFullUrl"], true);
+
+    let provider: Provider = serde_json::from_value(saved).expect("saved provider should parse");
+    let loaded = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert!(loaded.is_full_url);
+    assert_eq!(loaded.to_provider_json_value()["meta"]["isFullUrl"], true);
+}
+
+#[test]
 fn provider_add_form_claude_from_provider_backfills_models_with_legacy_fallback() {
     let provider = Provider::with_id(
         "p1".to_string(),
@@ -2163,6 +2359,8 @@ fn provider_add_form_claude_from_provider_backfills_models_with_legacy_fallback(
     assert_eq!(form.claude_haiku_model.value, "model-small-fast");
     assert_eq!(form.claude_sonnet_model.value, "model-sonnet-explicit");
     assert_eq!(form.claude_opus_model.value, "model-main");
+    assert_eq!(form.claude_fable_model.value, "model-main");
+    assert_eq!(form.claude_subagent_model.value, "");
 }
 
 #[test]
@@ -2174,6 +2372,8 @@ fn provider_add_form_claude_one_m_marker_loads_and_saves_canonically() {
             "env": {
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4 [1m]  ",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-pro[1M]",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "fable-pro [1m]",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "subagent-fast[1M]",
             }
         }),
         None,
@@ -2182,10 +2382,14 @@ fn provider_add_form_claude_one_m_marker_loads_and_saves_canonically() {
     let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
     assert_eq!(form.claude_sonnet_model.value, "deepseek-v4");
     assert_eq!(form.claude_opus_model.value, "opus-pro");
+    assert_eq!(form.claude_fable_model.value, "fable-pro");
+    assert_eq!(form.claude_subagent_model.value, "subagent-fast");
     assert!(form.claude_model_one_m_enabled(1));
     assert!(form.claude_model_one_m_enabled(2));
+    assert!(form.claude_model_one_m_enabled(3));
+    assert!(form.claude_model_one_m_enabled(4));
 
-    form.mark_claude_model_config_touched();
+    form.mark_all_claude_model_roles_touched();
     let saved = form.to_provider_json_value();
     let env = saved["settingsConfig"]["env"]
         .as_object()
@@ -2199,6 +2403,16 @@ fn provider_add_form_claude_one_m_marker_loads_and_saves_canonically() {
         env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
             .and_then(Value::as_str),
         Some("opus-pro[1M]")
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+            .and_then(Value::as_str),
+        Some("fable-pro[1M]")
+    );
+    assert_eq!(
+        env.get("CLAUDE_CODE_SUBAGENT_MODEL")
+            .and_then(Value::as_str),
+        Some("subagent-fast[1M]")
     );
 }
 
@@ -2220,9 +2434,11 @@ fn provider_add_form_claude_one_m_fallback_and_untouched_storage_are_preserved()
     let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
     assert_eq!(form.claude_sonnet_model.value, "fallback-model");
     assert_eq!(form.claude_opus_model.value, "fallback-model");
+    assert_eq!(form.claude_fable_model.value, "fallback-model");
     assert!(form.claude_model_one_m_enabled(1));
     assert!(form.claude_model_one_m_enabled(2));
-    assert_eq!(form.claude_haiku_model.value, "haiku[1m]");
+    assert!(form.claude_model_one_m_enabled(3));
+    assert_eq!(form.claude_haiku_model.value, "haiku");
 
     form.name.set("Provider One Updated");
     let untouched = form.to_provider_json_value();
@@ -2247,6 +2463,105 @@ fn provider_add_form_claude_one_m_fallback_and_untouched_storage_are_preserved()
 }
 
 #[test]
+fn provider_add_form_strips_one_m_marker_from_edited_haiku() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.claude_haiku_model.set("haiku-fast[1M]");
+    assert!(form.normalize_claude_model_input(ClaudeModelRole::Haiku.index()));
+    assert_eq!(form.claude_haiku_model.value, "haiku-fast");
+
+    form.mark_claude_model_role_touched(ClaudeModelRole::Haiku.index());
+    let saved = form.to_provider_json_value();
+    assert_eq!(
+        saved["settingsConfig"]["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+        json!("haiku-fast")
+    );
+}
+
+#[test]
+fn provider_add_form_claude_role_edit_does_not_pin_unconfigured_fable_fallback() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku-old",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-a"
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_fable_model.value, "opus-a");
+    form.claude_haiku_model.set("haiku-new");
+    form.mark_claude_model_role_touched(ClaudeModelRole::Haiku.index());
+
+    let saved = form.to_provider_json_value();
+    let env = saved["settingsConfig"]["env"]
+        .as_object()
+        .expect("settingsConfig.env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            .and_then(Value::as_str),
+        Some("haiku-new")
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .and_then(Value::as_str),
+        Some("opus-a")
+    );
+    assert!(
+        env.get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none(),
+        "an inherited Fable display value must remain a dynamic fallback"
+    );
+}
+
+#[test]
+fn provider_add_form_claude_role_edit_syncs_only_automatic_display_names() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-old[1M]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "opus-old",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "fable-old",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "Custom Fable Label"
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    form.claude_opus_model.set("opus-new");
+    form.claude_fable_model.set("fable-new");
+    form.mark_claude_model_role_touched(ClaudeModelRole::Opus.index());
+    form.mark_claude_model_role_touched(ClaudeModelRole::Fable.index());
+
+    let saved = form.to_provider_json_value();
+    let env = saved["settingsConfig"]["env"]
+        .as_object()
+        .expect("settingsConfig.env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .and_then(Value::as_str),
+        Some("opus-new[1M]")
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME")
+            .and_then(Value::as_str),
+        Some("opus-new"),
+        "a display name derived from the previous model should track the edit"
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME")
+            .and_then(Value::as_str),
+        Some("Custom Fable Label"),
+        "a custom display name must remain provider-controlled"
+    );
+}
+
+#[test]
 fn provider_add_form_claude_one_m_toggle_and_fill_all_follow_role_semantics() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     form.claude_sonnet_model.set("model-sonnet");
@@ -2257,16 +2572,23 @@ fn provider_add_form_claude_one_m_toggle_and_fill_all_follow_role_semantics() {
     assert_eq!(form.claude_haiku_model.value, "model-sonnet");
     assert!(form.claude_model_one_m_enabled(1));
     assert!(form.claude_model_one_m_enabled(2));
+    assert!(form.claude_model_one_m_enabled(3));
+    assert!(form.claude_model_one_m_enabled(4));
 
     form.claude_haiku_model.set("legacy-model[1M]");
     assert!(form.fill_claude_models_from(0));
     assert_eq!(form.claude_sonnet_model.value, "legacy-model");
     assert!(!form.claude_model_one_m_enabled(1));
     assert!(!form.claude_model_one_m_enabled(2));
+    assert!(!form.claude_model_one_m_enabled(3));
+    assert!(!form.claude_model_one_m_enabled(4));
 
     form.claude_opus_model.set("");
     assert!(!form.toggle_claude_model_one_m(2));
     assert_eq!(form.claude_model_value_for_config(2), "");
+    form.claude_subagent_model.set("");
+    assert!(!form.toggle_claude_model_one_m(4));
+    assert_eq!(form.claude_model_value_for_config(4), "");
 }
 
 #[test]
@@ -2286,7 +2608,10 @@ fn provider_add_form_claude_writes_new_model_keys_and_removes_small_fast() {
     form.claude_haiku_model.set("model-haiku");
     form.claude_sonnet_model.set("model-sonnet");
     form.claude_opus_model.set("model-opus");
-    form.mark_claude_model_config_touched();
+    form.claude_fable_model.set("model-fable");
+    form.claude_subagent_model.set("model-subagent");
+    form.mark_claude_fallback_model_touched();
+    form.mark_all_claude_model_roles_touched();
 
     let provider = form.to_provider_json_value();
     let env = provider["settingsConfig"]["env"]
@@ -2312,6 +2637,16 @@ fn provider_add_form_claude_writes_new_model_keys_and_removes_small_fast() {
             .and_then(|value| value.as_str()),
         Some("model-opus")
     );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+            .and_then(|value| value.as_str()),
+        Some("model-fable")
+    );
+    assert_eq!(
+        env.get("CLAUDE_CODE_SUBAGENT_MODEL")
+            .and_then(|value| value.as_str()),
+        Some("model-subagent")
+    );
     assert!(env.get("ANTHROPIC_SMALL_FAST_MODEL").is_none());
     assert_eq!(env.get("FOO").and_then(|value| value.as_str()), Some("bar"));
 }
@@ -2329,11 +2664,14 @@ fn provider_add_form_claude_empty_model_fields_remove_env_keys() {
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL": "old-haiku",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": "old-sonnet",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": "old-opus",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "old-fable",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "old-subagent",
                 "ANTHROPIC_SMALL_FAST_MODEL": "old-small-fast",
             }
         }
     });
-    form.mark_claude_model_config_touched();
+    form.mark_claude_fallback_model_touched();
+    form.mark_all_claude_model_roles_touched();
 
     let provider = form.to_provider_json_value();
     let env = provider["settingsConfig"]["env"]
@@ -2348,6 +2686,8 @@ fn provider_add_form_claude_empty_model_fields_remove_env_keys() {
     assert!(env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
     assert!(env.get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_none());
     assert!(env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
+    assert!(env.get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none());
+    assert!(env.get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
     assert!(env.get("ANTHROPIC_SMALL_FAST_MODEL").is_none());
 }
 
@@ -2470,6 +2810,48 @@ requires_openai_auth = true
     assert!(cfg.contains("model_provider = \"vendor_alpha\""), "{cfg}");
     assert!(cfg.contains("[model_providers.vendor_alpha]"), "{cfg}");
     assert!(!cfg.contains("[model_providers.custom]"), "{cfg}");
+}
+
+#[test]
+fn provider_edit_form_codex_updates_legacy_flat_config() {
+    let provider = Provider::with_id(
+        "legacy".to_string(),
+        "Legacy Codex".to_string(),
+        json!({
+            "auth": {
+                "OPENAI_API_KEY": "sk-old"
+            },
+            "config": r#"base_url = "https://old.example.com/v1"
+model = "gpt-old"
+wire_api = "chat"
+requires_openai_auth = false
+env_key = "LEGACY_API_KEY"
+"#,
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert!(form.codex_is_chat_format());
+    assert_eq!(form.codex_wire_api, CodexWireApi::Responses);
+    assert!(!form.codex_requires_openai_auth);
+    assert_eq!(form.codex_env_key.value, "LEGACY_API_KEY");
+
+    form.codex_base_url.set("https://new.example.com/v1");
+    let out = form.to_provider_json_value();
+    let config = out["settingsConfig"]["config"]
+        .as_str()
+        .expect("settingsConfig.config should be string");
+
+    assert_eq!(
+        crate::codex_config::extract_codex_base_url(config).as_deref(),
+        Some("https://new.example.com/v1")
+    );
+    assert!(!config.contains("model_provider"));
+    assert!(config.contains("wire_api = \"responses\""));
+    assert!(config.contains("requires_openai_auth = false"));
+    assert!(config.contains("env_key = \"LEGACY_API_KEY\""));
+    assert_eq!(out["meta"]["apiFormat"], "openai_chat");
 }
 
 #[test]
@@ -2603,6 +2985,101 @@ fn provider_add_form_codex_local_routing_is_off_by_default_and_persisted() {
 }
 
 #[test]
+fn provider_add_form_codex_prompt_cache_routing_is_chat_only() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.id.set("custom");
+    form.name.set("Custom");
+
+    assert_eq!(
+        form.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Auto
+    );
+    assert!(!form
+        .fields()
+        .contains(&ProviderAddField::CodexPromptCacheRouting));
+    assert!(form.to_provider_json_value()["meta"]
+        .get("promptCacheRouting")
+        .is_none());
+
+    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    assert!(!form.codex_local_routing_enabled());
+    assert!(form
+        .fields()
+        .contains(&ProviderAddField::CodexPromptCacheRouting));
+
+    form.codex_prompt_cache_routing = PromptCacheRoutingMode::Enabled;
+    let chat = form.to_provider_json_value();
+    assert_eq!(chat["meta"]["promptCacheRouting"], "enabled");
+
+    form.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+    let responses = form.to_provider_json_value();
+    assert!(responses["meta"].get("promptCacheRouting").is_none());
+}
+
+#[test]
+fn provider_add_form_codex_prompt_cache_routing_round_trips_and_normalizes() {
+    let mut provider = Provider::with_id(
+        "custom".to_string(),
+        "Custom".to_string(),
+        json!({ "config": "" }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        api_format: Some("openai_chat".to_string()),
+        prompt_cache_routing: Some("disabled".to_string()),
+        ..Default::default()
+    });
+
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(
+        form.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Disabled
+    );
+    assert_eq!(
+        form.to_provider_json_value()["meta"]["promptCacheRouting"],
+        "disabled"
+    );
+
+    provider
+        .meta
+        .as_mut()
+        .expect("meta should exist")
+        .prompt_cache_routing = Some("unexpected".to_string());
+    let normalized = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(
+        normalized.codex_prompt_cache_routing,
+        PromptCacheRoutingMode::Auto
+    );
+    assert!(normalized.to_provider_json_value()["meta"]
+        .get("promptCacheRouting")
+        .is_none());
+}
+
+#[test]
+fn provider_add_form_codex_official_removes_prompt_cache_routing() {
+    let mut provider = Provider::with_id(
+        "official".to_string(),
+        "OpenAI Official".to_string(),
+        json!({ "config": "", "auth": {} }),
+        None,
+    );
+    provider.category = Some("official".to_string());
+    provider.meta = Some(crate::provider::ProviderMeta {
+        api_format: Some("openai_chat".to_string()),
+        prompt_cache_routing: Some("enabled".to_string()),
+        ..Default::default()
+    });
+
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert!(!form
+        .fields()
+        .contains(&ProviderAddField::CodexPromptCacheRouting));
+    assert!(form.to_provider_json_value()["meta"]
+        .get("promptCacheRouting")
+        .is_none());
+}
+
+#[test]
 fn provider_add_form_codex_local_routing_restores_meta_chat_format() {
     let mut provider = Provider::with_id(
         "custom".to_string(),
@@ -2666,6 +3143,93 @@ requires_openai_auth = true
     assert_eq!(saved["meta"]["apiFormat"], "openai_chat");
     assert!(config.contains("wire_api = \"responses\""));
     assert!(!config.contains("wire_api = \"chat\""));
+}
+
+#[test]
+fn provider_add_form_codex_anthropic_options_round_trip_and_clear_on_format_change() {
+    let mut provider = Provider::with_id(
+        "anthropic".to_string(),
+        "Anthropic Gateway".to_string(),
+        json!({
+            "auth": {"OPENAI_API_KEY": "sk-test"},
+            "config": r#"
+model_provider = "custom"
+model = "claude-sonnet-4-6"
+
+[model_providers.custom]
+name = "Anthropic Gateway"
+base_url = "https://gateway.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        api_format: Some("anthropic".to_string()),
+        api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+        impersonate_claude_code: Some(true),
+        max_output_tokens: Some(16_384),
+        ..Default::default()
+    });
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(form.claude_api_format, ClaudeApiFormat::Anthropic);
+    assert_eq!(
+        form.claude_api_key_field,
+        crate::provider::ClaudeApiKeyField::ApiKey
+    );
+    assert!(form.codex_impersonate_claude_code);
+    assert_eq!(form.codex_max_output_tokens.value, "16384");
+    let fields = form.fields();
+    assert!(fields.contains(&ProviderAddField::CodexAnthropicApiKeyField));
+    assert!(fields.contains(&ProviderAddField::CodexImpersonateClaudeCode));
+    assert!(fields.contains(&ProviderAddField::CodexMaxOutputTokens));
+
+    let saved = form.to_provider_json_value();
+    assert_eq!(saved["meta"]["apiFormat"], "anthropic");
+    assert_eq!(saved["meta"]["apiKeyField"], "ANTHROPIC_API_KEY");
+    assert_eq!(saved["meta"]["impersonateClaudeCode"], true);
+    assert_eq!(saved["meta"]["maxOutputTokens"], 16_384);
+
+    form.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+    let saved = form.to_provider_json_value();
+    assert_eq!(saved["meta"]["apiFormat"], "openai_responses");
+    assert!(saved["meta"].get("apiKeyField").is_none());
+    assert!(saved["meta"].get("impersonateClaudeCode").is_none());
+    assert!(saved["meta"].get("maxOutputTokens").is_none());
+}
+
+#[test]
+fn provider_add_form_codex_legacy_anthropic_wire_api_loads_as_anthropic() {
+    let provider = Provider::with_id(
+        "anthropic".to_string(),
+        "Anthropic Gateway".to_string(),
+        json!({
+            "config": r#"
+model_provider = "custom"
+model = "claude-sonnet-4-6"
+
+[model_providers.custom]
+name = "Anthropic Gateway"
+base_url = "https://gateway.example/v1"
+wire_api = "anthropic"
+requires_openai_auth = true
+"#
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(form.claude_api_format, ClaudeApiFormat::Anthropic);
+
+    let saved = form.to_provider_json_value();
+    let config = saved["settingsConfig"]["config"]
+        .as_str()
+        .expect("Codex config should be serialized");
+    assert_eq!(saved["meta"]["apiFormat"], "anthropic");
+    assert!(config.contains("wire_api = \"responses\""));
+    assert!(!config.contains("wire_api = \"anthropic\""));
 }
 
 #[test]
@@ -3022,6 +3586,10 @@ fn provider_add_form_gemini_builds_env_settings() {
         provider["settingsConfig"]["env"]["GOOGLE_GEMINI_BASE_URL"],
         "https://generativelanguage.googleapis.com"
     );
+    assert_eq!(
+        provider["settingsConfig"]["env"]["GEMINI_MODEL"],
+        crate::provider_preset_models::GEMINI_DEFAULT_MODEL
+    );
 }
 
 #[test]
@@ -3039,6 +3607,53 @@ fn provider_add_form_gemini_includes_model_in_env_when_set() {
     assert_eq!(
         provider["settingsConfig"]["env"]["GEMINI_MODEL"],
         "gemini-3-pro-preview"
+    );
+}
+
+#[test]
+fn provider_add_form_gemini_sponsor_preset_clears_previous_api_key() {
+    let mut form = ProviderAddFormState::new(AppType::Gemini);
+    form.gemini_api_key.set("AIza-from-previous-provider");
+
+    form.apply_template(
+        packycode_template_index(AppType::Gemini),
+        &Vec::<String>::new(),
+    );
+
+    assert!(
+        form.gemini_api_key.is_blank(),
+        "switching sponsor presets must not carry credentials across provider endpoints"
+    );
+    assert!(
+        form.to_provider_json_value()["settingsConfig"]["env"]
+            .get("GEMINI_API_KEY")
+            .is_none(),
+        "the stale key must not be serialized into the selected sponsor"
+    );
+}
+
+#[test]
+fn provider_edit_form_gemini_preserves_an_omitted_model() {
+    let provider = Provider::with_id(
+        "g1".to_string(),
+        "Gemini Provider".to_string(),
+        json!({
+            "env": {
+                "GEMINI_API_KEY": "AIza...",
+                "GOOGLE_GEMINI_BASE_URL": "https://generativelanguage.googleapis.com"
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Gemini, &provider);
+    assert!(form.gemini_model.is_blank());
+    form.name.set("Gemini Provider Renamed");
+
+    let saved = form.to_provider_json_value();
+    assert!(
+        saved["settingsConfig"]["env"].get("GEMINI_MODEL").is_none(),
+        "the add-form default must not be injected while editing an existing provider"
     );
 }
 
@@ -3353,11 +3968,11 @@ fn mcp_env_form_restores_sorted_rows() {
     assert_eq!(
         form.env_rows,
         vec![
-            McpEnvVarRow {
+            McpKeyValueRow {
                 key: "A_TOKEN".to_string(),
                 value: "".to_string(),
             },
-            McpEnvVarRow {
+            McpKeyValueRow {
                 key: "Z_TOKEN".to_string(),
                 value: "tail".to_string(),
             },
@@ -3372,11 +3987,11 @@ fn mcp_env_form_serializes_rows_and_skips_empty_object() {
     form.name.set("Server One");
     form.command.set("npx");
     form.env_rows = vec![
-        McpEnvVarRow {
+        McpKeyValueRow {
             key: "API_KEY".to_string(),
             value: "secret".to_string(),
         },
-        McpEnvVarRow {
+        McpKeyValueRow {
             key: "PROJECT_ROOT".to_string(),
             value: "".to_string(),
         },
@@ -3397,24 +4012,27 @@ fn mcp_env_form_serializes_rows_and_skips_empty_object() {
 #[test]
 fn mcp_env_form_summary_uses_none_one_and_many_copy() {
     let mut form = McpAddFormState::new();
-    assert_eq!(form.env_summary(), crate::cli::i18n::texts::none());
+    assert_eq!(
+        form.key_value_summary(McpKeyValueKind::Env),
+        crate::cli::i18n::texts::none()
+    );
 
-    form.env_rows.push(McpEnvVarRow {
+    form.env_rows.push(McpKeyValueRow {
         key: "API_KEY".to_string(),
         value: "secret".to_string(),
     });
     assert_eq!(
-        form.env_summary(),
-        crate::cli::i18n::texts::tui_mcp_env_entry_count(1)
+        form.key_value_summary(McpKeyValueKind::Env),
+        crate::cli::i18n::texts::tui_mcp_key_value_entry_count(1)
     );
 
-    form.env_rows.push(McpEnvVarRow {
+    form.env_rows.push(McpKeyValueRow {
         key: "PROJECT_ROOT".to_string(),
         value: "".to_string(),
     });
     assert_eq!(
-        form.env_summary(),
-        crate::cli::i18n::texts::tui_mcp_env_entry_count(2)
+        form.key_value_summary(McpKeyValueKind::Env),
+        crate::cli::i18n::texts::tui_mcp_key_value_entry_count(2)
     );
 }
 
@@ -3455,11 +4073,27 @@ fn mcp_http_form_replaces_stdio_fields_with_url() {
     let fields = form.fields();
     assert!(fields.contains(&McpAddField::Type));
     assert!(fields.contains(&McpAddField::Url));
+    assert!(fields.contains(&McpAddField::Headers));
     assert!(!fields.contains(&McpAddField::Command));
     assert!(!fields.contains(&McpAddField::Args));
     assert!(!fields.contains(&McpAddField::Env));
     assert!(fields.contains(&McpAddField::AppOpenCode));
     assert!(fields.contains(&McpAddField::AppHermes));
+
+    let url_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::Url)
+        .expect("URL field");
+    let headers_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::Headers)
+        .expect("Headers field");
+    let first_app_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::AppClaude)
+        .expect("first app field");
+    assert!(url_idx < headers_idx && headers_idx < first_app_idx);
+    assert!(form.input(McpAddField::Headers).is_none());
 }
 
 #[test]
@@ -3484,6 +4118,13 @@ fn mcp_form_restores_remote_server_type_and_url() {
     let form = McpAddFormState::from_server(&server);
     assert_eq!(form.server_type, McpTransport::Http);
     assert_eq!(form.url.value, "https://docs.langchain.com/mcp");
+    assert_eq!(
+        form.header_rows,
+        vec![McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: "Bearer token".to_string(),
+        }]
+    );
 
     let roundtrip = form.to_mcp_server_json_value();
     assert_eq!(roundtrip["server"]["type"], "http");
@@ -3491,6 +4132,78 @@ fn mcp_form_restores_remote_server_type_and_url() {
     assert_eq!(
         roundtrip["server"]["headers"]["Authorization"],
         "Bearer token"
+    );
+}
+
+#[test]
+fn mcp_http_form_serializes_header_rows_and_omits_empty_headers() {
+    let mut form = McpAddFormState::new();
+    form.id.set("remote");
+    form.name.set("Remote");
+    form.server_type = McpTransport::Http;
+    form.url.set("https://example.com/mcp");
+    form.header_rows = vec![
+        McpKeyValueRow {
+            key: "X-Workspace".to_string(),
+            value: "team-a".to_string(),
+        },
+        McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: "Bearer exact-token".to_string(),
+        },
+    ];
+
+    let saved = form.to_mcp_server_json_value();
+    assert_eq!(
+        saved["server"]["headers"]["Authorization"],
+        "Bearer exact-token"
+    );
+    assert_eq!(saved["server"]["headers"]["X-Workspace"], "team-a");
+
+    form.header_rows.clear();
+    let saved = form.to_mcp_server_json_value();
+    assert!(
+        saved["server"].get("headers").is_none(),
+        "empty header rows should remove server.headers"
+    );
+}
+
+#[test]
+fn mcp_http_form_canonicalizes_legacy_codex_http_headers() {
+    let server = crate::app_config::McpServer {
+        id: "remote".to_string(),
+        name: "Remote".to_string(),
+        server: json!({
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "http_headers": {
+                "Authorization": "Bearer legacy-token"
+            }
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+
+    let form = McpAddFormState::from_server(&server);
+    assert_eq!(
+        form.header_rows,
+        vec![McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: "Bearer legacy-token".to_string(),
+        }]
+    );
+
+    let saved = form.to_mcp_server_json_value();
+    assert_eq!(
+        saved["server"]["headers"]["Authorization"],
+        "Bearer legacy-token"
+    );
+    assert!(
+        saved["server"].get("http_headers").is_none(),
+        "TUI save must use the unified headers key"
     );
 }
 
@@ -3588,7 +4301,26 @@ fn mcp_add_form_has_unsaved_changes_after_env_edit() {
     let mut form = McpAddFormState::new();
     assert!(!form.has_unsaved_changes());
 
-    form.upsert_env_row(None, "API_KEY".to_string(), "secret".to_string());
+    form.upsert_key_value_row(
+        McpKeyValueKind::Env,
+        None,
+        "API_KEY".to_string(),
+        "secret".to_string(),
+    );
+    assert!(form.has_unsaved_changes());
+}
+
+#[test]
+fn mcp_add_form_has_unsaved_changes_after_header_edit() {
+    let mut form = McpAddFormState::new();
+    assert!(!form.has_unsaved_changes());
+
+    form.upsert_key_value_row(
+        McpKeyValueKind::Headers,
+        None,
+        "Authorization".to_string(),
+        "Bearer secret".to_string(),
+    );
     assert!(form.has_unsaved_changes());
 }
 
@@ -4014,12 +4746,9 @@ fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
             "* FennoAI",
             "* RunAPI",
             "* Cubence",
+            "* PackyCode",
             "* AICodeMirror"
         ]
-    );
-    assert!(
-        !labels.contains(&"* PackyCode"),
-        "OpenCode should expose only explicitly supported sponsor presets"
     );
 }
 
@@ -4039,6 +4768,7 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
             "* FennoAI",
             "* RunAPI",
             "* Cubence",
+            "* PackyCode",
             "* AICodeMirror"
         ]
     );
@@ -4193,7 +4923,7 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "AICodeMirror");
-    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.ai");
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
     assert_eq!(provider["settingsConfig"]["npm"], "@ai-sdk/anthropic");
@@ -4205,22 +4935,22 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
     );
     assert_eq!(
         provider["settingsConfig"]["options"]["baseURL"],
-        "https://api.aicodemirror.com/api/claudecode"
+        "https://api.aicodemirror.ai/api/claudecode"
     );
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-sonnet-4.6"]["name"],
-        "Claude Sonnet 4.6"
+        provider["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
+        "Claude Sonnet 5"
     );
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-opus-4.6"]["name"],
-        "Claude Opus 4.6"
+        provider["settingsConfig"]["models"]["claude-opus-5"]["name"],
+        "Claude Opus 5"
     );
 
     let mut parsed = Provider::with_id(
         "opencode-aicodemirror".to_string(),
         "AICodeMirror".to_string(),
         provider["settingsConfig"].clone(),
-        Some("https://www.aicodemirror.com".to_string()),
+        Some("https://www.aicodemirror.ai".to_string()),
     );
     parsed.meta = Some(crate::provider::ProviderMeta {
         is_partner: Some(true),
@@ -4236,10 +4966,10 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
     assert!(roundtrip_form.opencode_api_key.value.is_empty());
     assert_eq!(
         roundtrip_form.opencode_base_url.value,
-        "https://api.aicodemirror.com/api/claudecode"
+        "https://api.aicodemirror.ai/api/claudecode"
     );
-    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-4.6");
-    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 4.6");
+    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5");
+    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5");
 
     let roundtrip = roundtrip_form.to_provider_json_value();
     assert!(
@@ -4249,12 +4979,12 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
         "OpenCode roundtrip should still omit blank API keys"
     );
     assert_eq!(
-        roundtrip["settingsConfig"]["models"]["claude-sonnet-4.6"]["name"],
-        "Claude Sonnet 4.6"
+        roundtrip["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
+        "Claude Sonnet 5"
     );
     assert_eq!(
-        roundtrip["settingsConfig"]["models"]["claude-opus-4.6"]["name"],
-        "Claude Opus 4.6"
+        roundtrip["settingsConfig"]["models"]["claude-opus-5"]["name"],
+        "Claude Opus 5"
     );
 }
 
@@ -4537,7 +5267,7 @@ fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loade
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["name"], "AICodeMirror");
-    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.ai");
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
     assert!(
@@ -4546,25 +5276,25 @@ fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loade
     );
     assert_eq!(
         provider["settingsConfig"]["baseUrl"],
-        "https://api.aicodemirror.com/api/claudecode"
+        "https://api.aicodemirror.ai/api/claudecode"
     );
     assert_eq!(provider["settingsConfig"]["api"], "anthropic-messages");
     assert_eq!(
         provider["settingsConfig"]["models"],
         json!([
             {
-                "id": "claude-opus-4-6",
-                "name": "Claude Opus 4.6",
-                "contextWindow": 200000,
+                "id": "claude-opus-5",
+                "name": "Claude Opus 5",
+                "contextWindow": 1000000,
                 "cost": {
                     "input": 5,
                     "output": 25
                 }
             },
             {
-                "id": "claude-sonnet-4-6",
-                "name": "Claude Sonnet 4.6",
-                "contextWindow": 200000,
+                "id": "claude-sonnet-5",
+                "name": "Claude Sonnet 5",
+                "contextWindow": 1000000,
                 "cost": {
                     "input": 3,
                     "output": 15
@@ -4577,7 +5307,7 @@ fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loade
         "openclaw-aicodemirror".to_string(),
         "AICodeMirror".to_string(),
         provider["settingsConfig"].clone(),
-        Some("https://www.aicodemirror.com".to_string()),
+        Some("https://www.aicodemirror.ai".to_string()),
     );
     parsed.meta = Some(crate::provider::ProviderMeta {
         is_partner: Some(true),
@@ -4593,11 +5323,11 @@ fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loade
     assert!(roundtrip_form.opencode_api_key.value.is_empty());
     assert_eq!(
         roundtrip_form.opencode_base_url.value,
-        "https://api.aicodemirror.com/api/claudecode"
+        "https://api.aicodemirror.ai/api/claudecode"
     );
-    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-4-6");
-    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 4.6");
-    assert_eq!(roundtrip_form.opencode_model_context_limit.value, "200000");
+    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5");
+    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5");
+    assert_eq!(roundtrip_form.opencode_model_context_limit.value, "1000000");
 
     let roundtrip = roundtrip_form.to_provider_json_value();
     assert!(
@@ -5395,6 +6125,7 @@ fn provider_add_form_usage_query_defaults_match_upstream() {
 #[test]
 fn provider_add_form_usage_query_balance_default_uses_app_specific_base_url() {
     let mut codex = ProviderAddFormState::new(AppType::Codex);
+    codex.codex_api_key.set("sk-test");
     codex.codex_base_url.set("https://openrouter.ai/api/v1");
     codex.open_usage_query_page();
     assert_eq!(codex.usage_query_template, UsageQueryTemplate::Balance);
@@ -5466,6 +6197,163 @@ fn provider_add_form_usage_query_template_fields_match_upstream_visibility() {
     assert!(!form
         .available_usage_query_templates()
         .contains(&UsageQueryTemplate::TokenPlan));
+}
+
+#[test]
+fn provider_add_form_official_usage_query_exposes_only_subscription_template() {
+    for (app_type, settings_config) in [
+        (AppType::Claude, json!({"env": {}})),
+        (AppType::Codex, json!({"auth": {}})),
+        (AppType::Gemini, json!({"env": {}})),
+    ] {
+        let mut provider =
+            Provider::with_id("official".into(), "Official".into(), settings_config, None);
+        provider.category = Some("official".to_string());
+
+        let mut form = ProviderAddFormState::from_provider(app_type, &provider);
+        form.open_usage_query_page();
+
+        assert_eq!(
+            form.available_usage_query_templates(),
+            vec![UsageQueryTemplate::OfficialSubscription]
+        );
+        assert_eq!(
+            form.usage_query_template,
+            UsageQueryTemplate::OfficialSubscription
+        );
+        assert_eq!(form.usage_query_fields(), vec![UsageQueryField::Enabled]);
+
+        form.toggle_usage_query_enabled();
+        assert_eq!(
+            form.usage_query_fields(),
+            vec![
+                UsageQueryField::Enabled,
+                UsageQueryField::Template,
+                UsageQueryField::Timeout,
+                UsageQueryField::AutoInterval,
+            ]
+        );
+        assert!(!form.usage_query_extractor_available());
+
+        let saved = form.to_provider_json_value();
+        let script = &saved["meta"]["usage_script"];
+        assert_eq!(script["enabled"], true);
+        assert_eq!(script["templateType"], "official_subscription");
+        assert_eq!(script["code"], "");
+        assert!(script.get("apiKey").is_none());
+        assert!(script.get("baseUrl").is_none());
+    }
+}
+
+#[test]
+fn provider_edit_form_preserves_official_subscription_when_usage_query_is_untouched() {
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "official",
+        "name": "Claude Official",
+        "category": "official",
+        "settingsConfig": {"env": {}},
+        "meta": {
+            "usage_script": {
+                "enabled": true,
+                "language": "javascript",
+                "code": "",
+                "timeout": 10,
+                "templateType": "official_subscription",
+                "autoQueryInterval": 5
+            }
+        }
+    }))
+    .expect("provider json");
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    form.notes.set("unrelated edit");
+    let saved = form.to_provider_json_value();
+
+    assert_eq!(
+        saved["meta"]["usage_script"]["templateType"],
+        "official_subscription"
+    );
+    assert_eq!(saved["meta"]["usage_script"]["enabled"], true);
+}
+
+#[test]
+fn provider_form_reconciles_usage_template_when_provider_kind_changes() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.open_usage_query_page();
+    form.toggle_usage_query_enabled();
+    assert!(form.usage_query_official_subscription);
+    assert_eq!(
+        form.usage_query_template,
+        UsageQueryTemplate::OfficialSubscription
+    );
+
+    form.close_usage_query_page();
+    form.claude_base_url.set("https://relay.example.test");
+    form.refresh_usage_query_provider_kind();
+    assert!(!form.usage_query_official_subscription);
+    assert_eq!(form.usage_query_template, UsageQueryTemplate::General);
+    assert!(form.usage_query_code.contains("{{baseUrl}}/user/balance"));
+    assert_eq!(
+        form.to_provider_json_value()["meta"]["usage_script"]["templateType"],
+        "general"
+    );
+
+    form.claude_base_url.set("");
+    form.refresh_usage_query_provider_kind();
+    assert!(form.usage_query_official_subscription);
+    assert_eq!(
+        form.usage_query_template,
+        UsageQueryTemplate::OfficialSubscription
+    );
+    assert!(!form.usage_query_enabled);
+    assert_eq!(form.usage_query_timeout.value, "10");
+    assert_eq!(form.usage_query_auto_interval.value, "5");
+    assert_eq!(
+        form.to_provider_json_value()["meta"]["usage_script"]["templateType"],
+        "official_subscription"
+    );
+    assert_eq!(
+        form.to_provider_json_value()["meta"]["usage_script"]["enabled"],
+        false
+    );
+
+    let stale_custom: Provider = serde_json::from_value(json!({
+        "id": "stale-custom",
+        "name": "Stale Custom",
+        "settingsConfig": {
+            "env": {"ANTHROPIC_BASE_URL": "https://relay.example.test"}
+        },
+        "meta": {
+            "usage_script": {
+                "enabled": true,
+                "language": "javascript",
+                "code": "",
+                "timeout": 30,
+                "templateType": "official_subscription",
+                "autoQueryInterval": 60
+            }
+        }
+    }))
+    .expect("stale custom provider");
+    let mut stale_form = ProviderAddFormState::from_provider(AppType::Claude, &stale_custom);
+    assert!(!stale_form.usage_query_official_subscription);
+    assert!(stale_form.usage_query_enabled);
+    assert_eq!(
+        stale_form.usage_query_template,
+        UsageQueryTemplate::OfficialSubscription
+    );
+
+    stale_form.claude_base_url.set("");
+    stale_form.refresh_usage_query_provider_kind();
+
+    assert!(stale_form.usage_query_official_subscription);
+    assert!(!stale_form.usage_query_enabled);
+    assert_eq!(stale_form.usage_query_timeout.value, "10");
+    assert_eq!(stale_form.usage_query_auto_interval.value, "5");
+    assert_eq!(
+        stale_form.to_provider_json_value()["meta"]["usage_script"]["enabled"],
+        false
+    );
 }
 
 #[test]

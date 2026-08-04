@@ -94,6 +94,18 @@ pub struct Theme {
     /// Foreground for text sitting on an accent background.
     pub on_accent: Color,
     pub no_color: bool,
+    color_mode: ColorMode,
+}
+
+impl Theme {
+    /// Quantize an arbitrary RGB triple through the active color mode.
+    ///
+    /// Widgets that carry their own ramp (the usage chart series palette)
+    /// route through this so they degrade the same way the palette fields do
+    /// instead of hard-coding truecolor.
+    pub fn shade(&self, rgb: (u8, u8, u8)) -> Color {
+        terminal_color(self.color_mode, rgb)
+    }
 }
 
 pub fn no_color() -> bool {
@@ -333,6 +345,7 @@ pub fn theme_for_mode(app: &AppType, mode: ThemeMode) -> Theme {
             if light { (255, 255, 255) } else { (10, 10, 10) },
         ),
         no_color,
+        color_mode,
     }
 }
 

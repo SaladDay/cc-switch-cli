@@ -46,107 +46,6 @@ fn get_opencode_db_path() -> PathBuf {
     get_opencode_base_dir().join("opencode.db")
 }
 
-/// Scan sessions from both the legacy JSON files and the newer SQLite database,
-/// merging results with SQLite taking precedence on ID conflicts.
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    merge_json_sqlite(scan_sessions_json(), scan_sessions_sqlite())
-}
-
-/// Cache-aware scan: the legacy JSON storage goes through the persistent file
-/// cache, while the SQLite database is always queried fresh (a single query, not
-/// worth caching). Results are merged with SQLite taking precedence — identical
-/// semantics to `scan_sessions`.
-pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    let storage = get_opencode_data_dir();
-    let storage_for_parse = storage.clone();
-    let json_sessions = cache::scan_provider_cached(
-        store,
-        PROVIDER_ID,
-        scan_targets(&storage),
-        force,
-        move |path| parse_session(&storage_for_parse, path),
-        // 只缓存"summary 不依赖旁路 part/ 文件"的会话，判定见 is_cacheable。
-        is_cacheable,
-    );
-    merge_json_sqlite(json_sessions, scan_sessions_sqlite())
-}
-
-pub(crate) fn scan_sessions_progressive(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    let storage = get_opencode_data_dir();
-    let storage_for_parse = storage.clone();
-    let targets = scan_targets(&storage);
-    let json_sessions = match store {
-        Some(store) => cache::scan_provider_cached_progressive(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            move |path| parse_session(&storage_for_parse, path),
-            is_cacheable,
-            &mut *on_session,
-        ),
-        None => cache::scan_provider_uncached_progressive(
-            targets,
-            move |path| parse_session(&storage_for_parse, path),
-            &mut *on_session,
-        ),
-    };
-
-    // SQLite work remains entirely on the detached session worker. Surface its
-    // rows after the query so SQLite-only installations still receive a bounded
-    // preview before the final cross-provider merge/sort.
-    let sqlite_sessions = scan_sessions_sqlite();
-    for session in &sqlite_sessions {
-        on_session(session);
-    }
-    merge_json_sqlite(json_sessions, sqlite_sessions)
-}
-
-pub(crate) fn scan_sessions_progressive_cancellable(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    let storage = get_opencode_data_dir();
-    let storage_for_parse = storage.clone();
-    let targets = scan_targets_cancellable(&storage, is_cancelled)?;
-    let json_sessions = match store {
-        Some(store) => cache::scan_provider_cached_progressive_cancellable(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            move |path| parse_session(&storage_for_parse, path),
-            is_cacheable,
-            &mut *on_session,
-            is_cancelled,
-        )?,
-        None => cache::scan_provider_uncached_progressive_cancellable(
-            targets,
-            move |path| parse_session(&storage_for_parse, path),
-            &mut *on_session,
-            is_cancelled,
-        )?,
-    };
-    let sqlite_sessions = scan_sessions_sqlite_cancellable(is_cancelled)?;
-    for session in &sqlite_sessions {
-        if is_cancelled() {
-            return None;
-        }
-        on_session(session);
-    }
-    if is_cancelled() {
-        None
-    } else {
-        merge_json_sqlite_cancellable(json_sessions, sqlite_sessions, is_cancelled)
-    }
-}
-
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
     force: bool,
@@ -289,8 +188,8 @@ fn sqlite_stream_decodable_contains(
     session_id: &str,
 ) -> Result<bool, ()> {
     let sql = format!(
-        "SELECT {} FROM session WHERE id = ?1 LIMIT 1",
-        sqlite_metadata_select_list()
+        "SELECT {} FROM session s WHERE s.id = ?1 LIMIT 1",
+        sqlite_metadata_select_list("s", "s.time_updated")
     );
     conn.query_row(&sql, [session_id], |row| {
         decode_sqlite_meta(row, db_display)
@@ -302,15 +201,32 @@ fn sqlite_stream_decodable_contains(
     })
 }
 
-fn sqlite_metadata_select_list() -> String {
+fn sqlite_metadata_select_list(session_alias: &str, updated_expression: &str) -> String {
     let limit = MAX_METADATA_LINE_BYTES;
     format!(
-        "CASE WHEN length(CAST(id AS BLOB)) <= {limit}
-              THEN id ELSE printf('oversized-rowid-%lld', rowid) END,
-         CASE WHEN length(CAST(title AS BLOB)) <= {limit} THEN title ELSE '' END,
-         CASE WHEN length(CAST(directory AS BLOB)) <= {limit} THEN directory ELSE '' END,
-         time_created, time_updated"
+        "CASE WHEN length(CAST({session_alias}.id AS BLOB)) <= {limit}
+              THEN {session_alias}.id
+              ELSE printf('oversized-rowid-%lld', {session_alias}.rowid) END,
+         CASE WHEN length(CAST({session_alias}.title AS BLOB)) <= {limit}
+              THEN {session_alias}.title ELSE '' END,
+         CASE WHEN length(CAST({session_alias}.directory AS BLOB)) <= {limit}
+              THEN {session_alias}.directory ELSE '' END,
+         {session_alias}.time_created, {updated_expression}"
     )
+}
+
+fn sqlite_session_metadata_query(_conn: &Connection, ordered: bool) -> rusqlite::Result<String> {
+    // Phase A must stay proportional to session metadata. The usage importer
+    // owns the exact session/message MAX(time_updated) scan; repeating it here
+    // would block ManifestPublished on the entire message history. The session
+    // timestamp remains same-domain freshness evidence, and OpenCode is
+    // deliberately capped at Partial because this evidence is not a composite
+    // version (§4.2 of the v3 plan).
+    let order_clause = if ordered { " ORDER BY 5 DESC" } else { "" };
+    Ok(format!(
+        "SELECT {} FROM session s{order_clause}",
+        sqlite_metadata_select_list("s", "s.time_updated")
+    ))
 }
 
 fn emit_json_with_sqlite_precedence(
@@ -350,9 +266,11 @@ fn decode_sqlite_meta(row: &rusqlite::Row<'_>, db_display: &str) -> rusqlite::Re
         summary: display_title,
         project_dir: (!directory.is_empty()).then_some(directory),
         created_at: Some(created),
+        source_mtime_ns: Some(updated),
         last_active_at: Some(updated),
         source_path: Some(format!("sqlite:{db_display}:{session_id}")),
         resume_command: Some(format!("opencode session resume {session_id}")),
+        usage: None,
     })
 }
 
@@ -365,10 +283,12 @@ fn stream_sqlite_sessions(
     if is_cancelled() {
         return Err(cache::StreamScanStop::Cancelled);
     }
-    // The page-manifest builder supplies the final total ordering, so omitting
-    // ORDER BY here lets SQLite step rows immediately instead of materializing
-    // a provider-wide sort before the first callback.
-    let sql = format!("SELECT {} FROM session", sqlite_metadata_select_list());
+    // The page-manifest builder supplies the final total ordering, so omit an
+    // additional outer ORDER BY.
+    let sql = sqlite_session_metadata_query(conn, false).map_err(|error| {
+        log::warn!("authoritative OpenCode schema inspection failed: {error}");
+        cache::StreamScanStop::Incomplete
+    })?;
     let mut stmt = conn.prepare(&sql).map_err(|error| {
         log::warn!("authoritative OpenCode session query prepare failed: {error}");
         cache::StreamScanStop::Incomplete
@@ -418,200 +338,17 @@ fn is_cacheable(meta: &SessionMeta) -> bool {
     meta.title.is_some() && meta.summary == meta.title
 }
 
-/// Merge legacy-JSON and SQLite sessions, keeping the SQLite row when the same
-/// `session_id` exists in both.
-fn merge_json_sqlite(
-    json_sessions: Vec<SessionMeta>,
-    sqlite_sessions: Vec<SessionMeta>,
-) -> Vec<SessionMeta> {
-    if sqlite_sessions.is_empty() {
-        return json_sessions;
-    }
-    if json_sessions.is_empty() {
-        return sqlite_sessions;
-    }
-
-    let sqlite_ids: std::collections::HashSet<String> = sqlite_sessions
-        .iter()
-        .map(|s| s.session_id.clone())
-        .collect();
-
-    let mut merged = sqlite_sessions;
-    for s in json_sessions {
-        if !sqlite_ids.contains(&s.session_id) {
-            merged.push(s);
-        }
-    }
-    merged
-}
-
-fn merge_json_sqlite_cancellable(
-    json_sessions: Vec<SessionMeta>,
-    sqlite_sessions: Vec<SessionMeta>,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    if is_cancelled() {
-        return None;
-    }
-    if sqlite_sessions.is_empty() {
-        return Some(json_sessions);
-    }
-    if json_sessions.is_empty() {
-        return Some(sqlite_sessions);
-    }
-    let mut sqlite_ids = std::collections::HashSet::with_capacity(sqlite_sessions.len());
-    for session in &sqlite_sessions {
-        if is_cancelled() {
-            return None;
-        }
-        sqlite_ids.insert(session.session_id.clone());
-    }
-    let mut merged = sqlite_sessions;
-    for session in json_sessions {
-        if is_cancelled() {
-            return None;
-        }
-        if !sqlite_ids.contains(&session.session_id) {
-            merged.push(session);
-        }
-    }
-    Some(merged)
-}
-
-fn scan_targets(storage: &Path) -> Vec<FileScanTarget> {
-    scan_targets_cancellable(storage, &|| false).expect("non-cancellable target scan cannot stop")
-}
-
-fn scan_targets_cancellable(
-    storage: &Path,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<FileScanTarget>> {
-    let mut targets = Vec::new();
-    if !cache::collect_targets_recursive_cancellable(
-        &storage.join("session"),
-        "json",
-        &mut targets,
-        is_cancelled,
-    ) {
-        return None;
-    }
-    // message 目录指纹只服务于**有 title** 的会话行的常规失效（例如会话新增
-    // 消息 → 目录 mtime 变 → 缓存重解析拿到更新的 last_active）。无 title 的
-    // 行由上面的 cacheable 判定直接不缓存、每轮重解析，不依赖这里的指纹；两
-    // 者分工互补。有 title 的会话混入此指纹无害，故保留。
-    let message_root = storage.join("message");
-    for target in &mut targets {
-        if is_cancelled() {
-            return None;
-        }
-        if let Some(stem) = target.path.file_stem().and_then(|s| s.to_str()) {
-            cache::mix_sibling_into_fingerprint(target, &message_root.join(stem));
-        }
-    }
-    Some(targets)
-}
-
-fn scan_sessions_json() -> Vec<SessionMeta> {
-    let storage = get_opencode_data_dir();
-    let session_dir = storage.join("session");
-    if !session_dir.exists() {
-        return Vec::new();
-    }
-
-    let mut json_files = Vec::new();
-    collect_json_files(&session_dir, &mut json_files);
-
-    let mut sessions = Vec::new();
-    for path in json_files {
-        if let Some(meta) = parse_session(&storage, &path) {
-            sessions.push(meta);
-        }
-    }
-    sessions
-}
-
 /// Parse a SQLite source reference in the format `sqlite:<db_path>:<session_id>`.
 ///
 /// Uses `rfind(":ses_")` to split the path from the session ID because the
 /// db path itself may contain colons (e.g. `C:\Users\...` on Windows).
 /// This relies on the OpenCode convention that session IDs start with `ses_`.
-fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
     let rest = source.strip_prefix("sqlite:")?;
     let sep = rest.rfind(":ses_")?;
     let db_path = PathBuf::from(&rest[..sep]);
     let session_id = rest[sep + 1..].to_string();
     Some((db_path, session_id))
-}
-
-fn scan_sessions_sqlite() -> Vec<SessionMeta> {
-    scan_sessions_sqlite_impl(&|| false, true)
-        .expect("non-cancellable SQLite session scan cannot stop")
-}
-
-fn scan_sessions_sqlite_cancellable(
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    scan_sessions_sqlite_impl(is_cancelled, false)
-}
-
-fn scan_sessions_sqlite_impl(
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-    ordered: bool,
-) -> Option<Vec<SessionMeta>> {
-    if is_cancelled() {
-        return None;
-    }
-    let db_path = get_opencode_db_path();
-    if !db_path.exists() {
-        return Some(Vec::new());
-    }
-
-    let conn = match Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Some(Vec::new()),
-    };
-
-    let query = if ordered {
-        format!(
-            "SELECT {} FROM session ORDER BY time_updated DESC",
-            sqlite_metadata_select_list()
-        )
-    } else {
-        // Search does not depend on metadata order. Omitting ORDER BY lets row
-        // stepping observe cancellation without first sorting the whole table.
-        format!("SELECT {} FROM session", sqlite_metadata_select_list())
-    };
-    let mut stmt = match conn.prepare(&query) {
-        Ok(s) => s,
-        Err(_) => return Some(Vec::new()),
-    };
-
-    let db_display = db_path.display().to_string();
-
-    let iter = match stmt.query_map([], |row| decode_sqlite_meta(row, &db_display)) {
-        Ok(rows) => rows,
-        Err(_) => return Some(Vec::new()),
-    };
-
-    let mut sessions = Vec::new();
-    for meta in iter.flatten() {
-        if is_cancelled() {
-            return None;
-        }
-        sessions.push(meta);
-    }
-    if is_cancelled() {
-        None
-    } else {
-        Some(sessions)
-    }
-}
-
-pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
-    load_messages_cancellable(path, &|| false)
 }
 
 #[derive(Debug)]
@@ -733,10 +470,6 @@ pub(crate) fn load_messages_cancellable(
 
 /// Load messages from the OpenCode SQLite database for a given source reference.
 /// Selects the latest bounded window and reconstructs each message lazily.
-pub fn load_messages_sqlite(source: &str) -> Result<SessionMessageBatch, String> {
-    load_messages_sqlite_cancellable(source, &|| false)
-}
-
 pub(crate) fn load_messages_sqlite_cancellable(
     source: &str,
     is_cancelled: &(dyn Fn() -> bool + Sync),
@@ -960,6 +693,164 @@ fn load_opencode_part_preview(
     } else {
         Ok((content, truncated))
     }
+}
+
+/// Materialize one file-backed OpenCode message selected by the transcript
+/// index. The returned flag reports content/metadata truncation, independently
+/// from whether additional messages exist.
+pub(crate) fn load_transcript_file_message(
+    message_path: &Path,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(Option<SessionMessage>, bool), String> {
+    let data = match read_to_string_cancellable(message_path, is_cancelled) {
+        Ok(Some(data)) => data,
+        Ok(None) => return Err("Session message page was cancelled".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Ok((None, true));
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to read OpenCode message {}: {error}",
+                message_path.display()
+            ))
+        }
+    };
+    let value: Value = serde_json::from_str(&data)
+        .map_err(|error| format!("Failed to parse OpenCode message: {error}"))?;
+    let Some(message_id) = value.get("id").and_then(Value::as_str) else {
+        return Ok((None, false));
+    };
+    if message_id.len() > SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES {
+        return Ok((None, true));
+    }
+    let mut role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let mut truncated = truncate_string_utf8(&mut role, SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES);
+    let created_ts = value
+        .get("time")
+        .and_then(|time| time.get("created"))
+        .and_then(parse_timestamp_to_ms)
+        .unwrap_or(0);
+    let storage = message_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            format!(
+                "Cannot determine OpenCode storage root from {}",
+                message_path.display()
+            )
+        })?;
+    let (content, content_truncated) =
+        load_opencode_part_preview(&storage.join("part").join(message_id), is_cancelled)?;
+    truncated |= content_truncated;
+    if content.trim().is_empty() {
+        return Ok((None, truncated));
+    }
+    Ok((
+        Some(SessionMessage {
+            role,
+            content,
+            ts: (created_ts > 0).then_some(created_ts),
+        }),
+        truncated,
+    ))
+}
+
+/// Materialize an ordered page of OpenCode SQLite rowids with one
+/// read-only connection and prepared statements.
+pub(crate) fn load_transcript_sqlite_messages(
+    source: &str,
+    rowids: &[i64],
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(Vec<Option<SessionMessage>>, bool), String> {
+    let (db_path, session_id) = parse_sqlite_source(source)
+        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+    let conn = Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("Failed to open OpenCode database: {error}"))?;
+    with_sqlite_cancellation(&conn, is_cancelled, || {
+        let mut header_stmt = conn
+            .prepare(&format!(
+                "SELECT
+                    time_created,
+                    CASE WHEN length(CAST(id AS BLOB)) <= {SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES}
+                         THEN CAST(id AS TEXT) ELSE NULL END,
+                    CASE WHEN length(CAST(data AS BLOB)) <= {MAX_METADATA_FILE_BYTES}
+                         THEN CAST(data AS TEXT) ELSE NULL END,
+                    length(CAST(data AS BLOB))
+                 FROM message
+                 WHERE session_id = ?1 AND rowid = ?2
+                 LIMIT 1"
+            ))
+            .map_err(|error| format!("Failed to prepare OpenCode message query: {error}"))?;
+        let mut part_stmt = conn
+            .prepare(&format!(
+                "SELECT
+                    CASE WHEN length(CAST(data AS BLOB)) <= {MAX_METADATA_FILE_BYTES}
+                         THEN CAST(data AS TEXT) ELSE NULL END,
+                    length(CAST(data AS BLOB))
+                 FROM part
+                 WHERE session_id = ?1 AND message_id = ?2
+                 ORDER BY time_created ASC
+                 LIMIT {}",
+                SESSION_MESSAGE_PREVIEW_MAX_MESSAGES + 1
+            ))
+            .map_err(|error| format!("Failed to prepare OpenCode part query: {error}"))?;
+        let mut messages = Vec::with_capacity(rowids.len());
+        let mut truncated = false;
+        for rowid in rowids {
+            if is_cancelled() {
+                return Err("Session message page was cancelled".to_string());
+            }
+            let header = header_stmt
+                .query_row(rusqlite::params![session_id, rowid], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                })
+                .optional()
+                .map_err(|error| format!("Failed to query OpenCode message: {error}"))?;
+            let Some((created_ts, message_id, data, data_bytes)) = header else {
+                truncated = true;
+                messages.push(None);
+                continue;
+            };
+            let Some(message_id) = message_id else {
+                truncated = true;
+                messages.push(None);
+                continue;
+            };
+            truncated |= data_bytes.is_some_and(|bytes| bytes > MAX_METADATA_FILE_BYTES as i64);
+            let mut role = data
+                .as_deref()
+                .and_then(|data| serde_json::from_str::<Value>(data).ok())
+                .and_then(|value| value.get("role").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_string());
+            truncated |= truncate_string_utf8(&mut role, SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES);
+            let (content, content_truncated) = load_opencode_sqlite_parts_preview(
+                &mut part_stmt,
+                &session_id,
+                &message_id,
+                is_cancelled,
+            )?;
+            truncated |= content_truncated;
+            messages.push((!content.trim().is_empty()).then_some(SessionMessage {
+                role,
+                content,
+                ts: Some(created_ts),
+            }));
+        }
+        Ok((messages, truncated))
+    })
 }
 
 fn load_opencode_sqlite_parts_preview(
@@ -1355,12 +1246,6 @@ pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, Str
     Ok(deleted > 0)
 }
 
-fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
-    parse_session_cancellable(storage, path, &|| false)
-        .ok()
-        .flatten()
-}
-
 fn parse_session_cancellable(
     storage: &Path,
     path: &Path,
@@ -1441,6 +1326,7 @@ fn parse_session_cancellable(
         summary,
         project_dir: directory,
         created_at,
+        source_mtime_ns: None,
         last_active_at: updated_at.or(created_at),
         source_path: Some(
             storage
@@ -1450,6 +1336,7 @@ fn parse_session_cancellable(
                 .into_owned(),
         ),
         resume_command: Some(format!("opencode session resume {session_id}")),
+        usage: None,
     }))
 }
 
@@ -1472,11 +1359,15 @@ fn parse_session_lightweight(
         .filter(|value| !value.is_empty());
     let directory =
         extract_json_value(prefix, "directory").and_then(|value| value.as_str().map(str::to_owned));
-    let created_at =
+    let provider_created_at =
         extract_json_value(prefix, "created").and_then(|value| parse_timestamp_to_ms(&value));
-    let updated_at = extract_json_value(prefix, "updated")
-        .and_then(|value| parse_timestamp_to_ms(&value))
-        .or_else(|| file_modified_ms(path));
+    let provider_updated_at =
+        extract_json_value(prefix, "updated").and_then(|value| parse_timestamp_to_ms(&value));
+    let fallback_time = file_modified_ms(path);
+    let updated_at = provider_updated_at.or(fallback_time);
+    let created_at = provider_created_at
+        .or(provider_updated_at)
+        .or(fallback_time);
     let display_title = explicit_title
         .clone()
         .or_else(|| directory.as_deref().and_then(path_basename))
@@ -1497,7 +1388,8 @@ fn parse_session_lightweight(
         title: display_title,
         summary,
         project_dir: directory,
-        created_at: created_at.or(updated_at),
+        created_at,
+        source_mtime_ns: None,
         last_active_at: updated_at.or(created_at),
         source_path: Some(
             storage
@@ -1507,6 +1399,7 @@ fn parse_session_lightweight(
                 .into_owned(),
         ),
         resume_command: Some(format!("opencode session resume {session_id}")),
+        usage: None,
     }
 }
 
@@ -1646,33 +1539,6 @@ fn extract_part_text(part_value: &Value) -> Option<String> {
     }
 }
 
-fn collect_parts_text(part_dir: &Path) -> String {
-    if !part_dir.is_dir() {
-        return String::new();
-    }
-
-    let mut parts = Vec::new();
-    collect_json_files(part_dir, &mut parts);
-
-    let mut texts = Vec::new();
-    for part_path in &parts {
-        let data = match read_to_string_cancellable(part_path, &|| false) {
-            Ok(Some(data)) => data,
-            Ok(None) | Err(_) => continue,
-        };
-        let value: Value = match serde_json::from_str(&data) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        if let Some(text) = extract_part_text(&value) {
-            texts.push(text);
-        }
-    }
-
-    texts.join("\n")
-}
-
 fn collect_parts_text_cancellable(
     part_dir: &Path,
     is_cancelled: &(dyn Fn() -> bool + Sync),
@@ -1731,37 +1597,6 @@ fn collect_json_files(root: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn collect_json_files_cancellable(
-    root: &Path,
-    files: &mut Vec<PathBuf>,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> bool {
-    if is_cancelled() {
-        return false;
-    }
-    if !root.exists() {
-        return true;
-    }
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return true,
-    };
-    for entry in entries.flatten() {
-        if is_cancelled() {
-            return false;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            if !collect_json_files_cancellable(&path, files, is_cancelled) {
-                return false;
-            }
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            files.push(path);
-        }
-    }
-    true
-}
-
 fn find_session_file(storage: &Path, session_id: &str) -> Option<PathBuf> {
     let session_root = storage.join("session");
     let mut files = Vec::new();
@@ -1816,6 +1651,7 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL DEFAULT 0,
                 data TEXT NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES session(id) ON DELETE CASCADE
             );
@@ -1831,6 +1667,54 @@ mod tests {
             ",
         )
         .expect("create sqlite schema");
+    }
+
+    #[test]
+    fn oversized_sqlite_message_metadata_does_not_hide_valid_parts() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("opencode.db");
+        let conn = Connection::open(&db_path).expect("database");
+        create_sqlite_schema(&conn);
+        conn.execute(
+            "INSERT INTO session (id, title, directory, time_created, time_updated)
+             VALUES ('ses_1', 'Session', '/tmp/project', 1, 1)",
+            [],
+        )
+        .expect("session");
+        let oversized_data = serde_json::json!({
+            "role": "user",
+            "padding": "x".repeat(MAX_METADATA_FILE_BYTES + 1),
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data)
+             VALUES ('msg_1', 'ses_1', 1, ?1)",
+            [&oversized_data],
+        )
+        .expect("message");
+        let rowid: i64 = conn
+            .query_row("SELECT rowid FROM message WHERE id = 'msg_1'", [], |row| {
+                row.get(0)
+            })
+            .expect("message rowid");
+        conn.execute(
+            "INSERT INTO part (id, session_id, message_id, time_created, data)
+             VALUES ('part_1', 'ses_1', 'msg_1', 1,
+                     '{\"type\":\"text\",\"text\":\"still visible\"}')",
+            [],
+        )
+        .expect("part");
+        drop(conn);
+        let source = format!("sqlite:{}:ses_1", db_path.display());
+
+        let (messages, truncated) = load_transcript_sqlite_messages(&source, &[rowid], &|| false)
+            .expect("load transcript page");
+
+        assert!(truncated);
+        assert_eq!(messages.len(), 1);
+        let message = messages[0].as_ref().expect("valid part-backed message");
+        assert_eq!(message.role, "unknown");
+        assert_eq!(message.content, "still visible");
     }
 
     #[test]
@@ -1905,6 +1789,60 @@ mod tests {
         assert_eq!(result, Err(cache::StreamScanStop::Cancelled));
         assert_eq!(ids.len(), 1);
         assert_eq!(stats.emitted, 1);
+    }
+
+    #[test]
+    fn sqlite_manifest_metadata_stays_bounded_to_the_session_table() {
+        let conn = Connection::open_in_memory().expect("database");
+        create_sqlite_schema(&conn);
+        conn.execute(
+            "INSERT INTO session (id, title, directory, time_created, time_updated)
+             VALUES ('ses_watermark', 'Session', '/tmp/project', 1, 100)",
+            [],
+        )
+        .expect("session");
+        conn.execute(
+            "INSERT INTO message (
+                 id, session_id, time_created, time_updated, data
+             ) VALUES (
+                 'msg_watermark', 'ses_watermark', 60, 200, '{}'
+             )",
+            [],
+        )
+        .expect("message");
+
+        let mut rows = Vec::new();
+        let mut stats = cache::StreamScanStats::default();
+        stream_sqlite_sessions(
+            &conn,
+            &mut |meta| {
+                rows.push(meta);
+                ControlFlow::Continue(())
+            },
+            &|| false,
+            &mut stats,
+        )
+        .expect("stream");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].source_mtime_ns,
+            Some(100),
+            "Phase A must reuse the session row instead of aggregating the full message table"
+        );
+
+        let sql = sqlite_session_metadata_query(&conn, false).expect("metadata query");
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("plan statement")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("plan rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("decode plan");
+        assert!(
+            plan.iter().all(|step| !step.contains("message")),
+            "Phase A query plan must not scan or materialize message: {plan:?}"
+        );
     }
 
     #[test]
@@ -2047,7 +1985,7 @@ mod tests {
         )
         .expect("write text part");
 
-        let msgs = load_messages(&msg_dir).expect("load");
+        let msgs = load_messages_cancellable(&msg_dir, &|| false).expect("load");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "assistant");
         assert!(msgs[0].content.contains("[Tool: bash]"));
@@ -2068,55 +2006,6 @@ mod tests {
         assert!(parse_sqlite_source("sqlite:/tmp/opencode.db:msg_123").is_none());
         assert!(parse_sqlite_source("sqlite:/tmp/opencode.db").is_none());
     }
-
-    #[test]
-    #[allow(deprecated)] // set_var/remove_var deprecated since Rust 1.81; safe here under mutex
-    fn scan_sessions_sqlite_reads_temp_database() {
-        let _guard = opencode_env_lock().lock().expect("lock");
-        let temp = tempdir().expect("tempdir");
-        let original_xdg = std::env::var_os("XDG_DATA_HOME");
-        std::env::set_var("XDG_DATA_HOME", temp.path());
-
-        let base_dir = temp.path().join("opencode");
-        std::fs::create_dir_all(&base_dir).expect("create base dir");
-        let db_path = base_dir.join("opencode.db");
-        let conn = Connection::open(&db_path).expect("open sqlite db");
-        create_sqlite_schema(&conn);
-
-        conn.execute(
-            "INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5)",
-            ("ses_1", "", "/tmp/project-a", 1_771_061_953_033_i64, 1_771_061_954_033_i64),
-        )
-        .expect("insert session 1");
-        conn.execute(
-            "INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5)",
-            ("ses_2", "Named Session", "/tmp/project-b", 1_771_061_950_000_i64, 1_771_061_955_000_i64),
-        )
-        .expect("insert session 2");
-        drop(conn);
-
-        let sessions = scan_sessions_sqlite();
-
-        #[allow(deprecated)]
-        if let Some(value) = original_xdg {
-            std::env::set_var("XDG_DATA_HOME", value);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
-
-        assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].session_id, "ses_2");
-        assert_eq!(sessions[0].title.as_deref(), Some("Named Session"));
-        assert_eq!(sessions[1].session_id, "ses_1");
-        assert_eq!(sessions[1].title.as_deref(), Some("project-a"));
-        assert_eq!(sessions[1].project_dir.as_deref(), Some("/tmp/project-a"));
-        let expected_source = format!("sqlite:{}:ses_1", db_path.display());
-        assert_eq!(
-            sessions[1].source_path.as_deref(),
-            Some(expected_source.as_str())
-        );
-    }
-
     #[test]
     fn load_messages_sqlite_reads_messages_and_parts() {
         let temp = tempdir().expect("tempdir");
@@ -2169,7 +2058,8 @@ mod tests {
         drop(conn);
 
         let source = format!("sqlite:{}:ses_1", db_path.display());
-        let messages = load_messages_sqlite(&source).expect("load sqlite messages");
+        let messages =
+            load_messages_sqlite_cancellable(&source, &|| false).expect("load sqlite messages");
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "user");
@@ -2304,7 +2194,9 @@ mod tests {
         )
         .expect("write session");
 
-        let meta = parse_session(storage, &session_file).expect("parse session");
+        let meta = parse_session_cancellable(storage, &session_file, &|| false)
+            .expect("scan")
+            .expect("parse session");
         assert_eq!(meta.title.as_deref(), Some("My Named Session"));
         // 不变量：summary 与 title 同源同值。
         assert_eq!(meta.summary, meta.title);
@@ -2353,7 +2245,9 @@ mod tests {
         )
         .expect("write part");
 
-        let meta = parse_session(storage, &session_file).expect("parse session");
+        let meta = parse_session_cancellable(storage, &session_file, &|| false)
+            .expect("scan")
+            .expect("parse session");
         // title 来自目录名，summary 来自 part 文本 —— 不同源、必不相等。
         assert_eq!(meta.title.as_deref(), Some("my-project"));
         assert_eq!(meta.summary.as_deref(), Some("help me fix the parser bug"));
@@ -2405,7 +2299,9 @@ mod tests {
         )
         .expect("write part");
 
-        let meta = parse_session(storage, &session_file).expect("parse session");
+        let meta = parse_session_cancellable(storage, &session_file, &|| false)
+            .expect("scan")
+            .expect("parse session");
         assert_eq!(meta.title.as_deref(), Some("my-project"));
         // 巧合命中：派生 summary 等于 title → 丢弃为 None。
         assert_eq!(meta.summary, None);

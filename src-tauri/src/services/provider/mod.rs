@@ -506,31 +506,7 @@ impl ProviderService {
     }
 
     fn codex_config_has_base_url(config_text: &str) -> bool {
-        let Ok(table) = toml::from_str::<toml::Table>(config_text.trim()) else {
-            return false;
-        };
-
-        if table
-            .get("base_url")
-            .and_then(|value| value.as_str())
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            return true;
-        }
-
-        let Some(provider_key) = table.get("model_provider").and_then(|value| value.as_str())
-        else {
-            return false;
-        };
-
-        table
-            .get("model_providers")
-            .and_then(|value| value.as_table())
-            .and_then(|providers| providers.get(provider_key))
-            .and_then(|value| value.as_table())
-            .and_then(|provider| provider.get("base_url"))
-            .and_then(|value| value.as_str())
-            .is_some_and(|value| !value.trim().is_empty())
+        crate::codex_config::extract_codex_base_url(config_text).is_some()
     }
 
     pub fn sync_openclaw_to_live(state: &AppState) -> Result<(), AppError> {
@@ -848,20 +824,33 @@ impl ProviderService {
 
                 let sync_result = if prepared.action.sync_proxy_live {
                     match state.proxy_service.is_running_blocking() {
-                        Ok(true) => futures::executor::block_on(
-                            state
-                                .proxy_service
-                                .sync_claude_live_from_provider_while_proxy_active(
-                                    &prepared.action.provider,
+                        Ok(true) => {
+                            let app_name = prepared.action.app_type.as_str();
+                            let result = match prepared.action.app_type {
+                                AppType::Claude => futures::executor::block_on(
+                                    state
+                                        .proxy_service
+                                        .sync_claude_live_from_provider_while_proxy_active(
+                                            &prepared.action.provider,
+                                        ),
                                 ),
-                        )
-                        .map_err(|error| {
-                            AppError::localized(
-                                "provider.update.proxy_live_sync_failed",
-                                format!("同步 Claude Live 配置失败: {error}"),
-                                format!("Failed to sync Claude live config: {error}"),
-                            )
-                        }),
+                                AppType::Codex => futures::executor::block_on(
+                                    state
+                                        .proxy_service
+                                        .sync_codex_live_from_provider_while_proxy_active(
+                                            &prepared.action.provider,
+                                        ),
+                                ),
+                                _ => Ok(()),
+                            };
+                            result.map_err(|error| {
+                                AppError::localized(
+                                    "provider.update.proxy_live_sync_failed",
+                                    format!("同步 {app_name} Live 配置失败: {error}"),
+                                    format!("Failed to sync {app_name} live config: {error}"),
+                                )
+                            })
+                        }
                         Ok(false) => Ok(()),
                         Err(error) => Err(AppError::Message(error)),
                     }
@@ -1541,35 +1530,7 @@ impl ProviderService {
 
     fn extract_claude_common_config(settings: &Value) -> Result<String, AppError> {
         let mut config = settings.clone();
-
-        const ENV_EXCLUDES: &[&str] = &[
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_MODEL",
-            "ANTHROPIC_REASONING_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_BASE_URL",
-        ];
-        const TOP_LEVEL_EXCLUDES: &[&str] = &["apiBaseUrl", "primaryModel", "smallFastModel"];
-
-        if let Some(env) = config.get_mut("env").and_then(Value::as_object_mut) {
-            for key in ENV_EXCLUDES {
-                env.remove(*key);
-            }
-            if env.is_empty() {
-                if let Some(obj) = config.as_object_mut() {
-                    obj.remove("env");
-                }
-            }
-        }
-
-        if let Some(obj) = config.as_object_mut() {
-            for key in TOP_LEVEL_EXCLUDES {
-                obj.remove(*key);
-            }
-        }
+        common_config::sanitize_extracted_claude_common_config(&mut config);
 
         if config.as_object().is_none_or(|obj| obj.is_empty()) {
             return Ok("{}".to_string());
@@ -1593,7 +1554,7 @@ impl ProviderService {
         let mut snippet = serde_json::Map::new();
         if let Some(env) = env {
             for (key, value) in env {
-                if key == "GOOGLE_GEMINI_BASE_URL" || key == "GEMINI_API_KEY" {
+                if key == "GOOGLE_GEMINI_BASE_URL" || common_config::is_sensitive_config_key(key) {
                     continue;
                 }
                 let Value::String(v) = value else {
@@ -2035,8 +1996,8 @@ impl ProviderService {
                 state.db.get_current_provider(app_type.as_str())?,
             )
         };
-        let takeover_active = if app_type.is_additive_mode() {
-            false
+        let (takeover_active, live_taken_over) = if app_type.is_additive_mode() {
+            (false, false)
         } else {
             let has_live_backup =
                 futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
@@ -2046,7 +2007,7 @@ impl ProviderService {
             let live_taken_over = state
                 .proxy_service
                 .detect_takeover_in_live_config_for_app(&app_type);
-            has_live_backup || live_taken_over
+            (has_live_backup || live_taken_over, live_taken_over)
         };
 
         Self::run_transaction(state, move |config| {
@@ -2165,7 +2126,9 @@ impl ProviderService {
                     common_config_snippet,
                     previous_common_config_snippet: None,
                     takeover_active,
-                    sync_proxy_live: takeover_active && matches!(&app_type_clone, AppType::Claude),
+                    sync_proxy_live: (takeover_active
+                        && matches!(&app_type_clone, AppType::Claude))
+                        || (live_taken_over && matches!(&app_type_clone, AppType::Codex)),
                     activate_provider: false,
                 })
             } else {

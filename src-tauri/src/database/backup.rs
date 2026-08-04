@@ -12,6 +12,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
@@ -52,6 +54,10 @@ where
 
 const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
     "proxy_request_logs",
+    // This cursor describes files on the current device. Cost projection does
+    // not read it, but importing another device's cursor could still skip
+    // local usage lines permanently.
+    "session_log_sync",
     "stream_check_logs",
     "proxy_live_backup",
     "proxy_failover_live_snapshots",
@@ -143,6 +149,30 @@ const SYNC_PRESERVATION_POLICY: SyncPreservationPolicy = SyncPreservationPolicy 
 };
 
 impl Database {
+    /// Create the normal SQLite snapshot before a schema migration has
+    /// quiesced an older daemon. SQLite's online backup API gives us a
+    /// consistent source snapshot while the daemon remains available; if the
+    /// backup directory is unwritable or the disk is full, initialization can
+    /// fail without taking a working proxy offline.
+    pub(crate) fn backup_database_path(database_path: &Path) -> Result<Option<PathBuf>, AppError> {
+        if !database_path.exists() {
+            return Ok(None);
+        }
+
+        let conn =
+            Connection::open_with_flags(database_path, super::readonly_database_open_flags())
+                .map_err(|error| AppError::Database(error.to_string()))?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| AppError::Database(error.to_string()))?;
+
+        let snapshot_source = Self {
+            conn: Mutex::new(conn),
+            runtime_key: format!("file:{}", database_path.display()),
+            db_path: Some(database_path.to_path_buf()),
+        };
+        snapshot_source.backup_database_file()
+    }
+
     /// 导出为 SQL 字符串（内存操作，不写文件）
     pub fn export_sql_string(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
@@ -522,7 +552,18 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
+        // The migration coordinator can supply a database outside the
+        // process-wide config root, so always create the sibling directory.
         create_secure_dir_all(&backup_dir)?;
+        // For the normal CC-Switch database, also reject an existing managed
+        // backup directory with unsafe permissions.
+        if super::database_path()
+            .is_ok_and(|managed_database_path| managed_database_path == db_path)
+        {
+            crate::config::create_managed_config_dir_all(
+                &crate::config::get_app_config_dir().join("backups"),
+            )?;
+        }
 
         let backup_path = {
             let conn = lock_conn!(self.conn);
@@ -1131,6 +1172,12 @@ mod tests {
                  VALUES ('current_profile_id_claude-desktop', 'remote-profile')",
                 [],
             )?;
+            conn.execute(
+                "INSERT INTO session_log_sync
+                    (file_path, last_modified, last_line_offset, last_synced_at)
+                 VALUES ('/shared/session.jsonl', 999, 999, 999)",
+                [],
+            )?;
         }
         let remote_sql = remote_db.export_sql_string_for_sync()?;
 
@@ -1163,6 +1210,12 @@ mod tests {
                     provider_id, provider_name, app_type, status, success, message,
                     response_time_ms, http_status, model_used, retry_count, tested_at
                 ) VALUES ('local-provider', 'Local Provider', 'claude', 'operational', 1, 'ok', 42, 200, 'claude-3', 0, 1000)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO session_log_sync
+                    (file_path, last_modified, last_line_offset, last_synced_at)
+                 VALUES ('/shared/session.jsonl', 123, 12, 1000)",
                 [],
             )?;
         }
@@ -1224,7 +1277,21 @@ mod tests {
             stream_logs, 1,
             "local stream check logs should be preserved"
         );
-
+        let local_sync: (i64, i64, i64) = {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            conn.query_row(
+                "SELECT last_modified, last_line_offset, last_synced_at
+                 FROM session_log_sync
+                 WHERE file_path = '/shared/session.jsonl'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+        };
+        assert_eq!(
+            local_sync,
+            (123, 12, 1000),
+            "WebDAV restore must not replace local file progress with a remote device's cursor"
+        );
         let semantics: (i64, i64) = {
             let conn = crate::database::lock_conn!(local_db.conn);
             conn.query_row(
@@ -1338,6 +1405,62 @@ mod tests {
         assert_ne!(first, second, "backup paths should not collide");
         assert!(first.exists(), "first backup should exist");
         assert!(second.exists(), "second backup should exist");
+
+        Ok(())
+    }
+
+    #[test]
+    fn backup_database_path_creates_backup_beside_supplied_database() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let canonical_temp =
+            std::fs::canonicalize(temp.path()).expect("canonicalize temp directory");
+        let db_path = canonical_temp.join("custom.db");
+        let conn = Connection::open(&db_path).expect("create source database");
+        conn.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY)", [])
+            .expect("create source table");
+        drop(conn);
+
+        let backup_path = Database::backup_database_path(&db_path)?
+            .expect("backup should be created for supplied database");
+        let expected_dir = canonical_temp.join("backups");
+
+        assert_eq!(backup_path.parent(), Some(expected_dir.as_path()));
+        assert!(backup_path.exists(), "backup file should exist");
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_database_backup_rejects_other_user_writable_backup_dir() -> Result<(), AppError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let db = Database::init()?;
+        let backup_dir = crate::config::get_app_config_dir().join("backups");
+        std::fs::create_dir(&backup_dir).expect("create backup dir");
+        std::fs::set_permissions(&backup_dir, std::fs::Permissions::from_mode(0o777))
+            .expect("set backup dir permissions");
+
+        let err = db
+            .backup_database_file()
+            .expect_err("other-user-writable backup dir must be rejected");
+
+        assert!(err.to_string().contains("不能允许组或其他用户写入"));
+        assert!(
+            std::fs::read_dir(&backup_dir)
+                .expect("read backup dir")
+                .next()
+                .is_none(),
+            "rejected backup must not create artifacts"
+        );
+        let mode = std::fs::metadata(&backup_dir)
+            .expect("metadata backup dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o777, "validation must not chmod the directory");
 
         Ok(())
     }

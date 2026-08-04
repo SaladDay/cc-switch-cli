@@ -23,6 +23,7 @@ fn settings_section(item: SettingsItem) -> SettingsSection {
         | SettingsItem::OpenClawConfigDir => SettingsSection::Applications,
         SettingsItem::SkipClaudeOnboarding
         | SettingsItem::ClaudePluginIntegration
+        | SettingsItem::PreserveCodexOfficialAuth
         | SettingsItem::CodexUnifiedSessionHistory => SettingsSection::Integrations,
         SettingsItem::Proxy | SettingsItem::ModelRoutes | SettingsItem::CheckForUpdates => {
             SettingsSection::System
@@ -980,7 +981,6 @@ fn render_openclaw_env_route(
         theme,
         &[
             ("Enter", texts::tui_key_edit()),
-            ("e", texts::tui_key_edit()),
             ("Esc", texts::tui_key_close()),
         ],
         app.focus == Focus::Content,
@@ -1455,7 +1455,6 @@ fn render_openclaw_tools_route(
     } else {
         vec![
             ("Enter", texts::tui_key_edit()),
-            ("e", texts::tui_key_edit()),
             ("Del/Backspace", texts::tui_key_delete()),
             ("Esc", texts::tui_key_close()),
         ]
@@ -3435,6 +3434,7 @@ pub(super) fn render_settings(
     let openclaw_config_dir = crate::settings::get_settings().openclaw_config_dir;
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
+    let preserve_codex_official_auth = crate::settings::preserve_codex_official_auth_on_switch();
     let codex_unified_session_history = crate::settings::unify_codex_session_history();
     let preferred_editor = crate::settings::get_preferred_editor();
 
@@ -3501,6 +3501,14 @@ pub(super) fn render_settings(
             super::app::SettingsItem::ClaudePluginIntegration => (
                 texts::enable_claude_plugin_integration_label().to_string(),
                 if claude_plugin_integration {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
+            super::app::SettingsItem::PreserveCodexOfficialAuth => (
+                texts::codex_preserve_official_auth_label().to_string(),
+                if preserve_codex_official_auth {
                     texts::enabled().to_string()
                 } else {
                     texts::disabled().to_string()
@@ -3686,15 +3694,13 @@ fn managed_account_key_items(app: &App) -> Vec<(&'static str, &'static str)> {
         return items;
     }
 
-    match app.managed_auth_status.as_ref() {
-        None => items.push(("Enter", texts::tui_key_refresh())),
-        Some(status) if status.accounts.is_empty() => {
-            items.push(("Enter", texts::tui_key_add_account()));
-        }
-        Some(_) => {
-            items.push(("Space", texts::tui_key_switch()));
-            items.push(("Enter", texts::tui_key_open()));
-        }
+    if app
+        .managed_auth_status
+        .as_ref()
+        .is_some_and(|status| !status.accounts.is_empty())
+    {
+        items.push(("Space", texts::tui_key_switch()));
+        items.push(("Enter", texts::tui_key_open()));
     }
 
     items
@@ -4131,7 +4137,9 @@ pub(super) fn render_settings_proxy(
         .split(inner);
 
     let key_label = match LocalProxySettingsItem::ALL.get(app.settings_proxy_idx) {
-        Some(LocalProxySettingsItem::AutoFailover) => texts::tui_key_toggle(),
+        Some(LocalProxySettingsItem::ProxySwitch | LocalProxySettingsItem::AutoFailover) => {
+            texts::tui_key_toggle()
+        }
         Some(LocalProxySettingsItem::ListenAddress) if data.proxy.running => "",
         Some(LocalProxySettingsItem::ListenPort)
             if data.proxy.has_active_worker_for(&app.app_type) =>

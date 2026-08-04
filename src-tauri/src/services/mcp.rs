@@ -246,15 +246,30 @@ impl McpService {
         Ok(())
     }
 
-    /// 手动同步所有启用的 MCP 服务器到对应的应用
+    /// 手动同步所有启用的 MCP 服务器到对应的应用。
+    ///
+    /// Best-effort：单个应用投影失败不阻断其余应用。各应用的 live 文件互相独立，
+    /// 一处损坏没有理由让其它应用的 MCP 状态保持陈旧。全部执行完后聚合错误，
+    /// 保留调用方对部分失败的可见性。
     pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
         let servers = Self::get_all_servers(state)?;
 
+        let mut failures = Vec::new();
         for app in Self::supported_mcp_apps() {
-            Self::project_servers_to_app(state, &servers, &app)?;
+            if let Err(err) = Self::project_servers_to_app(state, &servers, &app) {
+                log::warn!("同步 MCP 到 {app:?} 失败: {err}");
+                failures.push(format!("{}: {err}", app.as_str()));
+            }
         }
 
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(format!(
+                "部分应用 MCP 同步失败: {}",
+                failures.join("; ")
+            )))
+        }
     }
 
     /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做

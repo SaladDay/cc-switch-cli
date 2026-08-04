@@ -3889,4 +3889,52 @@ mod tests {
             Err(ManifestError::RowOutsideScope { .. })
         ));
     }
+
+    #[test]
+    fn source_version_roundtrips_without_persisting_runtime_usage_or_bumping_format() {
+        let (_temp, store) = test_store();
+        let mut row = meta("codex", "v3-row", 1);
+        row.source_mtime_ns = Some(1_234_567_890);
+        row.usage = Some(crate::session_manager::SessionUsageSummary {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_creation_tokens: 4,
+            estimated_cost_usd: Some(0.5),
+        });
+
+        let mut builder = store.begin_build("codex").expect("begin");
+        builder.push(row).expect("push");
+        builder.publish().expect("publish");
+        let loaded = store.load_page("codex", 0).expect("load page").rows;
+        assert_eq!(loaded[0].source_mtime_ns, Some(1_234_567_890));
+        assert_eq!(loaded[0].usage, None);
+        assert_eq!(FORMAT_VERSION, 1, "v3 must not invalidate old manifests");
+    }
+
+    #[test]
+    fn legacy_rows_without_source_version_remain_readable() {
+        let row: crate::session_manager::SessionMeta =
+            serde_json::from_str(r#"{"providerId":"codex","sessionId":"legacy","createdAt":123}"#)
+                .expect("deserialize legacy row");
+        assert_eq!(row.source_mtime_ns, None);
+    }
+
+    #[test]
+    fn source_version_keeps_worst_case_rows_within_existing_page_and_row_limits() {
+        let mut row = meta("codex", "bounded", 1);
+        row.provider_id = "p".repeat(MAX_IDENTITY_FIELD_BYTES);
+        row.session_id = "s".repeat(MAX_IDENTITY_FIELD_BYTES);
+        row.source_path = Some("x".repeat(MAX_IDENTITY_FIELD_BYTES));
+        row.source_mtime_ns = Some(i64::MAX);
+        let encoded = serde_json::to_vec(&row).expect("encode bounded row");
+        assert!(
+            encoded.len() <= MAX_SESSION_META_JSON_BYTES,
+            "source evidence must fit the existing per-row envelope"
+        );
+        assert!(
+            PAGE_SIZE * encoded.len() + MAX_PAGE_ENVELOPE_BYTES <= MAX_PAGE_BYTES as usize,
+            "100 rows with source evidence must fit the existing page cap"
+        );
+    }
 }

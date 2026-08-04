@@ -1,10 +1,10 @@
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
 use crate::config::get_claude_config_dir;
-use crate::session_manager::cache::{self, FileScanTarget};
+use crate::session_manager::cache;
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
     SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta,
@@ -18,75 +18,6 @@ use super::utils::{
 };
 
 const PROVIDER_ID: &str = "claude";
-
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let root = get_claude_config_dir().join("projects");
-    let mut files = Vec::new();
-    collect_jsonl_files(&root, &mut files);
-
-    super::utils::parse_sessions_parallel(files, parse_session)
-}
-
-/// Cache-aware scan: reuses cached metadata for unchanged files and re-parses
-/// only new or modified `.jsonl` files. Agent sessions still parse to `None`
-/// (a cheap filename check) and are simply not cached.
-pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    cache::scan_provider_cached(
-        store,
-        PROVIDER_ID,
-        scan_targets(),
-        force,
-        parse_session,
-        |_| true,
-    )
-}
-
-pub(crate) fn scan_sessions_progressive(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    let targets = scan_targets();
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_session,
-            |_| true,
-            on_session,
-        ),
-        None => cache::scan_provider_uncached_progressive(targets, parse_session, on_session),
-    }
-}
-
-pub(crate) fn scan_sessions_progressive_cancellable(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    let targets = scan_targets_cancellable(is_cancelled)?;
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive_cancellable(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_session,
-            |_| true,
-            on_session,
-            is_cancelled,
-        ),
-        None => cache::scan_provider_uncached_progressive_cancellable(
-            targets,
-            parse_session,
-            on_session,
-            is_cancelled,
-        ),
-    }
-}
 
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
@@ -120,72 +51,13 @@ pub(crate) fn stream_sessions_cancellable(
     )
 }
 
-fn scan_targets() -> Vec<FileScanTarget> {
-    scan_targets_cancellable(&|| false).expect("non-cancellable target scan cannot stop")
-}
-
-fn scan_targets_cancellable(
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<FileScanTarget>> {
-    let root = get_claude_config_dir().join("projects");
-    let mut targets = Vec::new();
-    if !cache::collect_targets_recursive_cancellable(&root, "jsonl", &mut targets, is_cancelled) {
-        return None;
-    }
-    Some(targets)
-}
-
-pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
-    load_messages_cancellable(path, &|| false)
-}
-
 pub(crate) fn load_messages_cancellable(
     path: &Path,
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<SessionMessageBatch, String> {
     let mut batch = SessionMessageBatchBuilder::new();
     let status = visit_bounded_lines_cancellable_with_status(path, is_cancelled, &mut |line| {
-        let value: Value = match serde_json::from_str(line) {
-            Ok(parsed) => parsed,
-            Err(_) => return ControlFlow::Continue(()),
-        };
-
-        if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
-            return ControlFlow::Continue(());
-        }
-
-        let message = match value.get("message") {
-            Some(message) => message,
-            None => return ControlFlow::Continue(()),
-        };
-
-        let mut role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-
-        // Claude wraps tool_result inside user messages; reclassify as "tool" role
-        if role == "user" {
-            if let Some(Value::Array(items)) = message.get("content") {
-                let all_tool_results = !items.is_empty()
-                    && items.iter().all(|item| {
-                        item.get("type").and_then(Value::as_str) == Some("tool_result")
-                    });
-                if all_tool_results {
-                    role = "tool".to_string();
-                }
-            }
-        }
-
-        let content = message.get("content").map(extract_text).unwrap_or_default();
-        if content.trim().is_empty() {
-            return ControlFlow::Continue(());
-        }
-
-        let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
-
-        batch.push(SessionMessage { role, content, ts })
+        parse_transcript_line(line).map_or(ControlFlow::Continue(()), |message| batch.push(message))
     })
     .map_err(|error| format!("Failed to read session file: {error}"))?
     .ok_or_else(|| "Session message preview was cancelled".to_string())?;
@@ -194,6 +66,37 @@ pub(crate) fn load_messages_cancellable(
     }
 
     Ok(batch.finish())
+}
+
+/// Decode one logical Claude transcript row for every transcript consumer.
+pub(crate) fn parse_transcript_line(line: &str) -> Option<SessionMessage> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let message = value.get("message")?;
+    let mut role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    if role == "user" {
+        if let Some(Value::Array(items)) = message.get("content") {
+            let all_tool_results = !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.get("type").and_then(Value::as_str) == Some("tool_result"));
+            if all_tool_results {
+                role = "tool".to_string();
+            }
+        }
+    }
+    let content = message.get("content").map(extract_text).unwrap_or_default();
+    if content.trim().is_empty() {
+        return None;
+    }
+    let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
+    Some(SessionMessage { role, content, ts })
 }
 
 /// Search a single Claude session file for `needle` (case-insensitive).
@@ -455,9 +358,11 @@ fn parse_session_lines(path: &Path, head: &[String], tail: &[String]) -> Option<
         summary,
         project_dir,
         created_at: created_at.or(fallback_time),
+        source_mtime_ns: None,
         last_active_at: last_active_at.or(fallback_time).or(created_at),
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("claude --resume {session_id}")),
+        usage: None,
     })
 }
 
@@ -472,26 +377,6 @@ fn infer_session_id_from_filename(path: &Path) -> Option<String> {
     path.file_stem()
         .and_then(|stem| stem.to_str())
         .map(|stem| stem.to_string())
-}
-
-fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
-    if !root.exists() {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_jsonl_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            files.push(path);
-        }
-    }
 }
 
 fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
@@ -553,7 +438,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "assistant");
         assert!(msgs[0].content.contains("[Tool: Write]"));
@@ -571,7 +456,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "assistant");
         assert!(msgs[0].content.contains("Let me help."));
@@ -588,7 +473,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "user");
         assert!(msgs[0].content.contains("Please continue"));

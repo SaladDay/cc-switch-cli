@@ -1,4 +1,7 @@
-use crate::provider::Provider;
+use crate::{
+    claude_model_config::{ClaudeModelRole, CLAUDE_DEFAULT_MODEL_ENV_KEY},
+    provider::Provider,
+};
 use serde_json::Value;
 
 const ONE_M_CONTEXT_MARKER: &str = "[1m]";
@@ -7,31 +10,29 @@ pub struct ModelMapping {
     pub haiku_model: Option<String>,
     pub sonnet_model: Option<String>,
     pub opus_model: Option<String>,
+    pub fable_model: Option<String>,
+    pub subagent_model: Option<String>,
     pub default_model: Option<String>,
 }
 
 impl ModelMapping {
     pub fn from_provider(provider: &Provider) -> Self {
         let env = provider.settings_config.get("env");
+        let model_for = |role: ClaudeModelRole| {
+            env.and_then(|value| value.get(role.model_env_key()))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(String::from)
+        };
 
         Self {
-            haiku_model: env
-                .and_then(|value| value.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(String::from),
-            sonnet_model: env
-                .and_then(|value| value.get("ANTHROPIC_DEFAULT_SONNET_MODEL"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(String::from),
-            opus_model: env
-                .and_then(|value| value.get("ANTHROPIC_DEFAULT_OPUS_MODEL"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(String::from),
+            haiku_model: model_for(ClaudeModelRole::Haiku),
+            sonnet_model: model_for(ClaudeModelRole::Sonnet),
+            opus_model: model_for(ClaudeModelRole::Opus),
+            fable_model: model_for(ClaudeModelRole::Fable),
+            subagent_model: model_for(ClaudeModelRole::Subagent),
             default_model: env
-                .and_then(|value| value.get("ANTHROPIC_MODEL"))
+                .and_then(|value| value.get(CLAUDE_DEFAULT_MODEL_ENV_KEY))
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(String::from),
@@ -42,12 +43,22 @@ impl ModelMapping {
         self.haiku_model.is_some()
             || self.sonnet_model.is_some()
             || self.opus_model.is_some()
+            || self.fable_model.is_some()
+            || self.subagent_model.is_some()
             || self.default_model.is_some()
     }
 
     pub fn map_model(&self, original_model: &str) -> String {
         let model_lower = original_model.to_lowercase();
 
+        if model_lower.contains("fable") {
+            if let Some(model) = &self.fable_model {
+                return model.clone();
+            }
+            if let Some(model) = &self.opus_model {
+                return model.clone();
+            }
+        }
         if model_lower.contains("haiku") {
             if let Some(model) = &self.haiku_model {
                 return model.clone();
@@ -61,6 +72,14 @@ impl ModelMapping {
         if model_lower.contains("sonnet") {
             if let Some(model) = &self.sonnet_model {
                 return model.clone();
+            }
+        }
+
+        if let Some(model) = &self.subagent_model {
+            if strip_one_m_suffix_for_upstream(original_model)
+                == strip_one_m_suffix_for_upstream(model)
+            {
+                return original_model.to_string();
             }
         }
 
@@ -205,6 +224,23 @@ mod tests {
         }
     }
 
+    fn provider_with_env(env: Value) -> Provider {
+        Provider {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            settings_config: json!({ "env": env }),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
     #[test]
     fn thinking_does_not_use_legacy_reasoning_model_mapping() {
         let mut provider = provider_with_mapping("sonnet-mapped");
@@ -218,6 +254,56 @@ mod tests {
 
         assert_eq!(result["model"], "sonnet-mapped");
         assert_eq!(mapped, Some("sonnet-mapped".to_string()));
+    }
+
+    #[test]
+    fn maps_fable_to_explicit_fable_model() {
+        let provider = provider_with_env(json!({
+            "ANTHROPIC_MODEL": "default-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-model",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "fable-model"
+        }));
+
+        let (result, _, mapped) =
+            apply_model_mapping(json!({"model": "claude-fable-5[1M]"}), &provider);
+
+        assert_eq!(result["model"], "fable-model");
+        assert_eq!(mapped, Some("fable-model".to_string()));
+    }
+
+    #[test]
+    fn fable_falls_back_to_opus_then_default() {
+        let opus_provider = provider_with_env(json!({
+            "ANTHROPIC_MODEL": "default-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-model"
+        }));
+        let default_provider = provider_with_env(json!({
+            "ANTHROPIC_MODEL": "default-model"
+        }));
+
+        let (opus_result, _, _) =
+            apply_model_mapping(json!({"model": "claude-fable-5"}), &opus_provider);
+        let (default_result, _, _) =
+            apply_model_mapping(json!({"model": "claude-fable-5"}), &default_provider);
+
+        assert_eq!(opus_result["model"], "opus-model");
+        assert_eq!(default_result["model"], "default-model");
+    }
+
+    #[test]
+    fn preserves_subagent_model_before_default_fallback() {
+        let provider = provider_with_env(json!({
+            "ANTHROPIC_MODEL": "default-model",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "gpt-5.4-mini"
+        }));
+
+        for model in ["gpt-5.4-mini", "gpt-5.4-mini[1M]"] {
+            let (result, original, mapped) =
+                apply_model_mapping(json!({"model": model}), &provider);
+            assert_eq!(result["model"], model);
+            assert_eq!(original.as_deref(), Some(model));
+            assert!(mapped.is_none());
+        }
     }
 
     #[test]

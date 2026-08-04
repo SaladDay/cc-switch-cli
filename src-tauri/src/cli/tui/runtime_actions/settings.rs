@@ -220,25 +220,14 @@ pub(super) fn set_preferred_editor(
     Ok(())
 }
 
-pub(super) fn set_codex_unified_session_history(
+pub(super) fn set_preserve_codex_official_auth(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,
 ) -> Result<(), AppError> {
-    let outcome =
-        crate::services::codex_history::set_unified_session_history_enabled(enabled, false, false)?;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-
+    crate::settings::set_preserve_codex_official_auth_on_switch(enabled)?;
     ctx.app.push_toast(
-        if outcome.changed {
-            texts::tui_toast_codex_unified_session_history_toggled(enabled)
-        } else {
-            texts::tui_toast_codex_unified_session_history_already(enabled)
-        },
-        if outcome.changed {
-            ToastKind::Success
-        } else {
-            ToastKind::Info
-        },
+        texts::tui_toast_codex_official_auth_preservation_toggled(enabled),
+        ToastKind::Success,
     );
     Ok(())
 }
@@ -722,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn set_codex_unified_session_history_persists_setting() {
+    fn set_codex_official_auth_preservation_persists_setting() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestEnvGuard::isolated(temp_home.path());
 
@@ -751,14 +740,15 @@ mod tests {
             managed_auth_req_tx: None,
         };
 
-        set_codex_unified_session_history(&mut ctx, true).expect("enable unified history");
+        set_preserve_codex_official_auth(&mut ctx, true)
+            .expect("enable Codex official auth preservation");
 
-        assert!(crate::settings::unify_codex_session_history());
+        assert!(crate::settings::preserve_codex_official_auth_on_switch());
         assert!(matches!(
             ctx.app.toast.as_ref(),
             Some(toast) if toast.kind == ToastKind::Success
                 && toast.message
-                    == texts::tui_toast_codex_unified_session_history_toggled(true)
+                    == texts::tui_toast_codex_official_auth_preservation_toggled(true)
         ));
     }
 }

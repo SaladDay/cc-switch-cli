@@ -18,116 +18,6 @@ use super::utils::{
 
 const PROVIDER_ID: &str = "gemini";
 
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let gemini_dir = crate::gemini_config::get_gemini_dir();
-    let tmp_dir = gemini_dir.join("tmp");
-    if !tmp_dir.exists() {
-        return Vec::new();
-    }
-
-    let mut sessions = Vec::new();
-
-    // Iterate over project directories: tmp/<project_name>/chats/session-*.json
-    let project_dirs = match std::fs::read_dir(&tmp_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-
-    for entry in project_dirs.flatten() {
-        let chats_dir = entry.path().join("chats");
-        if !chats_dir.is_dir() {
-            continue;
-        }
-
-        let chat_files = match std::fs::read_dir(&chats_dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
-        let project_root_file = entry.path().join(".project_root");
-        let project_dir = read_to_string_cancellable(&project_root_file, &|| false)
-            .ok()
-            .flatten();
-
-        for file_entry in chat_files.flatten() {
-            let path = file_entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            if let Some(meta) = parse_session(&path) {
-                sessions.push(SessionMeta {
-                    project_dir: project_dir.clone(),
-                    ..meta
-                });
-            }
-        }
-    }
-
-    sessions
-}
-
-/// Cache-aware scan over `tmp/<project>/chats/*.json`.
-pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    cache::scan_provider_cached(
-        store,
-        PROVIDER_ID,
-        scan_targets(),
-        force,
-        parse_meta,
-        |_| true,
-    )
-}
-
-pub(crate) fn scan_sessions_progressive(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-) -> Vec<SessionMeta> {
-    let targets = scan_targets();
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_meta,
-            |_| true,
-            on_session,
-        ),
-        None => cache::scan_provider_uncached_progressive(targets, parse_meta, on_session),
-    }
-}
-
-pub(crate) fn scan_sessions_progressive_cancellable(
-    store: Option<&ScanCacheStore>,
-    force: bool,
-    on_session: &mut dyn FnMut(&SessionMeta),
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>> {
-    let targets = scan_targets_in_cancellable(
-        &crate::gemini_config::get_gemini_dir().join("tmp"),
-        is_cancelled,
-    )?;
-    match store {
-        Some(store) => cache::scan_provider_cached_progressive_cancellable(
-            store,
-            PROVIDER_ID,
-            targets,
-            force,
-            parse_meta,
-            |_| true,
-            on_session,
-            is_cancelled,
-        ),
-        None => cache::scan_provider_uncached_progressive_cancellable(
-            targets,
-            parse_meta,
-            on_session,
-            is_cancelled,
-        ),
-    }
-}
-
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
     force: bool,
@@ -213,74 +103,6 @@ fn visit_stream_targets(
         )?;
     }
     Ok(())
-}
-
-fn scan_targets() -> Vec<FileScanTarget> {
-    scan_targets_in(&crate::gemini_config::get_gemini_dir().join("tmp"))
-}
-
-/// 收集 `tmp/<project>/chats/*.json` 的直属文件。与 `scan_sessions` 一致，只扫
-/// `chats/` 单层目录（用平铺收集器而非递归），嵌套子目录里的文件不纳入——否则
-/// 缓存路径会展示旧路径看不到的文件，且其旁路 `.project_root` 定位会取错目录。
-fn scan_targets_in(tmp_dir: &Path) -> Vec<FileScanTarget> {
-    scan_targets_in_cancellable(tmp_dir, &|| false)
-        .expect("non-cancellable target scan cannot stop")
-}
-
-fn scan_targets_in_cancellable(
-    tmp_dir: &Path,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<FileScanTarget>> {
-    let mut targets = Vec::new();
-    if is_cancelled() {
-        return None;
-    }
-    let project_dirs = match std::fs::read_dir(tmp_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Some(targets),
-    };
-    for entry in project_dirs.flatten() {
-        if is_cancelled() {
-            return None;
-        }
-        let chats_dir = entry.path().join("chats");
-        if !chats_dir.is_dir() {
-            continue;
-        }
-        let mut project_targets = Vec::new();
-        if !cache::collect_targets_flat_cancellable(
-            &chats_dir,
-            "json",
-            &mut project_targets,
-            is_cancelled,
-        ) {
-            return None;
-        }
-        // project_dir 派生自旁路的 .project_root：它变化时缓存也必须失效
-        let project_root = entry.path().join(".project_root");
-        for target in &mut project_targets {
-            if is_cancelled() {
-                return None;
-            }
-            cache::mix_sibling_into_fingerprint(target, &project_root);
-        }
-        targets.extend(project_targets);
-    }
-    Some(targets)
-}
-
-/// Parse one session file, injecting `project_dir` from the sibling
-/// `<project>/.project_root` exactly like `scan_sessions` does. The cached
-/// `SessionMeta` bakes this in, so unchanged files keep the resolved directory.
-fn parse_meta(path: &Path) -> Option<SessionMeta> {
-    let mut meta = parse_session(path)?;
-    // path: tmp/<project>/chats/<session>.json → .project_root at tmp/<project>/
-    meta.project_dir = path
-        .parent()
-        .and_then(Path::parent)
-        .map(|project| project.join(".project_root"))
-        .and_then(|file| read_to_string_cancellable(&file, &|| false).ok().flatten());
-    Some(meta)
 }
 
 fn fingerprint_target(path: &Path) -> Option<FileScanTarget> {
@@ -369,11 +191,15 @@ fn parse_session_lightweight(path: &Path, prefix: &str) -> SessionMeta {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let created_at =
+    let provider_created_at =
         extract_json_value(prefix, "startTime").and_then(|value| parse_timestamp_to_ms(&value));
-    let last_active_at = extract_json_value(prefix, "lastUpdated")
-        .and_then(|value| parse_timestamp_to_ms(&value))
-        .or_else(|| file_modified_ms(path));
+    let provider_last_active_at =
+        extract_json_value(prefix, "lastUpdated").and_then(|value| parse_timestamp_to_ms(&value));
+    let fallback_time = file_modified_ms(path);
+    let last_active_at = provider_last_active_at.or(fallback_time);
+    let created_at = provider_created_at
+        .or(provider_last_active_at)
+        .or(fallback_time);
     let title = extract_json_value(prefix, "content")
         .and_then(|value| value.as_str().map(|text| truncate_summary(text, 160)))
         .or_else(|| {
@@ -387,10 +213,12 @@ fn parse_session_lightweight(path: &Path, prefix: &str) -> SessionMeta {
         title: title.clone(),
         summary: title,
         project_dir: None,
-        created_at: created_at.or(last_active_at),
+        created_at,
+        source_mtime_ns: None,
         last_active_at,
         source_path: Some(path.to_string_lossy().into_owned()),
         resume_command: Some(format!("gemini --resume {session_id}")),
+        usage: None,
     }
 }
 
@@ -405,10 +233,6 @@ fn extract_json_value(input: &str, key: &str) -> Option<Value> {
         }
     }
     None
-}
-
-pub fn load_messages(path: &Path) -> Result<SessionMessageBatch, String> {
-    load_messages_cancellable(path, &|| false)
 }
 
 pub(crate) fn load_messages_cancellable(
@@ -439,55 +263,53 @@ pub(crate) fn load_messages_cancellable(
         if is_cancelled() {
             return Err("Session message preview was cancelled".to_string());
         }
-        let role = match msg.get("type").and_then(Value::as_str) {
-            Some("gemini") => "assistant",
-            Some("user") => "user",
-            Some("info") | Some("error") => continue,
-            Some(_) | None => continue,
-        };
-
-        // Gemini content may be a plain string or an array of {text: ...} objects
-        let mut content = match msg.get("content") {
-            Some(Value::String(s)) => s.to_string(),
-            Some(Value::Array(items)) => items
-                .iter()
-                .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
-
-        // Append tool call names from the optional toolCalls array
-        if let Some(Value::Array(calls)) = msg.get("toolCalls") {
-            for call in calls {
-                if let Some(name) = call.get("name").and_then(Value::as_str) {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&format!("[Tool: {name}]"));
-                }
-            }
-        }
-
-        if content.trim().is_empty() {
+        let Some(message) = parse_transcript_message(msg) else {
             continue;
-        }
-
-        let ts = msg.get("timestamp").and_then(parse_timestamp_to_ms);
-
-        if batch
-            .push(SessionMessage {
-                role: role.to_string(),
-                content,
-                ts,
-            })
-            .is_break()
-        {
+        };
+        if batch.push(message).is_break() {
             break;
         }
     }
 
     Ok(batch.finish())
+}
+
+/// Decode one Gemini `messages[]` element for every transcript consumer.
+pub(crate) fn parse_transcript_message(message: &Value) -> Option<SessionMessage> {
+    let role = match message.get("type").and_then(Value::as_str) {
+        Some("gemini") => "assistant",
+        Some("user") => "user",
+        Some("info") | Some("error") | Some(_) | None => return None,
+    };
+
+    let mut content = match message.get("content") {
+        Some(Value::String(value)) => value.to_string(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    };
+    if let Some(Value::Array(calls)) = message.get("toolCalls") {
+        for call in calls {
+            if let Some(name) = call.get("name").and_then(Value::as_str) {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&format!("[Tool: {name}]"));
+            }
+        }
+    }
+    if content.trim().is_empty() {
+        return None;
+    }
+    let ts = message.get("timestamp").and_then(parse_timestamp_to_ms);
+    Some(SessionMessage {
+        role: role.to_string(),
+        content,
+        ts,
+    })
 }
 
 /// Search a single Gemini session JSON file for `needle` (case-insensitive).
@@ -640,9 +462,11 @@ fn parse_session_data(path: &Path, data: &str) -> Option<SessionMeta> {
         summary: title,
         project_dir: None, // (optionally) populated later
         created_at,
+        source_mtime_ns: None,
         last_active_at: last_active_at.or(created_at),
         source_path: Some(source_path),
         resume_command: Some(format!("gemini --resume {session_id}")),
+        usage: None,
     })
 }
 
@@ -689,7 +513,16 @@ mod tests {
         // 嵌套子目录里的会话文件不应被缓存扫描收集
         std::fs::write(chats.join("archive").join("session-2.json"), "{}").expect("write");
 
-        let targets = scan_targets_in(tmp_dir);
+        let mut targets = Vec::new();
+        visit_stream_targets(
+            tmp_dir,
+            &mut |target| {
+                targets.push(target);
+                Ok(())
+            },
+            &|| false,
+        )
+        .expect("visit targets");
         assert_eq!(targets.len(), 1, "只收集 chats/ 直属文件");
         assert!(targets
             .iter()
@@ -724,8 +557,27 @@ mod tests {
         assert_eq!(meta.session_id, "bounded-id");
         assert_eq!(meta.source_path.as_deref(), Some(expected_source.as_str()));
 
-        let error = load_messages(&path).expect_err("oversized detail must stay bounded");
+        let error = load_messages_cancellable(&path, &|| false)
+            .expect_err("oversized detail must stay bounded");
         assert!(error.contains("4 MiB bounded preview limit"));
+    }
+
+    #[test]
+    fn lightweight_last_updated_is_used_as_a_recency_fallback() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("session.json");
+        std::fs::write(&path, "{}").expect("write session");
+
+        let meta = parse_session_lightweight(
+            &path,
+            r#"{
+                "sessionId": "legacy-but-recently-updated",
+                "lastUpdated": "2026-07-30T12:00:00.000Z"
+            }"#,
+        );
+
+        assert_eq!(meta.created_at, meta.last_active_at);
+        assert!(meta.created_at.is_some());
     }
 
     #[test]
@@ -746,7 +598,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[0].content, "hello");
@@ -770,7 +622,7 @@ mod tests {
         )
         .expect("write");
 
-        let msgs = load_messages(&path).expect("load");
+        let msgs = load_messages_cancellable(&path, &|| false).expect("load");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "assistant");
         assert!(msgs[0].content.contains("[Tool: web_search]"));

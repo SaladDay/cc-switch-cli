@@ -3,7 +3,7 @@
     reason = "generated i18n accessors may share text across locales"
 )]
 
-use crate::settings::{get_settings, update_settings};
+use crate::settings::{get_settings, update_settings, AppSettings};
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
@@ -54,7 +54,11 @@ fn language_store() -> &'static RwLock<Language> {
             // Keep unit tests deterministic and avoid reading real user settings.
             Language::English
         } else {
-            let settings = get_settings();
+            // Read the persisted settings directly while initializing the language
+            // store. Localized validation errors can be constructed while the
+            // in-memory settings store is write-locked, so re-entering
+            // `get_settings()` here would deadlock on first use.
+            let settings = AppSettings::load();
             settings
                 .language
                 .as_deref()
@@ -264,11 +268,7 @@ pub mod texts {
 
     // Welcome & Headers
     pub fn welcome_title() -> &'static str {
-        if is_chinese() {
-            "    🎯 CC-Switch 交互模式"
-        } else {
-            "    🎯 CC-Switch Interactive Mode"
-        }
+        "CC-Switch"
     }
 
     pub fn application() -> &'static str {
@@ -365,6 +365,30 @@ pub mod texts {
         " ✗ "
     }
 
+    pub fn tui_toast_clipboard_request_sent() -> &'static str {
+        if is_chinese() {
+            "复制请求已发送到终端。"
+        } else {
+            "Clipboard request sent to the terminal."
+        }
+    }
+
+    pub fn tui_toast_copied_to_clipboard() -> &'static str {
+        if is_chinese() {
+            "已复制到剪贴板。"
+        } else {
+            "Copied to clipboard."
+        }
+    }
+
+    pub fn tui_toast_copy_to_clipboard_failed() -> &'static str {
+        if is_chinese() {
+            "无法复制到剪贴板，请重试。"
+        } else {
+            "Could not copy to the clipboard. Please try again."
+        }
+    }
+
     pub fn tui_toast_invalid_json(details: &str) -> String {
         if is_chinese() {
             format!("JSON 无效：{details}")
@@ -448,6 +472,14 @@ pub mod texts {
             "过滤"
         } else {
             "Filter"
+        }
+    }
+
+    pub fn tui_session_message_page_filter_title() -> &'static str {
+        if is_chinese() {
+            "过滤 · 当前消息页"
+        } else {
+            "Filter · Current message page"
         }
     }
 
@@ -838,6 +870,134 @@ pub mod texts {
             "WebDAV 同步"
         } else {
             "WebDAV Sync"
+        }
+    }
+
+    // ============================================
+    // REFRESH INDICATOR (刷新指示器)
+    // ============================================
+
+    /// The one label every "still working" indicator uses — the home usage
+    /// card, the Usage summary bars, the pricing summary. Surfaces that need a
+    /// busy indicator reuse this instead of minting their own near-duplicate.
+    pub fn tui_refreshing() -> &'static str {
+        if is_chinese() {
+            "正在刷新"
+        } else {
+            "Refreshing"
+        }
+    }
+
+    // ============================================
+    // HOME USAGE CHART (首页用量图表)
+    // ============================================
+
+    /// Card title; the range is appended with the shared `·` separator so
+    /// ASCII terminals get " Usage - 30d ".
+    pub fn tui_home_chart_card_title() -> &'static str {
+        if is_chinese() {
+            "用量"
+        } else {
+            "Usage"
+        }
+    }
+
+    pub fn tui_home_chart_card_range() -> &'static str {
+        if is_chinese() {
+            "近 30 天"
+        } else {
+            "30d"
+        }
+    }
+
+    /// Header of the models column inside the usage card.
+    pub fn tui_home_chart_list_title() -> &'static str {
+        if is_chinese() {
+            "模型花费"
+        } else {
+            "Models by Cost"
+        }
+    }
+
+    pub fn tui_home_chart_other() -> &'static str {
+        if is_chinese() {
+            "其他"
+        } else {
+            "Other"
+        }
+    }
+
+    pub fn tui_home_chart_live() -> &'static str {
+        if is_chinese() {
+            "实时"
+        } else {
+            "live"
+        }
+    }
+
+    pub fn tui_home_chart_last_updated(relative: &str) -> String {
+        if is_chinese() {
+            format!("最近更新 {relative}")
+        } else {
+            format!("Last updated: {relative}")
+        }
+    }
+
+    pub fn tui_home_chart_never_synced() -> &'static str {
+        if is_chinese() {
+            "尚未导入本地用量"
+        } else {
+            "no local import yet"
+        }
+    }
+
+    pub fn tui_home_chart_just_now() -> &'static str {
+        if is_chinese() {
+            "刚刚"
+        } else {
+            "just now"
+        }
+    }
+
+    pub fn tui_home_chart_minutes_ago(minutes: u64) -> String {
+        if is_chinese() {
+            format!("{minutes} 分钟前")
+        } else {
+            format!("{minutes}m ago")
+        }
+    }
+
+    pub fn tui_home_chart_hours_ago(hours: u64) -> String {
+        if is_chinese() {
+            format!("{hours} 小时前")
+        } else {
+            format!("{hours}h ago")
+        }
+    }
+
+    pub fn tui_home_chart_days_ago(days: u64) -> String {
+        if is_chinese() {
+            format!("{days} 天前")
+        } else {
+            format!("{days}d ago")
+        }
+    }
+
+    /// Empty state for apps that never import local session logs (Hermes,
+    /// OpenClaw): their usage can only come from proxy traffic.
+    pub fn tui_home_chart_empty_proxy_only() -> &'static str {
+        if is_chinese() {
+            "暂无用量：该应用仅统计代理流量"
+        } else {
+            "No usage yet - this app only records proxy traffic"
+        }
+    }
+
+    pub fn tui_home_chart_empty_pending() -> &'static str {
+        if is_chinese() {
+            "暂无用量：等待首次同步"
+        } else {
+            "No usage yet - first sync pending"
         }
     }
 
@@ -1910,6 +2070,13 @@ pub mod texts {
                     "OpenAI Chat Completions (Local routing)"
                 }
             }
+            "anthropic" => {
+                if is_chinese() {
+                    "Anthropic Messages (需本地路由)"
+                } else {
+                    "Anthropic Messages (Local routing)"
+                }
+            }
             _ => {
                 if is_chinese() {
                     "OpenAI Responses API (原生)"
@@ -1917,6 +2084,46 @@ pub mod texts {
                     "OpenAI Responses API (Native)"
                 }
             }
+        }
+    }
+
+    pub fn tui_label_codex_anthropic_auth_field() -> &'static str {
+        if is_chinese() {
+            "认证字段"
+        } else {
+            "Auth field"
+        }
+    }
+
+    pub fn tui_codex_anthropic_auth_field_value(api_key_field: &str) -> &'static str {
+        if api_key_field == "ANTHROPIC_API_KEY" {
+            "ANTHROPIC_API_KEY (x-api-key)"
+        } else {
+            "ANTHROPIC_AUTH_TOKEN (Authorization)"
+        }
+    }
+
+    pub fn tui_label_codex_impersonate_claude_code() -> &'static str {
+        if is_chinese() {
+            "模拟 Claude Code 客户端"
+        } else {
+            "Emulate Claude Code client"
+        }
+    }
+
+    pub fn tui_label_codex_max_output_tokens() -> &'static str {
+        if is_chinese() {
+            "最大输出 tokens"
+        } else {
+            "Max output tokens"
+        }
+    }
+
+    pub fn tui_codex_max_output_tokens_invalid() -> &'static str {
+        if is_chinese() {
+            "最大输出 tokens 必须留空或填写大于 0 的整数"
+        } else {
+            "Max output tokens must be empty or an integer greater than 0"
         }
     }
 
@@ -1948,6 +2155,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_full_url_requires_proxy_message() -> &'static str {
+        if is_chinese() {
+            "已开启完整 URL 模式\n必须通过本地代理使用，否则客户端会继续拼接请求路径\n请在主页按 P 开启本地代理"
+        } else {
+            "Full URL mode is enabled.\nThis mode requires the local proxy; otherwise the client will still append its request path.\nPress P on the home page to open local proxy."
+        }
+    }
+
     pub fn tui_label_codex_local_routing() -> &'static str {
         if is_chinese() {
             "本地路由"
@@ -1961,6 +2176,25 @@ pub mod texts {
             "上游格式"
         } else {
             "Upstream format"
+        }
+    }
+
+    pub fn tui_label_codex_prompt_cache_routing() -> &'static str {
+        if is_chinese() {
+            "提示词缓存路由"
+        } else {
+            "Prompt cache routing"
+        }
+    }
+
+    pub fn tui_codex_prompt_cache_routing_value(mode: &str) -> &'static str {
+        match (is_chinese(), mode) {
+            (true, "enabled") => "开启",
+            (true, "disabled") => "关闭",
+            (true, _) => "自动（推荐）",
+            (false, "enabled") => "Enabled",
+            (false, "disabled") => "Disabled",
+            (false, _) => "Auto (recommended)",
         }
     }
 
@@ -2224,6 +2458,14 @@ pub mod texts {
             "FAST 模式"
         } else {
             "FAST mode"
+        }
+    }
+
+    pub fn tui_full_url_label() -> &'static str {
+        if is_chinese() {
+            "完整 URL"
+        } else {
+            "Full URL"
         }
     }
 
@@ -2837,7 +3079,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_entry_count(count: usize) -> String {
+    pub fn tui_label_headers() -> &'static str {
+        "Headers"
+    }
+
+    pub fn tui_mcp_key_value_entry_count(count: usize) -> String {
         if is_chinese() {
             format!("{count} 项")
         } else if count == 1 {
@@ -2879,7 +3125,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_key_label() -> &'static str {
+    pub fn tui_mcp_key_label() -> &'static str {
         if is_chinese() {
             "键"
         } else {
@@ -2887,7 +3133,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_value_label() -> &'static str {
+    pub fn tui_mcp_value_label() -> &'static str {
         if is_chinese() {
             "值"
         } else {
@@ -3088,6 +3334,14 @@ pub mod texts {
             "自动使用供应商的 API Key 查询账户余额"
         } else {
             "Automatically uses the provider's API Key to query account balance"
+        }
+    }
+
+    pub fn tui_usage_query_official_subscription_hint() -> &'static str {
+        if is_chinese() {
+            "读取本机 CLI 的 OAuth 凭据，并调用官方接口查询订阅额度。默认关闭，只有启用后才会请求。"
+        } else {
+            "Reads the local CLI OAuth credentials and calls the official API to query subscription quota. Disabled by default and only requests after you enable it."
         }
     }
 
@@ -3391,11 +3645,27 @@ pub mod texts {
         }
     }
 
+    pub fn tui_claude_default_fable_model_label() -> &'static str {
+        if is_chinese() {
+            "默认 Fable 模型"
+        } else {
+            "Default Fable Model"
+        }
+    }
+
+    pub fn tui_claude_subagent_model_label() -> &'static str {
+        if is_chinese() {
+            "Subagent 模型"
+        } else {
+            "Subagent Model"
+        }
+    }
+
     pub fn tui_claude_model_config_summary(configured_count: usize) -> String {
         if is_chinese() {
-            format!("已配置 {configured_count}/3")
+            format!("已配置 {configured_count}/5")
         } else {
-            format!("Configured {configured_count}/3")
+            format!("Configured {configured_count}/5")
         }
     }
 
@@ -3428,6 +3698,8 @@ pub mod texts {
             0 => tui_claude_default_haiku_model_label(),
             1 => tui_claude_default_sonnet_model_label(),
             2 => tui_claude_default_opus_model_label(),
+            3 => tui_claude_default_fable_model_label(),
+            4 => tui_claude_subagent_model_label(),
             _ => "",
         }
     }
@@ -3924,6 +4196,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_rebuild_codex_usage() -> &'static str {
+        if is_chinese() {
+            "重建 Codex 用量"
+        } else {
+            "rebuild Codex usage"
+        }
+    }
+
+    pub fn tui_key_backup_and_rebuild() -> &'static str {
+        if is_chinese() {
+            "备份并重建"
+        } else {
+            "back up and rebuild"
+        }
+    }
+
     pub fn tui_key_start_proxy() -> &'static str {
         if is_chinese() {
             "启动代理"
@@ -4180,6 +4468,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_page() -> &'static str {
+        if is_chinese() {
+            "翻页"
+        } else {
+            "page"
+        }
+    }
+
     pub fn tui_key_restore() -> &'static str {
         if is_chinese() {
             "恢复"
@@ -4354,16 +4650,6 @@ pub mod texts {
         } else {
             "Keys: a=add  e=edit  Space=switch  /=filter"
         }
-    }
-
-    pub fn tui_home_ascii_logo() -> &'static str {
-        // Same ASCII art across languages.
-        r#"                                  _  _         _
-   ___  ___        ___ __      __(_)| |_  ___ | |__
-  / __|/ __|_____ / __|\ \ /\ / /| || __|/ __|| '_ \
- | (__| (__|_____|\__ \ \ V  V / | || |_| (__ | | | |
-  \___|\___|      |___/  \_/\_/  |_| \__|\___||_| |_|
-                                                      "#
     }
 
     pub fn tui_common_snippet_keys() -> &'static str {
@@ -7321,9 +7607,37 @@ pub mod texts {
 
     pub fn tui_mcp_env_empty_state() -> &'static str {
         if is_chinese() {
-            "暂无环境变量，按 a 新增。"
+            "暂无环境变量。"
         } else {
-            "No env entries yet. Press a to add one."
+            "No env entries yet."
+        }
+    }
+
+    pub fn tui_mcp_headers_title() -> &'static str {
+        "MCP Headers"
+    }
+
+    pub fn tui_mcp_headers_add_entry_title() -> &'static str {
+        if is_chinese() {
+            "新增 Header"
+        } else {
+            "Add Header"
+        }
+    }
+
+    pub fn tui_mcp_headers_edit_entry_title() -> &'static str {
+        if is_chinese() {
+            "编辑 Header"
+        } else {
+            "Edit Header"
+        }
+    }
+
+    pub fn tui_mcp_headers_empty_state() -> &'static str {
+        if is_chinese() {
+            "暂无 Headers。"
+        } else {
+            "No headers yet."
         }
     }
 
@@ -7697,6 +8011,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_mcp_header_key_empty() -> &'static str {
+        if is_chinese() {
+            "Header 名称不能为空。"
+        } else {
+            "Header name cannot be empty."
+        }
+    }
+
+    pub fn tui_toast_mcp_header_duplicate_key(key: &str) -> String {
+        if is_chinese() {
+            format!("Header '{}' 已存在。", key)
+        } else {
+            format!("Header '{key}' already exists.")
+        }
+    }
+
     pub fn tui_confirm_restore_backup_title() -> &'static str {
         if is_chinese() {
             "恢复备份"
@@ -7710,6 +8040,71 @@ pub mod texts {
             format!("确认从备份 '{}' 恢复？", name)
         } else {
             format!("Restore from backup '{}'?", name)
+        }
+    }
+
+    pub fn tui_confirm_rebuild_codex_usage_title() -> &'static str {
+        if is_chinese() {
+            "确认重建 Codex 用量"
+        } else {
+            "Rebuild Codex usage?"
+        }
+    }
+
+    pub fn tui_confirm_rebuild_codex_usage_message() -> &'static str {
+        if is_chinese() {
+            "将先备份数据库，再清除 Codex 会话明细与汇总，并从本地 rollout 日志重新导入。\n\n源 JSONL 已删除的历史无法恢复；缺少父 rollout 的分支会暂缓导入。"
+        } else {
+            "The database will be backed up first. Codex session details and rollups will then be cleared and re-imported from local rollout logs.\n\nHistory with deleted source JSONL cannot be recovered. Forks with a missing parent rollout will be deferred."
+        }
+    }
+
+    pub fn tui_toast_codex_usage_rebuild_running() -> &'static str {
+        if is_chinese() {
+            "Codex 用量重建已在进行中。"
+        } else {
+            "Codex usage rebuild is already running."
+        }
+    }
+
+    pub fn tui_toast_codex_usage_rebuild_unavailable() -> &'static str {
+        if is_chinese() {
+            "会话用量工作线程未运行，无法重建 Codex 用量。"
+        } else {
+            "The session usage worker is unavailable; Codex usage cannot be rebuilt."
+        }
+    }
+
+    pub fn tui_toast_codex_usage_rebuild_queued_failed(error: &str) -> String {
+        if is_chinese() {
+            format!("无法开始 Codex 用量重建：{error}")
+        } else {
+            format!("Failed to start Codex usage rebuild: {error}")
+        }
+    }
+
+    pub fn tui_toast_codex_usage_rebuilt(
+        imported: u32,
+        errors: usize,
+        suspected: u32,
+        deferred: u32,
+    ) -> String {
+        if is_chinese() {
+            format!(
+                "Codex 用量重建完成：导入 {imported} 条，错误 {errors}，疑似重复 {suspected}，暂缓文件 {deferred}"
+            )
+        } else {
+            format!(
+                "Codex usage rebuilt: {imported} imported, {errors} errors, {suspected} suspected duplicates, {deferred} deferred files"
+            )
+        }
+    }
+
+    pub fn tui_toast_codex_usage_rebuild_failed(error: &str) -> String {
+        if is_chinese() {
+            format!("Codex 用量重建失败：{error}")
+        } else {
+            format!("Codex usage rebuild failed: {error}")
         }
     }
 
@@ -8282,6 +8677,28 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_codex_official_auth_preservation_toggled(enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                "已开启非接管切换时的官方登录保留。".to_string()
+            } else {
+                "已关闭非接管切换时的官方登录保留。".to_string()
+            }
+        } else if enabled {
+            "Official login preservation for direct switches enabled.".to_string()
+        } else {
+            "Official login preservation for direct switches disabled.".to_string()
+        }
+    }
+
+    pub fn tui_codex_provider_switched_restart_notice() -> &'static str {
+        if is_chinese() {
+            "Codex 供应商已切换。请重启 Codex；SSH 远程项目请重新连接。"
+        } else {
+            "Codex provider switched. Restart Codex; reconnect SSH remote projects."
+        }
+    }
+
     pub fn tui_toast_codex_unified_session_history_toggled(enabled: bool) -> String {
         if is_chinese() {
             if enabled {
@@ -8307,6 +8724,64 @@ pub mod texts {
             "Unified Codex session history is already enabled.".to_string()
         } else {
             "Unified Codex session history is already disabled.".to_string()
+        }
+    }
+
+    pub fn tui_toast_codex_history_restore_completed(files: usize, rows: usize) -> String {
+        if is_chinese() {
+            format!("已按备份还原官方会话历史（{files} 个会话文件、{rows} 条索引记录）")
+        } else {
+            format!(
+                "Official session history restored from backup ({files} session files, {rows} index rows)"
+            )
+        }
+    }
+
+    pub fn tui_toast_codex_history_restore_failed() -> &'static str {
+        if is_chinese() {
+            "还原官方会话历史失败，请重试"
+        } else {
+            "Failed to restore official session history, please try again"
+        }
+    }
+
+    pub fn tui_toast_codex_history_restore_nothing() -> &'static str {
+        if is_chinese() {
+            "当前 Codex 目录没有可恢复的迁移备份"
+        } else {
+            "No restorable migration backup for the current Codex directory"
+        }
+    }
+
+    pub fn tui_toast_codex_history_restore_skipped_toggle_on() -> &'static str {
+        if is_chinese() {
+            "统一会话历史开关已重新开启，已跳过还原"
+        } else {
+            "Unified session history was re-enabled; restore skipped"
+        }
+    }
+
+    pub fn tui_toast_codex_history_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("Codex 会话历史后台服务不可用: {err}")
+        } else {
+            format!("Codex session history worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_toast_codex_history_request_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("提交 Codex 会话历史设置失败: {err}")
+        } else {
+            format!("Failed to submit Codex session history setting: {err}")
+        }
+    }
+
+    pub fn tui_toast_codex_history_change_in_progress() -> &'static str {
+        if is_chinese() {
+            "Codex 会话历史设置正在保存，请稍候。"
+        } else {
+            "Codex session history setting is being saved; please wait."
         }
     }
 
@@ -8603,6 +9078,28 @@ pub mod texts {
             format!("{app} now routes through cc-switch.")
         } else {
             format!("{app} restored to its live config.")
+        }
+    }
+
+    pub fn tui_toast_proxy_managed_updated_refresh_failed(
+        app: &str,
+        enabled: bool,
+        err: &str,
+    ) -> String {
+        if is_chinese() {
+            if enabled {
+                format!("{app} 已走 cc-switch 代理，但状态刷新失败：{err}")
+            } else {
+                format!("{app} 已恢复 live 配置，但状态刷新失败：{err}")
+            }
+        } else if enabled {
+            format!(
+                "{app} now routes through cc-switch, but its status could not be refreshed: {err}"
+            )
+        } else {
+            format!(
+                "{app} restored to its live config, but its status could not be refreshed: {err}"
+            )
         }
     }
 
@@ -9070,6 +9567,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_sessions_overview_tokens_label() -> &'static str {
+        if is_chinese() {
+            "Token"
+        } else {
+            "Tokens"
+        }
+    }
+
     pub fn tui_sessions_messages_title() -> &'static str {
         if is_chinese() {
             "消息"
@@ -9090,22 +9595,6 @@ pub mod texts {
         title
     }
 
-    pub fn tui_sessions_messages_preview_title(truncated: bool) -> String {
-        let mut title = if is_chinese() {
-            "消息 · 有界预览".to_string()
-        } else {
-            "Messages · Bounded preview".to_string()
-        };
-        if truncated {
-            title.push_str(if is_chinese() {
-                " · 已截断"
-            } else {
-                " · Truncated"
-            });
-        }
-        title
-    }
-
     pub fn tui_sessions_empty_title() -> &'static str {
         if is_chinese() {
             "未找到本地会话"
@@ -9116,9 +9605,9 @@ pub mod texts {
 
     pub fn tui_sessions_empty_subtitle() -> &'static str {
         if is_chinese() {
-            "进入此页会从本机会话文件扫描，不需要数据库。"
+            "会话元数据来自本地会话文件；可用的费用和 token 小计会从本地用量数据库异步加载。"
         } else {
-            "This page scans local session files without using the database."
+            "Session metadata comes from local session files; available Cost and token subtotals load asynchronously from local usage databases."
         }
     }
 
@@ -9335,6 +9824,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_pagination_load_failed_move_retry() -> &'static str {
+        if is_chinese() {
+            "加载失败 · 再次移动重试"
+        } else {
+            "Load failed · Move again to retry"
+        }
+    }
+
     pub fn tui_pagination_end(total: usize) -> String {
         if is_chinese() {
             format!("已到末尾 · 共 {total} 条")
@@ -9364,6 +9861,14 @@ pub mod texts {
             "时间"
         } else {
             "Time"
+        }
+    }
+
+    pub fn tui_sessions_header_cost() -> &'static str {
+        if is_chinese() {
+            "费用"
+        } else {
+            "Cost"
         }
     }
 
@@ -9459,9 +9964,9 @@ pub mod texts {
 
     pub fn tui_sessions_messages_filtered_empty() -> &'static str {
         if is_chinese() {
-            "没有符合当前筛选/搜索的消息。"
+            "当前消息页没有符合筛选的消息；PgUp/PgDn 可继续浏览历史。"
         } else {
-            "No messages match the current filters."
+            "No matches on this message page; use PgUp/PgDn to browse history."
         }
     }
 
@@ -9579,11 +10084,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_sessions_toast_resume_fallback(err: &str) -> String {
+    pub fn tui_sessions_toast_resume_fallback() -> &'static str {
         if is_chinese() {
-            format!("无法自动打开终端，已显示恢复命令：{err}")
+            "无法自动打开终端，已显示恢复命令"
         } else {
-            format!("Could not open a terminal; showing the resume command instead: {err}")
+            "Could not open a terminal; showing the resume command instead."
         }
     }
 
@@ -10430,6 +10935,38 @@ pub mod texts {
             "如 claude-3-opus-20240229"
         } else {
             "e.g., claude-3-opus-20240229"
+        }
+    }
+
+    pub fn model_fable_label() -> &'static str {
+        if is_chinese() {
+            "Fable 模型："
+        } else {
+            "Fable Model:"
+        }
+    }
+
+    pub fn model_fable_placeholder() -> &'static str {
+        if is_chinese() {
+            "如 claude-fable-5"
+        } else {
+            "e.g., claude-fable-5"
+        }
+    }
+
+    pub fn model_subagent_label() -> &'static str {
+        if is_chinese() {
+            "Subagent 模型："
+        } else {
+            "Subagent Model:"
+        }
+    }
+
+    pub fn model_subagent_placeholder() -> &'static str {
+        if is_chinese() {
+            "如 claude-haiku-4-5-20251001"
+        } else {
+            "e.g., claude-haiku-4-5-20251001"
         }
     }
 
@@ -11820,17 +12357,71 @@ pub mod texts {
         }
     }
 
-    pub fn codex_unified_session_history_confirm(enable: bool) -> String {
+    pub fn codex_preserve_official_auth_label() -> &'static str {
         if is_chinese() {
-            if enable {
-                "确认开启统一 Codex 会话历史？\n官方订阅将使用共享 custom 供应商标识运行；已有官方会话不会自动迁移，可用 CLI 命令 settings codex-history migrate-existing 单独迁移。".to_string()
-            } else {
-                "确认关闭统一 Codex 会话历史？\n不会自动恢复已迁移的会话；如需恢复，请使用 CLI 命令 settings codex-history restore。".to_string()
-            }
-        } else if enable {
-            "Enable unified Codex session history?\nOfficial subscriptions will use the shared custom provider id. Existing official sessions are not migrated automatically; use settings codex-history migrate-existing from the CLI if needed.".to_string()
+            "非接管切换时保留官方登录"
         } else {
-            "Disable unified Codex session history?\nMigrated sessions are not restored automatically; use settings codex-history restore from the CLI if needed.".to_string()
+            "Keep official login for direct switches"
+        }
+    }
+
+    pub fn codex_unified_session_history_description() -> &'static str {
+        if is_chinese() {
+            "开启后，官方订阅将以共享的 custom 供应商标识运行，官方与第三方会话出现在同一历史列表中，并可选择把现有官方会话一并迁入（迁移前自动备份）。关闭开关时可按备份恢复迁入的会话。注意：跨供应商继续旧会话时，对方后端可能无法解密会话中的 encrypted_content 推理内容，导致继续失败"
+        } else {
+            "When enabled, the official subscription runs under the shared \"custom\" provider id so official and third-party sessions appear in one history list, optionally migrating existing official sessions in (backed up first). When turning it off, the migrated sessions can be restored from backup. Note: resuming an old session across providers may fail because its encrypted_content reasoning can only be decrypted by the backend that created it."
+        }
+    }
+
+    pub fn codex_unified_history_enable_title() -> &'static str {
+        codex_unified_session_history_label()
+    }
+
+    pub fn codex_unified_history_enable_message() -> &'static str {
+        if is_chinese() {
+            "开启后，官方订阅与第三方将共用同一个会话历史列表。注意：跨供应商继续旧会话时，可能因对方后端无法解密 encrypted_content 推理内容而失败。\n\n可选择同时把现有官方会话历史迁入共享列表（迁移前自动备份到 ~/.cc-switch/backups，关闭开关时可选择恢复）。"
+        } else {
+            "When enabled, the official subscription and third-party providers share one session history list. Note: resuming an old session across providers may fail because its encrypted_content reasoning cannot be decrypted by another backend.\n\nYou can also migrate your existing official session history into the shared list (originals are backed up to ~/.cc-switch/backups first and can be restored when you turn this off)."
+        }
+    }
+
+    pub fn codex_unified_history_migrate_and_enable_label() -> &'static str {
+        if is_chinese() {
+            "迁入并启用"
+        } else {
+            "migrate and enable"
+        }
+    }
+
+    pub fn codex_unified_history_disable_title() -> &'static str {
+        if is_chinese() {
+            "关闭统一会话历史"
+        } else {
+            "Turn off unified session history"
+        }
+    }
+
+    pub fn codex_unified_history_disable_message() -> &'static str {
+        if is_chinese() {
+            "关闭后，官方订阅与第三方将恢复各自独立的会话历史列表。开启期间产生的会话因无法区分来源，将留在第三方历史中，官方订阅将看不到它们。"
+        } else {
+            "After turning this off, the official subscription and third-party providers return to separate history lists. Sessions created while it was on cannot be attributed to a provider, so they stay in the third-party history and the official subscription will not see them."
+        }
+    }
+
+    pub fn codex_unified_history_restore_backup_label() -> &'static str {
+        if is_chinese() {
+            "把开启时迁入的官方会话还原回官方历史（按备份精确还原）"
+        } else {
+            "Restore the official sessions migrated at enable time back to the official history (exact restore from backup)"
+        }
+    }
+
+    pub fn codex_unified_history_disable_confirm_label() -> &'static str {
+        if is_chinese() {
+            "关闭"
+        } else {
+            "Turn off"
         }
     }
 
@@ -12654,6 +13245,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_show() -> &'static str {
+        if is_chinese() {
+            "显示"
+        } else {
+            "show"
+        }
+    }
+
     pub fn tui_toast_update_bg_success(tag: &str) -> String {
         if is_chinese() {
             format!("后台更新到 {tag} 完成")
@@ -12695,7 +13294,7 @@ pub mod texts {
     }
 
     // -----------------------------------------------------------------
-    // config.rs - validate_config_dir & prompt_fix_permissions
+    // config.rs - validate_config_dir
     // -----------------------------------------------------------------
 
     pub fn config_dir_is_system_dir(dir: &str, resolved: &str) -> String {
@@ -12723,78 +13322,6 @@ pub mod texts {
             format!("Invalid config directory path; only the final directory component may be missing: {path}")
         }
     }
-
-    pub fn config_permissions_insecure_header() -> &'static str {
-        if is_chinese() {
-            "⚠ 检测到以下文件/目录权限不安全："
-        } else {
-            "⚠ Insecure file/directory permissions detected:"
-        }
-    }
-
-    pub fn config_permissions_detail(path: &str, current: u32, expected: u32) -> String {
-        if is_chinese() {
-            format!("  {path}  当前 {current:04o}，期望 {expected:04o}")
-        } else {
-            format!("  {path}  current {current:04o}, expected {expected:04o}")
-        }
-    }
-
-    pub fn config_permissions_fix_prompt() -> &'static str {
-        if is_chinese() {
-            "是否现在修复权限？（仅所有者可访问）"
-        } else {
-            "Fix permissions now? (owner-only access)"
-        }
-    }
-
-    pub fn config_permissions_fixed() -> &'static str {
-        if is_chinese() {
-            "✓ 权限已修复"
-        } else {
-            "✓ Permissions fixed"
-        }
-    }
-
-    pub fn config_permissions_fix_warn_interactive() -> &'static str {
-        if is_chinese() {
-            "⚠ 未来版本将拒绝在权限不安全的情况下启动，请尽快修复。"
-        } else {
-            "⚠ Future versions will refuse to start with insecure permissions. Please fix soon."
-        }
-    }
-
-    pub fn config_permissions_fix_warn_noninteractive() -> &'static str {
-        if is_chinese() {
-            "⚠ 检测到配置文件权限不安全（非交互模式），跳过修复。未来版本将拒绝启动。"
-        } else {
-            "⚠ Insecure config permissions detected (non-interactive). Skipped. Future versions will refuse to start."
-        }
-    }
-
-    pub fn config_permissions_custom_dir_notice(path: &str) -> String {
-        if is_chinese() {
-            format!("检测到自定义配置目录: {path}，请核实此目录不是关键系统目录")
-        } else {
-            format!("Custom config directory detected: {path}, please verify this is not a critical system directory")
-        }
-    }
-
-    pub fn config_permissions_confirm_custom_dir() -> &'static str {
-        if is_chinese() {
-            "确认要修改此目录的权限吗？"
-        } else {
-            "Confirm modifying permissions on this directory?"
-        }
-    }
-
-    pub fn config_permissions_custom_dir_skipped() -> &'static str {
-        if is_chinese() {
-            "已跳过权限修复。"
-        } else {
-            "Skipped permission fix."
-        }
-    }
 }
 
 #[cfg(test)]
@@ -12819,6 +13346,7 @@ mod tests {
             texts::provider_duplicated_success("source", "source-copy"),
             "✓ 已复制供应商 'source' 为 'source-copy'"
         );
+        assert_eq!(texts::welcome_title(), "CC-Switch");
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
         assert_eq!(texts::tui_home_status_offline(), "离线");
@@ -12882,6 +13410,48 @@ mod tests {
             texts::tui_proxy_dashboard_manual_routing_copy("Claude"),
             "手动路由：Claude 的流量会通过 cc-switch。"
         );
+    }
+
+    #[test]
+    fn session_resume_fallback_omits_backend_error_details() {
+        {
+            let _lang = use_test_language(Language::Chinese);
+            assert_eq!(
+                texts::tui_sessions_toast_resume_fallback(),
+                "无法自动打开终端，已显示恢复命令"
+            );
+            assert_eq!(
+                texts::tui_toast_clipboard_request_sent(),
+                "复制请求已发送到终端。"
+            );
+            assert_eq!(texts::tui_toast_copied_to_clipboard(), "已复制到剪贴板。");
+        }
+
+        {
+            let _lang = use_test_language(Language::English);
+            assert_eq!(
+                texts::tui_sessions_toast_resume_fallback(),
+                "Could not open a terminal; showing the resume command instead."
+            );
+            assert_eq!(
+                texts::tui_toast_clipboard_request_sent(),
+                "Clipboard request sent to the terminal."
+            );
+            assert_eq!(
+                texts::tui_toast_copied_to_clipboard(),
+                "Copied to clipboard."
+            );
+        }
+    }
+
+    #[test]
+    fn full_url_proxy_notice_copy_avoids_orphan_chinese_punctuation() {
+        let _lang = use_test_language(Language::Chinese);
+        let message = texts::tui_full_url_requires_proxy_message();
+
+        assert_eq!(message.lines().count(), 3);
+        assert!(!message.contains('。'));
+        assert!(message.contains("主页按 P 开启本地代理"));
     }
 
     #[test]

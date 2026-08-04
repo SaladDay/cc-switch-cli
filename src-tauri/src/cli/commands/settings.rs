@@ -34,6 +34,10 @@ pub enum SettingsCommand {
     #[command(name = "claude-plugin", subcommand)]
     ClaudePlugin(ClaudePluginCommand),
 
+    /// Manage Codex official login preservation for direct provider switches
+    #[command(name = "codex-auth-preservation", subcommand)]
+    CodexAuthPreservation(CodexAuthPreservationCommand),
+
     /// Manage unified Codex session history
     #[command(name = "codex-history", subcommand)]
     CodexHistory(CodexHistoryCommand),
@@ -128,6 +132,20 @@ pub enum ClaudePluginCommand {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum CodexAuthPreservationCommand {
+    /// Show whether direct third-party switches preserve the Codex official login
+    Show {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Preserve the Codex official login on future direct third-party switches
+    Enable,
+    /// Replace the Codex official login on future direct third-party switches
+    Disable,
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum CodexHistoryCommand {
     /// Show unified Codex session history setting
     Show {
@@ -161,6 +179,7 @@ pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
         SettingsCommand::VisibleApps(cmd) => visible_apps_cmd(cmd),
         SettingsCommand::ClaudeOnboarding(cmd) => claude_onboarding_cmd(cmd),
         SettingsCommand::ClaudePlugin(cmd) => claude_plugin_cmd(cmd),
+        SettingsCommand::CodexAuthPreservation(cmd) => codex_auth_preservation_cmd(cmd),
         SettingsCommand::CodexHistory(cmd) => codex_history_cmd(cmd),
     }
 }
@@ -174,6 +193,7 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
             "visibleAppsMode": settings.visible_apps_settings.mode,
             "skipClaudeOnboarding": settings.skip_claude_onboarding,
             "enableClaudePluginIntegration": settings.enable_claude_plugin_integration,
+            "preserveCodexOfficialAuthOnSwitch": settings.preserve_codex_official_auth_on_switch,
             "unifyCodexSessionHistory": settings.unify_codex_session_history,
             "unifyCodexMigrateExisting": settings.unify_codex_migrate_existing.unwrap_or(false),
             "hasCodexHistoryUnifyBackup": crate::codex_history_migration::has_codex_official_history_unify_backup(),
@@ -197,6 +217,10 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
     println!(
         "Claude plugin integration: {}",
         yes_no(settings.enable_claude_plugin_integration)
+    );
+    println!(
+        "Preserve Codex official login: {}",
+        yes_no(settings.preserve_codex_official_auth_on_switch)
     );
     println!(
         "Unified Codex session history: {}",
@@ -384,6 +408,56 @@ fn set_claude_plugin_integration(enabled: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+fn codex_auth_preservation_cmd(cmd: CodexAuthPreservationCommand) -> Result<(), AppError> {
+    match cmd {
+        CodexAuthPreservationCommand::Show { json } => show_codex_auth_preservation(json),
+        CodexAuthPreservationCommand::Enable => set_codex_auth_preservation(true),
+        CodexAuthPreservationCommand::Disable => set_codex_auth_preservation(false),
+    }
+}
+
+fn show_codex_auth_preservation(json_output: bool) -> Result<(), AppError> {
+    let enabled = crate::settings::preserve_codex_official_auth_on_switch();
+    if json_output {
+        let payload = json!({
+            "preserveCodexOfficialAuthOnSwitch": enabled,
+        });
+        println!(
+            "{}",
+            to_json(&payload).map_err(|err| AppError::Message(err.to_string()))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Preserve Codex official login on direct switch: {}",
+        yes_no(enabled)
+    );
+    println!(
+        "{}",
+        info("Proxy takeover always preserves the Codex official login.")
+    );
+    Ok(())
+}
+
+fn set_codex_auth_preservation(enabled: bool) -> Result<(), AppError> {
+    crate::settings::set_preserve_codex_official_auth_on_switch(enabled)?;
+    println!(
+        "{}",
+        success(&format!(
+            "Codex official login preservation {}",
+            if enabled { "enabled" } else { "disabled" }
+        ))
+    );
+    println!(
+        "{}",
+        info(
+            "Applies to future direct third-party switches; proxy takeover always preserves the Codex official login.",
+        )
+    );
+    Ok(())
+}
+
 fn codex_history_cmd(cmd: CodexHistoryCommand) -> Result<(), AppError> {
     match cmd {
         CodexHistoryCommand::Show { json } => show_codex_history(json),
@@ -444,10 +518,11 @@ fn set_codex_history_enabled(
     migrate_existing: bool,
     restore: bool,
 ) -> Result<(), AppError> {
+    let state = crate::store::AppState::try_new()?;
     let outcome = crate::services::codex_history::set_unified_session_history_enabled(
+        &state,
         enabled,
         migrate_existing,
-        restore,
     )?;
     if !outcome.changed {
         println!(
@@ -461,12 +536,17 @@ fn set_codex_history_enabled(
     }
 
     if enabled {
-        if let Some(migration) = outcome.migration {
+        if migrate_existing {
+            let migration =
+                crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket(
+                )?;
             print_codex_history_migration_outcome(&migration);
         }
         println!("{}", success("Unified Codex session history enabled"));
     } else {
-        if let Some(restore) = outcome.restore {
+        if restore {
+            let restore =
+                crate::codex_history_migration::restore_codex_official_history_from_backups()?;
             print_codex_history_restore_outcome(&restore);
         }
         println!("{}", success("Unified Codex session history disabled"));
@@ -575,37 +655,26 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::save_manual_visible_apps;
+    use super::{save_manual_visible_apps, set_codex_auth_preservation};
     use crate::settings::{VisibleApps, VisibleAppsMode};
-    use crate::test_support::{
-        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-    };
+    use crate::test_support::TestEnvGuard;
     use serial_test::serial;
-    use std::path::Path;
+    use std::fs;
     use tempfile::TempDir;
 
     struct SettingsTestGuard {
-        _lock: TestHomeSettingsLock,
+        _env: TestEnvGuard,
         _temp: TempDir,
     }
 
     impl SettingsTestGuard {
         fn new() -> Self {
-            let lock = lock_test_home_and_settings();
             let temp = tempfile::tempdir().expect("create temp dir");
-            set_test_home_override(Some(temp.path()));
-            crate::settings::reload_test_settings();
+            let env = TestEnvGuard::isolated(temp.path());
             Self {
-                _lock: lock,
+                _env: env,
                 _temp: temp,
             }
-        }
-    }
-
-    impl Drop for SettingsTestGuard {
-        fn drop(&mut self) {
-            set_test_home_override(None::<&Path>);
-            crate::settings::reload_test_settings();
         }
     }
 
@@ -649,5 +718,51 @@ mod tests {
         .expect_err("empty visible apps should be rejected");
 
         assert!(err.to_string().contains("At least one app"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn codex_auth_preservation_updates_only_the_setting() {
+        let _guard = SettingsTestGuard::new();
+        let mut settings = crate::settings::get_settings();
+        settings.skip_claude_onboarding = true;
+        crate::settings::update_settings(settings).expect("seed unrelated setting");
+
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        fs::create_dir_all(&codex_dir).expect("create Codex config dir");
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let config_path = crate::codex_config::get_codex_config_path();
+        fs::write(&auth_path, b"{\n  \"auth_mode\": \"chatgpt\"\n}\n").expect("seed auth.json");
+        fs::write(&config_path, b"model_provider = \"custom\"\n").expect("seed config.toml");
+        let auth_before = fs::read(&auth_path).expect("read auth.json before setting change");
+        let config_before = fs::read(&config_path).expect("read config.toml before setting change");
+
+        set_codex_auth_preservation(true).expect("enable preservation");
+
+        let settings = crate::settings::get_settings();
+        assert!(settings.preserve_codex_official_auth_on_switch);
+        assert!(settings.skip_claude_onboarding);
+        assert_eq!(
+            fs::read(&auth_path).expect("read auth.json after enabling"),
+            auth_before
+        );
+        assert_eq!(
+            fs::read(&config_path).expect("read config.toml after enabling"),
+            config_before
+        );
+
+        set_codex_auth_preservation(false).expect("disable preservation");
+
+        let settings = crate::settings::get_settings();
+        assert!(!settings.preserve_codex_official_auth_on_switch);
+        assert!(settings.skip_claude_onboarding);
+        assert_eq!(
+            fs::read(&auth_path).expect("read auth.json after disabling"),
+            auth_before
+        );
+        assert_eq!(
+            fs::read(&config_path).expect("read config.toml after disabling"),
+            config_before
+        );
     }
 }

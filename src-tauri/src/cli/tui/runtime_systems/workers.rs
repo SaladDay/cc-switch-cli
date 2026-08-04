@@ -13,19 +13,21 @@ use crate::services::{S3SyncService, SkillService, StreamCheckService, WebDavSyn
 use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 
 use super::super::data::{
-    load_proxy_snapshot_from_state_async, load_snapshot_state, load_state,
-    load_usage_pricing_data_from_state_for_range, UiData, UsageRangePreset,
+    load_provider_runtime_snapshot_from_state_async, load_proxy_snapshot_from_state_async,
+    load_snapshot_state, load_state, load_usage_pricing_data_from_state_for_range, UiData,
+    UsageRangePreset,
 };
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
-    AppDataReq, AppDataSystem, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg,
-    ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg,
-    ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SessionMsg, SessionReq, SessionSystem,
-    SessionUsageSyncMsg, SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq,
-    SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem,
-    UpdateMsg, UpdateReq, UpdateSystem, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg,
-    UsagePricingReq, UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq,
-    WebDavReqKind, WebDavSystem,
+    AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem,
+    LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
+    ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchSystem,
+    ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages,
+    SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
+    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
+    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
+    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
+    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -51,6 +53,128 @@ pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
     })
 }
 
+enum CodexHistoryOperation {
+    MigrateExisting,
+    Restore,
+}
+
+pub(crate) fn start_codex_history_system() -> Result<CodexHistorySystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<CodexHistoryMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<CodexHistoryReq>();
+    let (operation_tx, operation_rx) = mpsc::channel::<CodexHistoryOperation>();
+
+    let operation_result_tx = result_tx.clone();
+    let operation_handle = std::thread::Builder::new()
+        .name("cc-switch-codex-history-operations".to_string())
+        .spawn(move || codex_history_operation_loop(operation_rx, operation_result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn Codex history operation worker".to_string(),
+            source: e,
+        })?;
+
+    let save_handle = std::thread::Builder::new()
+        .name("cc-switch-codex-history-settings".to_string())
+        .spawn(move || codex_history_save_loop(req_rx, result_tx, operation_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn Codex history settings worker".to_string(),
+            source: e,
+        })?;
+
+    Ok(CodexHistorySystem {
+        req_tx,
+        result_rx,
+        _handles: vec![save_handle, operation_handle],
+    })
+}
+
+fn codex_history_save_loop(
+    rx: mpsc::Receiver<CodexHistoryReq>,
+    tx: mpsc::Sender<CodexHistoryMsg>,
+    operation_tx: mpsc::Sender<CodexHistoryOperation>,
+) {
+    while let Ok(req) = rx.recv() {
+        let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
+            crate::services::codex_history::set_unified_session_history_enabled(
+                &state,
+                req.enabled,
+                req.migrate_existing,
+            )
+            .map_err(|e| e.to_string())
+        });
+
+        let changed = result.as_ref().is_ok_and(|outcome| outcome.changed);
+        if changed && req.enabled {
+            queue_codex_history_operation(
+                &operation_tx,
+                &tx,
+                CodexHistoryOperation::MigrateExisting,
+            );
+        }
+
+        let _ = tx.send(CodexHistoryMsg::Saved {
+            request_id: req.request_id,
+            enabled: req.enabled,
+            result,
+        });
+
+        if changed && !req.enabled && req.restore_after_disable {
+            queue_codex_history_operation(&operation_tx, &tx, CodexHistoryOperation::Restore);
+        }
+    }
+}
+
+fn queue_codex_history_operation(
+    operation_tx: &mpsc::Sender<CodexHistoryOperation>,
+    result_tx: &mpsc::Sender<CodexHistoryMsg>,
+    operation: CodexHistoryOperation,
+) {
+    let is_restore = matches!(operation, CodexHistoryOperation::Restore);
+    if let Err(err) = operation_tx.send(operation) {
+        if is_restore {
+            let _ = result_tx.send(CodexHistoryMsg::RestoreFinished(Err(err.to_string())));
+        } else {
+            log::warn!("Failed to queue unified Codex history migration: {err}");
+        }
+    }
+}
+
+fn codex_history_operation_loop(
+    rx: mpsc::Receiver<CodexHistoryOperation>,
+    tx: mpsc::Sender<CodexHistoryMsg>,
+) {
+    while let Ok(operation) = rx.recv() {
+        match operation {
+            CodexHistoryOperation::MigrateExisting => {
+                match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket(
+                ) {
+                    Ok(outcome) => {
+                        if let Some(reason) = outcome.skipped_reason {
+                            log::debug!(
+                                "Codex official history unify migration skipped: {reason}"
+                            );
+                        } else {
+                            log::info!(
+                                "Codex official history unify migration completed: jsonl_files={}, state_rows={}",
+                                outcome.migrated_jsonl_files,
+                                outcome.migrated_state_rows
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("Codex official history unify migration failed: {err}");
+                    }
+                }
+            }
+            CodexHistoryOperation::Restore => {
+                let result =
+                    crate::codex_history_migration::restore_codex_official_history_from_backups()
+                        .map_err(|e| e.to_string());
+                let _ = tx.send(CodexHistoryMsg::RestoreFinished(result));
+            }
+        }
+    }
+}
+
 fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -65,12 +189,14 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                         request_id,
                         app_type,
                         enabled,
+                        base_reload_token,
                     } => {
                         let _ = tx.send(ProxyMsg::ManagedSessionFinished {
                             request_id,
                             app_type,
                             enabled,
-                            result: Err(err.clone()),
+                            base_reload_token,
+                            outcome: ManagedSessionOutcome::Failed(err.clone()),
                         });
                     }
                     ProxyReq::RefreshSnapshot {
@@ -95,20 +221,33 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                 request_id,
                 app_type,
                 enabled,
+                base_reload_token,
             } => {
-                let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
-                    rt.block_on(
+                let outcome = match load_state().map_err(|e| e.to_string()) {
+                    Err(error) => ManagedSessionOutcome::Failed(error),
+                    Ok(state) => match rt.block_on(
                         state
                             .proxy_service
                             .set_managed_session_for_app(app_type.as_str(), enabled),
-                    )
-                });
+                    ) {
+                        Err(error) => ManagedSessionOutcome::Failed(error),
+                        Ok(()) => ManagedSessionOutcome::Applied {
+                            snapshot: rt
+                                .block_on(load_provider_runtime_snapshot_from_state_async(
+                                    &state, &app_type,
+                                ))
+                                .map(Box::new)
+                                .map_err(|error| error.to_string()),
+                        },
+                    },
+                };
 
                 let _ = tx.send(ProxyMsg::ManagedSessionFinished {
                     request_id,
                     app_type,
                     enabled,
-                    result,
+                    base_reload_token,
+                    outcome,
                 });
             }
             ProxyReq::RefreshSnapshot {
@@ -490,6 +629,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
         let ModelFetchReq::Fetch {
             request_id,
             base_url,
+            is_full_url,
             api_key,
             custom_user_agent,
             codex_oauth,
@@ -508,6 +648,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             rt.block_on(async {
                 fetch_provider_models_for_tui(
                     &base_url,
+                    is_full_url,
                     api_key.as_deref(),
                     custom_user_agent.as_deref(),
                     strategy,
@@ -686,6 +827,11 @@ pub(crate) fn start_session_system() -> Result<SessionSystem, AppError> {
     let (req_tx, req_rx) = mpsc::channel::<SessionReq>();
     let (control_tx, control_rx) = mpsc::channel::<SessionReq>();
     let (locate_tx, locate_rx) = session_locate_mailbox();
+    let active_cost_seq = Arc::new(AtomicU64::new(0));
+    let cost_req_tx = super::session_cost::lazy_session_cost_sender(
+        Arc::clone(&active_cost_seq),
+        result_tx.clone(),
+    );
     let search_generation = Arc::new(AtomicU64::new(0));
     let message_generation = Arc::new(AtomicU64::new(0));
     let locate_generation = Arc::new(AtomicU64::new(0));
@@ -744,6 +890,7 @@ pub(crate) fn start_session_system() -> Result<SessionSystem, AppError> {
 
     Ok(SessionSystem {
         req_tx,
+        cost_req_tx,
         result_rx,
         _handles: vec![dispatcher_handle, control_handle, locate_handle],
     })
@@ -780,28 +927,100 @@ fn session_dispatcher_loop(
 struct SessionMessageJob {
     request_id: u64,
     key: String,
-    provider_id: String,
-    source_path: String,
+    kind: SessionMessageJobKind,
     generation: u64,
     current_generation: Arc<AtomicU64>,
     result_tx: mpsc::Sender<SessionMsg>,
+}
+
+enum SessionMessageJobKind {
+    Open {
+        provider_id: String,
+        source_path: String,
+    },
+    Page {
+        transcript_generation: String,
+        page: usize,
+        refresh_page: usize,
+        refresh_message_key: Option<String>,
+        reader: crate::session_manager::transcript::TranscriptReader,
+    },
 }
 
 fn launch_session_messages(job: SessionMessageJob) -> Result<(), String> {
     std::thread::Builder::new()
         .name("cc-switch-session-messages".to_string())
         .spawn(move || {
-            let result = crate::session_manager::load_messages_cancellable(
-                &job.provider_id,
-                &job.source_path,
-                &|| job.current_generation.load(Ordering::Acquire) != job.generation,
-            );
-            if job.current_generation.load(Ordering::Acquire) == job.generation {
-                let _ = job.result_tx.send(SessionMsg::MessagesLoaded {
-                    request_id: job.request_id,
-                    key: job.key,
-                    result,
-                });
+            let SessionMessageJob {
+                request_id,
+                key,
+                kind,
+                generation,
+                current_generation,
+                result_tx,
+            } = job;
+            let is_cancelled = || current_generation.load(Ordering::Acquire) != generation;
+            match kind {
+                SessionMessageJobKind::Open {
+                    provider_id,
+                    source_path,
+                } => {
+                    let result = crate::session_manager::transcript::open_transcript_cancellable(
+                        &provider_id,
+                        &source_path,
+                        &is_cancelled,
+                    );
+                    if !is_cancelled() {
+                        let _ = result_tx.send(SessionMsg::MessagesLoaded {
+                            request_id,
+                            key,
+                            result,
+                        });
+                    }
+                }
+                SessionMessageJobKind::Page {
+                    transcript_generation,
+                    page,
+                    refresh_page,
+                    refresh_message_key,
+                    reader,
+                } => {
+                    let result = match reader.load_page(page, &is_cancelled) {
+                        Ok(loaded) => Ok(LoadedMessagePage::Page(loaded)),
+                        Err(error) if error.requires_refresh() => {
+                            let provider_id = reader.provider_id().to_string();
+                            let source_path = reader.source_path().to_string();
+                            drop(reader);
+                            crate::session_manager::transcript::open_transcript_pages_cancellable(
+                                &provider_id,
+                                &source_path,
+                                Some(refresh_page),
+                                refresh_message_key.as_deref(),
+                                Some(page),
+                                &is_cancelled,
+                            )
+                            .map(
+                                |(reader, active_page, requested_page)| {
+                                    LoadedMessagePage::Refreshed(Box::new(RefreshedMessagePages {
+                                        reader,
+                                        active_page,
+                                        requested_page,
+                                    }))
+                                },
+                            )
+                        }
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if !is_cancelled() {
+                        let _ = result_tx.send(SessionMsg::MessagePageLoaded {
+                            request_id,
+                            key,
+                            transcript_generation,
+                            page,
+                            result,
+                        });
+                    }
+                }
             }
         })
         .map(|_| ())
@@ -1079,8 +1298,10 @@ fn session_dispatcher_loop_with<S, L, P, R, M>(
                 let job = SessionMessageJob {
                     request_id,
                     key,
-                    provider_id,
-                    source_path,
+                    kind: SessionMessageJobKind::Open {
+                        provider_id,
+                        source_path,
+                    },
                     generation,
                     current_generation: Arc::clone(&message_generation),
                     result_tx: result_tx.clone(),
@@ -1090,6 +1311,44 @@ fn session_dispatcher_loop_with<S, L, P, R, M>(
                         let _ = result_tx.send(SessionMsg::MessagesLoaded {
                             request_id,
                             key: error_key,
+                            result: Err(error),
+                        });
+                    }
+                }
+            }
+            SessionReq::LoadMessagePage {
+                request_id,
+                key,
+                transcript_generation,
+                page,
+                refresh_page,
+                refresh_message_key,
+                reader,
+            } => {
+                let generation = message_generation.load(Ordering::Acquire);
+                let error_key = key.clone();
+                let error_generation = transcript_generation.clone();
+                let job = SessionMessageJob {
+                    request_id,
+                    key,
+                    kind: SessionMessageJobKind::Page {
+                        transcript_generation,
+                        page,
+                        refresh_page,
+                        refresh_message_key,
+                        reader,
+                    },
+                    generation,
+                    current_generation: Arc::clone(&message_generation),
+                    result_tx: result_tx.clone(),
+                };
+                if let Err(error) = launch_messages(job) {
+                    if message_generation.load(Ordering::Acquire) == generation {
+                        let _ = result_tx.send(SessionMsg::MessagePageLoaded {
+                            request_id,
+                            key: error_key,
+                            transcript_generation: error_generation,
+                            page,
                             result: Err(error),
                         });
                     }
@@ -1361,8 +1620,10 @@ fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<
             let job = SessionMessageJob {
                 request_id,
                 key,
-                provider_id,
-                source_path,
+                kind: SessionMessageJobKind::Open {
+                    provider_id,
+                    source_path,
+                },
                 generation: 1,
                 current_generation: generation,
                 result_tx: tx.clone(),
@@ -1371,6 +1632,44 @@ fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<
                 tx.send(SessionMsg::MessagesLoaded {
                     request_id,
                     key: error_key,
+                    result: Err(error),
+                })
+                .map_err(|_| ())?;
+            }
+            Ok(())
+        }
+        SessionReq::LoadMessagePage {
+            request_id,
+            key,
+            transcript_generation,
+            page,
+            refresh_page,
+            refresh_message_key,
+            reader,
+        } => {
+            let generation = Arc::new(AtomicU64::new(1));
+            let error_key = key.clone();
+            let error_generation = transcript_generation.clone();
+            let job = SessionMessageJob {
+                request_id,
+                key,
+                kind: SessionMessageJobKind::Page {
+                    transcript_generation,
+                    page,
+                    refresh_page,
+                    refresh_message_key,
+                    reader,
+                },
+                generation: 1,
+                current_generation: generation,
+                result_tx: tx.clone(),
+            };
+            if let Err(error) = launch_session_messages(job) {
+                tx.send(SessionMsg::MessagePageLoaded {
+                    request_id,
+                    key: error_key,
+                    transcript_generation: error_generation,
+                    page,
                     result: Err(error),
                 })
                 .map_err(|_| ())?;
@@ -1660,20 +1959,27 @@ fn run_session_scan(
         }
     };
 
-    // Opening a scope reads one immutable page only. It happens before any
-    // revalidation work and therefore remains fixed-cost for very large stores.
+    // Opening a scope reads one immutable page only. Sessions is intentionally
+    // manual-refresh-only: a valid persisted generation completes an ordinary
+    // entry request here, without walking or statting provider sources. A
+    // missing manifest falls through to the unavoidable one-time bootstrap.
     let mut needs_provisional = false;
     if !force {
         let opened = manifest_store
             .open_reader(&provider_id)
             .and_then(|reader| reader.load_page(0).map(|page| (reader, page)));
         needs_provisional = opened.is_none();
+        let complete = opened.is_some();
         let _ = tx.send(SessionMsg::ScopeOpened {
             request_id,
             scope_epoch,
             scope: provider_id.clone(),
+            complete,
             result: Ok(opened),
         });
+        if complete {
+            return;
+        }
     }
 
     let store = match crate::session_manager::scan_cache_store::ScanCacheStore::open() {
@@ -1766,19 +2072,26 @@ fn run_session_scan(
     if is_cancelled() {
         return;
     }
-    let result = result.map(|published| {
-        let reader = published.reader.clone();
-        (published, reader)
-    });
+    let published = match result {
+        Ok(published) => published,
+        Err(error) => {
+            let _ = tx.send(SessionMsg::ManifestPublished {
+                request_id,
+                scope_epoch,
+                scope: provider_id,
+                result: Err(error),
+            });
+            return;
+        }
+    };
+    let reader = published.reader.clone();
     let _ = tx.send(SessionMsg::ManifestPublished {
         request_id,
         scope_epoch,
         scope: provider_id,
-        result,
+        result: Ok((published, reader)),
     });
 }
-
-const SESSION_LOCATE_PAGE_RADIUS: usize = 1;
 
 fn locate_session_manifest(job: SessionLocateJob) {
     let is_cancelled = || job.current_generation.load(Ordering::Acquire) != job.locate_generation;
@@ -1807,11 +2120,13 @@ fn locate_session_manifest(job: SessionLocateJob) {
     });
 }
 
-/// Resolve against the fallback page and its immediate neighbours only. A
-/// refresh normally moves the selected row by a handful of positions, so this
-/// preserves its identity across page-boundary shifts. A large reorder falls
-/// back to the same absolute position instead of scanning an unbounded number
-/// of immutable pages.
+/// Resolve a stable row identity across the complete immutable generation.
+///
+/// This runs on the dedicated latest-wins locate lane, not the event loop.
+/// Memory remains bounded to two pages: the fallback page stays available
+/// while every other page is inspected and dropped one at a time. The old
+/// page is checked first, followed by the recency head (the common destination
+/// when an old session is continued), then the remaining pages nearest-first.
 fn resolve_session_manifest_selection<F>(
     source: crate::cli::tui::app::SessionPageSource,
     scope: &str,
@@ -1839,47 +2154,84 @@ where
 
     let fallback = fallback_absolute.min(reader.total_rows().saturating_sub(1));
     let fallback_page_index = fallback / crate::session_manager::paged_manifest::PAGE_SIZE;
-    let mut candidate_pages = Vec::with_capacity(1 + SESSION_LOCATE_PAGE_RADIUS * 2);
-    candidate_pages.push(fallback_page_index);
-    if anchor.is_some() {
-        for distance in 1..=SESSION_LOCATE_PAGE_RADIUS {
+    let Some(fallback_page) =
+        load_session_manifest_page_cancellable(reader, fallback_page_index, is_cancelled)?
+    else {
+        return Ok(None);
+    };
+    if let Some(selected) = anchor.and_then(|anchor| {
+        fallback_page
+            .rows
+            .iter()
+            .position(|row| anchor.matches(row))
+    }) {
+        return Ok(Some((fallback_page, selected)));
+    }
+
+    if let Some(anchor) = anchor {
+        if fallback_page_index != 0 {
+            let Some(page) = load_session_manifest_page_cancellable(reader, 0, is_cancelled)?
+            else {
+                return Ok(None);
+            };
+            if let Some(selected) = page.rows.iter().position(|row| anchor.matches(row)) {
+                return Ok(Some((page, selected)));
+            }
+        }
+
+        for distance in 1..reader.page_count() {
             if let Some(previous) = fallback_page_index.checked_sub(distance) {
-                candidate_pages.push(previous);
+                if previous != 0 {
+                    let Some(page) =
+                        load_session_manifest_page_cancellable(reader, previous, is_cancelled)?
+                    else {
+                        return Ok(None);
+                    };
+                    if let Some(selected) = page.rows.iter().position(|row| anchor.matches(row)) {
+                        return Ok(Some((page, selected)));
+                    }
+                }
             }
-            let next = fallback_page_index.saturating_add(distance);
-            if next < reader.page_count() {
-                candidate_pages.push(next);
+            if let Some(next) = fallback_page_index
+                .checked_add(distance)
+                .filter(|page| *page < reader.page_count())
+            {
+                let Some(page) =
+                    load_session_manifest_page_cancellable(reader, next, is_cancelled)?
+                else {
+                    return Ok(None);
+                };
+                if let Some(selected) = page.rows.iter().position(|row| anchor.matches(row)) {
+                    return Ok(Some((page, selected)));
+                }
             }
         }
     }
 
-    let mut fallback_page = None;
-    for page_index in candidate_pages {
-        if is_cancelled() {
-            return Ok(None);
-        }
-        let page = reader
-            .load_page(page_index)
-            .ok_or_else(|| format!("session manifest page {page_index} is unavailable"))?;
-        if is_cancelled() {
-            return Ok(None);
-        }
-        if let Some(selected) =
-            anchor.and_then(|anchor| page.rows.iter().position(|row| anchor.matches(row)))
-        {
-            return Ok(Some((page, selected)));
-        }
-        if page_index == fallback_page_index {
-            fallback_page = Some(page);
-        }
-    }
-
-    let page =
-        fallback_page.ok_or_else(|| "session manifest fallback page is unavailable".to_string())?;
     let selected = fallback
         .saturating_sub(fallback_page_index * crate::session_manager::paged_manifest::PAGE_SIZE)
-        .min(page.rows.len().saturating_sub(1));
-    Ok(Some((page, selected)))
+        .min(fallback_page.rows.len().saturating_sub(1));
+    Ok(Some((fallback_page, selected)))
+}
+
+fn load_session_manifest_page_cancellable<F>(
+    reader: &crate::session_manager::paged_manifest::ManifestReader,
+    page_index: usize,
+    is_cancelled: &F,
+) -> Result<Option<crate::session_manager::paged_manifest::ManifestPage>, String>
+where
+    F: Fn() -> bool,
+{
+    if is_cancelled() {
+        return Ok(None);
+    }
+    let page = reader
+        .load_page(page_index)
+        .ok_or_else(|| format!("session manifest page {page_index} is unavailable"))?;
+    if is_cancelled() {
+        return Ok(None);
+    }
+    Ok(Some(page))
 }
 
 #[cfg(test)]
@@ -2048,8 +2400,9 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
         Err(e) => {
             let err = e.to_string();
             while let Ok(req) = rx.recv() {
-                let QuotaReq::Refresh { target } = req;
+                let QuotaReq::Refresh { generation, target } = req;
                 let _ = tx.send(QuotaMsg::Finished {
+                    generation,
                     target,
                     result: Err(err.clone()),
                 });
@@ -2059,10 +2412,14 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
     };
 
     while let Ok(req) = rx.recv() {
-        let QuotaReq::Refresh { target } = req;
+        let QuotaReq::Refresh { generation, target } = req;
         let result = rt.block_on(crate::cli::provider_quota::query_quota(&target));
 
-        let _ = tx.send(QuotaMsg::Finished { target, result });
+        let _ = tx.send(QuotaMsg::Finished {
+            generation,
+            target,
+            result,
+        });
     }
 }
 
@@ -2151,10 +2508,22 @@ fn session_usage_sync_worker_loop(
             req = next;
         }
 
-        let SessionUsageSyncReq::Run { request_id } = req;
-        let result = match crate::Database::init() {
-            Ok(db) => {
-                crate::services::session_usage::run_session_usage_sync_cycle(&db, "tui-background")
+        let msg = match crate::Database::init() {
+            Ok(db) => execute_session_usage_sync_request(&db, req),
+            Err(error) => session_usage_sync_failure(req, error.to_string()),
+        };
+        let _ = tx.send(msg);
+    }
+}
+
+fn execute_session_usage_sync_request(
+    db: &crate::Database,
+    req: SessionUsageSyncReq,
+) -> SessionUsageSyncMsg {
+    match req {
+        SessionUsageSyncReq::Run { request_id } => {
+            let result =
+                crate::services::session_usage::run_session_usage_sync_cycle(db, "tui-background")
                     .and_then(|result| {
                         if result.errors.is_empty() {
                             Ok(())
@@ -2166,12 +2535,27 @@ fn session_usage_sync_worker_loop(
                             )))
                         }
                     })
-                    .map_err(|error| error.to_string())
-            }
-            Err(error) => Err(error.to_string()),
-        };
+                    .map_err(|error| error.to_string());
+            SessionUsageSyncMsg::Finished { request_id, result }
+        }
+        SessionUsageSyncReq::RebuildCodex { request_id } => {
+            let result = crate::services::session_usage::rebuild_codex_usage(db)
+                .map_err(|error| error.to_string());
+            SessionUsageSyncMsg::CodexRebuilt { request_id, result }
+        }
+    }
+}
 
-        let _ = tx.send(SessionUsageSyncMsg::Finished { request_id, result });
+fn session_usage_sync_failure(req: SessionUsageSyncReq, error: String) -> SessionUsageSyncMsg {
+    match req {
+        SessionUsageSyncReq::Run { request_id } => SessionUsageSyncMsg::Finished {
+            request_id,
+            result: Err(error),
+        },
+        SessionUsageSyncReq::RebuildCodex { request_id } => SessionUsageSyncMsg::CodexRebuilt {
+            request_id,
+            result: Err(error),
+        },
     }
 }
 
@@ -3520,6 +3904,77 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn codex_history_worker_saves_disable_before_reporting_restore() {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let system = start_codex_history_system().expect("start Codex history worker");
+
+        system
+            .req_tx
+            .send(CodexHistoryReq {
+                request_id: 1,
+                enabled: true,
+                migrate_existing: false,
+                restore_after_disable: false,
+            })
+            .expect("queue enable");
+        assert!(matches!(
+            system
+                .result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("enable result"),
+            CodexHistoryMsg::Saved {
+                request_id: 1,
+                enabled: true,
+                result: Ok(crate::services::codex_history::CodexHistoryToggleOutcome {
+                    changed: true,
+                }),
+            }
+        ));
+        assert_eq!(
+            crate::settings::get_settings().unify_codex_migrate_existing,
+            Some(false)
+        );
+
+        system
+            .req_tx
+            .send(CodexHistoryReq {
+                request_id: 2,
+                enabled: false,
+                migrate_existing: false,
+                restore_after_disable: true,
+            })
+            .expect("queue disable");
+        assert!(matches!(
+            system
+                .result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("disable result"),
+            CodexHistoryMsg::Saved {
+                request_id: 2,
+                enabled: false,
+                result: Ok(crate::services::codex_history::CodexHistoryToggleOutcome {
+                    changed: true,
+                }),
+            }
+        ));
+        assert!(matches!(
+            system
+                .result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("restore result"),
+            CodexHistoryMsg::RestoreFinished(Ok(
+                crate::codex_history_migration::CodexOfficialHistoryRestoreOutcome {
+                    skipped_reason: Some(reason),
+                    ..
+                }
+            )) if reason == "no_backup_ledger"
+        ));
+    }
 
     struct LocalEnvTaskDropSignal(mpsc::Sender<()>);
 
@@ -3527,6 +3982,51 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.0.send(());
         }
+    }
+
+    #[test]
+    fn codex_rebuild_worker_request_resets_usage_and_returns_counts() {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = crate::Database::memory().expect("in-memory database");
+        {
+            let conn = db.conn.lock().expect("database lock");
+            conn.execute_batch(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model, input_tokens,
+                    output_tokens, cache_read_tokens, latency_ms, status_code,
+                    created_at, data_source
+                 ) VALUES
+                    ('codex-row', '_codex_session', 'codex', 'gpt', 1, 1, 0, 0, 200, 1, 'codex_session');
+                 INSERT INTO usage_daily_rollups (date, app_type, provider_id, model)
+                 VALUES ('2026-07-10', 'codex', '_codex_session', 'gpt');",
+            )
+            .expect("seed stale Codex usage");
+        }
+
+        let msg = execute_session_usage_sync_request(
+            &db,
+            SessionUsageSyncReq::RebuildCodex { request_id: 41 },
+        );
+
+        assert!(matches!(
+            msg,
+            SessionUsageSyncMsg::CodexRebuilt {
+                request_id: 41,
+                result: Ok(crate::services::session_usage::SessionSyncResult { imported: 0, .. }),
+            }
+        ));
+        let conn = db.conn.lock().expect("database lock");
+        let counts: (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'codex_session'),
+                    (SELECT COUNT(*) FROM usage_daily_rollups WHERE provider_id = '_codex_session')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query rebuilt usage");
+        assert_eq!(counts, (0, 0));
     }
 
     #[test]
@@ -3607,6 +4107,93 @@ mod tests {
             rx.recv().expect("purge completion"),
             SessionMsg::ManifestsPurged { request_id: 41, .. }
         ));
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn session_entry_uses_valid_manifest_without_source_revalidation() {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let config_dir = home.path().join(".cc-switch");
+        std::fs::create_dir(&config_dir).expect("create private config directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+                .expect("secure config directory");
+        }
+        let store = crate::session_manager::paged_manifest::PagedManifestStore::open()
+            .expect("open manifest store");
+        let mut builder = store.begin_build("claude").expect("begin manifest");
+        builder
+            .push(crate::session_manager::SessionMeta {
+                provider_id: "claude".to_string(),
+                session_id: "cached-session".to_string(),
+                usage: Some(crate::session_manager::SessionUsageSummary {
+                    input_tokens: 42,
+                    estimated_cost_usd: Some(0.125),
+                    ..crate::session_manager::SessionUsageSummary::default()
+                }),
+                ..crate::session_manager::SessionMeta::default()
+            })
+            .expect("stage cached session");
+        builder.publish().expect("publish cached manifest");
+
+        let (tx, rx) = mpsc::channel();
+        run_session_scan(17, 3, "claude".to_string(), false, 0, &tx);
+
+        assert!(matches!(
+            rx.recv().expect("cached-open result"),
+            SessionMsg::ScopeOpened {
+                request_id: 17,
+                scope_epoch: 3,
+                complete: true,
+                result: Ok(Some((_, page))),
+                ..
+            } if page.rows.first().is_some_and(|row| row.session_id == "cached-session")
+                && page.rows.first().and_then(|row| row.usage).is_none()
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "a valid cached open must not publish a rebuilt manifest"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn manual_session_refresh_ends_with_metadata_publication() {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let config_dir = home.path().join(".cc-switch");
+        std::fs::create_dir(&config_dir).expect("create private config directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+                .expect("secure config directory");
+        }
+        let (tx, rx) = mpsc::channel();
+        let generation = SESSION_SCAN_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+
+        run_session_scan(23, 5, "claude".to_string(), true, generation, &tx);
+
+        let metadata = rx.recv().expect("metadata publication");
+        match metadata {
+            SessionMsg::ManifestPublished {
+                request_id: 23,
+                scope_epoch: 5,
+                result: Ok((published, _)),
+                ..
+            } => assert_eq!(published.total_rows, 0),
+            SessionMsg::ManifestPublished {
+                result: Err(error), ..
+            } => panic!("metadata publication failed: {error}"),
+            _ => panic!("unexpected metadata message"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "manual refresh must not start a second cost-indexing phase"
+        );
     }
 
     #[test]
@@ -3873,7 +4460,7 @@ mod tests {
     }
 
     #[test]
-    fn session_manifest_locator_uses_bounded_neighbourhood_then_fallback() {
+    fn session_manifest_locator_finds_identity_across_the_complete_generation() {
         let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
         let manifest_store = crate::session_manager::paged_manifest::PagedManifestStore::open_at(
             manifest_dir.path(),
@@ -3893,18 +4480,36 @@ mod tests {
                 })
                 .expect("manifest fixture row");
         }
-        let published = builder.publish().expect("publish fixture");
-        let reader = published.reader;
-        let distant_page = reader.load_page(4).expect("distant manifest page");
+        let published = builder.publish().expect("publish original fixture");
+        let distant_page = published
+            .reader
+            .load_page(4)
+            .expect("distant manifest page");
         let distant_anchor = crate::cli::tui::app::SessionRowIdentity::capture(
             distant_page.rows.first().expect("distant row"),
         );
 
+        let mut refreshed = manifest_store
+            .begin_build("claude")
+            .expect("refreshed manifest fixture builder");
+        for index in 0..401 {
+            refreshed
+                .push(crate::session_manager::SessionMeta {
+                    provider_id: "claude".to_string(),
+                    session_id: format!("session-{index:03}"),
+                    source_path: Some(format!("/tmp/session-{index:03}.jsonl")),
+                    last_active_at: Some(if index == 0 { 10_000 } else { index as i64 }),
+                    ..crate::session_manager::SessionMeta::default()
+                })
+                .expect("refreshed manifest fixture row");
+        }
+        let refreshed = refreshed.publish().expect("publish refreshed fixture");
+        let reader = refreshed.reader;
         let location = resolve_session_manifest_selection(
             crate::cli::tui::app::SessionPageSource::Base,
             "claude",
             reader.generation(),
-            0,
+            400,
             Some(&distant_anchor),
             &reader,
             &|| false,
@@ -3914,7 +4519,7 @@ mod tests {
 
         assert_eq!(location.0.page_index, 0);
         assert_eq!(location.1, 0);
-        assert!(!distant_anchor.matches(&location.0.rows[location.1]));
+        assert!(distant_anchor.matches(&location.0.rows[location.1]));
     }
 
     #[test]
@@ -4041,6 +4646,116 @@ mod tests {
             second.current_generation.load(Ordering::Acquire),
             second.generation,
             "closing detail must cancel the newest read"
+        );
+
+        drop(req_tx);
+        dispatcher.join().expect("dispatcher exits");
+    }
+
+    #[test]
+    fn transcript_page_jobs_share_the_open_generation_until_detail_is_replaced() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        std::fs::write(
+            &source,
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            })
+            .to_string(),
+        )
+        .expect("transcript fixture");
+        let (reader, _) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source.to_string_lossy(),
+        )
+        .expect("transcript reader");
+        let transcript_generation = reader.generation().to_string();
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (control_tx, _control_rx) = mpsc::channel();
+        let (result_tx, _result_rx) = mpsc::channel();
+        let message_generation = Arc::new(AtomicU64::new(0));
+        let dispatcher_message_generation = Arc::clone(&message_generation);
+        let (message_job_tx, message_job_rx) = mpsc::channel();
+        let dispatcher = std::thread::spawn(move || {
+            session_dispatcher_loop_with(
+                req_rx,
+                control_tx,
+                result_tx,
+                Arc::new(AtomicU64::new(0)),
+                dispatcher_message_generation,
+                Arc::new(AtomicU64::new(0)),
+                |_| Ok(()),
+                move |job| message_job_tx.send(job).map_err(|error| error.to_string()),
+                |_| Ok(()),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+        });
+
+        req_tx
+            .send(SessionReq::LoadMessages {
+                request_id: 1,
+                key: "session-1".to_string(),
+                provider_id: "codex".to_string(),
+                source_path: source.to_string_lossy().into_owned(),
+            })
+            .expect("queue open");
+        let open = message_job_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("open job");
+        req_tx
+            .send(SessionReq::LoadMessagePage {
+                request_id: 2,
+                key: "session-1".to_string(),
+                transcript_generation,
+                page: 0,
+                refresh_page: 0,
+                refresh_message_key: None,
+                reader,
+            })
+            .expect("queue page");
+        let page = message_job_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("page job");
+
+        assert!(matches!(open.kind, SessionMessageJobKind::Open { .. }));
+        assert!(matches!(
+            page.kind,
+            SessionMessageJobKind::Page { page: 0, .. }
+        ));
+        assert_eq!(page.generation, open.generation);
+        assert_eq!(
+            page.current_generation.load(Ordering::Acquire),
+            page.generation,
+            "adjacent page reads must not cancel the transcript open generation"
+        );
+
+        req_tx
+            .send(SessionReq::LoadMessages {
+                request_id: 3,
+                key: "session-2".to_string(),
+                provider_id: "codex".to_string(),
+                source_path: source.to_string_lossy().into_owned(),
+            })
+            .expect("replace detail");
+        let replacement = message_job_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("replacement job");
+        assert_ne!(
+            page.current_generation.load(Ordering::Acquire),
+            page.generation,
+            "opening another detail must cancel every old transcript page"
+        );
+        assert_eq!(
+            replacement.current_generation.load(Ordering::Acquire),
+            replacement.generation
         );
 
         drop(req_tx);

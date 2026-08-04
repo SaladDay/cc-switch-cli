@@ -1,10 +1,10 @@
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::app_config::AppType;
 use crate::provider::{Provider, UsageData, UsageResult};
 use crate::services::{ProviderService, SubscriptionQuota};
 use crate::store::AppState;
+use crate::usage_script::UsageQueryTemplate;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -21,6 +21,10 @@ pub(crate) struct QuotaTarget {
     pub(crate) provider_id: String,
     pub(crate) provider_name: String,
     pub(crate) kind: QuotaTargetKind,
+    /// Scheduling policy is local runtime metadata, not part of the public
+    /// `provider quota --json` contract.
+    #[serde(skip)]
+    pub(crate) auto_query_interval_minutes: u64,
 }
 
 impl QuotaTarget {
@@ -62,19 +66,47 @@ pub(crate) fn quota_target_for_provider(
     provider: &Provider,
 ) -> Option<QuotaTarget> {
     let provider_name = provider_display_name(app_type, id, provider);
-
-    if provider
+    let usage_script = provider
         .meta
         .as_ref()
-        .and_then(|meta| meta.usage_script.as_ref())
-        .is_some_and(|script| script.enabled)
-    {
-        return Some(QuotaTarget {
-            app_type: app_type.clone(),
-            provider_id: id.to_string(),
-            provider_name,
-            kind: QuotaTargetKind::UsageScript,
-        });
+        .and_then(|meta| meta.usage_script.as_ref());
+
+    if let Some(script) = usage_script.filter(|script| script.enabled) {
+        let template = script
+            .template_type
+            .as_deref()
+            .and_then(UsageQueryTemplate::from_str);
+
+        if template == Some(UsageQueryTemplate::OfficialSubscription) {
+            if let Some(tool) = provider.official_subscription_tool(app_type) {
+                return Some(QuotaTarget {
+                    app_type: app_type.clone(),
+                    provider_id: id.to_string(),
+                    provider_name,
+                    kind: QuotaTargetKind::SubscriptionTool {
+                        tool: tool.to_string(),
+                    },
+                    auto_query_interval_minutes: script.auto_query_interval.unwrap_or(0),
+                });
+            }
+            // Ignore an imported or hand-edited native template on a custom
+            // provider. Managed OAuth providers may still use their own quota
+            // path below.
+        } else {
+            // Official providers expose only the native subscription template.
+            // A stale script template must not bypass the opt-in switch.
+            if provider.official_subscription_tool(app_type).is_some() {
+                return None;
+            }
+
+            return Some(QuotaTarget {
+                app_type: app_type.clone(),
+                provider_id: id.to_string(),
+                provider_name,
+                kind: QuotaTargetKind::UsageScript,
+                auto_query_interval_minutes: script.auto_query_interval.unwrap_or(0),
+            });
+        }
     }
 
     if is_codex_oauth_provider(provider) {
@@ -88,24 +120,11 @@ pub(crate) fn quota_target_for_provider(
                     .as_ref()
                     .and_then(|meta| meta.managed_account_id_for("codex_oauth")),
             },
+            auto_query_interval_minutes: 5,
         });
     }
 
-    let tool = match app_type {
-        AppType::Claude if is_claude_official_provider(provider) => "claude",
-        AppType::Codex if is_codex_official_provider(provider) => "codex",
-        AppType::Gemini if is_gemini_official_provider(provider) => "gemini",
-        _ => return None,
-    };
-
-    Some(QuotaTarget {
-        app_type: app_type.clone(),
-        provider_id: id.to_string(),
-        provider_name,
-        kind: QuotaTargetKind::SubscriptionTool {
-            tool: tool.to_string(),
-        },
-    })
+    None
 }
 
 pub(crate) async fn query_quota(target: &QuotaTarget) -> Result<ProviderUsageQuota, String> {
@@ -184,185 +203,9 @@ fn is_codex_oauth_provider(provider: &Provider) -> bool {
         .is_some_and(|value| value == "codex_oauth")
 }
 
-fn is_claude_official_provider(provider: &Provider) -> bool {
-    provider
-        .category
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
-}
-
-fn is_codex_official_provider(provider: &Provider) -> bool {
-    if provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_official)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    if provider
-        .category
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
-    {
-        return true;
-    }
-
-    let legacy_official_identity = provider
-        .website_url
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("https://chatgpt.com/codex"))
-        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official");
-
-    if !legacy_official_identity {
-        return false;
-    }
-
-    let api_key_blank = provider
-        .settings_config
-        .get("auth")
-        .and_then(|auth| auth.get("OPENAI_API_KEY"))
-        .and_then(Value::as_str)
-        .is_none_or(|value| value.trim().is_empty());
-
-    api_key_blank && !codex_config_has_base_url(&provider.settings_config)
-}
-
-fn is_gemini_official_provider(provider: &Provider) -> bool {
-    if provider
-        .category
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
-    {
-        return true;
-    }
-
-    if provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.partner_promotion_key.as_deref())
-        .is_some_and(|value| value.eq_ignore_ascii_case("google-official"))
-    {
-        return true;
-    }
-
-    let legacy_google_identity = provider.website_url.as_deref().is_some_and(|value| {
-        let value = value.trim_end_matches('/');
-        value.eq_ignore_ascii_case("https://ai.google.dev")
-            || value.eq_ignore_ascii_case("https://aistudio.google.com")
-    }) || matches!(
-        provider.name.trim().to_ascii_lowercase().as_str(),
-        "google" | "google official" | "google oauth"
-    );
-
-    if !legacy_google_identity {
-        return false;
-    }
-
-    let api_key_blank = provider
-        .settings_config
-        .get("env")
-        .and_then(|env| env.get("GEMINI_API_KEY"))
-        .and_then(Value::as_str)
-        .is_none_or(|value| value.trim().is_empty());
-    let base_url_blank = extract_api_url(&provider.settings_config, &AppType::Gemini)
-        .is_none_or(|value| value.trim().is_empty());
-
-    api_key_blank && base_url_blank
-}
-
-fn codex_config_has_base_url(settings_config: &Value) -> bool {
-    let Some(config_text) = settings_config
-        .get("config")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-
-    let Ok(table) = toml::from_str::<toml::Table>(config_text) else {
-        return false;
-    };
-
-    if table
-        .get("base_url")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return true;
-    }
-
-    let Some(provider_key) = table.get("model_provider").and_then(|value| value.as_str()) else {
-        return false;
-    };
-
-    table
-        .get("model_providers")
-        .and_then(|value| value.as_table())
-        .and_then(|providers| providers.get(provider_key))
-        .and_then(|value| value.as_table())
-        .and_then(|provider| provider.get("base_url"))
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String> {
-    match app_type {
-        AppType::Claude => settings_config
-            .get("env")?
-            .get("ANTHROPIC_BASE_URL")?
-            .as_str()
-            .map(|s| s.to_string()),
-        AppType::Codex => {
-            if let Some(config_str) = settings_config.get("config")?.as_str() {
-                for line in config_str.lines() {
-                    let line = line.trim();
-                    if line.starts_with("base_url") {
-                        if let Some(url_part) = line.split('=').nth(1) {
-                            let url = url_part.trim().trim_matches('"').trim_matches('\'');
-                            if !url.is_empty() {
-                                return Some(url.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        }
-        AppType::Gemini => settings_config
-            .get("env")
-            .and_then(|env| {
-                env.get("GOOGLE_GEMINI_BASE_URL")
-                    .or_else(|| env.get("GEMINI_BASE_URL"))
-                    .or_else(|| env.get("BASE_URL"))
-            })?
-            .as_str()
-            .map(|s| s.to_string()),
-        AppType::OpenCode => settings_config
-            .get("options")?
-            .get("baseURL")?
-            .as_str()
-            .map(|s| s.to_string()),
-        AppType::Hermes => settings_config
-            .get("base_url")
-            .or_else(|| settings_config.get("baseUrl"))
-            .or_else(|| settings_config.get("baseURL"))
-            .or_else(|| settings_config.get("endpoint"))?
-            .as_str()
-            .map(|s| s.to_string()),
-        AppType::OpenClaw => settings_config
-            .get("baseUrl")
-            .or_else(|| settings_config.get("base_url"))?
-            .as_str()
-            .map(|s| s.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::*;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta, UsageScript};
@@ -371,13 +214,10 @@ mod tests {
         Provider::with_id(id.to_string(), name.to_string(), settings_config, None)
     }
 
-    #[test]
-    fn quota_target_detects_usage_script_before_official_provider() {
-        let mut provider = test_provider("official", "Claude Official", json!({"env": {}}));
-        provider.category = Some("official".to_string());
+    fn set_usage_script(provider: &mut Provider, enabled: bool, template_type: &str) {
         provider.meta = Some(ProviderMeta {
             usage_script: Some(UsageScript {
-                enabled: true,
+                enabled,
                 language: "javascript".to_string(),
                 code: "return { data: [] }".to_string(),
                 timeout: Some(10),
@@ -385,135 +225,74 @@ mod tests {
                 base_url: None,
                 access_token: None,
                 user_id: None,
-                template_type: Some("general".to_string()),
+                template_type: Some(template_type.to_string()),
                 auto_query_interval: Some(5),
                 coding_plan_provider: None,
             }),
             ..ProviderMeta::default()
         });
-
-        let target = quota_target_for_provider(&AppType::Claude, "official", &provider)
-            .expect("usage script target");
-
-        assert!(matches!(target.kind, QuotaTargetKind::UsageScript));
     }
 
     #[test]
-    fn quota_target_detects_official_claude_by_explicit_category() {
-        let mut official = test_provider("official", "Claude Official", json!({"env": {}}));
-        official.category = Some("official".to_string());
-        let stripped_custom = test_provider("stripped-custom", "Custom", json!({"env": {}}));
-        let custom = test_provider(
-            "custom",
-            "Claude Custom",
-            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
-        );
+    fn official_subscription_target_requires_enabled_official_template() {
+        let mut provider = test_provider("official", "Claude Official", json!({"env": {}}));
+        provider.category = Some("official".to_string());
 
+        assert!(quota_target_for_provider(&AppType::Claude, "official", &provider).is_none());
+
+        set_usage_script(&mut provider, false, "official_subscription");
+        assert!(quota_target_for_provider(&AppType::Claude, "official", &provider).is_none());
+
+        set_usage_script(&mut provider, true, "official_subscription");
         assert!(matches!(
-            quota_target_for_provider(&AppType::Claude, "official", &official)
+            quota_target_for_provider(&AppType::Claude, "official", &provider)
                 .map(|target| target.kind),
             Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "claude"
         ));
-        assert!(
-            quota_target_for_provider(&AppType::Claude, "stripped-custom", &stripped_custom)
-                .is_none()
-        );
-        assert!(quota_target_for_provider(&AppType::Claude, "custom", &custom).is_none());
+
+        set_usage_script(&mut provider, true, "general");
+        assert!(quota_target_for_provider(&AppType::Claude, "official", &provider).is_none());
     }
 
     #[test]
-    fn quota_target_detects_codex_official_and_skips_api_key_providers() {
-        let missing_key = test_provider("official", "OpenAI Official", json!({"auth": {}}));
-        let no_key_custom_base_url = test_provider(
-            "base-url",
-            "OpenAI Official",
-            json!({
-                "auth": {},
-                "config": r#"base_url = "https://api.example.com/v1""#
-            }),
-        );
-        let mut metadata_official = test_provider(
-            "metadata",
-            "Codex Official",
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-        );
-        metadata_official.meta = Some(ProviderMeta {
-            codex_official: Some(true),
-            ..ProviderMeta::default()
-        });
-        let api_key = test_provider(
-            "api-key",
-            "Custom OpenAI",
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-        );
-
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Codex, "official", &missing_key)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Codex, "metadata", &metadata_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
-        ));
-        assert!(
-            quota_target_for_provider(&AppType::Codex, "base-url", &no_key_custom_base_url)
-                .is_none()
-        );
-        assert!(quota_target_for_provider(&AppType::Codex, "api-key", &api_key).is_none());
+    fn official_subscription_template_routes_supported_apps_to_native_quota() {
+        for (app_type, tool, settings) in [
+            (AppType::Claude, "claude", json!({"env": {}})),
+            (AppType::Codex, "codex", json!({"auth": {}})),
+            (AppType::Gemini, "gemini", json!({"env": {}})),
+        ] {
+            let mut provider = test_provider("official", "Official", settings);
+            set_usage_script(&mut provider, true, "official_subscription");
+            assert!(matches!(
+                quota_target_for_provider(&app_type, "official", &provider)
+                    .map(|target| target.kind),
+                Some(QuotaTargetKind::SubscriptionTool { tool: actual }) if actual == tool
+            ));
+        }
     }
 
     #[test]
-    fn quota_target_detects_gemini_official_and_skips_api_key_providers() {
-        let mut explicit_official =
-            test_provider("google-official", "Google Official", json!({"env": {}}));
-        explicit_official.category = Some("official".to_string());
+    fn non_official_enabled_script_keeps_script_route() {
+        let mut provider = test_provider(
+            "custom",
+            "Custom",
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
+        );
+        set_usage_script(&mut provider, true, "general");
+        assert!(matches!(
+            quota_target_for_provider(&AppType::Claude, "custom", &provider)
+                .map(|target| target.kind),
+            Some(QuotaTargetKind::UsageScript)
+        ));
 
-        let google_oauth = test_provider(
-            "google-oauth",
-            "Google OAuth",
-            json!({"env": {}, "config": {}}),
-        );
-        let mut partner_official = test_provider(
-            "partner",
-            "Gemini",
-            json!({"env": {"GEMINI_API_KEY": "sk"}}),
-        );
-        partner_official.meta = Some(ProviderMeta {
-            partner_promotion_key: Some("google-official".to_string()),
-            ..ProviderMeta::default()
-        });
-        let api_key = test_provider(
-            "api-key",
-            "Google OAuth",
-            json!({"env": {"GEMINI_API_KEY": "sk-custom"}}),
-        );
-        let base_url = test_provider(
-            "base-url",
-            "Google OAuth",
-            json!({"env": {"GOOGLE_GEMINI_BASE_URL": "https://api.example.com"}}),
-        );
-        let stripped_custom = test_provider("custom", "Custom Gemini", json!({"env": {}}));
+        set_usage_script(&mut provider, false, "general");
+        assert!(quota_target_for_provider(&AppType::Claude, "custom", &provider).is_none());
 
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, "google-official", &explicit_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, "google-oauth", &google_oauth)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, "partner", &partner_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(quota_target_for_provider(&AppType::Gemini, "api-key", &api_key).is_none());
-        assert!(quota_target_for_provider(&AppType::Gemini, "base-url", &base_url).is_none());
-        assert!(quota_target_for_provider(&AppType::Gemini, "custom", &stripped_custom).is_none());
+        set_usage_script(&mut provider, true, "official_subscription");
+        assert!(
+            quota_target_for_provider(&AppType::Claude, "custom", &provider).is_none(),
+            "a raw native template must not read local OAuth for a custom provider"
+        );
     }
 
     #[test]

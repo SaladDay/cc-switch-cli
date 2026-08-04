@@ -137,6 +137,28 @@ fn filter_matching_resume_hint(
     }
 }
 
+/// Return whether an apparently unchanged file has evidence that it is no
+/// longer the file described by the authoritative cursor. Adapters with a
+/// semantic pre-scan may use this before their fast mtime return; this keeps
+/// that optimization aligned with the driver's own identity checks.
+pub(crate) fn unchanged_jsonl_identity_is_suspicious(
+    metadata: &fs::Metadata,
+    hint: Option<&SyncResumeHint>,
+    last_modified: i64,
+    last_offset: i64,
+) -> bool {
+    let matched_hint = filter_matching_resume_hint(hint.cloned(), last_modified, last_offset);
+    let Some(hint) = matched_hint else {
+        return false;
+    };
+    let shrunk = hint.byte_offset > 0 && (metadata.len() as i64) < hint.byte_offset;
+    let inode_changed = match hint.file_identity {
+        Some(expected) => file_identity(metadata).is_some_and(|current| current != expected),
+        None => false,
+    };
+    shrunk || inode_changed
+}
+
 /// 续传决策：区分"能续传"、"文件身份失效需全量重扫"、"沿用行 offset 跳过"。
 enum ResumeDecision<S> {
     /// 提示完整有效：从 `byte_offset` 续读，恢复状态机。
@@ -330,19 +352,14 @@ where
         // 不 skip，继续扫描（decide_resume 会 RescanFromZero，request_id 去重兜底）。
         // 无匹配提示或无 metadata（读取失败）时无从证伪 → 维持既有 mtime-skip
         // （跨机器只同步 db、不同步会话文件，是记录在案的已知边界）。
-        let identity_suspicious = match (matched_hint.as_ref(), fresh_meta.as_ref()) {
-            (Some(h), Some(meta)) => {
-                let shrunk = h.byte_offset > 0 && (meta.len() as i64) < h.byte_offset;
-                let inode_changed = match h.file_identity {
-                    Some(expected) => {
-                        file_identity(meta).is_some_and(|current| current != expected)
-                    }
-                    None => false,
-                };
-                shrunk || inode_changed
-            }
-            _ => false,
-        };
+        let identity_suspicious = fresh_meta.as_ref().is_some_and(|meta| {
+            unchanged_jsonl_identity_is_suspicious(
+                meta,
+                matched_hint.as_ref(),
+                last_modified,
+                last_offset,
+            )
+        });
         if !identity_suspicious {
             return Ok(None);
         }

@@ -64,10 +64,6 @@ pub(super) fn render_skills_installed(
             theme,
             texts::tui_skills_empty_title(),
             texts::tui_skills_empty_subtitle(),
-            &[
-                ("f", texts::tui_key_discover()),
-                ("i", texts::tui_skills_action_import_existing()),
-            ],
         );
         return;
     }

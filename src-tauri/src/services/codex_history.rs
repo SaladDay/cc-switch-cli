@@ -3,43 +3,42 @@ use crate::error::AppError;
 #[derive(Debug, Clone, Default)]
 pub struct CodexHistoryToggleOutcome {
     pub changed: bool,
-    pub migration:
-        Option<crate::codex_history_migration::CodexHistoryProviderBucketMigrationOutcome>,
-    pub restore: Option<crate::codex_history_migration::CodexOfficialHistoryRestoreOutcome>,
 }
 
 pub fn set_unified_session_history_enabled(
+    state: &crate::store::AppState,
     enabled: bool,
     migrate_existing: bool,
-    restore: bool,
+) -> Result<CodexHistoryToggleOutcome, AppError> {
+    set_unified_session_history_enabled_with(
+        state,
+        enabled,
+        migrate_existing,
+        crate::services::provider::reapply_current_codex_official_live,
+    )
+}
+
+fn set_unified_session_history_enabled_with(
+    state: &crate::store::AppState,
+    enabled: bool,
+    migrate_existing: bool,
+    reapply_live: impl FnOnce(&crate::store::AppState) -> Result<bool, AppError>,
 ) -> Result<CodexHistoryToggleOutcome, AppError> {
     let existing = crate::settings::get_settings();
     let changed = existing.unify_codex_session_history != enabled;
     if !changed {
-        return Ok(CodexHistoryToggleOutcome {
-            changed: false,
-            ..Default::default()
-        });
+        return Ok(CodexHistoryToggleOutcome { changed: false });
     }
 
     let mut next = existing.clone();
     next.unify_codex_session_history = enabled;
-    next.unify_codex_migrate_existing = if enabled && migrate_existing {
-        Some(true)
+    next.unify_codex_migrate_existing = if enabled {
+        Some(migrate_existing)
     } else {
-        None
+        Some(false)
     };
 
     crate::settings::update_settings(next)?;
-    let state = match crate::store::AppState::try_new() {
-        Ok(state) => state,
-        Err(err) => {
-            rollback_codex_history_settings(&existing);
-            return Err(AppError::Message(format!(
-                "Unified Codex session history setting was rolled back because app state initialization failed: {err}"
-            )));
-        }
-    };
     if let Err(err) = futures::executor::block_on(
         state
             .db
@@ -50,41 +49,23 @@ pub fn set_unified_session_history_enabled(
             "Unified Codex session history setting was rolled back because failover snapshots could not be invalidated: {err}"
         )));
     }
-    if let Err(err) = crate::services::provider::reapply_current_codex_official_live(&state) {
+    if let Err(err) = reapply_live(state) {
         rollback_codex_history_settings(&existing);
         return Err(AppError::Message(format!(
             "Unified Codex session history setting was rolled back because live config rewrite failed: {err}"
         )));
     }
 
-    if enabled {
-        let migration = if migrate_existing {
-            Some(
-                crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket(
-                )?,
-            )
-        } else {
-            None
-        };
-        Ok(CodexHistoryToggleOutcome {
-            changed: true,
-            migration,
-            restore: None,
-        })
-    } else {
-        crate::settings::clear_codex_official_history_unify_migration()?;
-        crate::settings::clear_codex_unify_migrate_existing()?;
-        let restore = if restore {
-            Some(crate::codex_history_migration::restore_codex_official_history_from_backups()?)
-        } else {
-            None
-        };
-        Ok(CodexHistoryToggleOutcome {
-            changed: true,
-            migration: None,
-            restore,
-        })
+    if !enabled {
+        if let Err(err) = crate::settings::clear_codex_official_history_unify_migration() {
+            log::warn!("Failed to clear unified Codex history migration marker: {err}");
+        }
+        if let Err(err) = crate::settings::clear_codex_unify_migrate_existing() {
+            log::warn!("Failed to clear unified Codex history migration intent: {err}");
+        }
     }
+
+    Ok(CodexHistoryToggleOutcome { changed: true })
 }
 
 fn rollback_codex_history_settings(existing: &crate::settings::AppSettings) {
@@ -130,7 +111,7 @@ mod tests {
         ))
         .expect("seed failover snapshot");
 
-        set_unified_session_history_enabled(false, false, false)
+        set_unified_session_history_enabled(&state, false, false)
             .expect("disable unified session history");
 
         let snapshot =
@@ -140,5 +121,25 @@ mod tests {
             ))
             .expect("read failover snapshot");
         assert!(snapshot.is_none(), "toggle must invalidate stale snapshots");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn live_rewrite_failure_rolls_back_toggle_and_migration_intent() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let state = crate::store::AppState::try_new().expect("create app state");
+        let err = set_unified_session_history_enabled_with(&state, true, true, |_| {
+            Err(AppError::Message("forced live rewrite failure".to_string()))
+        })
+        .expect_err("live rewrite failure must reject the setting");
+        assert!(
+            err.to_string().contains("rolled back"),
+            "unexpected error: {err}"
+        );
+
+        let settings = crate::settings::get_settings();
+        assert!(!settings.unify_codex_session_history);
+        assert_eq!(settings.unify_codex_migrate_existing, None);
     }
 }

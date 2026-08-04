@@ -975,17 +975,19 @@ async fn disabling_one_managed_app_restores_only_that_app_while_shared_runtime_k
     let codex_auth: Value =
         read_json_file(&get_codex_auth_path()).expect("read active codex auth after claude stop");
     assert_eq!(
-        codex_auth
-            .get("OPENAI_API_KEY")
-            .and_then(|value| value.as_str()),
-        Some("PROXY_MANAGED"),
-        "Codex should stay in takeover mode while its managed session remains attached"
+        codex_auth, original_codex_auth,
+        "Codex takeover should preserve its native auth while the managed session remains attached"
     );
     let codex_config =
         std::fs::read_to_string(get_codex_config_path()).expect("read active codex config");
     assert!(
         codex_config.contains("127.0.0.1") && codex_config.contains("/v1"),
         "Codex should keep routing through the shared proxy while still attached"
+    );
+    assert!(
+        codex_config.contains("experimental_bearer_token")
+            && codex_config.contains("PROXY_MANAGED"),
+        "Codex should keep its proxy takeover marker in config.toml while still attached"
     );
     assert!(
         state.proxy_service.is_running().await,

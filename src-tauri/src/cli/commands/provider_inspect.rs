@@ -33,6 +33,7 @@ enum ModelFetchSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelFetchTarget {
     base_url: String,
+    is_full_url: bool,
     auth_value: Option<String>,
     custom_user_agent: Option<String>,
     strategy: ProviderModelFetchStrategy,
@@ -46,6 +47,8 @@ struct ClaudeConfig {
     haiku_model: Option<String>,
     sonnet_model: Option<String>,
     opus_model: Option<String>,
+    fable_model: Option<String>,
+    subagent_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,7 +131,7 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
     );
 
     if matches!(app_type, AppType::Claude) {
-        let config = extract_claude_config(&provider.settings_config);
+        let config = extract_claude_config(provider);
 
         println!("\n{}", highlight(texts::api_config_section_header()));
         println!(
@@ -158,10 +161,26 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
             "  Opus:     {}",
             config.opus_model.unwrap_or_else(|| "default".to_string())
         );
+        println!(
+            "  Fable:    {}",
+            config.fable_model.unwrap_or_else(|| "default".to_string())
+        );
+        println!(
+            "  Subagent: {}",
+            config
+                .subagent_model
+                .unwrap_or_else(|| "default".to_string())
+        );
     } else {
         println!("\n{}", highlight("API 配置 / API Configuration"));
         let api_url = extract_api_url(provider, &app_type).unwrap_or_else(|| "N/A".to_string());
         println!("  API URL:  {}", api_url);
+        println!(
+            "  API Key:  {}",
+            provider
+                .configured_api_key(&app_type)
+                .unwrap_or_else(|| "N/A".to_string())
+        );
     }
 
     println!("\n{}", "─".repeat(60));
@@ -329,6 +348,7 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
         ModelFetchSource::Http(target) => runtime.block_on(async {
             crate::cli::tui::fetch_provider_models_for_tui(
                 &target.base_url,
+                target.is_full_url,
                 target.auth_value.as_deref(),
                 target.custom_user_agent.as_deref(),
                 to_tui_strategy(target.strategy),
@@ -686,8 +706,13 @@ fn push_script_usage_lines(lines: &mut Vec<String>, result: &UsageResult) {
         texts::tui_quota_ok()
     ));
     for (idx, item) in items.iter().enumerate() {
-        let label = display_usage_plan_name(item)
-            .map_or_else(|| format!("Usage {}", idx + 1), str::to_string);
+        let label = display_usage_plan_name(item).map_or_else(
+            || format!("Usage {}", idx + 1),
+            |name| match name.trim() {
+                "five_hour" | "weekly_limit" => quota_tier_label(name.trim()),
+                other => other.to_string(),
+            },
+        );
         lines.push(format!("{label}: {}", script_usage_item_text(item)));
     }
 }
@@ -757,6 +782,13 @@ fn model_fetch_target(
         .meta
         .as_ref()
         .and_then(|meta| meta.custom_user_agent.clone());
+    let is_full_url = matches!(app_type, AppType::Claude | AppType::Codex)
+        && !provider.is_codex_oauth()
+        && provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.is_full_url)
+            .unwrap_or(false);
 
     match app_type {
         AppType::Claude => {
@@ -771,6 +803,7 @@ fn model_fetch_target(
 
             Ok(ModelFetchTarget {
                 base_url,
+                is_full_url,
                 auth_value: Some(auth_value),
                 custom_user_agent,
                 strategy,
@@ -779,6 +812,7 @@ fn model_fetch_target(
         AppType::Codex => {
             Ok(ModelFetchTarget {
                 base_url,
+                is_full_url,
                 auth_value: Some(StreamCheckService::extract_codex_key(provider).ok_or_else(
                     || AppError::Message(format!("Missing API key for provider '{}'", provider.id)),
                 )?),
@@ -790,6 +824,7 @@ fn model_fetch_target(
             let (auth_value, strategy) = extract_gemini_model_fetch_auth(provider)?;
             Ok(ModelFetchTarget {
                 base_url,
+                is_full_url,
                 auth_value: Some(auth_value),
                 custom_user_agent,
                 strategy,
@@ -797,6 +832,7 @@ fn model_fetch_target(
         }
         AppType::OpenCode => Ok(ModelFetchTarget {
             base_url,
+            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -815,6 +851,7 @@ fn model_fetch_target(
         }),
         AppType::Hermes => Ok(ModelFetchTarget {
             base_url,
+            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -833,6 +870,7 @@ fn model_fetch_target(
         }),
         AppType::OpenClaw => Ok(ModelFetchTarget {
             base_url,
+            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -871,6 +909,7 @@ fn one_off_model_fetch_target(
 
     Ok(ModelFetchTarget {
         base_url,
+        is_full_url: false,
         auth_value,
         custom_user_agent: None,
         strategy,
@@ -990,18 +1029,15 @@ fn extract_api_url(provider: &Provider, app_type: &AppType) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn extract_claude_config(settings_config: &Value) -> ClaudeConfig {
-    let env = settings_config
+fn extract_claude_config(provider: &Provider) -> ClaudeConfig {
+    let env = provider
+        .settings_config
         .get("env")
         .and_then(|value| value.as_object());
 
     if let Some(env) = env {
         ClaudeConfig {
-            api_key: env
-                .get("ANTHROPIC_AUTH_TOKEN")
-                .or_else(|| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|value| value.as_str())
-                .map(mask_api_key),
+            api_key: provider.configured_api_key(&AppType::Claude),
             base_url: env
                 .get("ANTHROPIC_BASE_URL")
                 .and_then(|value| value.as_str())
@@ -1022,17 +1058,17 @@ fn extract_claude_config(settings_config: &Value) -> ClaudeConfig {
                 .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|value| value.as_str())
                 .map(simplify_model_name),
+            fable_model: env
+                .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+                .and_then(|value| value.as_str())
+                .map(simplify_model_name),
+            subagent_model: env
+                .get("CLAUDE_CODE_SUBAGENT_MODEL")
+                .and_then(|value| value.as_str())
+                .map(simplify_model_name),
         }
     } else {
         ClaudeConfig::default()
-    }
-}
-
-fn mask_api_key(key: &str) -> String {
-    if key.len() > 8 {
-        format!("{}...", &key[..8])
-    } else {
-        key.to_string()
     }
 }
 
@@ -1095,6 +1131,30 @@ mod tests {
     }
 
     #[test]
+    fn cli_api_url_uses_active_codex_model_provider() {
+        let provider = Provider::with_id(
+            "current".to_string(),
+            "Current".to_string(),
+            json!({
+                "config": r#"model_provider = "current"
+
+# [model_providers.old]
+# base_url = "https://old.example.com/v1"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+"#
+            }),
+            None,
+        );
+
+        assert_eq!(
+            extract_api_url(&provider, &AppType::Codex).as_deref(),
+            Some("https://current.example.com/v1")
+        );
+    }
+
+    #[test]
     fn provider_quota_text_shows_script_empty_success_as_not_available_only() {
         let output = quota_output(ProviderUsageQuota::Script(UsageResult {
             success: true,
@@ -1147,6 +1207,26 @@ mod tests {
         )));
         assert!(joined.contains("Usage 1: 2 USD"));
         assert!(joined.contains("Usage 2: 3 USD"));
+    }
+
+    #[test]
+    fn provider_quota_text_localizes_token_plan_tier_names() {
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        let output = quota_output(ProviderUsageQuota::Script(UsageResult {
+            success: true,
+            data: Some(vec![
+                usage_item(Some("five_hour"), Some(100.0)),
+                usage_item(Some("weekly_limit"), Some(0.0)),
+            ]),
+            error: None,
+        }));
+
+        let joined = provider_quota_text_lines(&output).join("\n");
+
+        assert!(joined.contains("5h: 100 USD"), "{joined}");
+        assert!(joined.contains("weekly: 0 USD"), "{joined}");
+        assert!(!joined.contains("five_hour"), "{joined}");
+        assert!(!joined.contains("weekly_limit"), "{joined}");
     }
 
     #[test]
@@ -1265,6 +1345,7 @@ mod tests {
         );
         provider.meta = Some(ProviderMeta {
             custom_user_agent: Some("cc-switch-model-fetch/test".to_string()),
+            is_full_url: Some(true),
             ..Default::default()
         });
 
@@ -1275,6 +1356,7 @@ mod tests {
             target.custom_user_agent.as_deref(),
             Some("cc-switch-model-fetch/test")
         );
+        assert!(target.is_full_url);
     }
 
     #[test]

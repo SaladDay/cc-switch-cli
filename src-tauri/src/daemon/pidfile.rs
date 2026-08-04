@@ -9,7 +9,8 @@
 //!   exit, panic, drop), so even an `abort()` cleans up automatically.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -55,12 +56,30 @@ impl PidFile {
             .write(true)
             .create(true)
             .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&path)
+            .map_err(AcquireError::Io)?;
+
+        let metadata = file.metadata().map_err(AcquireError::Io)?;
+        if !metadata.is_file() {
+            return Err(AcquireError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("daemon pidfile is not a regular file: {}", path.display()),
+            )));
+        }
+        if metadata.nlink() != 1 {
+            return Err(AcquireError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("daemon pidfile must not be hard-linked: {}", path.display()),
+            )));
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(AcquireError::Io)?;
 
         flock_exclusive_nonblock(&file).map_err(|err| {
             if err.kind() == std::io::ErrorKind::WouldBlock {
-                let pid = read_pid(&path);
+                let pid = read_pid(&file);
                 AcquireError::AlreadyHeld { pid }
             } else {
                 AcquireError::Io(err)
@@ -104,12 +123,12 @@ fn flock_exclusive_nonblock(file: &File) -> std::io::Result<()> {
     }
 }
 
-fn read_pid(path: &Path) -> Option<u32> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .trim()
-        .parse::<u32>()
-        .ok()
+fn read_pid(file: &File) -> Option<u32> {
+    let mut reader = file.try_clone().ok()?;
+    reader.rewind().ok()?;
+    let mut value = String::new();
+    reader.read_to_string(&mut value).ok()?;
+    value.trim().parse::<u32>().ok()
 }
 
 #[cfg(test)]
@@ -157,5 +176,29 @@ mod tests {
 
         let second = PidFile::acquire(&pidfile_path).expect("second after release");
         drop(second);
+    }
+
+    #[test]
+    fn acquire_rejects_symlink_and_hardlink_pidfiles() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let target = tmp.path().join("target");
+        std::fs::write(&target, b"sentinel").expect("seed target");
+
+        let symlink_path = tmp.path().join("symlink.pid");
+        symlink(&target, &symlink_path).expect("create symlink");
+        assert!(matches!(
+            PidFile::acquire(&symlink_path),
+            Err(AcquireError::Io(_))
+        ));
+
+        let hardlink_path = tmp.path().join("hardlink.pid");
+        std::fs::hard_link(&target, &hardlink_path).expect("create hardlink");
+        assert!(matches!(
+            PidFile::acquire(&hardlink_path),
+            Err(AcquireError::Io(_))
+        ));
+        assert_eq!(std::fs::read(&target).expect("read target"), b"sentinel");
     }
 }

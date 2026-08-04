@@ -317,9 +317,16 @@ pub(super) fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
         .saturating_add(NAV_TEXT_EXTRA_WIDTH)
         .max(NAV_TEXT_MIN_WIDTH);
 
+    // In ASCII mode the emoji column is collapsed, so it reserves no width.
+    let icon_col_width = if icons::use_emoji() {
+        NAV_ICON_COL_WIDTH
+    } else {
+        0
+    };
+
     NAV_BORDER_WIDTH
         .saturating_add(highlight_width)
-        .saturating_add(NAV_ICON_COL_WIDTH)
+        .saturating_add(icon_col_width)
         .saturating_add(NAV_COL_SPACING)
         .saturating_add(text_col_width)
 }
@@ -329,23 +336,34 @@ pub(super) fn render_nav(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
+    let emoji = icons::use_emoji();
     let rows = app.nav_items().iter().map(|item| {
         let (icon, text) = split_nav_label(nav_label(*item));
-        let icon_clean = cell_pad(icon).replace('\u{FE0F}', "");
-        Row::new(vec![Cell::from(icon_clean), Cell::from(text)])
+        // ASCII mode drops the emoji entirely (an empty, zero-width column)
+        // so wide-rendered glyphs can never push the text past the border.
+        let icon_cell = if emoji {
+            cell_pad(icon).replace('\u{FE0F}', "")
+        } else {
+            String::new()
+        };
+        Row::new(vec![Cell::from(icon_cell), Cell::from(text)])
     });
 
-    let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(10)])
-        .column_spacing(1)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Plain)
-                .border_style(pane_border_style(app, Focus::Nav, theme))
-                .title(format!(" {} ", texts::tui_nav_title())),
-        )
-        .row_highlight_style(selection_style(theme))
-        .highlight_symbol(highlight_symbol(theme));
+    let icon_col_width = if emoji { 3 } else { 0 };
+    let table = Table::new(
+        rows,
+        [Constraint::Length(icon_col_width), Constraint::Min(10)],
+    )
+    .column_spacing(1)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(pane_border_style(app, Focus::Nav, theme))
+            .title(format!(" {} ", texts::tui_nav_title())),
+    )
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
 
     let mut state = TableState::default();
     state.select(Some(app.nav_idx));
@@ -466,28 +484,25 @@ pub(super) fn render_toast(frame: &mut Frame<'_>, app: &App, theme: &super::them
     let Some(toast) = &app.toast else {
         return;
     };
+    if toast.action.is_some() && app.available_toast_action().is_none() {
+        return;
+    }
 
     let content_area = content_pane_rect(frame.area(), theme);
-    let (prefix, color) = match toast.kind {
-        ToastKind::Info => (
-            texts::tui_toast_prefix_info(),
-            transient_feedback_color(theme, &toast.kind),
-        ),
-        ToastKind::Success => (
-            texts::tui_toast_prefix_success(),
-            transient_feedback_color(theme, &toast.kind),
-        ),
-        ToastKind::Warning => (
-            texts::tui_toast_prefix_warning(),
-            transient_feedback_color(theme, &toast.kind),
-        ),
-        ToastKind::Error => (
-            texts::tui_toast_prefix_error(),
-            transient_feedback_color(theme, &toast.kind),
-        ),
+    let prefix = match toast.kind {
+        ToastKind::Info => texts::tui_toast_prefix_info(),
+        ToastKind::Success => texts::tui_toast_prefix_success(),
+        ToastKind::Warning => texts::tui_toast_prefix_warning(),
+        ToastKind::Error => texts::tui_toast_prefix_error(),
+    };
+    let color = if toast.action.is_some() {
+        theme.accent
+    } else {
+        transient_feedback_color(theme, &toast.kind)
     };
     let message = format!("{} {}", prefix.trim(), toast.message);
-    let area = toast_rect(content_area, &message);
+    let layout_text = toast_layout_text(toast, &message);
+    let area = toast_rect(content_area, &layout_text);
 
     frame.render_widget(Clear, area);
 
@@ -509,12 +524,109 @@ pub(super) fn render_toast(frame: &mut Frame<'_>, app: &App, theme: &super::them
     };
 
     frame.render_widget(
-        Paragraph::new(centered_message_lines(&message, inner.width, inner.height))
-            .alignment(Alignment::Center)
-            .style(text_style)
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(toast_content_lines(
+            toast,
+            &message,
+            inner.width,
+            inner.height,
+            theme,
+            text_style,
+        ))
+        .alignment(Alignment::Center)
+        .style(text_style)
+        .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+fn toast_action_label(action: &ToastAction) -> &'static str {
+    match action {
+        ToastAction::CopyToClipboard { .. } => texts::tui_key_copy(),
+    }
+}
+
+fn toast_action_text(action: &ToastAction) -> String {
+    format!(" {} {} ", action.shortcut(), toast_action_label(action))
+}
+
+fn toast_action_preview(toast: &Toast) -> Option<String> {
+    let text = toast.copy_text()?;
+    let preview = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    Some(if preview.is_empty() {
+        "—".to_string()
+    } else {
+        preview
+    })
+}
+
+pub(super) fn toast_layout_text(toast: &Toast, message: &str) -> String {
+    let (Some(action), Some(preview)) = (toast.action.as_ref(), toast_action_preview(toast)) else {
+        return message.to_string();
+    };
+    format!("{message}\n{preview}\n\n{}", toast_action_text(action))
+}
+
+pub(super) fn toast_content_lines(
+    toast: &Toast,
+    message: &str,
+    width: u16,
+    height: u16,
+    theme: &super::theme::Theme,
+    message_style: Style,
+) -> Vec<Line<'static>> {
+    let Some(action) = toast.action.as_ref() else {
+        return centered_message_lines(message, width, height);
+    };
+
+    let mut message_lines = wrap_message_lines(message, width)
+        .into_iter()
+        .map(|line| Line::styled(line, message_style))
+        .collect::<Vec<_>>();
+
+    let mut preview_lines = Vec::new();
+    if let Some(preview) = toast_action_preview(toast) {
+        let preview_style = if theme.no_color {
+            Style::default()
+        } else {
+            Style::default().fg(theme.fg_strong).bg(theme.surface)
+        };
+        preview_lines.extend(
+            wrap_message_lines(&preview, width)
+                .into_iter()
+                .map(|line| Line::styled(line, preview_style)),
+        );
+    }
+
+    let action_text = truncate_to_display_width(&toast_action_text(action), width);
+    let action_line = Line::styled(action_text, active_chip_style(theme));
+    let max_lines = usize::from(height);
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    let footer_height = if max_lines >= 3 { 2 } else { 1 };
+    let body_height = max_lines.saturating_sub(footer_height);
+    if message_lines.len().saturating_add(preview_lines.len()) > body_height {
+        preview_lines.truncate(body_height);
+        message_lines.truncate(body_height.saturating_sub(preview_lines.len()));
+    }
+    message_lines.extend(preview_lines);
+    let body_lines = message_lines;
+
+    let unused_body_rows = body_height.saturating_sub(body_lines.len());
+    let body_top_padding = unused_body_rows / 2;
+    let body_bottom_padding = unused_body_rows.saturating_sub(body_top_padding);
+    let mut lines = Vec::with_capacity(max_lines);
+    lines.extend((0..body_top_padding).map(|_| Line::raw("")));
+    lines.extend(body_lines);
+    lines.extend((0..body_bottom_padding).map(|_| Line::raw("")));
+    if footer_height == 2 {
+        lines.push(Line::raw(""));
+    }
+    lines.push(action_line);
+    lines
 }
 
 pub(super) fn toast_rect(content_area: Rect, message: &str) -> Rect {

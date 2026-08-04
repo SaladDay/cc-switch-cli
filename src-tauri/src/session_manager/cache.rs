@@ -11,7 +11,7 @@
 //! history. Only file-parse-backed providers use this cache; SQLite-only sources
 //! (opencode.db / hermes state.db) are a single query and stay uncached.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
@@ -29,6 +29,9 @@ pub const SCAN_CACHE_VERSION: i64 = 1;
 #[derive(Debug, Clone)]
 pub struct FileScanTarget {
     pub path: PathBuf,
+    /// Raw mtime of the source itself. Unlike `mtime_ns`, sibling fingerprint
+    /// decoration must never alter this cache-consistency evidence.
+    pub source_mtime_ns: i64,
     pub mtime_ns: i64,
     pub size: i64,
 }
@@ -110,22 +113,6 @@ pub struct SessionScanCacheEntry {
     pub cache_version: i64,
 }
 
-/// The result of reconciling the on-disk files with the cached rows.
-#[derive(Debug, Default)]
-pub struct ScanDelta {
-    /// The full, merged session list (cache hits plus freshly parsed files).
-    pub sessions: Vec<SessionMeta>,
-    /// Rows to write back (new or changed files that parsed successfully).
-    pub upserts: Vec<SessionScanCacheEntry>,
-    /// Cache keys to remove (files that disappeared or no longer parse).
-    pub deletes: Vec<String>,
-    /// Number of sessions returned this round that were deliberately not cached
-    /// (the `cacheable` predicate rejected them, e.g. OpenCode no-title sessions
-    /// whose summary derives from sibling `part/` files the fingerprint cannot
-    /// track). They re-parse every scan; surfaced only for observability logging.
-    pub uncacheable: usize,
-}
-
 /// `stat` a single path, returning its `(mtime_ns, size)`. Returns `None` when the
 /// path is missing, is not a regular file, or cannot be inspected.
 pub fn stat_target(path: &Path) -> Option<FileScanTarget> {
@@ -152,23 +139,16 @@ pub(crate) fn stat_target_strict(path: &Path) -> std::io::Result<Option<FileScan
         .unwrap_or(0);
     Ok(Some(FileScanTarget {
         path: path.to_path_buf(),
+        source_mtime_ns: mtime_ns,
         mtime_ns,
         size: meta.len() as i64,
     }))
 }
 
-/// Mix a sibling dependency's `(mtime, size)` into a target's fingerprint.
-///
-/// Some providers derive parts of `SessionMeta` from files *next to* the
-/// session file (Gemini's `.project_root`, OpenClaw's `sessions.json`
-/// display-name map, OpenCode's per-session message directory). The cache
-/// fingerprint must change when those change too, or the cached row keeps
-/// serving stale derived fields until a manual reload. Missing siblings are
-/// simply not mixed in — their later appearance changes the fingerprint.
-/// Works for directories as well (a directory's mtime changes when entries
-/// are added or removed).
-pub fn mix_sibling_into_fingerprint(target: &mut FileScanTarget, sibling: &Path) {
-    let _ = mix_sibling_into_fingerprint_strict(target, sibling);
+fn stable_source_mtime_ns(before: &FileScanTarget, after: Option<&FileScanTarget>) -> Option<i64> {
+    after
+        .filter(|after| same_fingerprint(before, after))
+        .map(|_| before.source_mtime_ns)
 }
 
 /// Strict sibling fingerprinting for authoritative streams. A missing optional
@@ -192,92 +172,6 @@ pub(crate) fn mix_sibling_into_fingerprint_strict(
     target.mtime_ns = target.mtime_ns.max(sibling_mtime);
     target.size = target.size.wrapping_add(meta.len() as i64);
     Ok(())
-}
-
-/// Recursively collect files whose extension equals `ext`, statting each once.
-/// Mirrors the directory walks the file scanners already use, but reads only
-/// metadata (readdir + stat) rather than opening file contents.
-#[allow(dead_code)]
-pub fn collect_targets_recursive(root: &Path, ext: &str, out: &mut Vec<FileScanTarget>) {
-    let _ = collect_targets_recursive_cancellable(root, ext, out, &|| false);
-}
-
-/// Cancellation-aware form of [`collect_targets_recursive`]. Returns `false`
-/// when traversal stopped early; callers must discard the partial target list.
-pub(crate) fn collect_targets_recursive_cancellable(
-    root: &Path,
-    ext: &str,
-    out: &mut Vec<FileScanTarget>,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> bool {
-    if is_cancelled() {
-        return false;
-    }
-    if !root.exists() {
-        return true;
-    }
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return true,
-    };
-    for entry in entries.flatten() {
-        if is_cancelled() {
-            return false;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            if !collect_targets_recursive_cancellable(&path, ext, out, is_cancelled) {
-                return false;
-            }
-        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
-            if let Some(target) = stat_target(&path) {
-                out.push(target);
-            }
-        }
-    }
-    true
-}
-
-/// Collect files **directly inside** `dir` whose extension equals `ext`, statting
-/// each once. Unlike [`collect_targets_recursive`] this does **not** descend into
-/// subdirectories — it mirrors the single-level `read_dir` walk that some
-/// providers' `scan_sessions` use (Gemini `chats/*.json`, OpenClaw
-/// `sessions/*.jsonl`), so the cache path collects exactly the same files the
-/// legacy path shows. `stat_target` excludes non-regular files, so a directory
-/// whose name happens to end in `.ext` is skipped just like the legacy walk.
-#[allow(dead_code)]
-pub fn collect_targets_flat(dir: &Path, ext: &str, out: &mut Vec<FileScanTarget>) {
-    let _ = collect_targets_flat_cancellable(dir, ext, out, &|| false);
-}
-
-/// Cancellation-aware form of [`collect_targets_flat`]. Returns `false` when
-/// the partial result must be discarded.
-pub(crate) fn collect_targets_flat_cancellable(
-    dir: &Path,
-    ext: &str,
-    out: &mut Vec<FileScanTarget>,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> bool {
-    if is_cancelled() {
-        return false;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return true,
-    };
-    for entry in entries.flatten() {
-        if is_cancelled() {
-            return false;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some(ext) {
-            continue;
-        }
-        if let Some(target) = stat_target(&path) {
-            out.push(target);
-        }
-    }
-    true
 }
 
 /// Visit matching files one at a time without first collecting the directory
@@ -446,507 +340,6 @@ pub(crate) fn visit_targets_flat_cancellable(
         visit_target_entry_flat(entry, ext, on_target)?;
     }
     Ok(())
-}
-
-/// Reconcile the freshly-`stat`ed `targets` against the `cached` rows.
-///
-/// A target reuses its cached [`SessionMeta`] only when (unless `force`) its
-/// cache version matches [`SCAN_CACHE_VERSION`] and its `(mtime_ns, size)` are
-/// unchanged and the stored JSON still deserializes; otherwise it is re-parsed.
-/// Cached keys that no longer keep a live session — the file vanished, or a
-/// re-parse yielded nothing — are collected for deletion.
-///
-/// `cacheable` gates whether a parsed [`SessionMeta`] may be cached at all. Most
-/// providers pass `|_| true`; OpenCode passes `|m| m.title.is_some()` because a
-/// no-title session's summary is derived from sibling `part/` files that the
-/// `(mtime_ns, size)` fingerprint cannot observe — such a row would otherwise
-/// serve a stale summary indefinitely. An uncacheable row still enters the
-/// returned list but is never upserted, and any pre-existing cached row for its
-/// path is deleted so the next scan re-parses it instead of hitting a stale row.
-///
-/// `restat` re-`stat`s a target's path just before its parse result is written
-/// (fix 3). Production passes [`stat_target`]; only when the re-stat still returns
-/// the *same* `(mtime_ns, size)` as the pre-parse target is the row upserted. This
-/// closes a delete/rewrite race: a TUI scan thread that read a session the user
-/// then deleted (its sidecar row already purged) must not upsert the stale row
-/// back — otherwise a later restart's stale first-paint snapshot resurrects the
-/// deleted session. A re-stat that vanished or changed skips the upsert and, by
-/// not entering `keep`, lets any pre-existing cache row for that path be deleted;
-/// the file is reprocessed on the next scan.
-#[allow(dead_code)]
-pub fn revalidate<F, C, R>(
-    provider: &str,
-    targets: Vec<FileScanTarget>,
-    cached: HashMap<String, CachedScanRow>,
-    force: bool,
-    parse: F,
-    cacheable: C,
-    restat: R,
-) -> ScanDelta
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    C: Fn(&SessionMeta) -> bool + Sync,
-    R: Fn(&Path) -> Option<FileScanTarget>,
-{
-    revalidate_progressive(
-        provider,
-        targets,
-        cached,
-        force,
-        parse,
-        cacheable,
-        restat,
-        |_| {},
-    )
-}
-
-/// Progressive variant of [`revalidate`]. `on_session` runs on the calling
-/// scan thread as soon as each cache hit or parsed session becomes available;
-/// it is never called from parser worker threads. The returned delta remains
-/// complete and preserves the same authoritative ordering/semantics as
-/// [`revalidate`].
-#[expect(
-    clippy::too_many_arguments,
-    reason = "cache reconciliation injects parsing, cacheability, restat, and progress policies"
-)]
-pub fn revalidate_progressive<F, C, R, P>(
-    provider: &str,
-    targets: Vec<FileScanTarget>,
-    cached: HashMap<String, CachedScanRow>,
-    force: bool,
-    parse: F,
-    cacheable: C,
-    restat: R,
-    on_session: P,
-) -> ScanDelta
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    C: Fn(&SessionMeta) -> bool + Sync,
-    R: Fn(&Path) -> Option<FileScanTarget>,
-    P: FnMut(&SessionMeta),
-{
-    revalidate_progressive_cancellable(
-        provider,
-        targets,
-        cached,
-        force,
-        parse,
-        cacheable,
-        restat,
-        on_session,
-        &|| false,
-    )
-    .expect("non-cancellable session scan cannot be cancelled")
-}
-
-/// Cancellation-aware cache reconciliation. A cancelled pass returns `None`
-/// and never persists a partial delta, so an obsolete search cannot delete or
-/// overwrite sidecar rows discovered by an authoritative scan.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "cache reconciliation injects parsing, cacheability, restat, progress, and cancellation policies"
-)]
-pub(crate) fn revalidate_progressive_cancellable<F, C, R, P>(
-    provider: &str,
-    targets: Vec<FileScanTarget>,
-    cached: HashMap<String, CachedScanRow>,
-    force: bool,
-    parse: F,
-    cacheable: C,
-    restat: R,
-    mut on_session: P,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<ScanDelta>
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    C: Fn(&SessionMeta) -> bool + Sync,
-    R: Fn(&Path) -> Option<FileScanTarget>,
-    P: FnMut(&SessionMeta),
-{
-    let mut sessions = Vec::new();
-    let mut keep: HashSet<String> = HashSet::new();
-    let mut to_parse: Vec<FileScanTarget> = Vec::new();
-
-    for target in targets {
-        if is_cancelled() {
-            return None;
-        }
-        let key = target.path.to_string_lossy().to_string();
-        if !force {
-            if let Some(row) = cached.get(&key) {
-                if row.cache_version == SCAN_CACHE_VERSION
-                    && row.mtime_ns == target.mtime_ns
-                    && row.size == target.size
-                {
-                    if let Ok(meta) = serde_json::from_str::<SessionMeta>(&row.meta_json) {
-                        // 命中捷径仅对可缓存行有效：升级前遗留的不可缓存行
-                        // （如曾被误缓存的无 title 会话）不走捷径，落到重新
-                        // 解析，随后旧行走 deletes 被清除。
-                        if cacheable(&meta) {
-                            on_session(&meta);
-                            sessions.push(meta);
-                            keep.insert(key);
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-        to_parse.push(target);
-    }
-
-    // Parse only the new/changed files, reusing the parallel fan-out so the
-    // first-ever run (empty cache → every file parses) keeps today's throughput.
-    let parsed =
-        parse_targets_parallel_cancellable(&to_parse, &parse, &mut on_session, is_cancelled)?;
-    let mut upserts = Vec::new();
-    let mut uncacheable = 0usize;
-    for (target, meta) in to_parse.into_iter().zip(parsed) {
-        if is_cancelled() {
-            return None;
-        }
-        let key = target.path.to_string_lossy().to_string();
-        let Some(meta) = meta else {
-            continue; // not a session file; leave it out of `keep` so any stale row is deleted
-        };
-        // 不可缓存行：进返回列表但不落缓存、不进 keep（若缓存里有同 key 旧行
-        // 会走 deletes 删除），保证下轮继续重新解析而非命中过期行。
-        if !cacheable(&meta) {
-            uncacheable += 1;
-            sessions.push(meta);
-            continue;
-        }
-        let Ok(meta_json) = serde_json::to_string(&meta) else {
-            continue;
-        };
-        // fix 3：upsert 前对该文件再 stat 一次，关闭 parse 期间的删除/改写竞态。
-        // 仅当文件仍在、且 (mtime_ns, size) 与 parse 前完全一致时才写缓存；否则
-        // 跳过 upsert 且不进 keep（其旧缓存行由末尾 filter 纳入 deletes），下轮
-        // 重新处理该文件。这样在途扫描线程不会把已删/已改文件的旧 row 写回
-        // sidecar，避免重启后 stale 首屏快照复活已删会话。仍把已解析的 meta 放入
-        // 返回列表（本轮 UI 由内存 tombstone 过滤已删会话；此处只管缓存不被污染）。
-        match restat(&target.path) {
-            Some(fresh) if fresh.mtime_ns == target.mtime_ns && fresh.size == target.size => {
-                keep.insert(key.clone());
-                upserts.push(SessionScanCacheEntry {
-                    file_path: key,
-                    provider: provider.to_string(),
-                    mtime_ns: target.mtime_ns,
-                    size: target.size,
-                    meta_json,
-                    cache_version: SCAN_CACHE_VERSION,
-                });
-            }
-            _ => {
-                log::debug!(
-                    "[SESSION-SCAN] provider={provider} re-stat 失配，跳过 upsert（旧缓存行将删除）: {key}"
-                );
-            }
-        }
-        sessions.push(meta);
-    }
-
-    let mut deletes = Vec::new();
-    for key in cached.into_keys() {
-        if is_cancelled() {
-            return None;
-        }
-        if !keep.contains(&key) {
-            deletes.push(key);
-        }
-    }
-
-    if is_cancelled() {
-        return None;
-    }
-
-    Some(ScanDelta {
-        sessions,
-        upserts,
-        deletes,
-        uncacheable,
-    })
-}
-
-/// Parse `targets` into metadata, preserving input order and pairing each result
-/// with its target. Small inputs run serially; larger ones fan out with the same
-/// conservative worker cap as [`super::providers::utils::parse_sessions_parallel`]
-/// so the background scan never starves the single-threaded UI loop.
-fn parse_targets_parallel<F, P>(
-    targets: &[FileScanTarget],
-    parse: &F,
-    on_session: &mut P,
-) -> Vec<Option<SessionMeta>>
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    P: FnMut(&SessionMeta),
-{
-    parse_targets_parallel_cancellable(targets, parse, on_session, &|| false)
-        .expect("non-cancellable session parse cannot be cancelled")
-}
-
-fn parse_targets_parallel_cancellable<F, P>(
-    targets: &[FileScanTarget],
-    parse: &F,
-    on_session: &mut P,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<Option<SessionMeta>>>
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    P: FnMut(&SessionMeta),
-{
-    let workers = std::thread::available_parallelism()
-        .map(|n| (n.get() / 2).max(1))
-        .unwrap_or(2)
-        .min(4);
-    if workers <= 1 || targets.len() < 64 {
-        let mut parsed = Vec::with_capacity(targets.len());
-        for target in targets {
-            if is_cancelled() {
-                return None;
-            }
-            let result = parse(&target.path);
-            if let Some(meta) = result.as_ref() {
-                on_session(meta);
-            }
-            parsed.push(result);
-        }
-        return Some(parsed);
-    }
-    let chunk_size = targets.len().div_ceil(workers);
-    std::thread::scope(|scope| {
-        let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let handles: Vec<_> = targets
-            .chunks(chunk_size)
-            .enumerate()
-            .map(|(chunk_index, chunk)| {
-                let result_tx = result_tx.clone();
-                scope.spawn(move || {
-                    let offset = chunk_index * chunk_size;
-                    for (within_chunk, target) in chunk.iter().enumerate() {
-                        if is_cancelled() {
-                            break;
-                        }
-                        if result_tx
-                            .send((offset + within_chunk, parse(&target.path)))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                })
-            })
-            .collect();
-        drop(result_tx);
-
-        let mut parsed: Vec<Option<Option<SessionMeta>>> = std::iter::repeat_with(|| None)
-            .take(targets.len())
-            .collect();
-        while !is_cancelled() {
-            match result_rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok((index, result)) => {
-                    if let Some(meta) = result.as_ref() {
-                        on_session(meta);
-                    }
-                    parsed[index] = Some(result);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        drop(result_rx);
-        for handle in handles {
-            // Propagate parser panics to the outer session worker catch_unwind.
-            handle.join().expect("session parse worker panicked");
-        }
-        if is_cancelled() {
-            return None;
-        }
-        Some(
-            parsed
-                .into_iter()
-                .map(|result| result.expect("session parse result index must be filled"))
-                .collect(),
-        )
-    })
-}
-
-/// Run the cache-aware scan for one file-parse-backed provider: load the cached
-/// rows, reconcile them against the current files, persist the delta, and return
-/// the (unsorted) session list. Store errors degrade gracefully — a failed load
-/// behaves like an empty cache (full parse) and failed writes are logged — so a
-/// cache hiccup never breaks scanning.
-pub fn scan_provider_cached<F, C>(
-    store: &ScanCacheStore,
-    provider: &str,
-    targets: Vec<FileScanTarget>,
-    force: bool,
-    parse: F,
-    cacheable: C,
-) -> Vec<SessionMeta>
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    C: Fn(&SessionMeta) -> bool + Sync,
-{
-    scan_provider_cached_progressive(store, provider, targets, force, parse, cacheable, |_| {})
-}
-
-/// Progressive version of [`scan_provider_cached`]. The callback is invoked
-/// before the full provider scan completes whenever at least one valid session
-/// can be produced, including on a first run with an empty sidecar.
-pub fn scan_provider_cached_progressive<F, C, P>(
-    store: &ScanCacheStore,
-    provider: &str,
-    targets: Vec<FileScanTarget>,
-    force: bool,
-    parse: F,
-    cacheable: C,
-    on_session: P,
-) -> Vec<SessionMeta>
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    C: Fn(&SessionMeta) -> bool + Sync,
-    P: FnMut(&SessionMeta),
-{
-    let started = std::time::Instant::now();
-    let cached = store.load_for_provider(provider).unwrap_or_else(|err| {
-        log::warn!("session scan cache load failed for {provider}: {err}");
-        HashMap::new()
-    });
-
-    let target_count = targets.len();
-    let cached_count = cached.len();
-    // fix 3：生产侧用真实 stat_target 做 upsert 前的 re-stat（关闭 parse 期间竞态）。
-    let delta = revalidate_progressive(
-        provider,
-        targets,
-        cached,
-        force,
-        parse,
-        cacheable,
-        stat_target,
-        on_session,
-    );
-    log::debug!(
-        "[SESSION-SCAN] provider={provider} targets={target_count} cached={cached_count} \
-         reparsed={} deleted={} uncacheable={} force={force} elapsed={:?}",
-        delta.upserts.len(),
-        delta.deletes.len(),
-        delta.uncacheable,
-        started.elapsed()
-    );
-
-    if !delta.upserts.is_empty() {
-        if let Err(err) = store.upsert_batch(&delta.upserts) {
-            log::warn!("session scan cache upsert failed for {provider}: {err}");
-        }
-    }
-    if !delta.deletes.is_empty() {
-        if let Err(err) = store.delete_paths(&delta.deletes) {
-            log::warn!("session scan cache delete failed for {provider}: {err}");
-        }
-    }
-
-    delta.sessions
-}
-
-/// Search-only variant of [`scan_provider_cached_progressive`]. Cancellation
-/// discards the partial reconciliation before any cache write.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "provider scan receives parser, cacheability, progress, and cancellation policies"
-)]
-pub(crate) fn scan_provider_cached_progressive_cancellable<F, C, P>(
-    store: &ScanCacheStore,
-    provider: &str,
-    targets: Vec<FileScanTarget>,
-    force: bool,
-    parse: F,
-    cacheable: C,
-    on_session: P,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>>
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    C: Fn(&SessionMeta) -> bool + Sync,
-    P: FnMut(&SessionMeta),
-{
-    let started = std::time::Instant::now();
-    let cached = match store.load_for_provider_cancellable(provider, is_cancelled) {
-        Ok(Some(cached)) => cached,
-        Ok(None) => return None,
-        Err(err) => {
-            log::warn!("session scan cache load failed for {provider}: {err}");
-            HashMap::new()
-        }
-    };
-
-    let target_count = targets.len();
-    let cached_count = cached.len();
-    let delta = revalidate_progressive_cancellable(
-        provider,
-        targets,
-        cached,
-        force,
-        parse,
-        cacheable,
-        stat_target,
-        on_session,
-        is_cancelled,
-    )?;
-    if is_cancelled() {
-        return None;
-    }
-    log::debug!(
-        "[SESSION-SEARCH-SCAN] provider={provider} targets={target_count} cached={cached_count} \
-         reparsed={} deleted={} uncacheable={} force={force} elapsed={:?}",
-        delta.upserts.len(),
-        delta.deletes.len(),
-        delta.uncacheable,
-        started.elapsed()
-    );
-
-    if is_cancelled() {
-        None
-    } else {
-        Some(delta.sessions)
-    }
-}
-
-/// Progressive uncached scan used when the local sidecar cannot be opened.
-/// Parsing still streams completed rows to the worker while retaining every
-/// result for the final authoritative Vec.
-pub fn scan_provider_uncached_progressive<F, P>(
-    targets: Vec<FileScanTarget>,
-    parse: F,
-    mut on_session: P,
-) -> Vec<SessionMeta>
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    P: FnMut(&SessionMeta),
-{
-    parse_targets_parallel(&targets, &parse, &mut on_session)
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-pub(crate) fn scan_provider_uncached_progressive_cancellable<F, P>(
-    targets: Vec<FileScanTarget>,
-    parse: F,
-    mut on_session: P,
-    is_cancelled: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<SessionMeta>>
-where
-    F: Fn(&Path) -> Option<SessionMeta> + Sync,
-    P: FnMut(&SessionMeta),
-{
-    Some(
-        parse_targets_parallel_cancellable(&targets, &parse, &mut on_session, is_cancelled)?
-            .into_iter()
-            .flatten()
-            .collect(),
-    )
 }
 
 /// Stream a file-backed provider into an owned-row sink without ever building
@@ -1133,6 +526,10 @@ where
             })
             .and_then(|row| serde_json::from_str::<SessionMeta>(&row.meta_json).ok())
             .filter(|meta| cacheable(meta))
+            .filter(|meta| {
+                meta.source_mtime_ns
+                    .is_none_or(|mtime| mtime == target.source_mtime_ns)
+            })
             .filter(|_| {
                 observed
                     .as_ref()
@@ -1159,8 +556,12 @@ where
             .as_ref()
             .is_some_and(|fresh| same_fingerprint(fresh, target));
 
-        let (settled_target, settled_meta) = if stable {
-            (target.clone(), parsed)
+        let (settled_target, settled_meta, settled_source_mtime_ns) = if stable {
+            (
+                target.clone(),
+                parsed,
+                stable_source_mtime_ns(target, observed.as_ref()),
+            )
         } else {
             let Some(fresh) = observed else {
                 // The target existed at discovery but disappeared during parse.
@@ -1195,10 +596,11 @@ where
             {
                 return Err(StreamScanStop::Incomplete);
             }
-            (fresh, retry)
+            let source_mtime_ns = stable_source_mtime_ns(&fresh, after_retry.as_ref());
+            (fresh, retry, source_mtime_ns)
         };
 
-        let Some(meta) = settled_meta else {
+        let Some(mut meta) = settled_meta else {
             // A stable parse-to-None means this file is authoritatively not a
             // session. Only this case may remove an older cache row.
             if cached.contains_key(&key) {
@@ -1206,6 +608,7 @@ where
             }
             return Ok(());
         };
+        meta.source_mtime_ns = settled_source_mtime_ns;
 
         if cacheable(&meta) {
             match serde_json::to_string(&meta) {
@@ -1249,7 +652,9 @@ where
 }
 
 fn same_fingerprint(left: &FileScanTarget, right: &FileScanTarget) -> bool {
-    left.mtime_ns == right.mtime_ns && left.size == right.size
+    left.source_mtime_ns == right.source_mtime_ns
+        && left.mtime_ns == right.mtime_ns
+        && left.size == right.size
 }
 
 fn authoritative_restat<R>(
@@ -1289,7 +694,10 @@ where
         return None;
     }
     let meta = serde_json::from_str::<SessionMeta>(&row.meta_json).ok()?;
-    cacheable(&meta).then_some(meta)
+    cacheable(&meta).then_some(meta).filter(|meta| {
+        meta.source_mtime_ns
+            .is_none_or(|mtime| mtime == target.source_mtime_ns)
+    })
 }
 
 /// Parse a fixed batch on a bounded worker pool and deliver results in actual
@@ -1403,158 +811,6 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    /// A parse closure that records how often it runs and derives the session id
-    /// from the file's first line, so a cache hit (no re-read) is observable both
-    /// by the counter staying flat and by the returned id being the stale one.
-    fn counting_parse<'a>(
-        counter: &'a AtomicUsize,
-    ) -> impl Fn(&Path) -> Option<SessionMeta> + Sync + 'a {
-        move |path: &Path| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            let content = std::fs::read_to_string(path).ok()?;
-            let id = content.lines().next()?.trim().to_string();
-            if id.is_empty() {
-                return None;
-            }
-            let mut meta = sample_meta(&id);
-            meta.source_path = Some(path.to_string_lossy().to_string());
-            Some(meta)
-        }
-    }
-
-    #[test]
-    fn cache_lifecycle_seed_reuse_change_and_delete() {
-        let store = ScanCacheStore::in_memory().expect("memory store");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("s.jsonl");
-        std::fs::write(&path, "id-001\n").expect("write");
-
-        let targets = || {
-            let mut out = Vec::new();
-            collect_targets_recursive(dir.path(), "jsonl", &mut out);
-            out
-        };
-        let counter = AtomicUsize::new(0);
-
-        // 1. First scan seeds the cache and parses the one file.
-        let first = scan_provider_cached(
-            &store,
-            "claude",
-            targets(),
-            false,
-            counting_parse(&counter),
-            |_| true,
-        );
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].session_id, "id-001");
-
-        // 2. Rewrite the content to a different value of the SAME byte length and
-        //    restore the mtime, so `(mtime_ns, size)` is unchanged. The second scan
-        //    must NOT re-read the file: the counter stays flat and the returned id
-        //    is the stale cached "id-001", proving the corrupted content was ignored.
-        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        std::fs::write(&path, "id-XXX\n").expect("rewrite same length");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(original_mtime)
-            .expect("restore mtime");
-
-        let second = scan_provider_cached(
-            &store,
-            "claude",
-            targets(),
-            false,
-            counting_parse(&counter),
-            |_| true,
-        );
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "unchanged file must not re-parse"
-        );
-        assert_eq!(second[0].session_id, "id-001");
-
-        // 3. Append (changes size, so the file re-parses) → picks up new content.
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap();
-            writeln!(f, "extra").unwrap();
-        }
-        // The first line is still "id-XXX" from step 2's rewrite.
-        let third = scan_provider_cached(
-            &store,
-            "claude",
-            targets(),
-            false,
-            counting_parse(&counter),
-            |_| true,
-        );
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            2,
-            "changed file must re-parse"
-        );
-        assert_eq!(third[0].session_id, "id-XXX");
-
-        // 4. Delete the file → its cache row is removed and the list is empty.
-        std::fs::remove_file(&path).expect("delete");
-        let fourth = scan_provider_cached(
-            &store,
-            "claude",
-            targets(),
-            false,
-            counting_parse(&counter),
-            |_| true,
-        );
-        assert!(fourth.is_empty());
-        assert!(store.load_for_provider("claude").expect("load").is_empty());
-    }
-
-    #[test]
-    fn cancellable_revalidation_stops_parser_fanout_and_discards_partial_delta() {
-        let cancelled = AtomicBool::new(false);
-        let parsed = AtomicUsize::new(0);
-        let targets: Vec<_> = (0..1_000)
-            .map(|index| FileScanTarget {
-                path: PathBuf::from(format!("/virtual/session-{index}.jsonl")),
-                mtime_ns: 1,
-                size: 1,
-            })
-            .collect();
-
-        let result = revalidate_progressive_cancellable(
-            "claude",
-            targets,
-            HashMap::new(),
-            false,
-            |_| {
-                let count = parsed.fetch_add(1, Ordering::AcqRel) + 1;
-                if count >= 4 {
-                    cancelled.store(true, Ordering::Release);
-                }
-                Some(sample_meta(&format!("session-{count}")))
-            },
-            |_| true,
-            |_| None,
-            |_| {},
-            &|| cancelled.load(Ordering::Acquire),
-        );
-
-        assert!(
-            result.is_none(),
-            "cancelled scan must not expose a partial delta"
-        );
-        assert!(
-            parsed.load(Ordering::Acquire) < 32,
-            "parser workers should stop near the cancellation point"
-        );
-    }
 
     #[test]
     fn streaming_scan_never_retains_more_than_one_fixed_batch() {
@@ -1786,6 +1042,7 @@ mod tests {
                 } else {
                     format!("fast-{index}.jsonl")
                 }),
+                source_mtime_ns: 1,
                 mtime_ns: 1,
                 size: 1,
             })
@@ -1889,64 +1146,6 @@ mod tests {
         assert_eq!(store.load_for_provider("claude").expect("cache").len(), 299);
     }
 
-    /// 平铺收集器只取目录直属文件、不递归子目录，且跳过非目标扩展名。
-    #[test]
-    fn collect_targets_flat_ignores_subdirectories() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("archive")).expect("mkdir");
-        // 直属目标文件应被收集
-        std::fs::write(root.join("a.json"), "{}").expect("write");
-        std::fs::write(root.join("b.json"), "{}").expect("write");
-        // 非目标扩展名跳过
-        std::fs::write(root.join("note.txt"), "x").expect("write");
-        // 嵌套子目录里的文件不应被收集
-        std::fs::write(root.join("archive").join("c.json"), "{}").expect("write");
-
-        let mut out = Vec::new();
-        collect_targets_flat(root, "json", &mut out);
-
-        assert_eq!(out.len(), 2, "只收集直属 .json 文件");
-        assert!(out.iter().all(|t| t.path.parent() == Some(root)));
-        assert!(!out
-            .iter()
-            .any(|t| t.path.file_name().and_then(|n| n.to_str()) == Some("c.json")));
-    }
-
-    #[test]
-    fn force_reload_reparses_even_when_unchanged() {
-        let store = ScanCacheStore::in_memory().expect("memory store");
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("s.jsonl"), "id-1\n").expect("write");
-
-        let targets = || {
-            let mut out = Vec::new();
-            collect_targets_recursive(dir.path(), "jsonl", &mut out);
-            out
-        };
-        let counter = AtomicUsize::new(0);
-
-        scan_provider_cached(
-            &store,
-            "claude",
-            targets(),
-            false,
-            counting_parse(&counter),
-            |_| true,
-        );
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-        // A forced reload re-parses the unchanged file (mtime/size ignored).
-        scan_provider_cached(
-            &store,
-            "claude",
-            targets(),
-            true,
-            counting_parse(&counter),
-            |_| true,
-        );
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
-    }
-
     fn sample_meta(session_id: &str) -> SessionMeta {
         SessionMeta {
             provider_id: "claude".to_string(),
@@ -1955,32 +1154,13 @@ mod tests {
             summary: Some("summary".to_string()),
             project_dir: Some("/tmp/project".to_string()),
             created_at: Some(1_000),
+            source_mtime_ns: None,
             last_active_at: Some(2_000),
             source_path: Some(format!("/tmp/{session_id}.jsonl")),
+            usage: None,
             resume_command: Some(format!("claude --resume {session_id}")),
         }
     }
-
-    fn cached_row(target: &FileScanTarget, meta: &SessionMeta, version: i64) -> CachedScanRow {
-        CachedScanRow {
-            mtime_ns: target.mtime_ns,
-            size: target.size,
-            cache_version: version,
-            meta_json: serde_json::to_string(meta).unwrap(),
-        }
-    }
-
-    /// fix 3 测试辅助：模拟"parse 期间文件未变"的 re-stat——按路径回显传入 targets
-    /// 的 `(mtime_ns, size)`。用于以假路径断言 upsert 的既有用例，使 re-stat 恒命中、
-    /// 保持既有语义（未知路径回 None，与真实文件消失一致）。
-    fn echoing_restat(targets: &[FileScanTarget]) -> impl Fn(&Path) -> Option<FileScanTarget> {
-        let map: HashMap<PathBuf, FileScanTarget> = targets
-            .iter()
-            .map(|t| (t.path.clone(), t.clone()))
-            .collect();
-        move |p: &Path| map.get(p).cloned()
-    }
-
     #[test]
     fn session_meta_json_roundtrip_is_identity() {
         let meta = sample_meta("abc");
@@ -2001,346 +1181,85 @@ mod tests {
     }
 
     #[test]
-    fn revalidate_reuses_unchanged_and_reparses_changed() {
-        let unchanged = FileScanTarget {
-            path: PathBuf::from("/tmp/a.jsonl"),
-            mtime_ns: 100,
-            size: 10,
+    fn sibling_fingerprint_decoration_preserves_the_source_file_mtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("session.json");
+        let sibling = temp.path().join(".project_root");
+        std::fs::write(&source, "{}").expect("write source");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::fs::write(&sibling, "/tmp/project").expect("write sibling");
+
+        let mut target = stat_target(&source).expect("source target");
+        let source_mtime_ns = target.source_mtime_ns;
+        mix_sibling_into_fingerprint_strict(&mut target, &sibling).expect("decorate fingerprint");
+
+        assert_eq!(target.source_mtime_ns, source_mtime_ns);
+        assert!(
+            target.mtime_ns >= target.source_mtime_ns,
+            "the decorated fingerprint may advance without changing source evidence"
+        );
+    }
+
+    #[test]
+    fn source_snapshot_is_only_recorded_when_pre_and_post_parse_stats_match() {
+        let before = FileScanTarget {
+            path: PathBuf::from("/session.jsonl"),
+            mtime_ns: 10,
+            source_mtime_ns: 7,
+            size: 100,
         };
+        assert_eq!(stable_source_mtime_ns(&before, Some(&before)), Some(7));
+
         let changed = FileScanTarget {
-            path: PathBuf::from("/tmp/b.jsonl"),
-            mtime_ns: 200,
-            size: 20,
+            mtime_ns: 11,
+            source_mtime_ns: 8,
+            ..before.clone()
         };
-        let mut cached = HashMap::new();
-        cached.insert(
-            "/tmp/a.jsonl".to_string(),
-            cached_row(&unchanged, &sample_meta("a"), SCAN_CACHE_VERSION),
-        );
-        // Stored size differs from the current file, so `b` must be re-parsed.
-        cached.insert(
-            "/tmp/b.jsonl".to_string(),
-            CachedScanRow {
-                size: 999,
-                ..cached_row(&changed, &sample_meta("b-old"), SCAN_CACHE_VERSION)
-            },
-        );
-
-        let parsed = std::sync::atomic::AtomicUsize::new(0);
-        let all_targets = vec![unchanged, changed];
-        let restat = echoing_restat(&all_targets);
-        let delta = revalidate(
-            "claude",
-            all_targets,
-            cached,
-            false,
-            |path| {
-                parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Some(sample_meta(path.file_stem().unwrap().to_str().unwrap()))
-            },
-            |_| true,
-            restat,
-        );
-
-        // Only the changed file is parsed; the unchanged one is a cache hit.
-        assert_eq!(parsed.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(delta.upserts.len(), 1);
-        assert_eq!(delta.upserts[0].file_path, "/tmp/b.jsonl");
-        assert!(delta.deletes.is_empty());
-        assert_eq!(delta.sessions.len(), 2);
+        assert_eq!(stable_source_mtime_ns(&before, Some(&changed)), None);
+        assert_eq!(stable_source_mtime_ns(&before, None), None);
     }
 
     #[test]
-    fn progressive_callback_fires_before_file_provider_scan_completes() {
-        let fast = FileScanTarget {
-            path: PathBuf::from("/tmp/fast.jsonl"),
-            mtime_ns: 1,
-            size: 1,
+    fn cache_fallback_rejects_stale_source_mtime_when_sibling_dominates_fingerprint() {
+        let key = "/session.json".to_string();
+        let current = FileScanTarget {
+            path: PathBuf::from(&key),
+            source_mtime_ns: 200,
+            // A newer sibling can keep this composite value unchanged while
+            // the source itself changes.
+            mtime_ns: 500,
+            size: 42,
         };
-        let slow = FileScanTarget {
-            path: PathBuf::from("/tmp/slow.jsonl"),
-            mtime_ns: 2,
-            size: 1,
-        };
-        let targets = vec![fast, slow];
-        let restat = echoing_restat(&targets);
-        let slow_parsed = std::sync::atomic::AtomicBool::new(false);
-        let preview_before_slow = std::sync::atomic::AtomicBool::new(false);
-
-        let delta = revalidate_progressive(
-            "claude",
-            targets,
-            HashMap::new(),
-            false,
-            |path| {
-                if path.file_stem().and_then(|value| value.to_str()) == Some("slow") {
-                    slow_parsed.store(true, Ordering::SeqCst);
-                }
-                Some(sample_meta(
-                    path.file_stem()
-                        .and_then(|value| value.to_str())
-                        .expect("test path stem"),
-                ))
-            },
-            |_| true,
-            restat,
-            |_| {
-                if !slow_parsed.load(Ordering::SeqCst) {
-                    preview_before_slow.store(true, Ordering::SeqCst);
-                }
-            },
-        );
-
-        assert_eq!(delta.sessions.len(), 2);
-        assert!(slow_parsed.load(Ordering::SeqCst));
-        assert!(
-            preview_before_slow.load(Ordering::SeqCst),
-            "the first preview must be observable before the provider's remaining files finish"
-        );
-    }
-
-    #[test]
-    fn revalidate_deletes_vanished_files() {
-        let present = FileScanTarget {
-            path: PathBuf::from("/tmp/a.jsonl"),
-            mtime_ns: 100,
-            size: 10,
-        };
-        let mut cached = HashMap::new();
-        cached.insert(
-            "/tmp/a.jsonl".to_string(),
-            cached_row(&present, &sample_meta("a"), SCAN_CACHE_VERSION),
-        );
-        cached.insert(
-            "/tmp/gone.jsonl".to_string(),
-            cached_row(&present, &sample_meta("gone"), SCAN_CACHE_VERSION),
-        );
-
-        let all_targets = vec![present];
-        let restat = echoing_restat(&all_targets);
-        let delta = revalidate(
-            "claude",
-            all_targets,
-            cached,
-            false,
-            |_| Some(sample_meta("a")),
-            |_| true,
-            restat,
-        );
-
-        assert_eq!(delta.deletes, vec!["/tmp/gone.jsonl".to_string()]);
-        assert_eq!(delta.sessions.len(), 1);
-    }
-
-    #[test]
-    fn revalidate_reparses_when_cache_version_mismatches() {
-        let target = FileScanTarget {
-            path: PathBuf::from("/tmp/a.jsonl"),
-            mtime_ns: 100,
-            size: 10,
-        };
-        let mut cached = HashMap::new();
-        // Same mtime/size but a stale cache version → must re-parse.
-        cached.insert(
-            "/tmp/a.jsonl".to_string(),
-            cached_row(&target, &sample_meta("a"), SCAN_CACHE_VERSION - 1),
-        );
-
-        let parsed = std::sync::atomic::AtomicUsize::new(0);
-        let all_targets = vec![target];
-        let restat = echoing_restat(&all_targets);
-        let delta = revalidate(
-            "claude",
-            all_targets,
-            cached,
-            false,
-            |_| {
-                parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Some(sample_meta("a"))
-            },
-            |_| true,
-            restat,
-        );
-
-        assert_eq!(parsed.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(delta.upserts.len(), 1);
-        assert_eq!(delta.upserts[0].cache_version, SCAN_CACHE_VERSION);
-        assert!(delta.deletes.is_empty());
-    }
-
-    #[test]
-    fn revalidate_force_reparses_everything() {
-        let target = FileScanTarget {
-            path: PathBuf::from("/tmp/a.jsonl"),
-            mtime_ns: 100,
-            size: 10,
-        };
-        let mut cached = HashMap::new();
-        cached.insert(
-            "/tmp/a.jsonl".to_string(),
-            cached_row(&target, &sample_meta("a"), SCAN_CACHE_VERSION),
-        );
-
-        let parsed = std::sync::atomic::AtomicUsize::new(0);
-        let all_targets = vec![target];
-        let restat = echoing_restat(&all_targets);
-        let delta = revalidate(
-            "claude",
-            all_targets,
-            cached,
-            true,
-            |_| {
-                parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Some(sample_meta("a"))
-            },
-            |_| true,
-            restat,
-        );
-
-        // Even an mtime/size match is ignored under `force`.
-        assert_eq!(parsed.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(delta.upserts.len(), 1);
-    }
-
-    /// cacheable=false 的行每轮都重新解析且不落缓存（OpenCode 无 title 会话
-    /// 语义）：文件未变，counter 仍逐轮递增，缓存始终为空。
-    #[test]
-    fn uncacheable_rows_reparse_every_round_and_are_not_cached() {
-        let store = ScanCacheStore::in_memory().expect("memory store");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("s.jsonl");
-        std::fs::write(&path, "id-001\n").expect("write");
-
-        let targets = || {
-            let mut out = Vec::new();
-            collect_targets_recursive(dir.path(), "jsonl", &mut out);
-            out
-        };
-        let counter = AtomicUsize::new(0);
-
-        let first = scan_provider_cached(
-            &store,
-            "opencode",
-            targets(),
-            false,
-            counting_parse(&counter),
-            |_| false,
-        );
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-        assert_eq!(first.len(), 1);
-        assert!(
-            store
-                .load_for_provider("opencode")
-                .expect("load")
-                .is_empty(),
-            "不可缓存行不落缓存"
-        );
-
-        // 文件完全未变，但仍每轮重新解析（无命中捷径），缓存依旧为空。
-        let second = scan_provider_cached(
-            &store,
-            "opencode",
-            targets(),
-            false,
-            counting_parse(&counter),
-            |_| false,
-        );
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "未变文件仍每轮重新解析");
-        assert_eq!(second.len(), 1);
-        assert!(store
-            .load_for_provider("opencode")
-            .expect("load")
-            .is_empty());
-    }
-
-    /// 升级前遗留的缓存行本轮判定为不可缓存：不走命中捷径 → 重新解析、不
-    /// upsert，且旧行进 deletes 被清除，避免命中过期行。
-    #[test]
-    fn revalidate_deletes_stale_row_when_now_uncacheable() {
-        let target = FileScanTarget {
-            path: PathBuf::from("/tmp/a.jsonl"),
-            mtime_ns: 100,
-            size: 10,
-        };
-        // (mtime,size) 与当前 target 完全吻合的遗留缓存行。
-        let mut cached = HashMap::new();
-        cached.insert(
-            "/tmp/a.jsonl".to_string(),
-            cached_row(&target, &sample_meta("a"), SCAN_CACHE_VERSION),
-        );
-
-        let parsed = AtomicUsize::new(0);
-        let all_targets = vec![target];
-        // 不可缓存行在 restat 之前就 continue，restat 不会被调用；传回显版即可。
-        let restat = echoing_restat(&all_targets);
-        let delta = revalidate(
-            "opencode",
-            all_targets,
-            cached,
-            false,
-            |_| {
-                parsed.fetch_add(1, Ordering::SeqCst);
-                Some(sample_meta("a"))
-            },
-            |_| false,
-            restat,
-        );
-
-        assert_eq!(
-            parsed.load(Ordering::SeqCst),
-            1,
-            "命中捷径被禁用 → 重新解析"
-        );
-        assert!(delta.upserts.is_empty(), "不可缓存行不落缓存");
-        assert_eq!(
-            delta.deletes,
-            vec!["/tmp/a.jsonl".to_string()],
-            "旧行被删除以便下轮重新解析"
-        );
-        assert_eq!(delta.sessions.len(), 1, "仍进返回列表");
-        assert_eq!(delta.uncacheable, 1, "观测计数");
-    }
-
-    /// fix 3：parse 期间文件被删除（re-stat 返回 None）时，不 upsert 该文件，且其
-    /// 遗留缓存行进 deletes——在途扫描线程不会把已删文件的旧 row 写回 sidecar。
-    #[test]
-    fn revalidate_reparse_then_deleted_skips_upsert_and_deletes_old_row() {
-        let target = FileScanTarget {
-            path: PathBuf::from("/tmp/gone-mid-parse.jsonl"),
-            mtime_ns: 100,
-            size: 10,
-        };
-        let key = "/tmp/gone-mid-parse.jsonl".to_string();
-        // (mtime,size) 与当前 target 不同的遗留缓存行 → 该文件进 to_parse。
+        let mut stale_meta = sample_meta("stale");
+        stale_meta.source_mtime_ns = Some(100);
         let mut cached = HashMap::new();
         cached.insert(
             key.clone(),
             CachedScanRow {
-                mtime_ns: 1,
-                size: 1,
+                mtime_ns: current.mtime_ns,
+                size: current.size,
+                meta_json: serde_json::to_string(&stale_meta).expect("cache json"),
                 cache_version: SCAN_CACHE_VERSION,
-                meta_json: serde_json::to_string(&sample_meta("old")).unwrap(),
             },
         );
 
-        let delta = revalidate(
-            "claude",
-            vec![target],
-            cached,
-            false,
-            // parse 成功（返回 meta），但文件在 re-stat 时已消失。
-            |_| Some(sample_meta("new")),
-            |_| true,
-            // 注入的 re-stat 返回 None，模拟 parse 期间文件被删除的竞态。
-            |_| None,
-        );
-
-        assert!(delta.upserts.is_empty(), "re-stat 失配 → 不 upsert");
         assert!(
-            delta.deletes.contains(&key),
-            "遗留缓存行进 deletes（不被在途线程写回）"
+            cached_meta_for_target(&cached, &key, &current, &|_| true).is_none(),
+            "a composite fingerprint match must not resurrect older source freshness evidence"
         );
-        // 已解析的 meta 仍进返回列表（本轮 UI 由内存 tombstone 过滤已删会话）。
-        assert_eq!(delta.sessions.len(), 1);
+    }
+
+    #[test]
+    fn legacy_persisted_usage_is_ignored_because_usage_is_runtime_only() {
+        let meta: SessionMeta = serde_json::from_str(
+            r#"{
+                "providerId":"codex",
+                "sessionId":"abc",
+                "usage":{"totalTokens":42,"totalCostUsd":0.125}
+            }"#,
+        )
+        .expect("parse legacy usage summary");
+
+        assert_eq!(meta.usage, None);
     }
 }

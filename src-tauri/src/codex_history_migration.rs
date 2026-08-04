@@ -4,7 +4,8 @@
 //! 失败时不写标记，下一次启动自动重试。
 
 use crate::codex_config::{
-    get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+    extract_codex_experimental_bearer_token, get_codex_config_dir, read_codex_config_text,
+    read_codex_live_settings, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
 };
 use crate::codex_state_db::codex_state_db_paths;
 #[cfg(test)]
@@ -217,7 +218,13 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         });
     }
 
-    if !codex_config_text_routes_custom(&read_codex_config_text().unwrap_or_default()) {
+    let config_text = read_codex_config_text().unwrap_or_default();
+    let live_is_proxy_managed = codex_config_text_is_proxy_managed(&config_text)
+        || read_codex_live_settings()
+            .ok()
+            .as_ref()
+            .is_some_and(codex_live_is_proxy_managed);
+    if live_is_proxy_managed || !codex_config_text_routes_custom(&config_text) {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
             skipped_reason: Some("live_not_unified".to_string()),
             ..Default::default()
@@ -269,6 +276,21 @@ fn codex_config_text_routes_custom(config_text: &str) -> bool {
                 .map(|id| id.trim() == CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
         })
         .unwrap_or(false)
+}
+
+fn codex_live_is_proxy_managed(live: &Value) -> bool {
+    live.get("auth")
+        .and_then(|auth| auth.get("OPENAI_API_KEY"))
+        .and_then(Value::as_str)
+        == Some("PROXY_MANAGED")
+        || live
+            .get("config")
+            .and_then(Value::as_str)
+            .is_some_and(codex_config_text_is_proxy_managed)
+}
+
+fn codex_config_text_is_proxy_managed(config_text: &str) -> bool {
+    extract_codex_experimental_bearer_token(config_text).as_deref() == Some("PROXY_MANAGED")
 }
 
 fn canonical_dir_string(dir: &Path) -> String {
@@ -1738,6 +1760,55 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
+    #[test]
+    fn detects_custom_routed_codex_config_for_unify_gate() {
+        assert!(codex_config_text_routes_custom(
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+requires_openai_auth = true
+supports_websockets = true
+wire_api = "responses"
+"#
+        ));
+        assert!(codex_config_text_routes_custom(
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "AIHubMix"
+base_url = "https://aihubmix.example/v1"
+"#
+        ));
+        assert!(!codex_config_text_routes_custom(
+            "model_provider = \"openai\"\n"
+        ));
+        assert!(!codex_config_text_routes_custom(
+            "base_url = \"http://127.0.0.1:15721/codex\"\n"
+        ));
+        assert!(!codex_config_text_routes_custom(""));
+    }
+
+    #[test]
+    fn proxy_managed_codex_live_is_not_treated_as_unified_live() {
+        assert!(codex_live_is_proxy_managed(&serde_json::json!({
+            "auth": { "OPENAI_API_KEY": "PROXY_MANAGED" },
+            "config": "model_provider = \"custom\"\n",
+        })));
+        assert!(codex_live_is_proxy_managed(&serde_json::json!({
+            "auth": { "tokens": { "access_token": "official" } },
+            "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+experimental_bearer_token = "PROXY_MANAGED"
+"#,
+        })));
+        assert!(!codex_live_is_proxy_managed(&serde_json::json!({
+            "auth": { "tokens": { "access_token": "official" } },
+            "config": "model_provider = \"custom\"\n",
+        })));
+    }
+
     fn migrate_provider_templates_for_test(
         db: &Database,
     ) -> (
@@ -2212,6 +2283,119 @@ base_url = "https://proxy.example/v1"
         assert_eq!(rerun.restored_jsonl_files, 0);
         assert_eq!(rerun.restored_state_rows, 0);
         assert_eq!(rerun.skipped_reason.as_deref(), Some("nothing_to_restore"));
+    }
+
+    #[test]
+    fn restore_ignores_backup_generations_from_other_codex_dirs() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let ledger_parent = dir.path().join("ledger");
+
+        let generation = ledger_parent.join("20260612_010101");
+        let backup_session_dir = generation.join("jsonl/sessions/2026/06/01");
+        fs::create_dir_all(&backup_session_dir).expect("create backup session dir");
+        fs::write(
+            backup_session_dir.join("official.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"openai\"}}\n",
+        )
+        .expect("write backup session");
+        fs::write(
+            generation.join("meta.json"),
+            "{\n  \"codexConfigDir\": \"/some/other/codex-dir\"\n}",
+        )
+        .expect("write meta");
+
+        let session_dir = codex_dir.join("sessions/2026/06/01");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        let session_path = session_dir.join("official.jsonl");
+        fs::write(
+            &session_path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"custom\"}}\n",
+        )
+        .expect("write session");
+
+        let outcome = restore_codex_official_history_inner(
+            &codex_dir,
+            &ledger_parent,
+            &dir.path().join("restore-backup"),
+            "",
+        )
+        .expect("restore");
+        assert_eq!(outcome.skipped_reason.as_deref(), Some("no_backup_ledger"));
+        let text = fs::read_to_string(&session_path).expect("read session");
+        assert!(text.contains("\"model_provider\":\"custom\""));
+    }
+
+    #[test]
+    fn backup_probe_only_counts_generations_for_current_dir() {
+        let dir = tempdir().expect("tempdir");
+        let ledger_parent = dir.path().join("ledger");
+        let codex_dir_key = "/current/codex-dir";
+
+        assert!(!has_official_history_unify_backup_for_dir(
+            &ledger_parent,
+            codex_dir_key
+        ));
+
+        let other = ledger_parent.join("20260612_010101");
+        fs::create_dir_all(&other).expect("create generation");
+        fs::write(
+            other.join("meta.json"),
+            "{\n  \"codexConfigDir\": \"/some/other/codex-dir\"\n}",
+        )
+        .expect("write meta");
+        assert!(!has_official_history_unify_backup_for_dir(
+            &ledger_parent,
+            codex_dir_key
+        ));
+
+        fs::create_dir_all(ledger_parent.join("20260612_020202"))
+            .expect("create legacy generation");
+        assert!(has_official_history_unify_backup_for_dir(
+            &ledger_parent,
+            codex_dir_key
+        ));
+
+        fs::remove_dir_all(ledger_parent.join("20260612_020202"))
+            .expect("remove legacy generation");
+        let matched = ledger_parent.join("20260612_030303");
+        fs::create_dir_all(&matched).expect("create matched generation");
+        fs::write(
+            matched.join("meta.json"),
+            format!("{{\n  \"codexConfigDir\": \"{codex_dir_key}\"\n}}"),
+        )
+        .expect("write matched meta");
+        assert!(has_official_history_unify_backup_for_dir(
+            &ledger_parent,
+            codex_dir_key
+        ));
+    }
+
+    #[test]
+    fn restore_skips_when_no_backup_ledger_exists() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let session_dir = codex_dir.join("sessions/2026/06/01");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        fs::write(
+            session_dir.join("session.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"custom\"}}\n",
+        )
+        .expect("write session");
+
+        let outcome = restore_codex_official_history_inner(
+            &codex_dir,
+            &dir.path().join("missing-ledger"),
+            &dir.path().join("restore-backup"),
+            "",
+        )
+        .expect("restore");
+        assert_eq!(outcome.skipped_reason.as_deref(), Some("no_backup_ledger"));
+        assert_eq!(outcome.restored_jsonl_files, 0);
+        assert_eq!(outcome.restored_state_rows, 0);
+
+        let text = fs::read_to_string(session_dir.join("session.jsonl")).expect("read session");
+        assert!(text.contains("\"model_provider\":\"custom\""));
     }
 
     #[test]
