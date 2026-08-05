@@ -4169,8 +4169,12 @@ impl ProxyService {
         let Some(expected_session_token) = session.session_token.as_deref() else {
             return ExternalProxyStatusProbe::Unreachable;
         };
+        // Loopback-only probe: never route through HTTP(S)_PROXY env, or a
+        // system forward proxy hijacks the local status check and the TUI
+        // reports the worker as not running.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
+            .no_proxy()
             .build();
         let Ok(client) = client else {
             return ExternalProxyStatusProbe::Unreachable;
