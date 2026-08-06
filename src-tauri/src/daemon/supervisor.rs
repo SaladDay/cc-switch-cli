@@ -809,8 +809,11 @@ impl Supervisor {
     }
 
     async fn probe_worker_runtime_status(&self, info: &WorkerInfo) -> Option<WorkerRuntimeStatus> {
+        // Loopback-only probe: bypass HTTP(S)_PROXY env so a system forward
+        // proxy cannot hijack the local worker status check.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
+            .no_proxy()
             .build()
             .ok()?;
         let response = client

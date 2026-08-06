@@ -24,7 +24,7 @@ use crate::{
             TextInputState, TextSubmit, UsagePane,
         },
         data::{
-            ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
+            ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot, ModelRouteSnapshot,
             OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderHealthSnapshot, ProviderRow,
             ProvidersSnapshot, ProxySnapshot, ProxyTargetSnapshot, SkillsSnapshot, UiData,
             UsageDailyModelBucket, UsageLogRow, UsageProviderStatsRow, UsageRangePreset,
@@ -3891,6 +3891,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         usage: UsageSnapshot::default(),
         pricing: Default::default(),
         quota: Default::default(),
+        model_routes: ModelRouteSnapshot::default(),
         reload_token: Default::default(),
     }
 }
@@ -13291,7 +13292,7 @@ fn home_usage_chart_bars_span_the_whole_card_width() {
 }
 
 #[test]
-fn home_usage_chart_shows_the_live_badge_while_the_proxy_routes_this_app() {
+fn home_swaps_usage_chart_for_proxy_dashboard_while_the_proxy_routes_this_app() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -13300,6 +13301,8 @@ fn home_usage_chart_shows_the_live_badge_while_the_proxy_routes_this_app() {
     app.route = Route::Main;
     app.focus = Focus::Content;
 
+    // Routed: the proxy activity dashboard owns the home page and the usage
+    // chart (with its "• live" badge) is not rendered at all.
     let mut data = minimal_data(&app.app_type);
     data.usage = usage_with_daily_models(&[("claude-opus", 5_000, 6.0)]);
     data.proxy.running = true;
@@ -13307,8 +13310,17 @@ fn home_usage_chart_shows_the_live_badge_while_the_proxy_routes_this_app() {
 
     let all = all_text(&render(&app, &data));
 
-    assert!(all.contains("• live"), "{all}");
+    assert!(all.contains("Proxy Dashboard"), "{all}");
+    assert!(!all.contains("• live"), "{all}");
     assert!(!all.contains("Last updated"), "{all}");
+
+    // Not routed: the usage chart comes back.
+    data.proxy.claude_takeover = false;
+    data.proxy.running = false;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(!all.contains("Proxy Dashboard"), "{all}");
 }
 
 #[test]

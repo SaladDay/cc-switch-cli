@@ -11,6 +11,7 @@ pub mod http_client;
 pub(crate) mod json_canonical;
 pub mod metrics;
 pub mod model_mapper;
+pub mod model_router;
 pub mod provider_router;
 pub mod providers;
 pub mod response;

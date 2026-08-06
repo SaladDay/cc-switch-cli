@@ -19,6 +19,7 @@ use super::{
     circuit_breaker::CircuitBreakerConfig,
     error::ProxyError,
     handlers,
+    model_router::ModelRouter,
     provider_router::ProviderRouter,
     providers::codex_chat_history::CodexChatHistoryStore,
     providers::gemini_shadow::GeminiShadowStore,
@@ -35,8 +36,10 @@ pub struct ProxyServerState {
     pub start_time: Arc<RwLock<Option<Instant>>>,
     pub current_providers: Arc<RwLock<HashMap<String, (String, String)>>>,
     pub provider_router: Arc<ProviderRouter>,
+    pub model_router: Arc<ModelRouter>,
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
     pub gemini_shadow: Arc<GeminiShadowStore>,
+    pub provider_token_map: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl ProxyServerState {
@@ -60,6 +63,8 @@ impl ProxyServerState {
             .collect::<Vec<_>>();
         active_targets.sort_by(|left, right| left.app_type.cmp(&right.app_type));
         status.active_targets = active_targets;
+
+        status.provider_token_map = self.provider_token_map.read().await.clone();
 
         status
     }
@@ -91,6 +96,14 @@ impl ProxyServerState {
             status.estimated_output_tokens_total.saturating_add(tokens);
     }
 
+    /// 按 provider 记录预估 token 数，用于仪表盘点阵图多色展示。
+    /// 即使 token 估算为 0（非流式响应无 char_count 估算），也至少记录一次
+    /// 命中计数为 1，避免点阵图因 estimated_output_tokens == 0 而完全空。
+    pub async fn record_provider_activity(&self, provider_id: &str, tokens: u64) {
+        let mut map = self.provider_token_map.write().await;
+        *map.entry(provider_id.to_string()).or_default() += tokens.max(1);
+    }
+
     pub async fn record_active_target(&self, app_type: &AppType, provider: &Provider) {
         self.current_providers.write().await.insert(
             app_type.as_str().to_string(),
@@ -107,10 +120,17 @@ impl ProxyServerState {
         app_type: &AppType,
         provider: &Provider,
         current_provider_id_at_start: &str,
+        is_model_routed: bool,
     ) {
         self.record_active_target(app_type, provider).await;
 
         if provider.id == current_provider_id_at_start {
+            return;
+        }
+
+        // 模型路由选中的 provider 不应切换当前 provider / 更新 live backup。
+        // 路由命中是瞬态行为，不应覆盖用户主动选择的 provider。
+        if is_model_routed {
             return;
         }
 
@@ -192,6 +212,7 @@ pub struct ProxyServer {
 impl ProxyServer {
     pub fn new(config: ProxyConfig, db: Arc<Database>) -> Self {
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
+        let model_router = Arc::new(ModelRouter::new(db.clone()));
         let managed_session_token = std::env::var(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY)
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -208,8 +229,10 @@ impl ProxyServer {
                 start_time: Arc::new(RwLock::new(None)),
                 current_providers: Arc::new(RwLock::new(HashMap::new())),
                 provider_router,
+                model_router,
                 codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
                 gemini_shadow: Arc::new(GeminiShadowStore::default()),
+                provider_token_map: Arc::new(RwLock::new(HashMap::new())),
             },
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
@@ -501,9 +524,11 @@ mod tests {
             status: Arc::new(RwLock::new(ProxyStatus::default())),
             start_time: Arc::new(RwLock::new(None)),
             current_providers: Arc::new(RwLock::new(HashMap::new())),
-            provider_router: Arc::new(ProviderRouter::new(db)),
+            provider_router: Arc::new(ProviderRouter::new(db.clone())),
+            model_router: Arc::new(ModelRouter::new(db)),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
+            provider_token_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -707,7 +732,7 @@ model = "gpt-5.4"
 
         let state = test_state(db.clone());
         state
-            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id)
+            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id, false)
             .await;
 
         assert_eq!(
@@ -772,7 +797,7 @@ model = "gpt-5.4"
 
         let state = test_state(db.clone());
         state
-            .sync_successful_provider_selection(&AppType::Claude, &current, &current.id)
+            .sync_successful_provider_selection(&AppType::Claude, &current, &current.id, false)
             .await;
 
         assert_eq!(
@@ -826,7 +851,7 @@ model = "gpt-5.4"
 
         let state = test_state(db.clone());
         state
-            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id)
+            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id, false)
             .await;
 
         assert_eq!(

@@ -41,6 +41,7 @@ mod forms;
 mod home_chart;
 mod main_page;
 mod mcp;
+mod model_routes;
 mod overlay;
 mod pricing;
 mod prompts;
@@ -64,6 +65,7 @@ use forms::*;
 use home_chart::*;
 use main_page::*;
 use mcp::*;
+use model_routes::*;
 use overlay::*;
 use pricing::*;
 use prompts::*;
@@ -198,6 +200,9 @@ fn render_content(
         Route::SettingsProxy => render_settings_proxy(frame, app, data, content_area, theme),
         Route::SettingsManagedAccounts => {
             render_settings_managed_accounts(frame, app, data, content_area, theme)
+        }
+        Route::SettingsModelRoutes => {
+            render_settings_model_routes(frame, app, data, content_area, theme)
         }
     }
 }
