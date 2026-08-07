@@ -661,6 +661,30 @@ impl ProxyService {
         }
     }
 
+    /// 补偿 EnsureWorker 的不确定失败，重试幂等清理以避免遗留 daemon worker。
+    async fn compensate_failed_managed_session_start(&self, app_type: &str) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            if let Err(first_error) = self.daemon_drop_takeover(app_type).await {
+                return self
+                    .daemon_drop_takeover(app_type)
+                    .await
+                    .map_err(|retry_error| {
+                        format!(
+                            "initial daemon cleanup failed: {first_error}; retry failed: {retry_error}"
+                        )
+                    });
+            }
+            Ok(())
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = app_type;
+            Ok(())
+        }
+    }
+
     async fn should_drop_takeover_via_daemon(&self, app_type: &AppType) -> Result<bool, String> {
         let Some(session) = self.load_persisted_runtime_session_for_app(app_type) else {
             self.remove_stale_daemon_socket_if_unreachable();
@@ -1626,7 +1650,8 @@ impl ProxyService {
             return Ok(existing);
         }
 
-        let (live, sync_live_token_to_current, _) = self
+        // 自动故障转移的 live 配置没有可靠的供应商归属，凭证只能来自 provider 配置。
+        let (live, _, _) = self
             .read_takeover_source_live(app_type, fallback_provider_id)
             .await?;
         let backup = serde_json::to_string(&live)
@@ -1635,14 +1660,11 @@ impl ProxyService {
             .save_live_backup(app_key, &backup)
             .await
             .map_err(|error| format!("save {app_key} live backup failed: {error}"))?;
-        if sync_live_token_to_current {
-            self.sync_live_config_to_current_provider(app_type, &live)
-                .await?;
-        }
 
         Ok(live)
     }
 
+    /// 使用目标 provider 的凭证构建故障转移快照，并仅继承 live 中的非凭证配置。
     fn build_failover_live_snapshot(
         &self,
         app_type: &AppType,
@@ -1651,13 +1673,48 @@ impl ProxyService {
     ) -> Result<Value, String> {
         let provider_snapshot = self.build_live_snapshot_from_provider(app_type, provider)?;
         if matches!(app_type, AppType::Codex) {
-            return Self::prepare_codex_backup_from_existing(
+            let provider_api_key = provider_snapshot
+                .pointer("/auth/OPENAI_API_KEY")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mut snapshot = Self::prepare_codex_backup_from_existing(
                 provider,
                 provider_snapshot,
                 Some(original_live),
+            )?;
+            Self::apply_codex_provider_api_key_to_failover_snapshot(
+                &mut snapshot,
+                provider_api_key,
             );
+            return Ok(snapshot);
         }
         Self::merge_live_backup_snapshot(app_type, Some(original_live), None, provider_snapshot)
+    }
+
+    /// 保留 Codex OAuth 登录材料，同时确保 API key 只来自目标 provider。
+    fn apply_codex_provider_api_key_to_failover_snapshot(
+        snapshot: &mut Value,
+        provider_api_key: Option<String>,
+    ) {
+        if let Some(provider_api_key) = provider_api_key {
+            let Some(snapshot_obj) = snapshot.as_object_mut() else {
+                return;
+            };
+            let auth = snapshot_obj
+                .entry("auth".to_string())
+                .or_insert_with(|| json!({}));
+            if !auth.is_object() {
+                *auth = json!({});
+            }
+            if let Some(auth_obj) = auth.as_object_mut() {
+                auth_obj.insert("OPENAI_API_KEY".to_string(), json!(provider_api_key));
+            }
+            return;
+        }
+
+        if let Some(auth_obj) = snapshot.get_mut("auth").and_then(Value::as_object_mut) {
+            auth_obj.remove("OPENAI_API_KEY");
+        }
     }
 
     async fn save_failover_live_snapshot(
@@ -1737,11 +1794,19 @@ impl ProxyService {
                 AppType::Codex => {
                     let provider_snapshot =
                         self.build_live_snapshot_from_provider(app_type, provider)?;
+                    let provider_api_key = provider_snapshot
+                        .pointer("/auth/OPENAI_API_KEY")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     cached = Self::prepare_codex_backup_from_existing(
                         provider,
                         provider_snapshot,
                         Some(&cached),
                     )?;
+                    Self::apply_codex_provider_api_key_to_failover_snapshot(
+                        &mut cached,
+                        provider_api_key,
+                    );
                 }
                 AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
             }
@@ -1833,6 +1898,26 @@ impl ProxyService {
             .update_proxy_config_for_app(config)
             .await
             .map_err(|error| format!("update proxy config for {app_type} failed: {error}"))
+    }
+
+    /// 在启动 daemon worker 前暂存代理与自动故障转移状态，避免 live key 被按手动接管回写。
+    async fn persist_proxy_and_auto_failover_activation_for_app(
+        &self,
+        app_type: &str,
+    ) -> Result<(), String> {
+        let mut config = self
+            .db
+            .get_proxy_config_for_app(app_type)
+            .await
+            .map_err(|error| format!("load proxy config for {app_type} failed: {error}"))?;
+        config.enabled = true;
+        config.auto_failover_enabled = true;
+        self.db
+            .update_proxy_config_for_app(config)
+            .await
+            .map_err(|error| {
+                format!("stage proxy and auto failover for {app_type} failed: {error}")
+            })
     }
 
     pub async fn set_auto_failover_for_app(
@@ -1932,13 +2017,26 @@ impl ProxyService {
             .ok_or_else(|| format!("missing rollback backup for {app_key}"))?;
         self.switch_proxy_target(app_key, &first_provider_id)
             .await?;
-        Ok(AutoFailoverActivation {
+        let activation = AutoFailoverActivation {
             app_type,
             previous_db_current_provider,
             previous_local_current_provider,
             previous_live_backup,
             rollback_live_backup,
-        })
+        };
+        if let Err(stage_error) = self
+            .persist_proxy_and_auto_failover_activation_for_app(activation.app_type.as_str())
+            .await
+        {
+            if let Err(rollback_error) = self
+                .rollback_proxy_and_auto_failover_activation(&activation)
+                .await
+            {
+                return Err(format!("{stage_error}; rollback failed: {rollback_error}"));
+            }
+            return Err(stage_error);
+        }
+        Ok(activation)
     }
 
     fn restore_current_provider_after_activation_failure(
@@ -1961,6 +2059,34 @@ impl ProxyService {
             activation.previous_local_current_provider.as_deref(),
         )
         .map_err(|error| format!("restore local current provider for {app_key} failed: {error}"))
+    }
+
+    /// 回滚组合启用已修改的 live、快照、路由状态和当前 provider。
+    async fn rollback_proxy_and_auto_failover_activation(
+        &self,
+        activation: &AutoFailoverActivation,
+    ) -> Result<(), String> {
+        let app_key = activation.app_type.as_str();
+        self.db
+            .save_live_backup(app_key, &activation.rollback_live_backup)
+            .await
+            .map_err(|error| format!("restore live backup for {app_key} failed: {error}"))?;
+        self.disable_takeover_for_app_unlocked(&activation.app_type, false)
+            .await?;
+
+        match activation.previous_live_backup.as_deref() {
+            Some(previous_live_backup) => self
+                .db
+                .save_live_backup(app_key, previous_live_backup)
+                .await
+                .map_err(|error| {
+                    format!("restore prior live backup for {app_key} failed: {error}")
+                })?,
+            None => self.db.delete_live_backup(app_key).await.map_err(|error| {
+                format!("delete temporary live backup for {app_key} failed: {error}")
+            })?,
+        }
+        self.restore_current_provider_after_activation_failure(activation)
     }
 
     fn clear_database_current_provider_for_app(&self, app_type: &str) -> Result<(), String> {
@@ -1987,50 +2113,41 @@ impl ProxyService {
         };
         let app_key = activation.app_type.as_str();
         if let Err(start_error) = self.set_managed_session_for_app(app_key, true).await {
+            let managed_worker_active = self
+                .has_managed_worker_for_app(&activation.app_type)
+                .await;
+            if managed_worker_active
+                && self.detect_takeover_in_live_config_for_app(&activation.app_type)
             {
+                log::warn!(
+                    "managed session returned an error after {app_key} takeover became active: {start_error}"
+                );
+                return Ok(());
+            }
+            let cleanup_result = if managed_worker_active {
+                self.compensate_failed_managed_session_start(app_key).await
+            } else {
+                Ok(())
+            };
+            let rollback_result = {
                 let _guard =
                     crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-                self.db
-                    .save_live_backup(app_key, &activation.rollback_live_backup)
+                self.rollback_proxy_and_auto_failover_activation(&activation)
                     .await
-                    .map_err(|rollback_error| {
-                        format!(
-                            "enable proxy and auto failover failed: {start_error}; rollback failed: restore live backup for {app_key} failed: {rollback_error}"
-                        )
-                    })?;
-                if let Err(rollback_error) = self
-                    .disable_takeover_for_app_unlocked(&activation.app_type, false)
-                    .await
-                {
-                    return Err(format!(
-                        "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
-                    ));
-                }
-                let restore_backup_result = match activation.previous_live_backup.as_deref() {
-                    Some(previous_live_backup) => {
-                        self.db
-                            .save_live_backup(app_key, previous_live_backup)
-                            .await
-                    }
-                    None => self.db.delete_live_backup(app_key).await,
-                };
-                if let Err(rollback_error) = restore_backup_result {
-                    return Err(format!(
-                        "enable proxy and auto failover failed: {start_error}; rollback failed: restore prior live backup for {app_key} failed: {rollback_error}"
-                    ));
-                }
-                if let Err(rollback_error) =
-                    self.restore_current_provider_after_activation_failure(&activation)
-                {
-                    return Err(format!(
-                        "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
-                    ));
-                }
-            }
-            return Err(start_error);
+            };
+            return match (cleanup_result, rollback_result) {
+                (Ok(()), Ok(())) => Err(start_error),
+                (Err(cleanup_error), Ok(())) => Err(format!(
+                    "enable proxy and auto failover failed: {start_error}; worker cleanup failed: {cleanup_error}"
+                )),
+                (Ok(()), Err(rollback_error)) => Err(format!(
+                    "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
+                )),
+                (Err(cleanup_error), Err(rollback_error)) => Err(format!(
+                    "enable proxy and auto failover failed: {start_error}; worker cleanup failed: {cleanup_error}; rollback failed: {rollback_error}"
+                )),
+            };
         }
-        self.persist_auto_failover_for_app(app_key, true).await?;
-
         Ok(())
     }
 
@@ -3152,6 +3269,20 @@ impl ProxyService {
         app_type: &AppType,
         live_config: &Value,
     ) -> Result<(), String> {
+        let app_key = app_type.as_str();
+        let app_proxy = self
+            .db
+            .get_proxy_config_for_app(app_key)
+            .await
+            .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
+        // 自动故障转移场景下 live 配置不具备可靠的供应商归属，禁止用它反向覆盖凭证。
+        if app_proxy.auto_failover_enabled {
+            log::info!(
+                "skip syncing {app_key} live token because automatic failover credentials are provider-scoped"
+            );
+            return Ok(());
+        }
+
         enum LiveTokenSync {
             Claude(&'static str, String),
             Codex(String),
@@ -5880,6 +6011,11 @@ wire_api = "responses"
                 .as_deref(),
             Some("queue-head")
         );
+        assert_eq!(
+            db.get_proxy_flags_sync("claude"),
+            (true, true),
+            "combined activation must stage failover state before starting the worker"
+        );
     }
 
     #[tokio::test]
@@ -6344,6 +6480,140 @@ wire_api = "responses"
         );
     }
 
+    /// 验证多供应商故障转移不会把 live key 覆盖到当前 Codex provider。
+    #[tokio::test]
+    #[serial]
+    async fn codex_failover_queue_does_not_sync_live_token_to_current_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_codex_auth_path()
+                .parent()
+                .expect("codex auth parent dir"),
+        )
+        .expect("create ~/.codex");
+        write_json_file(
+            &get_codex_auth_path(),
+            &json!({"OPENAI_API_KEY": "ciii-key"}),
+        )
+        .expect("seed Ciii live auth");
+        write_text_file(
+            &get_codex_config_path(),
+            r#"model_provider = "ciii"
+
+[model_providers.ciii]
+base_url = "https://ciii.example/v1"
+"#,
+        )
+        .expect("seed Ciii live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let ciii = Provider::with_id(
+            "ciii".to_string(),
+            "Ciii".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "ciii-key"},
+                "config": r#"model_provider = "ciii"
+
+[model_providers.ciii]
+base_url = "https://ciii.example/v1"
+"#
+            }),
+            None,
+        );
+        let ylscode = Provider::with_id(
+            "ylscode".to_string(),
+            "ylscode".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "ylscode-key"},
+                "config": r#"model_provider = "ylscode"
+
+[model_providers.ylscode]
+base_url = "https://ylscode.example/v1"
+"#
+            }),
+            None,
+        );
+        let mut official = Provider::with_id(
+            "official".to_string(),
+            "Official".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "official-key"},
+                "config": r#"model_provider = "official"
+
+[model_providers.official]
+base_url = "https://api.openai.com/v1"
+"#
+            }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &ciii)
+            .expect("save Ciii provider");
+        db.save_provider("codex", &ylscode)
+            .expect("save ylscode provider");
+        db.save_provider("codex", &official)
+            .expect("save official provider");
+        db.set_current_provider("codex", &ylscode.id)
+            .expect("set ylscode current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&ylscode.id))
+            .expect("set effective current provider");
+        db.add_to_failover_queue("codex", &ciii.id)
+            .expect("queue Ciii provider");
+        db.add_to_failover_queue("codex", &ylscode.id)
+            .expect("queue ylscode provider");
+        db.add_to_failover_queue("codex", &official.id)
+            .expect("queue official provider");
+
+        service
+            .regenerate_failover_live_snapshots_for_app(&AppType::Codex, Some(&ciii.id))
+            .await
+            .expect("generate provider-scoped failover snapshots");
+        db.set_proxy_flags_sync("codex", true, true)
+            .expect("enable codex automatic failover");
+
+        service
+            .sync_live_config_to_current_provider(
+                &AppType::Codex,
+                &json!({"auth": {"OPENAI_API_KEY": "ciii-key"}}),
+            )
+            .await
+            .expect("skip ambiguous live token sync");
+
+        for (provider_id, expected_key) in [
+            ("ciii", "ciii-key"),
+            ("ylscode", "ylscode-key"),
+            ("official", "official-key"),
+        ] {
+            let unchanged = db
+                .get_provider_by_id(provider_id, "codex")
+                .expect("read Codex provider")
+                .expect("Codex provider exists");
+            assert_eq!(
+                unchanged
+                    .settings_config
+                    .pointer("/auth/OPENAI_API_KEY")
+                    .and_then(Value::as_str),
+                Some(expected_key)
+            );
+
+            let stored_snapshot = db
+                .get_failover_live_snapshot("codex", provider_id)
+                .await
+                .expect("read Codex failover snapshot")
+                .expect("Codex failover snapshot exists");
+            let snapshot: Value = serde_json::from_str(&stored_snapshot.config_json)
+                .expect("parse Codex failover snapshot");
+            assert_eq!(
+                snapshot
+                    .pointer("/auth/OPENAI_API_KEY")
+                    .and_then(Value::as_str),
+                Some(expected_key)
+            );
+        }
+    }
+
     #[tokio::test]
     #[serial]
     async fn enabling_codex_takeover_syncs_live_token_back_to_current_provider() {
@@ -6395,6 +6665,27 @@ base_url = "https://api.openai.com/v1"
             .expect("save codex provider");
         db.set_current_provider("codex", &provider.id)
             .expect("set current codex provider");
+        let queued_provider = Provider::with_id(
+            "queued-codex-provider".to_string(),
+            "Queued Codex Provider".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "queued-provider-token"
+                },
+                "config": r#"model_provider = "queued"
+
+[model_providers.queued]
+base_url = "https://queued.example/v1"
+"#
+            }),
+            None,
+        );
+        db.save_provider("codex", &queued_provider)
+            .expect("save queued codex provider");
+        db.add_to_failover_queue("codex", &provider.id)
+            .expect("queue current codex provider");
+        db.add_to_failover_queue("codex", &queued_provider.id)
+            .expect("queue secondary codex provider");
 
         use_ephemeral_app_proxy_port(db.as_ref(), "codex");
 
@@ -7946,7 +8237,8 @@ base_url = "https://new.example/v1"
         let original_live = json!({
             "auth": {
                 "auth_mode": "chatgpt",
-                "tokens": { "access_token": "official-oauth-token" }
+                "tokens": { "access_token": "official-oauth-token" },
+                "OPENAI_API_KEY": "foreign-live-key"
             },
             "config": stale_config
         });
@@ -7961,6 +8253,16 @@ base_url = "https://new.example/v1"
         assert!(!config.contains("model_provider = \"custom\""));
         assert!(!config.contains("[model_providers.custom]"));
         assert!(config.contains("[mcp_servers.echo]"));
+        assert_eq!(
+            snapshot
+                .pointer("/auth/tokens/access_token")
+                .and_then(Value::as_str),
+            Some("official-oauth-token")
+        );
+        assert!(
+            snapshot.pointer("/auth/OPENAI_API_KEY").is_none(),
+            "official OAuth snapshot must not inherit a live API key"
+        );
     }
 
     #[tokio::test]
@@ -7987,8 +8289,11 @@ base_url = "https://new.example/v1"
         db.save_failover_live_snapshot(
             "codex",
             &provider.id,
-            &serde_json::to_string(&json!({ "auth": {}, "config": stale_config }))
-                .expect("serialize stale snapshot"),
+            &serde_json::to_string(&json!({
+                "auth": {"OPENAI_API_KEY": "foreign-live-key"},
+                "config": stale_config
+            }))
+            .expect("serialize stale snapshot"),
         )
         .await
         .expect("seed stale snapshot");
@@ -8006,6 +8311,10 @@ base_url = "https://new.example/v1"
         assert!(config.contains("model = \"gpt-5.6-sol\""));
         assert!(!config.contains("model = \"gpt-5.4\""));
         assert!(config.contains("[mcp_servers.echo]"));
+        assert!(
+            normalized.pointer("/auth/OPENAI_API_KEY").is_none(),
+            "cached failover snapshot must drop a key absent from provider settings"
+        );
 
         let cached = db
             .get_failover_live_snapshot("codex", &provider.id)
@@ -8021,6 +8330,7 @@ base_url = "https://new.example/v1"
         assert!(!cached_config.contains("model_provider = \"custom\""));
         assert!(cached_config.contains("model = \"gpt-5.6-sol\""));
         assert!(cached_config.contains("[mcp_servers.echo]"));
+        assert!(!cached.config_json.contains("foreign-live-key"));
     }
 
     #[tokio::test]
