@@ -1152,10 +1152,10 @@ requires_openai_auth = true
                 "Codex",
                 "* AICodeMirror",
                 "* ClaudeAPI",
-                "* Qiniu",
+                "* Cubence",
                 "* FennoAI",
                 "* RunAPI",
-                "* Cubence",
+                "* Qiniu",
                 "* PackyCode",
                 "* DDS",
             ]
@@ -1166,10 +1166,10 @@ requires_openai_auth = true
                 "Custom",
                 "OpenAI Official",
                 "* AICodeMirror",
-                "* Qiniu",
+                "* Cubence",
                 "* FennoAI",
                 "* RunAPI",
-                "* Cubence",
+                "* Qiniu",
                 "* PackyCode",
                 "* DDS",
                 "DeepSeek",
@@ -1181,8 +1181,8 @@ requires_openai_auth = true
                 "Custom",
                 "Google OAuth",
                 "* AICodeMirror",
-                "* Qiniu",
                 "* Cubence",
+                "* Qiniu",
                 "* PackyCode",
             ]
         );
@@ -1191,10 +1191,10 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* AICodeMirror",
-                "* Qiniu",
+                "* Cubence",
                 "* FennoAI",
                 "* RunAPI",
-                "* Cubence",
+                "* Qiniu",
                 "* PackyCode"
             ]
         );
@@ -1203,10 +1203,10 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* AICodeMirror",
-                "* Qiniu",
+                "* Cubence",
                 "* FennoAI",
                 "* RunAPI",
-                "* Cubence",
+                "* Qiniu",
                 "* PackyCode"
             ]
         );
@@ -1215,10 +1215,10 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* AICodeMirror",
-                "* Qiniu",
+                "* Cubence",
                 "* FennoAI",
                 "* RunAPI",
-                "* Cubence",
+                "* Qiniu",
                 "* PackyCode"
             ]
         );

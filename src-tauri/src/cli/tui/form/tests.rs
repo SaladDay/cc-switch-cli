@@ -105,10 +105,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Codex",
             "* AICodeMirror",
             "* ClaudeAPI",
-            "* Qiniu",
+            "* Cubence",
             "* FennoAI",
             "* RunAPI",
-            "* Cubence",
+            "* Qiniu",
             "* PackyCode",
             "* DDS",
         ]
@@ -121,10 +121,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "OpenAI Official",
             "* AICodeMirror",
-            "* Qiniu",
+            "* Cubence",
             "* FennoAI",
             "* RunAPI",
-            "* Cubence",
+            "* Qiniu",
             "* PackyCode",
             "* DDS",
             "DeepSeek",
@@ -138,8 +138,8 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Google OAuth",
             "* AICodeMirror",
-            "* Qiniu",
             "* Cubence",
+            "* Qiniu",
             "* PackyCode",
         ]
     );
@@ -150,10 +150,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "* AICodeMirror",
-            "* Qiniu",
+            "* Cubence",
             "* FennoAI",
             "* RunAPI",
-            "* Cubence",
+            "* Qiniu",
             "* PackyCode"
         ]
     );
@@ -168,10 +168,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "* AICodeMirror",
-            "* Qiniu",
+            "* Cubence",
             "* FennoAI",
             "* RunAPI",
-            "* Cubence",
+            "* Qiniu",
             "* PackyCode"
         ]
     );
@@ -182,10 +182,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "* AICodeMirror",
-            "* Qiniu",
+            "* Cubence",
             "* FennoAI",
             "* RunAPI",
-            "* Cubence",
+            "* Qiniu",
             "* PackyCode"
         ]
     );
@@ -4762,10 +4762,10 @@ fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
         vec![
             "Custom",
             "* AICodeMirror",
-            "* Qiniu",
+            "* Cubence",
             "* FennoAI",
             "* RunAPI",
-            "* Cubence",
+            "* Qiniu",
             "* PackyCode"
         ]
     );
@@ -4784,10 +4784,10 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         vec![
             "Custom",
             "* AICodeMirror",
-            "* Qiniu",
+            "* Cubence",
             "* FennoAI",
             "* RunAPI",
-            "* Cubence",
+            "* Qiniu",
             "* PackyCode"
         ]
     );

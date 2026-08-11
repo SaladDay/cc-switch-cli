@@ -158,26 +158,26 @@ pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 8] = [
 const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 8] = [
     AI_CODE_MIRROR,
     CLAUDE_API,
-    QINIU,
+    CUBENCE,
     FENNO,
     RUN_API,
-    CUBENCE,
+    QINIU,
     PACKY_CODE,
     DDS,
 ];
 const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 7] = [
     AI_CODE_MIRROR,
-    QINIU,
+    CUBENCE,
     FENNO,
     RUN_API,
-    CUBENCE,
+    QINIU,
     PACKY_CODE,
     DDS,
 ];
 const GEMINI_SPONSOR_PRESETS: [SponsorProviderPreset; 4] =
-    [AI_CODE_MIRROR, QINIU, CUBENCE, PACKY_CODE];
+    [AI_CODE_MIRROR, CUBENCE, QINIU, PACKY_CODE];
 const ADDITIVE_SPONSOR_PRESETS: [SponsorProviderPreset; 6] =
-    [AI_CODE_MIRROR, QINIU, FENNO, RUN_API, CUBENCE, PACKY_CODE];
+    [AI_CODE_MIRROR, CUBENCE, FENNO, RUN_API, QINIU, PACKY_CODE];
 
 pub(crate) fn sponsor_provider_preset(id: &str) -> Option<SponsorProviderPreset> {
     SPONSOR_PROVIDER_PRESETS
@@ -253,10 +253,10 @@ mod tests {
     fn additive_apps_share_one_sponsor_support_matrix() {
         let expected = [
             "aicodemirror",
-            "qiniu",
+            "cubence",
             "fenno",
             "runapi",
-            "cubence",
+            "qiniu",
             "packycode",
         ];
         for app_type in [AppType::OpenCode, AppType::Hermes, AppType::OpenClaw] {
