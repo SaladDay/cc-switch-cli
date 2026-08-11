@@ -59,13 +59,12 @@ AICodeMirror 为 CC-Switch CLI 项目的用户提供了特别福利，通过[此
   </tr>
   <tr>
     <td width="180">
-      <a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">
-        <img src="assets/partners/logos/fennoai.png" alt="Fenno.ai" width="150">
+      <a href="https://www.openmodel.ai/?ref=JGDNqZl8">
+        <img src="assets/partners/logos/openmodel.jpg" alt="OpenModel" width="150">
       </a>
     </td>
     <td>
-      感谢 <b>Fenno.ai</b> 赞助本项目！Fenno.ai 是一家稳定、高效的 API 中转服务商，目前主要提供 Codex 中转服务，兼容 OpenAI 及 Anthropic 协议，可灵活接入 Codex、Claude Code、OpenCode 等主流编程工具，可稳定支撑千亿 Token/日的企业级调用需求，支持国内及海外主体公对公结算、开票。<br/>
-      Fenno.ai 为 CC-Switch CLI 用户提供了专属福利：通过<a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">此链接</a>即可订阅 <b>9.9 元/150 刀额度</b>的超值 Coding Plan，邀请好友最高可享 <b>20% 奖励</b>，多邀多得！
+      一个API，顶级模型随便用！<a href="https://www.openmodel.ai/?ref=JGDNqZl8"><b>OpenModel</b></a> 专注于生产级、高可用的 AI API 网关，让你的应用真正做到高速稳定：自动故障转移、智能选最优渠道、生产级 SLA 保障。远超单一供应商的 SLA，让稳定性成为您的核心竞争力。
     </td>
   </tr>
   <tr>
@@ -87,6 +86,17 @@ AICodeMirror 为 CC-Switch CLI 项目的用户提供了特别福利，通过[此
     <td>
       感谢 <b>七牛云AI</b> 赞助本项目！<b>七牛云（02567.HK）</b>旗下企业级大模型 MaaS 平台，一站式调用全球 150+ 主流模型，兼容全球主流模型厂商协议，覆盖文本、图像、音频、视频、文件处理等全模态处理能力，服务超过 <b>169 万</b>企业及开发者用户。<br/>
       专属福利：企业用户免费领 <b>1200 万 Token</b>，邀请好友最高得<b>百亿 Token</b>。通过<a href="https://s.qiniu.com/FVfiEb">此链接</a>注册领取。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">
+        <img src="assets/partners/logos/fennoai.png" alt="Fenno.ai" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>Fenno.ai</b> 赞助本项目！Fenno.ai 是一家稳定、高效的 API 中转服务商，目前主要提供 Codex 中转服务，兼容 OpenAI 及 Anthropic 协议，可灵活接入 Codex、Claude Code、OpenCode 等主流编程工具，可稳定支撑千亿 Token/日的企业级调用需求，支持国内及海外主体公对公结算、开票。<br/>
+      Fenno.ai 为 CC-Switch CLI 用户提供了专属福利：通过<a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">此链接</a>即可订阅 <b>9.9 元/150 刀额度</b>的超值 Coding Plan，邀请好友最高可享 <b>20% 奖励</b>，多邀多得！
     </td>
   </tr>
   <tr>

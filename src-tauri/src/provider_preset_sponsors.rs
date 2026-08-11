@@ -63,6 +63,22 @@ pub(crate) const CUBENCE: SponsorProviderPreset = SponsorProviderPreset {
     hermes_base_url: "https://api.cubence.com",
 };
 
+pub(crate) const OPENMODEL: SponsorProviderPreset = SponsorProviderPreset {
+    id: "openmodel",
+    provider_name: "OpenModel",
+    chip_label: "* OpenModel",
+    website_url: "https://www.openmodel.ai/?ref=JGDNqZl8",
+    register_url: "https://www.openmodel.ai/?ref=JGDNqZl8",
+    promo_code: "",
+    partner_promotion_key: "openmodel",
+    claude_base_url: "https://api.openmodel.ai",
+    codex_base_url: "https://api.openmodel.ai/v1",
+    gemini_base_url: "https://api.openmodel.ai",
+    opencode_base_url: "https://api.openmodel.ai/v1",
+    openclaw_base_url: "https://api.openmodel.ai",
+    hermes_base_url: "https://api.openmodel.ai",
+};
+
 pub(crate) const RUN_API: SponsorProviderPreset = SponsorProviderPreset {
     id: "runapi",
     provider_name: "RunAPI",
@@ -144,40 +160,50 @@ pub(crate) const FENNO: SponsorProviderPreset = SponsorProviderPreset {
     hermes_base_url: "https://api.fenno.ai/v1",
 };
 
-pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 8] = [
+pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 9] = [
     AI_CODE_MIRROR,
     CLAUDE_API,
     PACKY_CODE,
     CUBENCE,
+    OPENMODEL,
     RUN_API,
     DDS,
     QINIU,
     FENNO,
 ];
 
-const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 8] = [
+const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 9] = [
     AI_CODE_MIRROR,
     CLAUDE_API,
     CUBENCE,
-    FENNO,
+    OPENMODEL,
     RUN_API,
     QINIU,
+    FENNO,
     PACKY_CODE,
     DDS,
 ];
-const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 7] = [
+const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 8] = [
     AI_CODE_MIRROR,
     CUBENCE,
-    FENNO,
+    OPENMODEL,
     RUN_API,
     QINIU,
+    FENNO,
     PACKY_CODE,
     DDS,
 ];
-const GEMINI_SPONSOR_PRESETS: [SponsorProviderPreset; 4] =
-    [AI_CODE_MIRROR, CUBENCE, QINIU, PACKY_CODE];
-const ADDITIVE_SPONSOR_PRESETS: [SponsorProviderPreset; 6] =
-    [AI_CODE_MIRROR, CUBENCE, FENNO, RUN_API, QINIU, PACKY_CODE];
+const GEMINI_SPONSOR_PRESETS: [SponsorProviderPreset; 5] =
+    [AI_CODE_MIRROR, CUBENCE, OPENMODEL, QINIU, PACKY_CODE];
+const ADDITIVE_SPONSOR_PRESETS: [SponsorProviderPreset; 7] = [
+    AI_CODE_MIRROR,
+    CUBENCE,
+    OPENMODEL,
+    RUN_API,
+    QINIU,
+    FENNO,
+    PACKY_CODE,
+];
 
 pub(crate) fn sponsor_provider_preset(id: &str) -> Option<SponsorProviderPreset> {
     SPONSOR_PROVIDER_PRESETS
@@ -250,13 +276,29 @@ mod tests {
     }
 
     #[test]
+    fn openmodel_uses_affiliate_url_and_protocol_specific_api_hosts() {
+        assert_eq!(
+            OPENMODEL.website_url,
+            "https://www.openmodel.ai/?ref=JGDNqZl8"
+        );
+        assert_eq!(OPENMODEL.register_url, OPENMODEL.website_url);
+        assert_eq!(OPENMODEL.claude_base_url, "https://api.openmodel.ai");
+        assert_eq!(OPENMODEL.codex_base_url, "https://api.openmodel.ai/v1");
+        assert_eq!(OPENMODEL.gemini_base_url, "https://api.openmodel.ai");
+        assert_eq!(OPENMODEL.opencode_base_url, "https://api.openmodel.ai/v1");
+        assert_eq!(OPENMODEL.hermes_base_url, "https://api.openmodel.ai");
+        assert_eq!(OPENMODEL.openclaw_base_url, "https://api.openmodel.ai");
+    }
+
+    #[test]
     fn additive_apps_share_one_sponsor_support_matrix() {
         let expected = [
             "aicodemirror",
             "cubence",
-            "fenno",
+            "openmodel",
             "runapi",
             "qiniu",
+            "fenno",
             "packycode",
         ];
         for app_type in [AppType::OpenCode, AppType::Hermes, AppType::OpenClaw] {

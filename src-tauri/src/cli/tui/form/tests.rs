@@ -106,9 +106,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "* AICodeMirror",
             "* ClaudeAPI",
             "* Cubence",
-            "* FennoAI",
+            "* OpenModel",
             "* RunAPI",
             "* Qiniu",
+            "* FennoAI",
             "* PackyCode",
             "* DDS",
         ]
@@ -122,9 +123,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "OpenAI Official",
             "* AICodeMirror",
             "* Cubence",
-            "* FennoAI",
+            "* OpenModel",
             "* RunAPI",
             "* Qiniu",
+            "* FennoAI",
             "* PackyCode",
             "* DDS",
             "DeepSeek",
@@ -139,6 +141,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Google OAuth",
             "* AICodeMirror",
             "* Cubence",
+            "* OpenModel",
             "* Qiniu",
             "* PackyCode",
         ]
@@ -151,9 +154,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "* AICodeMirror",
             "* Cubence",
-            "* FennoAI",
+            "* OpenModel",
             "* RunAPI",
             "* Qiniu",
+            "* FennoAI",
             "* PackyCode"
         ]
     );
@@ -169,9 +173,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "* AICodeMirror",
             "* Cubence",
-            "* FennoAI",
+            "* OpenModel",
             "* RunAPI",
             "* Qiniu",
+            "* FennoAI",
             "* PackyCode"
         ]
     );
@@ -183,9 +188,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "* AICodeMirror",
             "* Cubence",
-            "* FennoAI",
+            "* OpenModel",
             "* RunAPI",
             "* Qiniu",
+            "* FennoAI",
             "* PackyCode"
         ]
     );
@@ -223,6 +229,36 @@ fn cli_provider_templates_match_tui_serializer_output() {
             AppType::Claude,
             ProviderAddTemplate::Packycode,
             "* PackyCode",
+        ),
+        (
+            AppType::Claude,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::Codex,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::Gemini,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::OpenCode,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::Hermes,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::OpenClaw,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
         ),
         (
             AppType::Codex,
@@ -4763,9 +4799,10 @@ fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
             "Custom",
             "* AICodeMirror",
             "* Cubence",
-            "* FennoAI",
+            "* OpenModel",
             "* RunAPI",
             "* Qiniu",
+            "* FennoAI",
             "* PackyCode"
         ]
     );
@@ -4785,9 +4822,10 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
             "Custom",
             "* AICodeMirror",
             "* Cubence",
-            "* FennoAI",
+            "* OpenModel",
             "* RunAPI",
             "* Qiniu",
+            "* FennoAI",
             "* PackyCode"
         ]
     );

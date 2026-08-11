@@ -538,6 +538,85 @@ fn add_packycode_template_is_scriptable_for_every_additive_app() {
 
 #[test]
 #[serial]
+fn add_openmodel_template_is_scriptable_for_every_app() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    for (app_type, name) in [
+        (AppType::Claude, "OpenModel Claude"),
+        (AppType::Codex, "OpenModel Codex"),
+        (AppType::Gemini, "OpenModel Gemini"),
+        (AppType::OpenCode, "OpenModel OpenCode"),
+        (AppType::Hermes, "OpenModel Hermes"),
+        (AppType::OpenClaw, "OpenModel OpenClaw"),
+    ] {
+        run_add(
+            Some(name),
+            app_type,
+            AddOpts {
+                template: Some(ProviderAddTemplate::Openmodel),
+                api_key: Some("om-test".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("OpenModel preset should accept non-interactive API-key input");
+    }
+
+    let claude = saved_provider(AppType::Claude, "openmodel-claude");
+    assert_eq!(env_str(&claude, "ANTHROPIC_AUTH_TOKEN"), Some("om-test"));
+    assert_eq!(
+        env_str(&claude, "ANTHROPIC_BASE_URL"),
+        Some("https://api.openmodel.ai")
+    );
+
+    let codex = saved_provider(AppType::Codex, "openmodel-codex");
+    assert_eq!(codex.settings_config["auth"]["OPENAI_API_KEY"], "om-test");
+    let codex_config = codex.settings_config["config"]
+        .as_str()
+        .expect("OpenModel Codex config should be TOML");
+    assert!(codex_config.contains("model = \"gpt-5.6-sol\""));
+    assert!(codex_config.contains("base_url = \"https://api.openmodel.ai/v1\""));
+    assert!(codex_config.contains("wire_api = \"responses\""));
+
+    let gemini = saved_provider(AppType::Gemini, "openmodel-gemini");
+    assert_eq!(env_str(&gemini, "GEMINI_API_KEY"), Some("om-test"));
+    assert_eq!(
+        env_str(&gemini, "GOOGLE_GEMINI_BASE_URL"),
+        Some("https://api.openmodel.ai")
+    );
+    assert_eq!(env_str(&gemini, "GEMINI_MODEL"), Some("gemini-3.6-flash"));
+
+    let opencode = saved_provider(AppType::OpenCode, "openmodel-opencode");
+    assert_eq!(opencode.settings_config["options"]["apiKey"], "om-test");
+    assert_eq!(
+        opencode.settings_config["options"]["baseURL"],
+        "https://api.openmodel.ai/v1"
+    );
+    assert!(opencode.settings_config["models"]
+        .get("claude-opus-5")
+        .is_some());
+
+    let hermes = saved_provider(AppType::Hermes, "openmodel-hermes");
+    assert_eq!(hermes.settings_config["api_key"], "om-test");
+    assert_eq!(
+        hermes.settings_config["base_url"],
+        "https://api.openmodel.ai"
+    );
+    assert_eq!(hermes.settings_config["api_mode"], "anthropic_messages");
+    assert_eq!(hermes.settings_config["models"][0]["id"], "claude-opus-5");
+
+    let openclaw = saved_provider(AppType::OpenClaw, "openmodel-openclaw");
+    assert_eq!(openclaw.settings_config["apiKey"], "om-test");
+    assert_eq!(
+        openclaw.settings_config["baseUrl"],
+        "https://api.openmodel.ai"
+    );
+    assert_eq!(openclaw.settings_config["api"], "anthropic-messages");
+    assert_eq!(openclaw.settings_config["models"][0]["id"], "claude-opus-5");
+}
+
+#[test]
+#[serial]
 fn add_claude_role_flags_reject_non_claude_apps() {
     let _guard = lock_test_mutex();
     prepare_empty_state();

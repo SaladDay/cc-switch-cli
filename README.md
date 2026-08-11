@@ -63,13 +63,12 @@ AICodeMirror also offers an exclusive benefit to users of the CC-Switch CLI proj
   </tr>
   <tr>
     <td width="180">
-      <a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">
-        <img src="assets/partners/logos/fennoai.png" alt="Fenno.ai" width="150">
+      <a href="https://www.openmodel.ai/?ref=JGDNqZl8">
+        <img src="assets/partners/logos/openmodel.jpg" alt="OpenModel" width="150">
       </a>
     </td>
     <td>
-      Thanks to <b>Fenno.ai</b> for sponsoring this project! Fenno.ai is a stable, efficient API relay provider currently focused on Codex relay. It is compatible with both the OpenAI and Anthropic protocols and plugs smoothly into mainstream coding tools such as Codex, Claude Code, and OpenCode, reliably sustaining enterprise workloads of hundreds of billions of tokens per day, with corporate (B2B) settlement and invoicing for both domestic and overseas entities. <br/>
-      Exclusive benefit for CC-Switch CLI users: register via <a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">this link</a> to subscribe to a great-value Coding Plan — <b>¥9.9 for $150 of credit</b> — and earn up to a <b>20% reward</b> for referrals; the more you invite, the more you get!
+      One API, every top model! <a href="https://www.openmodel.ai/?ref=JGDNqZl8"><b>OpenModel</b></a> is a production-grade, high-availability AI API gateway that makes your applications truly fast and stable: automatic failover, smart routing to the best-performing channel, and a production-grade SLA. An SLA that far surpasses any single provider — making stability your core competitive advantage. Works directly with Claude Code, Codex, and Gemini CLI. Register via <a href="https://www.openmodel.ai/?ref=JGDNqZl8">this link</a> to get started.
     </td>
   </tr>
   <tr>
@@ -91,6 +90,17 @@ AICodeMirror also offers an exclusive benefit to users of the CC-Switch CLI proj
     <td>
       Thanks to <b>Qiniu Cloud AI</b> for sponsoring this project! <b>Qiniu Cloud AI</b> is an enterprise-grade large-model MaaS platform from <b>Qiniu Cloud (HKEX: 02567)</b>, offering one-stop access to 150+ mainstream models worldwide, compatibility with the protocols of major global model vendors, and full-modality coverage across text, image, audio, video, and file processing — serving over <b>1.69 million</b> enterprise and developer users. <br/>
       Exclusive benefits: enterprise users can claim <b>12 million free tokens</b>, and referring friends can earn up to <b>tens of billions of tokens</b>. Register via <a href="https://s.qiniu.com/FVfiEb">this link</a>.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">
+        <img src="assets/partners/logos/fennoai.png" alt="Fenno.ai" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>Fenno.ai</b> for sponsoring this project! Fenno.ai is a stable, efficient API relay provider currently focused on Codex relay. It is compatible with both the OpenAI and Anthropic protocols and plugs smoothly into mainstream coding tools such as Codex, Claude Code, and OpenCode, reliably sustaining enterprise workloads of hundreds of billions of tokens per day, with corporate (B2B) settlement and invoicing for both domestic and overseas entities. <br/>
+      Exclusive benefit for CC-Switch CLI users: register via <a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">this link</a> to subscribe to a great-value Coding Plan — <b>¥9.9 for $150 of credit</b> — and earn up to a <b>20% reward</b> for referrals; the more you invite, the more you get!
     </td>
   </tr>
   <tr>

@@ -40,6 +40,7 @@ pub enum ProviderAddTemplate {
     Runapi,
     Aicodemirror,
     Cubence,
+    Openmodel,
     Dds,
     Qiniu,
     Fenno,
@@ -59,6 +60,7 @@ impl ProviderAddTemplate {
             Self::Runapi => "runapi",
             Self::Aicodemirror => "aicodemirror",
             Self::Cubence => "cubence",
+            Self::Openmodel => "openmodel",
             Self::Dds => "dds",
             Self::Qiniu => "qiniu",
             Self::Fenno => "fenno",
@@ -78,6 +80,7 @@ impl ProviderAddTemplate {
                 | Self::Runapi
                 | Self::Aicodemirror
                 | Self::Cubence
+                | Self::Openmodel
                 | Self::Dds
                 | Self::Qiniu
                 | Self::Fenno
@@ -249,6 +252,7 @@ fn sponsor_template_from_id(id: &str) -> ProviderAddTemplate {
         "runapi" => ProviderAddTemplate::Runapi,
         "aicodemirror" => ProviderAddTemplate::Aicodemirror,
         "cubence" => ProviderAddTemplate::Cubence,
+        "openmodel" => ProviderAddTemplate::Openmodel,
         "dds" => ProviderAddTemplate::Dds,
         "qiniu" => ProviderAddTemplate::Qiniu,
         "fenno" => ProviderAddTemplate::Fenno,
@@ -355,6 +359,7 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
         | ProviderAddTemplate::Qiniu
         | ProviderAddTemplate::Fenno => sponsor_preset(template)
@@ -376,6 +381,7 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
         | ProviderAddTemplate::Qiniu
         | ProviderAddTemplate::Fenno => sponsor_preset(template).map(|preset| preset.website_url),
@@ -389,9 +395,10 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         | ProviderAddTemplate::OpenaiOfficial
         | ProviderAddTemplate::GoogleOauth => Some("official"),
         ProviderAddTemplate::Deepseek => Some("cn_official"),
-        ProviderAddTemplate::Runapi | ProviderAddTemplate::Qiniu | ProviderAddTemplate::Fenno => {
-            Some("aggregator")
-        }
+        ProviderAddTemplate::Runapi
+        | ProviderAddTemplate::Openmodel
+        | ProviderAddTemplate::Qiniu
+        | ProviderAddTemplate::Fenno => Some("aggregator"),
         ProviderAddTemplate::Custom
         | ProviderAddTemplate::CodexOauth
         | ProviderAddTemplate::Claudeapi
@@ -443,6 +450,7 @@ fn template_default_meta(
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
         | ProviderAddTemplate::Qiniu
         | ProviderAddTemplate::Fenno => sponsor_preset(template).map(|preset| {
@@ -475,6 +483,7 @@ fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> 
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds => None,
     }
 }
@@ -492,6 +501,7 @@ fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
         | ProviderAddTemplate::Qiniu
         | ProviderAddTemplate::Fenno => None,
@@ -519,6 +529,7 @@ fn build_provider_template_settings_config(
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
         | ProviderAddTemplate::Qiniu
         | ProviderAddTemplate::Fenno => build_sponsor_template_settings_config(
@@ -1153,9 +1164,10 @@ requires_openai_auth = true
                 "* AICodeMirror",
                 "* ClaudeAPI",
                 "* Cubence",
-                "* FennoAI",
+                "* OpenModel",
                 "* RunAPI",
                 "* Qiniu",
+                "* FennoAI",
                 "* PackyCode",
                 "* DDS",
             ]
@@ -1167,9 +1179,10 @@ requires_openai_auth = true
                 "OpenAI Official",
                 "* AICodeMirror",
                 "* Cubence",
-                "* FennoAI",
+                "* OpenModel",
                 "* RunAPI",
                 "* Qiniu",
+                "* FennoAI",
                 "* PackyCode",
                 "* DDS",
                 "DeepSeek",
@@ -1182,6 +1195,7 @@ requires_openai_auth = true
                 "Google OAuth",
                 "* AICodeMirror",
                 "* Cubence",
+                "* OpenModel",
                 "* Qiniu",
                 "* PackyCode",
             ]
@@ -1192,9 +1206,10 @@ requires_openai_auth = true
                 "Custom",
                 "* AICodeMirror",
                 "* Cubence",
-                "* FennoAI",
+                "* OpenModel",
                 "* RunAPI",
                 "* Qiniu",
+                "* FennoAI",
                 "* PackyCode"
             ]
         );
@@ -1204,9 +1219,10 @@ requires_openai_auth = true
                 "Custom",
                 "* AICodeMirror",
                 "* Cubence",
-                "* FennoAI",
+                "* OpenModel",
                 "* RunAPI",
                 "* Qiniu",
+                "* FennoAI",
                 "* PackyCode"
             ]
         );
@@ -1216,9 +1232,10 @@ requires_openai_auth = true
                 "Custom",
                 "* AICodeMirror",
                 "* Cubence",
-                "* FennoAI",
+                "* OpenModel",
                 "* RunAPI",
                 "* Qiniu",
+                "* FennoAI",
                 "* PackyCode"
             ]
         );
@@ -1235,6 +1252,17 @@ requires_openai_auth = true
         for app_type in [AppType::OpenCode, AppType::Hermes, AppType::OpenClaw] {
             validate_provider_add_template(&app_type, ProviderAddTemplate::Packycode)
                 .expect("PackyCode should match the upstream additive-app support matrix");
+        }
+        for app_type in [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            validate_provider_add_template(&app_type, ProviderAddTemplate::Openmodel)
+                .expect("OpenModel should support every app");
         }
         assert!(
             validate_provider_add_template(&AppType::Codex, ProviderAddTemplate::Claudeapi)
@@ -1903,6 +1931,138 @@ requires_openai_auth = true
                 .as_ref()
                 .and_then(|meta| meta.partner_promotion_key.as_deref()),
             Some("cubence")
+        );
+    }
+
+    #[test]
+    fn openmodel_template_uses_official_hosts_and_packycode_model_shapes_for_every_app() {
+        for app_type in [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            let provider =
+                build_provider_template_seed(&app_type, ProviderAddTemplate::Openmodel, &[])
+                    .expect("build OpenModel provider");
+            assert_eq!(provider.name, "OpenModel");
+            assert_eq!(
+                provider.website_url.as_deref(),
+                Some("https://www.openmodel.ai/?ref=JGDNqZl8")
+            );
+            assert_eq!(provider.category.as_deref(), Some("aggregator"));
+            assert_eq!(
+                provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.partner_promotion_key.as_deref()),
+                Some("openmodel")
+            );
+            assert_eq!(
+                provider.meta.as_ref().and_then(|meta| meta.is_partner),
+                Some(true)
+            );
+        }
+
+        let claude =
+            build_provider_template_seed(&AppType::Claude, ProviderAddTemplate::Openmodel, &[])
+                .expect("build OpenModel Claude provider");
+        assert_eq!(
+            claude.settings_config,
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.openmodel.ai",
+                },
+            })
+        );
+
+        let codex =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Openmodel, &[])
+                .expect("build OpenModel Codex provider");
+        let codex_config = codex.settings_config["config"]
+            .as_str()
+            .expect("OpenModel Codex config should be TOML");
+        assert!(codex_config.contains("model = \"gpt-5.6-sol\""));
+        assert!(codex_config.contains("base_url = \"https://api.openmodel.ai/v1\""));
+        assert!(codex_config.contains("wire_api = \"responses\""));
+        assert!(codex_config.contains("requires_openai_auth = true"));
+        assert_eq!(
+            codex.meta.and_then(|meta| meta.api_format),
+            Some("openai_responses".to_string())
+        );
+
+        let gemini =
+            build_provider_template_seed(&AppType::Gemini, ProviderAddTemplate::Openmodel, &[])
+                .expect("build OpenModel Gemini provider");
+        assert_eq!(
+            gemini.settings_config,
+            json!({
+                "env": {
+                    "GOOGLE_GEMINI_BASE_URL": "https://api.openmodel.ai",
+                    "GEMINI_MODEL": "gemini-3.6-flash",
+                },
+            })
+        );
+
+        let opencode =
+            build_provider_template_seed(&AppType::OpenCode, ProviderAddTemplate::Openmodel, &[])
+                .expect("build OpenModel OpenCode provider");
+        assert_eq!(opencode.settings_config["npm"], "@ai-sdk/anthropic");
+        assert_eq!(
+            opencode.settings_config["options"]["baseURL"],
+            "https://api.openmodel.ai/v1"
+        );
+        assert_eq!(
+            opencode.settings_config["models"],
+            json!({
+                "claude-sonnet-5": { "name": "Claude Sonnet 5" },
+                "claude-opus-5": { "name": "Claude Opus 5" },
+            })
+        );
+
+        let hermes =
+            build_provider_template_seed(&AppType::Hermes, ProviderAddTemplate::Openmodel, &[])
+                .expect("build OpenModel Hermes provider");
+        assert_eq!(
+            hermes.settings_config["base_url"],
+            "https://api.openmodel.ai"
+        );
+        assert_eq!(hermes.settings_config["api_mode"], "anthropic_messages");
+        assert_eq!(
+            hermes.settings_config["models"],
+            json!([
+                { "id": "claude-opus-5", "name": "Claude Opus 5" },
+                { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
+                { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5" },
+            ])
+        );
+
+        let openclaw =
+            build_provider_template_seed(&AppType::OpenClaw, ProviderAddTemplate::Openmodel, &[])
+                .expect("build OpenModel OpenClaw provider");
+        assert_eq!(
+            openclaw.settings_config["baseUrl"],
+            "https://api.openmodel.ai"
+        );
+        assert_eq!(openclaw.settings_config["api"], "anthropic-messages");
+        assert_eq!(
+            openclaw.settings_config["models"],
+            json!([
+                {
+                    "id": "claude-opus-5",
+                    "name": "Claude Opus 5",
+                    "contextWindow": 1000000,
+                    "cost": { "input": 5, "output": 25 },
+                },
+                {
+                    "id": "claude-sonnet-5",
+                    "name": "Claude Sonnet 5",
+                    "contextWindow": 1000000,
+                    "cost": { "input": 3, "output": 15 },
+                },
+            ])
         );
     }
 
