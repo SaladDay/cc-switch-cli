@@ -3643,6 +3643,23 @@ impl ProxyService {
         self.write_codex_live_verbatim(config)
     }
 
+    /// Merge per-provider catalog-generation options that the effective live
+    /// snapshot (for Codex only `{auth, config}`) would otherwise drop, so the
+    /// generated config honors e.g. `disableWebSearch`.
+    fn merge_codex_provider_catalog_options(settings: &mut Value, provider: &Provider) {
+        if let Some(root) = settings.as_object_mut() {
+            if let Some(option) = provider
+                .settings_config
+                .get(crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY)
+            {
+                root.insert(
+                    crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY.to_string(),
+                    option.clone(),
+                );
+            }
+        }
+    }
+
     fn write_codex_live_for_provider(
         &self,
         config: &Value,
@@ -3695,6 +3712,7 @@ impl ProxyService {
                 );
             }
         }
+        Self::merge_codex_provider_catalog_options(&mut settings, provider);
 
         let profile = crate::proxy::providers::codex_provider_catalog_tool_profile(provider);
         crate::codex_config::write_codex_provider_live_with_catalog(
@@ -3735,6 +3753,9 @@ impl ProxyService {
                             .unwrap_or_else(|| json!({ "models": [] })),
                     );
                 }
+            }
+            if let Some(provider) = provider {
+                Self::merge_codex_provider_catalog_options(&mut settings, provider);
             }
 
             let config_text = config
@@ -3788,6 +3809,7 @@ impl ProxyService {
                 );
             }
         }
+        Self::merge_codex_provider_catalog_options(&mut settings, provider);
 
         let profile = crate::proxy::providers::codex_provider_catalog_tool_profile(provider);
         crate::codex_config::write_codex_provider_live_config_only_with_catalog(

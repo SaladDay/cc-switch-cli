@@ -2404,6 +2404,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_codex_disable_web_search() -> &'static str {
+        if is_chinese() {
+            "禁用内置联网搜索"
+        } else {
+            "Disable hosted web search"
+        }
+    }
+
     pub fn tui_label_claude_hide_attribution() -> &'static str {
         if is_chinese() {
             "隐藏 AI 署名"

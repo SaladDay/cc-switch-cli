@@ -276,6 +276,7 @@ pub enum ProviderAddField {
     CodexQuickConfig,
     CodexGoalMode,
     CodexRemoteCompaction,
+    CodexDisableWebSearch,
     #[allow(dead_code)]
     CodexWireApi,
     #[allow(dead_code)]
@@ -560,6 +561,8 @@ pub struct ProviderAddFormState {
     codex_goal_mode_touched: bool,
     pub codex_remote_compaction: bool,
     codex_remote_compaction_touched: bool,
+    pub codex_disable_web_search: bool,
+    codex_disable_web_search_touched: bool,
     pub codex_quick_config_idx: usize,
     pub codex_oauth_account_id: Option<String>,
     pub codex_fast_mode: bool,

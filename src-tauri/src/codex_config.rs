@@ -768,6 +768,9 @@ fn set_codex_model_catalog_json_field(
 
 pub(crate) const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
 pub(crate) const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
+/// Per-provider settings key (in `settingsConfig`) that disables the hosted
+/// web-search tool for native `/responses` providers.
+pub(crate) const CODEX_WEB_SEARCH_DISABLE_KEY: &str = "disableWebSearch";
 
 /// Disable the hosted web-search tool for protocol paths that cannot carry it.
 /// Only remove values previously written by cc-switch, preserving user-owned
@@ -803,12 +806,20 @@ pub fn prepare_codex_config_text_with_model_catalog_payload(
 ) -> Result<PreparedCodexConfigText, AppError> {
     let catalog_path = get_codex_model_catalog_path();
 
+    // Anthropic gateways cannot carry the hosted web-search tool at all, so it
+    // is always disabled there. Native `/responses` providers disable it only
+    // when the per-provider `disableWebSearch` option is set; Chat profiles go
+    // through the proxy which converts the tool, so the option is ignored.
+    let disable_web_search = profile == CodexCatalogToolProfile::Anthropic
+        || (profile == CodexCatalogToolProfile::NativeResponses
+            && settings
+                .get(CODEX_WEB_SEARCH_DISABLE_KEY)
+                .and_then(Value::as_bool)
+                == Some(true));
+
     if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? {
         let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
-        let config_text = set_codex_web_search_field(
-            &config_text,
-            profile == CodexCatalogToolProfile::Anthropic,
-        )?;
+        let config_text = set_codex_web_search_field(&config_text, disable_web_search)?;
         Ok(PreparedCodexConfigText {
             config_text,
             model_catalog: Some(catalog),
@@ -816,10 +827,7 @@ pub fn prepare_codex_config_text_with_model_catalog_payload(
     } else {
         let config_text = set_codex_model_catalog_json_field(config_text, None)?;
         Ok(PreparedCodexConfigText {
-            config_text: set_codex_web_search_field(
-                &config_text,
-                profile == CodexCatalogToolProfile::Anthropic,
-            )?,
+            config_text: set_codex_web_search_field(&config_text, disable_web_search)?,
             model_catalog: None,
         })
     }
@@ -2022,6 +2030,95 @@ mod tests {
         let parsed: toml::Value =
             toml::from_str(&proxy.config_text).expect("parse proxy-chat config");
         assert!(parsed.get("web_search").is_none());
+    }
+
+    fn parse_web_search_field(config_text: &str) -> Option<String> {
+        toml::from_str::<toml::Value>(config_text)
+            .ok()
+            .and_then(|parsed| {
+                parsed
+                    .get("web_search")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string)
+            })
+    }
+
+    #[test]
+    fn native_responses_disable_web_search_option_writes_disabled_field() {
+        let config = "model = \"gpt-5.6\"\n";
+        let settings = json!({ CODEX_WEB_SEARCH_DISABLE_KEY: true });
+
+        let native = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(
+            parse_web_search_field(&native.config_text).as_deref(),
+            Some(CODEX_WEB_SEARCH_DISABLED)
+        );
+    }
+
+    #[test]
+    fn native_responses_without_option_keeps_web_search_field_absent() {
+        let config = "model = \"gpt-5.6\"\n";
+        let settings = json!({});
+
+        let native = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(parse_web_search_field(&native.config_text), None);
+
+        // Explicit false behaves like absent.
+        let off = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({ CODEX_WEB_SEARCH_DISABLE_KEY: false }),
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(parse_web_search_field(&off.config_text), None);
+    }
+
+    #[test]
+    fn native_responses_option_off_removes_previous_disabled_value() {
+        let config = "model = \"gpt-5.6\"\nweb_search = \"disabled\"\n";
+        let off = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({ CODEX_WEB_SEARCH_DISABLE_KEY: false }),
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(parse_web_search_field(&off.config_text), None);
+
+        // User-owned values survive the cleanup.
+        let live = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({ CODEX_WEB_SEARCH_DISABLE_KEY: false }),
+            "model = \"gpt-5.6\"\nweb_search = \"live\"\n",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(
+            parse_web_search_field(&live.config_text).as_deref(),
+            Some("live")
+        );
+    }
+
+    #[test]
+    fn proxy_chat_profile_ignores_disable_web_search_option() {
+        let config = "model = \"gpt-5.6\"\n";
+        let settings = json!({ CODEX_WEB_SEARCH_DISABLE_KEY: true });
+
+        let proxy = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare proxy-chat config");
+        assert_eq!(parse_web_search_field(&proxy.config_text), None);
     }
 
     #[test]
