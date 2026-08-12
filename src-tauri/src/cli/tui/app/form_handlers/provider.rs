@@ -557,6 +557,13 @@ impl App {
                 provider.toggle_codex_remote_compaction();
                 Action::None
             }
+            ProviderAddField::CodexDisableWebSearch => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.toggle_codex_disable_web_search();
+                Action::None
+            }
             ProviderAddField::ClaudeHideAttribution => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;

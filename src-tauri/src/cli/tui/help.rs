@@ -754,8 +754,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::CodexQuickConfig => HelpContent::new(
             texts::tui_label_codex_quick_config(),
             help_lines(
-                "打开 Codex 快捷配置菜单，集中管理启用 Goal mode、启用远程压缩等开关。",
-                "Opens the Codex quick-config menu that groups the Goal-mode and remote-compaction toggles.",
+                "打开 Codex 快捷配置菜单，集中管理启用 Goal mode、启用远程压缩、禁用内置联网搜索等开关。",
+                "Opens the Codex quick-config menu that groups the Goal-mode, remote-compaction, and hosted web-search toggles.",
             ),
         ),
         ProviderAddField::CodexGoalMode => HelpContent::new(
@@ -770,6 +770,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
             help_lines(
                 "开启后会将当前 model_providers 条目的 name 写为 OpenAI，使 Codex 尝试使用远程压缩；关闭时恢复原供应商名称。",
                 "When enabled, sets the current model_providers entry's name to \"OpenAI\" so Codex attempts remote compaction; turning it off restores the provider name.",
+            ),
+        ),
+        ProviderAddField::CodexDisableWebSearch => HelpContent::new(
+            texts::tui_label_codex_disable_web_search(),
+            help_lines(
+                "禁用 Codex 的内置联网搜索工具，生成 config.toml 时写入 web_search = \"disabled\"。仅对原生 Responses（openai_responses）格式的供应商生效：Anthropic 网关无法携带该工具（本就禁用），Chat 格式由本地代理转换，此开关不影响两者。关闭时只移除 cc-switch 之前写入的 disabled 值，用户手写的偏好（如 live）会被保留。",
+                "Disables Codex's hosted web-search tool by writing web_search = \"disabled\" into the generated config.toml. Applies only to native Responses (openai_responses) providers: Anthropic gateways cannot carry the tool (always disabled) and Chat formats are converted by the local proxy, so this toggle does not affect them. Turning it off only removes the disabled value previously written by cc-switch, preserving user-owned settings such as live.",
             ),
         ),
         ProviderAddField::ClaudeHideAttribution => HelpContent::new(
