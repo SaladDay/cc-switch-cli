@@ -12,7 +12,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::time::timeout;
 
 use crate::app_config::AppType;
@@ -22,6 +22,11 @@ use crate::database::Database;
 use crate::error::{format_skill_error, AppError};
 
 const SKILLS_INDEX_VERSION: u32 = 1;
+const MAX_SKILL_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_SKILL_ARCHIVE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SKILL_ARCHIVE_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_SKILL_ARCHIVE_PATH_DEPTH: usize = 64;
+const SKILL_ARCHIVE_ENTRY_COST: u64 = 4096;
 
 fn default_skills_index_version() -> u32 {
     SKILLS_INDEX_VERSION
@@ -195,6 +200,59 @@ pub struct Skill {
     pub repo_name: Option<String>,
     #[serde(rename = "repoBranch")]
     pub repo_branch: Option<String>,
+}
+
+/// One installed Skill whose repository content differs from the local copy.
+#[derive(Debug, Clone)]
+pub struct SkillUpdateInfo {
+    pub id: String,
+    pub name: String,
+    pub directory: String,
+    pub current_hash: Option<String>,
+    pub remote_hash: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SkillUpdateCheckResult {
+    pub updates: Vec<SkillUpdateInfo>,
+    pub failures: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillUpdateFailure {
+    pub id: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SkillUpdateBatchResult {
+    pub updated: Vec<InstalledSkill>,
+    pub failures: Vec<SkillUpdateFailure>,
+}
+
+struct SkillUpdateOutcome {
+    skill: InstalledSkill,
+    deployment_failures: Vec<String>,
+}
+
+struct DownloadedRepoGuard(PathBuf);
+
+impl DownloadedRepoGuard {
+    fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for DownloadedRepoGuard {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            log::debug!("Failed to remove temporary Skill repo: {error}");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -804,6 +862,8 @@ impl SkillService {
                             repo_branch: None,
                             apps,
                             installed_at: Utc::now().timestamp(),
+                            content_hash: Self::compute_dir_hash(&ssot_path).ok(),
+                            updated_at: 0,
                         },
                     );
                     created += 1;
@@ -903,6 +963,70 @@ impl SkillService {
         }
     }
 
+    fn sync_updated_skill_to_app(
+        directory: &str,
+        app: &AppType,
+        method: SyncMethod,
+    ) -> Result<(), AppError> {
+        if !Self::app_supports_skills(app) {
+            return Ok(());
+        }
+
+        let source = Self::get_ssot_dir()?.join(directory);
+        if !source.is_dir() {
+            return Err(AppError::Message(format!(
+                "Skill does not exist in SSOT: {directory}"
+            )));
+        }
+        let app_dir = Self::get_app_skills_dir(app)?;
+        fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
+        let dest = app_dir.join(directory);
+        if source == dest {
+            return Ok(());
+        }
+
+        let staging = tempfile::Builder::new()
+            .prefix(".cc-switch-skill-deploy-")
+            .tempdir_in(&app_dir)
+            .map_err(|e| AppError::io(&app_dir, e))?;
+        let next = staging.path().join("next");
+        let previous = staging.path().join("previous");
+        match method {
+            SyncMethod::Auto => {
+                if let Err(error) = Self::create_symlink(&source, &next) {
+                    log::warn!(
+                        "Symlink creation failed during Skill update, falling back to copy: {error}"
+                    );
+                    Self::copy_dir_recursive(&source, &next)?;
+                }
+            }
+            SyncMethod::Symlink => Self::create_symlink(&source, &next)?,
+            SyncMethod::Copy => Self::copy_dir_recursive(&source, &next)?,
+        }
+
+        let had_previous = fs::symlink_metadata(&dest).is_ok();
+        if had_previous {
+            fs::rename(&dest, &previous).map_err(|e| AppError::IoContext {
+                context: format!("Failed to stage app Skill: {}", dest.display()),
+                source: e,
+            })?;
+        }
+        if let Err(error) = fs::rename(&next, &dest) {
+            if had_previous {
+                if let Err(rollback) = fs::rename(&previous, &dest) {
+                    let preserved = staging.keep();
+                    return Err(AppError::Message(format!(
+                        "Skill deployment failed ({error}); rollback failed ({rollback}). Previous files remain at {}",
+                        preserved.join("previous").display()
+                    )));
+                }
+            }
+            return Err(AppError::io(&dest, error));
+        }
+        drop(staging);
+        Ok(())
+    }
+
     pub fn remove_from_app(directory: &str, app: &AppType) -> Result<(), AppError> {
         if !Self::app_supports_skills(app) {
             return Ok(());
@@ -963,6 +1087,465 @@ impl SkillService {
         let mut skills: Vec<InstalledSkill> = index.skills.values().cloned().collect();
         skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(skills)
+    }
+
+    // ---------------------------------------------------------------------
+    // Manual update checks and updates
+    // ---------------------------------------------------------------------
+
+    /// Hash all non-hidden files in a Skill directory in stable path order.
+    pub fn compute_dir_hash(dir: &Path) -> Result<String, AppError> {
+        use sha2::{Digest, Sha256};
+
+        fn collect(current: &Path, files: &mut Vec<PathBuf>) -> Result<(), AppError> {
+            for entry in fs::read_dir(current).map_err(|e| AppError::io(current, e))? {
+                let entry = entry.map_err(|e| AppError::io(current, e))?;
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let file_type = entry
+                    .file_type()
+                    .map_err(|e| AppError::io(entry.path(), e))?;
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    collect(&entry.path(), files)?;
+                } else if file_type.is_file() {
+                    files.push(entry.path());
+                }
+            }
+            Ok(())
+        }
+
+        if !dir.is_dir() {
+            return Err(AppError::Message(format!(
+                "Skill directory not found: {}",
+                dir.display()
+            )));
+        }
+
+        let mut files = Vec::new();
+        collect(dir, &mut files)?;
+        files.sort();
+
+        let mut hasher = Sha256::new();
+        for path in files {
+            let relative = path.strip_prefix(dir).unwrap_or(&path);
+            hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+            hasher.update(b"\0");
+            hasher.update(fs::read(&path).map_err(|e| AppError::io(&path, e))?);
+            hasher.update(b"\0");
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn validate_update_directory(directory: &str) -> Result<(), AppError> {
+        let mut components = Path::new(directory).components();
+        if matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none() {
+            return Ok(());
+        }
+        Err(AppError::InvalidInput(format!(
+            "Invalid Skill directory: {directory}"
+        )))
+    }
+
+    fn source_path_from_readme(
+        skill: &InstalledSkill,
+        downloaded_branch: Option<&str>,
+    ) -> Option<PathBuf> {
+        let owner = skill.repo_owner.as_deref()?;
+        let repo = skill.repo_name.as_deref()?;
+        let url = skill.readme_url.as_deref()?;
+        let mut branches = Vec::new();
+        if let Some(branch) = skill.repo_branch.as_deref() {
+            branches.push(branch);
+        }
+        if let Some(branch) = downloaded_branch {
+            if !branches.contains(&branch) {
+                branches.push(branch);
+            }
+        }
+        for branch in ["HEAD", "main", "master"] {
+            if !branches.contains(&branch) {
+                branches.push(branch);
+            }
+        }
+
+        for kind in ["tree", "blob"] {
+            for branch in &branches {
+                let prefix = format!("https://github.com/{owner}/{repo}/{kind}/{branch}/");
+                let Some(raw) = url.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let mut path = PathBuf::from(raw.trim_end_matches('/'));
+                if kind == "blob" && path.file_name().is_some_and(|name| name == "SKILL.md") {
+                    path.pop();
+                }
+                if path
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+                {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve_update_source(
+        root: &Path,
+        skill: &InstalledSkill,
+        downloaded_branch: Option<&str>,
+    ) -> Result<PathBuf, AppError> {
+        if let Some(relative) = Self::source_path_from_readme(skill, downloaded_branch) {
+            let exact = root.join(relative);
+            if exact.is_dir() && exact.join("SKILL.md").is_file() {
+                return Ok(exact);
+            }
+        }
+
+        let mut matches = Self::scan_skill_dirs(root)?
+            .into_iter()
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .eq_ignore_ascii_case(&skill.directory)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let root_is_skill = root.join("SKILL.md").is_file();
+        if matches.is_empty() && root_is_skill {
+            return Ok(root.to_path_buf());
+        }
+        if matches.len() == 1 && !root_is_skill {
+            return Ok(matches.remove(0));
+        }
+
+        let detail = if matches.is_empty() && !root_is_skill {
+            "not found"
+        } else {
+            "ambiguous"
+        };
+        Err(AppError::Message(format!(
+            "Remote Skill directory '{}' is {detail} in {}/{}",
+            skill.directory,
+            skill.repo_owner.as_deref().unwrap_or("unknown"),
+            skill.repo_name.as_deref().unwrap_or("unknown")
+        )))
+    }
+
+    /// Check for repository-backed Skill updates. This is only called by
+    /// explicit CLI/TUI actions; no background or startup check is scheduled.
+    pub async fn check_updates(&self) -> Result<SkillUpdateCheckResult, AppError> {
+        let db = Database::init()?;
+        let installed = db.get_all_installed_skills()?;
+        let ssot_dir = Self::get_ssot_dir()?;
+        let mut groups: HashMap<(String, String, String), Vec<InstalledSkill>> = HashMap::new();
+
+        for skill in installed.into_values() {
+            let (Some(owner), Some(repo)) = (&skill.repo_owner, &skill.repo_name) else {
+                continue;
+            };
+            groups
+                .entry((
+                    owner.clone(),
+                    repo.clone(),
+                    skill
+                        .repo_branch
+                        .clone()
+                        .unwrap_or_else(|| "HEAD".to_string()),
+                ))
+                .or_default()
+                .push(skill);
+        }
+
+        let mut groups = groups.into_iter().collect::<Vec<_>>();
+        groups.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut result = SkillUpdateCheckResult::default();
+
+        for ((owner, name, branch), skills) in groups {
+            let repo = SkillRepo {
+                owner: owner.clone(),
+                name: name.clone(),
+                branch,
+                enabled: true,
+            };
+            let (temp_dir, used_branch) = match timeout(
+                std::time::Duration::from_secs(60),
+                self.download_repo_for_update(&repo),
+            )
+            .await
+            {
+                Ok(Ok((path, used_branch))) => (DownloadedRepoGuard::new(path), used_branch),
+                Ok(Err(error)) => {
+                    result.failures.push(format!("{owner}/{name}: {error}"));
+                    continue;
+                }
+                Err(_) => {
+                    result
+                        .failures
+                        .push(format!("{owner}/{name}: update check timed out"));
+                    continue;
+                }
+            };
+
+            for skill in skills {
+                if let Err(error) = Self::validate_update_directory(&skill.directory) {
+                    result.failures.push(format!("{}: {error}", skill.id));
+                    continue;
+                }
+                let remote_dir = match Self::resolve_update_source(
+                    temp_dir.path(),
+                    &skill,
+                    Some(&used_branch),
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        result.failures.push(format!("{}: {error}", skill.id));
+                        continue;
+                    }
+                };
+                let remote_hash = match Self::compute_dir_hash(&remote_dir) {
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        result.failures.push(format!("{}: {error}", skill.id));
+                        continue;
+                    }
+                };
+
+                let local_dir = ssot_dir.join(&skill.directory);
+                let current_hash = if local_dir.is_dir() {
+                    match &skill.content_hash {
+                        Some(hash) => Some(hash.clone()),
+                        None => match Self::compute_dir_hash(&local_dir) {
+                            Ok(hash) => {
+                                if let Err(error) = db.update_skill_hash(&skill.id, &hash, 0) {
+                                    log::warn!(
+                                        "Failed to store Skill hash for {}: {error}",
+                                        skill.id
+                                    );
+                                }
+                                Some(hash)
+                            }
+                            Err(error) => {
+                                result.failures.push(format!("{}: {error}", skill.id));
+                                continue;
+                            }
+                        },
+                    }
+                } else {
+                    None
+                };
+
+                if current_hash.as_deref() != Some(remote_hash.as_str()) {
+                    result.updates.push(SkillUpdateInfo {
+                        id: skill.id,
+                        name: skill.name,
+                        directory: skill.directory,
+                        current_hash,
+                        remote_hash,
+                    });
+                }
+            }
+        }
+
+        result
+            .updates
+            .sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        Ok(result)
+    }
+
+    fn restore_previous_update(dest: &Path, previous: Option<&Path>) -> Result<(), AppError> {
+        if fs::symlink_metadata(dest).is_ok() {
+            Self::remove_path(dest)?;
+        }
+        if let Some(previous) = previous {
+            fs::rename(previous, dest).map_err(|e| AppError::IoContext {
+                context: format!("Failed to restore Skill directory: {}", dest.display()),
+                source: e,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Update one repository-backed Skill after an explicit user action.
+    async fn update_skill(&self, skill_id: &str) -> Result<SkillUpdateOutcome, AppError> {
+        let db = Database::init()?;
+        let skill = db
+            .get_installed_skill(skill_id)?
+            .ok_or_else(|| AppError::Message(format!("Skill not found: {skill_id}")))?;
+        Self::validate_update_directory(&skill.directory)?;
+
+        let (owner, name) = match (&skill.repo_owner, &skill.repo_name) {
+            (Some(owner), Some(name)) => (owner.clone(), name.clone()),
+            _ => {
+                return Err(AppError::InvalidInput(format!(
+                    "Cannot update local Skill: {skill_id}"
+                )))
+            }
+        };
+        let repo = SkillRepo {
+            owner: owner.clone(),
+            name: name.clone(),
+            branch: skill
+                .repo_branch
+                .clone()
+                .unwrap_or_else(|| "HEAD".to_string()),
+            enabled: true,
+        };
+
+        let (temp_dir, used_branch) = timeout(
+            std::time::Duration::from_secs(60),
+            self.download_repo_for_update(&repo),
+        )
+        .await
+        .map_err(|_| {
+            AppError::Message(format!("Timed out downloading {owner}/{name} for update"))
+        })??;
+        let temp_dir = DownloadedRepoGuard::new(temp_dir);
+        let source = Self::resolve_update_source(temp_dir.path(), &skill, Some(&used_branch))?;
+        let source_relative = source
+            .strip_prefix(temp_dir.path())
+            .map_err(|_| AppError::Message("Remote Skill source escaped its repository".into()))?
+            .to_path_buf();
+
+        let ssot_dir = Self::get_ssot_dir()?;
+        let sync_method = Self::get_sync_method()?;
+        let staging = tempfile::Builder::new()
+            .prefix(".cc-switch-skill-update-")
+            .tempdir_in(&ssot_dir)
+            .map_err(|e| AppError::io(&ssot_dir, e))?;
+        let next = staging.path().join("next");
+        let previous = staging.path().join("previous");
+        Self::copy_dir_recursive(&source, &next)?;
+        drop(temp_dir);
+
+        let content_hash = Self::compute_dir_hash(&next)?;
+        let (new_name, new_description) =
+            Self::read_skill_name_desc(&next.join("SKILL.md"), &skill.directory);
+        let current = db.get_installed_skill(skill_id)?.ok_or_else(|| {
+            AppError::Message(format!("Skill was removed during update: {skill_id}"))
+        })?;
+        if current.directory != skill.directory
+            || current.repo_owner != skill.repo_owner
+            || current.repo_name != skill.repo_name
+            || current.repo_branch != skill.repo_branch
+            || current.readme_url != skill.readme_url
+            || current.content_hash != skill.content_hash
+            || current.updated_at != skill.updated_at
+        {
+            return Err(AppError::Message(format!(
+                "Skill changed during update; run the update again: {skill_id}"
+            )));
+        }
+        let dest = ssot_dir.join(&skill.directory);
+        let had_previous = fs::symlink_metadata(&dest).is_ok();
+        if had_previous {
+            fs::rename(&dest, &previous).map_err(|e| AppError::IoContext {
+                context: format!("Failed to stage existing Skill: {}", dest.display()),
+                source: e,
+            })?;
+        }
+        if let Err(error) = fs::rename(&next, &dest) {
+            if had_previous {
+                if let Err(rollback) = fs::rename(&previous, &dest) {
+                    let preserved = staging.keep();
+                    return Err(AppError::Message(format!(
+                        "Skill update failed ({error}); rollback failed ({rollback}). Previous files remain at {}",
+                        preserved.join("previous").display()
+                    )));
+                }
+            }
+            return Err(AppError::io(&dest, error));
+        }
+
+        // Preserve app enablement changes made while the repository was downloading.
+        let mut updated = current;
+        updated.name = new_name;
+        updated.description = new_description;
+        updated.repo_branch = Some(used_branch.clone());
+        let doc_path = if source_relative.as_os_str().is_empty() {
+            "SKILL.md".to_string()
+        } else {
+            format!(
+                "{}/SKILL.md",
+                source_relative.to_string_lossy().replace('\\', "/")
+            )
+        };
+        updated.readme_url = Some(Self::build_skill_doc_url(
+            &owner,
+            &name,
+            &used_branch,
+            &doc_path,
+        ));
+        updated.content_hash = Some(content_hash);
+        updated.updated_at = Utc::now().timestamp();
+
+        if let Err(error) = db.save_skill(&updated) {
+            if let Err(rollback) =
+                Self::restore_previous_update(&dest, had_previous.then_some(previous.as_path()))
+            {
+                let preserved = staging.keep();
+                return Err(AppError::Message(format!(
+                    "Skill metadata update failed ({error}); rollback failed ({rollback}). Previous files remain at {}",
+                    preserved.join("previous").display()
+                )));
+            }
+            return Err(error);
+        }
+        drop(staging);
+
+        let mut deployment_failures = Vec::new();
+        for app in Self::supported_skill_apps() {
+            if updated.apps.is_enabled_for(&app) {
+                if let Err(error) =
+                    Self::sync_updated_skill_to_app(&updated.directory, &app, sync_method)
+                {
+                    log::warn!(
+                        "Updated Skill {} but failed to sync it to {app:?}: {error}",
+                        updated.id
+                    );
+                    deployment_failures.push(format!("{app:?}: {error}"));
+                }
+            }
+        }
+
+        Ok(SkillUpdateOutcome {
+            skill: updated,
+            deployment_failures,
+        })
+    }
+
+    pub async fn update_skills(&self, ids: &[String]) -> SkillUpdateBatchResult {
+        let mut result = SkillUpdateBatchResult::default();
+        let mut seen = HashSet::new();
+        for id in ids {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            match self.update_skill(id).await {
+                Ok(outcome) => {
+                    if !outcome.deployment_failures.is_empty() {
+                        result.failures.push(SkillUpdateFailure {
+                            id: outcome.skill.id.clone(),
+                            error: format!(
+                                "content updated, but app deployment failed; retry the update or run `cc-switch skills sync`: {}",
+                                outcome.deployment_failures.join("; ")
+                            ),
+                        });
+                    }
+                    result.updated.push(outcome.skill);
+                }
+                Err(error) => result.failures.push(SkillUpdateFailure {
+                    id: id.clone(),
+                    error: error.to_string(),
+                }),
+            }
+        }
+        result
     }
 
     pub fn list_repos() -> Result<Vec<SkillRepo>, AppError> {
@@ -1190,6 +1773,8 @@ impl SkillService {
         // Ensure SSOT dir and install files.
         let ssot_dir = Self::get_ssot_dir()?;
         let dest = ssot_dir.join(&install_name);
+        let mut installed_branch = discoverable.repo_branch.clone();
+        let mut installed_readme_url = discoverable.readme_url.clone();
         if !dest.exists() {
             let repo = SkillRepo {
                 owner: discoverable.repo_owner.clone(),
@@ -1198,7 +1783,7 @@ impl SkillService {
                 enabled: true,
             };
 
-            let temp_dir = timeout(
+            let (temp_dir, used_branch) = timeout(
                 std::time::Duration::from_secs(60),
                 self.download_repo(&repo),
             )
@@ -1235,6 +1820,20 @@ impl SkillService {
                 )));
             }
 
+            let source_relative = source.strip_prefix(&temp_dir).map_err(|_| {
+                AppError::Message("Remote Skill source escaped its repository".into())
+            })?;
+            let doc_path = format!(
+                "{}/SKILL.md",
+                source_relative.to_string_lossy().replace('\\', "/")
+            );
+            installed_readme_url = Some(Self::build_skill_doc_url(
+                &repo.owner,
+                &repo.name,
+                &used_branch,
+                &doc_path,
+            ));
+            installed_branch = used_branch;
             Self::copy_dir_recursive(&source, &dest)?;
             let _ = fs::remove_dir_all(&temp_dir);
         }
@@ -1248,12 +1847,14 @@ impl SkillService {
                 Some(discoverable.description.clone())
             },
             directory: install_name.clone(),
-            readme_url: discoverable.readme_url.clone(),
+            readme_url: installed_readme_url,
             repo_owner: Some(discoverable.repo_owner.clone()),
             repo_name: Some(discoverable.repo_name.clone()),
-            repo_branch: Some(discoverable.repo_branch.clone()),
+            repo_branch: Some(installed_branch),
             apps: SkillApps::only(app),
             installed_at: Utc::now().timestamp(),
+            content_hash: Self::compute_dir_hash(&dest).ok(),
+            updated_at: 0,
         };
 
         index.skills.insert(install_name.clone(), installed.clone());
@@ -1477,6 +2078,8 @@ impl SkillService {
                 readme_url,
                 apps,
                 installed_at: Utc::now().timestamp(),
+                content_hash: Self::compute_dir_hash(&dest).ok(),
+                updated_at: 0,
             };
 
             index.skills.insert(dir_name.clone(), skill.clone());
@@ -1713,6 +2316,254 @@ impl SkillService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_repo_archive_at(
+        path: &str,
+        content: &[u8],
+    ) -> zip::ZipArchive<std::io::Cursor<Vec<u8>>> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .add_directory("repo-main/", options)
+            .expect("add archive root");
+        writer.start_file(path, options).expect("add archive file");
+        std::io::Write::write_all(&mut writer, content).expect("write archive content");
+        let mut cursor = writer.finish().expect("finish archive");
+        cursor.set_position(0);
+        zip::ZipArchive::new(cursor).expect("open archive")
+    }
+
+    fn test_repo_archive(content: &[u8]) -> zip::ZipArchive<std::io::Cursor<Vec<u8>>> {
+        test_repo_archive_at("repo-main/SKILL.md", content)
+    }
+
+    fn repository_skill(readme_url: Option<&str>) -> InstalledSkill {
+        InstalledSkill {
+            id: "owner/repo:shared".to_string(),
+            name: "Shared".to_string(),
+            description: None,
+            directory: "shared".to_string(),
+            repo_owner: Some("owner".to_string()),
+            repo_name: Some("repo".to_string()),
+            repo_branch: Some("main".to_string()),
+            readme_url: readme_url.map(str::to_string),
+            apps: SkillApps::default(),
+            installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn skill_directory_hash_is_stable_and_ignores_hidden_files() {
+        let temp = tempfile::tempdir().expect("create hash fixture");
+        fs::create_dir_all(temp.path().join("nested")).expect("create nested directory");
+        fs::write(temp.path().join("SKILL.md"), "first").expect("write manifest");
+        fs::write(temp.path().join("nested/data.txt"), "data").expect("write nested file");
+        let initial = SkillService::compute_dir_hash(temp.path()).expect("compute initial hash");
+
+        fs::write(temp.path().join(".cache"), "ignored").expect("write hidden file");
+        assert_eq!(
+            SkillService::compute_dir_hash(temp.path()).expect("hash with hidden file"),
+            initial
+        );
+
+        fs::write(temp.path().join("nested/data.txt"), "changed").expect("change visible file");
+        assert_ne!(
+            SkillService::compute_dir_hash(temp.path()).expect("hash changed content"),
+            initial
+        );
+    }
+
+    #[test]
+    fn repository_archive_enforces_entry_and_extracted_size_limits() {
+        let entry_dest = tempfile::tempdir().expect("create entry-limit destination");
+        let entry_error = SkillService::extract_repo_archive_with_limits(
+            test_repo_archive(b"data"),
+            entry_dest.path(),
+            1,
+            100,
+        )
+        .expect_err("archive should exceed the one-entry limit");
+        assert!(entry_error.to_string().contains("too many entries"));
+
+        let size_dest = tempfile::tempdir().expect("create size-limit destination");
+        let size_error = SkillService::extract_repo_archive_with_limits(
+            test_repo_archive(b"data"),
+            size_dest.path(),
+            10,
+            3,
+        )
+        .expect_err("archive should exceed the extracted-byte limit");
+        assert!(size_error.to_string().contains("extraction limit"));
+    }
+
+    #[test]
+    fn repository_archive_rejects_paths_that_escape_after_root_stripping() {
+        let parent = tempfile::tempdir().expect("create traversal destination parent");
+        let dest = parent.path().join("extract");
+        fs::create_dir(&dest).expect("create traversal destination");
+        let error = SkillService::extract_repo_archive_with_limits(
+            test_repo_archive_at("repo-main/../escaped.txt", b"escape"),
+            &dest,
+            10,
+            1024 * 1024,
+        )
+        .expect_err("root-relative parent traversal must be rejected");
+
+        assert!(error.to_string().contains("INVALID_ARCHIVE_PATH"));
+        assert!(!parent.path().join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn repository_archive_charges_implicit_directories_to_the_budget() {
+        let dest = tempfile::tempdir().expect("create directory-budget destination");
+        let error = SkillService::extract_repo_archive_with_limits(
+            test_repo_archive_at("repo-main/a/b/c/SKILL.md", b""),
+            dest.path(),
+            10,
+            SKILL_ARCHIVE_ENTRY_COST - 1,
+        )
+        .expect_err("implicit directories must consume extraction budget");
+
+        assert!(error.to_string().contains("extraction limit"));
+    }
+
+    #[test]
+    fn github_archive_coordinates_cannot_change_the_download_endpoint() {
+        assert!(SkillService::github_archive_url("owner", "repo", "feature/nested").is_ok());
+        for invalid in [
+            ("owner/escape", "repo", "main"),
+            ("owner", "../releases", "main"),
+            ("owner", "repo", "../../../releases/download/payload"),
+        ] {
+            assert!(SkillService::github_archive_url(invalid.0, invalid.1, invalid.2).is_err());
+        }
+    }
+
+    #[test]
+    fn manual_update_keeps_an_explicit_repository_branch_pinned() {
+        assert_eq!(
+            SkillService::branch_candidates("release", None, false),
+            vec!["release"]
+        );
+        assert_eq!(
+            SkillService::branch_candidates("release", None, true),
+            vec!["release", "main", "master"]
+        );
+        assert_eq!(
+            SkillService::branch_candidates("HEAD", Some("trunk".to_string()), false),
+            vec!["trunk", "main", "master"]
+        );
+    }
+
+    #[test]
+    fn update_deployment_keeps_existing_app_copy_until_replacement_is_ready() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Codex)
+            .expect("resolve isolated Codex skills directory");
+        let deployed = app_dir.join("demo");
+        fs::create_dir_all(&deployed).expect("create existing app deployment");
+        fs::write(deployed.join("SKILL.md"), "old").expect("write existing app deployment");
+
+        SkillService::sync_updated_skill_to_app("demo", &AppType::Codex, SyncMethod::Copy)
+            .expect_err("missing staged source should fail");
+        assert_eq!(
+            fs::read_to_string(deployed.join("SKILL.md")).expect("read preserved deployment"),
+            "old"
+        );
+
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve isolated SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create replacement source");
+        fs::write(source.join("SKILL.md"), "new").expect("write replacement source");
+        SkillService::sync_updated_skill_to_app("demo", &AppType::Codex, SyncMethod::Copy)
+            .expect("deploy replacement");
+        assert_eq!(
+            fs::read_to_string(deployed.join("SKILL.md")).expect("read replaced deployment"),
+            "new"
+        );
+    }
+
+    #[test]
+    fn update_source_uses_nested_path_from_readme_url() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        let first = temp.path().join("first/shared");
+        let expected = temp.path().join("second/shared");
+        fs::create_dir_all(&first).expect("create first duplicate");
+        fs::create_dir_all(&expected).expect("create expected duplicate");
+        fs::write(first.join("SKILL.md"), "first").expect("write first manifest");
+        fs::write(expected.join("SKILL.md"), "second").expect("write expected manifest");
+
+        let skill = repository_skill(Some(
+            "https://github.com/owner/repo/tree/main/second/shared",
+        ));
+        let resolved = SkillService::resolve_update_source(temp.path(), &skill, Some("main"))
+            .expect("readme path should disambiguate duplicate names");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn update_source_rejects_ambiguous_name_without_source_path() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        for parent in ["first", "second"] {
+            let directory = temp.path().join(parent).join("shared");
+            fs::create_dir_all(&directory).expect("create duplicate skill");
+            fs::write(directory.join("SKILL.md"), parent).expect("write manifest");
+        }
+
+        let error =
+            SkillService::resolve_update_source(temp.path(), &repository_skill(None), Some("main"))
+                .expect_err("ambiguous source must not update an arbitrary directory");
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+    }
+
+    #[test]
+    fn update_source_accepts_head_metadata_for_branchless_nested_skill() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        let expected = temp.path().join("second/shared");
+        for parent in ["first", "second"] {
+            let directory = temp.path().join(parent).join("shared");
+            fs::create_dir_all(&directory).expect("create duplicate skill");
+            fs::write(directory.join("SKILL.md"), parent).expect("write manifest");
+        }
+
+        let mut skill = repository_skill(Some(
+            "https://github.com/owner/repo/blob/HEAD/second/shared/SKILL.md",
+        ));
+        skill.repo_branch = None;
+        let resolved = SkillService::resolve_update_source(temp.path(), &skill, Some("main"))
+            .expect("HEAD metadata should preserve the nested source path");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn update_source_prioritizes_exact_root_metadata() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        fs::write(temp.path().join("SKILL.md"), "root").expect("write root manifest");
+        let nested = temp.path().join("nested/shared");
+        fs::create_dir_all(&nested).expect("create nested skill");
+        fs::write(nested.join("SKILL.md"), "nested").expect("write nested manifest");
+
+        let skill = repository_skill(Some("https://github.com/owner/repo/blob/main/SKILL.md"));
+        let resolved = SkillService::resolve_update_source(temp.path(), &skill, Some("main"))
+            .expect("exact root metadata should win over a same-named nested skill");
+
+        assert_eq!(resolved, temp.path());
+    }
+
+    #[test]
+    fn update_directory_must_be_one_safe_path_segment() {
+        assert!(SkillService::validate_update_directory("safe-skill").is_ok());
+        assert!(SkillService::validate_update_directory("../outside").is_err());
+        assert!(SkillService::validate_update_directory("nested/skill").is_err());
+        assert!(SkillService::validate_update_directory("").is_err());
+    }
 
     #[test]
     fn skills_sh_api_skill_maps_github_source() {

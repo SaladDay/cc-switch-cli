@@ -82,11 +82,49 @@ pub(super) fn install(ctx: &mut RuntimeActionContext<'_>, spec: String) -> Resul
     Ok(())
 }
 
+pub(super) fn check_updates(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
+    let Some(tx) = ctx.skills_req_tx else {
+        return Err(AppError::Message(
+            texts::tui_error_skills_worker_unavailable().to_string(),
+        ));
+    };
+    tx.send(super::super::runtime_systems::SkillsReq::CheckUpdates)
+        .map_err(|e| AppError::Message(e.to_string()))?;
+    ctx.app.overlay = Overlay::Loading {
+        kind: LoadingKind::SkillOperation,
+        title: texts::tui_skills_check_updates_title().to_string(),
+        message: texts::tui_loading().to_string(),
+    };
+    Ok(())
+}
+
+pub(super) fn update(ctx: &mut RuntimeActionContext<'_>, ids: Vec<String>) -> Result<(), AppError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let Some(tx) = ctx.skills_req_tx else {
+        return Err(AppError::Message(
+            texts::tui_error_skills_worker_unavailable().to_string(),
+        ));
+    };
+    tx.send(super::super::runtime_systems::SkillsReq::Update { ids })
+        .map_err(|e| AppError::Message(e.to_string()))?;
+    ctx.app.overlay = Overlay::Loading {
+        kind: LoadingKind::SkillOperation,
+        title: texts::tui_skills_update_title().to_string(),
+        message: texts::tui_loading().to_string(),
+    };
+    Ok(())
+}
+
 pub(super) fn uninstall(
     ctx: &mut RuntimeActionContext<'_>,
     directory: String,
 ) -> Result<(), AppError> {
     SkillService::uninstall(&directory)?;
+    ctx.app
+        .skill_updates
+        .retain(|_, update| !update.directory.eq_ignore_ascii_case(&directory));
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         texts::tui_toast_skill_uninstalled(&directory),

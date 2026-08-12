@@ -384,13 +384,16 @@ cc-switch prompts delete <id>        # Delete prompt
 
 Manage and extend Claude Code/Codex/Gemini/OpenCode/Hermes capabilities with community skills.
 
-**Features:** SSOT-based skills store, multi-app enable/disable, sync to app directories, unmanaged scan/import, repo discovery, skills.sh marketplace search.
+**Features:** SSOT-based skills store, multi-app enable/disable, sync to app directories, manual update checks/updates, unmanaged scan/import, repo discovery, skills.sh marketplace search.
 
 ```bash
 cc-switch skills list                # List installed skills
 cc-switch skills discover <query>      # Discover available skills (alias: search)
 cc-switch skills market <query>      # Search skills.sh marketplace
 cc-switch skills install <name>      # Install a skill
+cc-switch skills check-updates       # Manually check for updates
+cc-switch skills update <name>       # Update one repository-backed skill
+cc-switch skills update --all        # Update all detected updates
 cc-switch skills uninstall <name>    # Uninstall a skill
 cc-switch skills enable <name>       # Enable for current app (--app)
 cc-switch skills disable <name>      # Disable for current app (--app)

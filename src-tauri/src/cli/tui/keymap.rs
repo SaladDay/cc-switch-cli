@@ -456,6 +456,9 @@ pub(crate) mod skills_installed {
         Apps,
         Discover,
         Import,
+        CheckUpdates,
+        Update,
+        UpdateAll,
         Uninstall,
     }
 
@@ -496,6 +499,27 @@ pub(crate) mod skills_installed {
             shown: |_, _| true,
         },
         Binding {
+            display: "r",
+            keys: &[KeyCode::Char('r')],
+            intent: Intent::CheckUpdates,
+            label: |_, _| texts::tui_key_check_updates(),
+            shown: has_repository_skill,
+        },
+        Binding {
+            display: "u",
+            keys: &[KeyCode::Char('u')],
+            intent: Intent::Update,
+            label: |_, _| texts::tui_key_update(),
+            shown: selected_has_update,
+        },
+        Binding {
+            display: "U",
+            keys: &[KeyCode::Char('U')],
+            intent: Intent::UpdateAll,
+            label: |_, _| texts::tui_key_update_all(),
+            shown: |app, _| !app.skill_updates.is_empty(),
+        },
+        Binding {
             display: "d",
             keys: &[KeyCode::Char('d')],
             intent: Intent::Uninstall,
@@ -521,6 +545,19 @@ pub(crate) mod skills_installed {
             .get(app.skills_idx)
             .copied()
             .is_some()
+    }
+
+    fn has_repository_skill(_: &App, data: &UiData) -> bool {
+        data.skills
+            .installed
+            .iter()
+            .any(|skill| skill.repo_owner.is_some() && skill.repo_name.is_some())
+    }
+
+    fn selected_has_update(app: &App, data: &UiData) -> bool {
+        visible_skills_installed(&app.filter, data)
+            .get(app.skills_idx)
+            .is_some_and(|skill| app.skill_updates.contains_key(&skill.id))
     }
 }
 

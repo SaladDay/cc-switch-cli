@@ -3985,6 +3985,8 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             hermes: false,
         },
         installed_at: 1,
+        content_hash: None,
+        updated_at: 0,
     }
 }
 
@@ -5767,6 +5769,8 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 hermes: false,
             },
             installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
         },
         crate::app_config::InstalledSkill {
             id: "local:skill-b".to_string(),
@@ -5779,6 +5783,8 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
             readme_url: None,
             apps: crate::app_config::SkillApps::default(),
             installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
         },
     ];
 
@@ -6690,6 +6696,39 @@ fn skills_page_renders_sync_method_and_installed_rows() {
     assert!(all.contains(AppType::Hermes.as_str()));
     assert!(!all.contains("hello-skill"));
     assert!(all.contains("Hello Skill"));
+}
+
+#[test]
+fn skills_page_marks_updates_found_in_current_tui_session() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Skills;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let skill = installed_skill("hello-skill", "Hello Skill");
+    app.skill_updates.insert(
+        skill.id.clone(),
+        crate::services::skill::SkillUpdateInfo {
+            id: skill.id.clone(),
+            name: skill.name.clone(),
+            directory: skill.directory.clone(),
+            current_hash: Some("old".to_string()),
+            remote_hash: "new".to_string(),
+        },
+    );
+    data.skills.installed = vec![skill];
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains(texts::tui_skills_update_marker()), "{all}");
+    assert!(
+        all.contains(&texts::tui_skills_updates_available(1)),
+        "{all}"
+    );
+    assert!(all.contains(texts::tui_key_update()), "{all}");
 }
 
 #[test]

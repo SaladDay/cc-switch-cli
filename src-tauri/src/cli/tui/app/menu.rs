@@ -104,6 +104,7 @@ impl App {
             skills_discover_idx: 0,
             skills_repo_idx: 0,
             skills_unmanaged_idx: 0,
+            skill_updates: HashMap::new(),
             skills_discover_results: Vec::new(),
             skills_discover_query: String::new(),
             skills_discover_source: SkillsDiscoverSource::Repos,

@@ -53,6 +53,10 @@ pub enum Action {
     SkillsInstall {
         spec: String,
     },
+    SkillsCheckUpdates,
+    SkillsUpdate {
+        ids: Vec<String>,
+    },
     SkillsUninstall {
         directory: String,
     },
@@ -722,6 +726,7 @@ pub struct App {
     pub skills_discover_idx: usize,
     pub skills_repo_idx: usize,
     pub skills_unmanaged_idx: usize,
+    pub skill_updates: HashMap<String, crate::services::skill::SkillUpdateInfo>,
     pub skills_discover_results: Vec<crate::services::skill::Skill>,
     pub skills_discover_query: String,
     pub skills_discover_source: SkillsDiscoverSource,

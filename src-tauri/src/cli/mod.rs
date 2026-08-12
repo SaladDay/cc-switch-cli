@@ -1856,6 +1856,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_manual_skill_update_commands() {
+        let check = Cli::parse_from(["cc-switch", "skills", "check-updates"]);
+        assert!(matches!(
+            check.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::CheckUpdates
+            ))
+        ));
+
+        let one = Cli::parse_from(["cc-switch", "skills", "update", "hello"]);
+        assert!(matches!(
+            one.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::Update {
+                    spec: Some(spec),
+                    all: false,
+                }
+            )) if spec == "hello"
+        ));
+
+        let all = Cli::parse_from(["cc-switch", "skills", "update", "--all"]);
+        assert!(matches!(
+            all.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::Update {
+                    spec: None,
+                    all: true,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn manual_skill_update_requires_exactly_one_target() {
+        assert!(Cli::try_parse_from(["cc-switch", "skills", "update"]).is_err());
+        assert!(Cli::try_parse_from(["cc-switch", "skills", "update", "hello", "--all"]).is_err());
+    }
+
+    #[test]
     fn parses_skills_set_apps_repeated_flags() {
         let cli = Cli::parse_from([
             "cc-switch",

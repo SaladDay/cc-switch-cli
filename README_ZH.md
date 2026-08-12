@@ -387,12 +387,15 @@ cc-switch prompts delete <id>        # 删除提示词
 
 通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode/Hermes 的能力。
 
-**功能：** SSOT 技能仓库、多应用启用/禁用、同步到应用目录、扫描/导入未管理技能、仓库发现。
+**功能：** SSOT 技能仓库、多应用启用/禁用、同步到应用目录、手动检查/执行更新、扫描/导入未管理技能、仓库发现。
 
 ```bash
 cc-switch skills list                # 列出已安装技能
 cc-switch skills discover <query>      # 发现可用技能（别名：search）
 cc-switch skills install <name>      # 安装技能
+cc-switch skills check-updates       # 手动检查更新
+cc-switch skills update <name>       # 更新一个仓库来源的技能
+cc-switch skills update --all        # 更新所有检测到的更新
 cc-switch skills uninstall <name>    # 卸载技能
 cc-switch skills enable <name>       # 为当前应用启用（配合 --app）
 cc-switch skills disable <name>      # 为当前应用禁用（配合 --app）

@@ -37,6 +37,21 @@ pub enum SkillsCommand {
         /// Skill directory name or full key (owner/name:directory)
         spec: String,
     },
+    /// Manually check installed repository-backed skills for updates
+    CheckUpdates,
+    /// Manually update one repository-backed skill or every detected update
+    Update {
+        /// Installed skill directory or id
+        #[arg(
+            value_name = "SPEC",
+            required_unless_present = "all",
+            conflicts_with = "all"
+        )]
+        spec: Option<String>,
+        /// Update every skill reported by a fresh manual check
+        #[arg(long)]
+        all: bool,
+    },
     /// Uninstall a skill (remove from SSOT and app dirs)
     Uninstall {
         /// Skill directory or id
@@ -138,6 +153,8 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
             offset,
         } => search_market(&query, limit, offset),
         SkillsCommand::Install { spec } => install_skill(&app_type, &spec),
+        SkillsCommand::CheckUpdates => check_skill_updates(),
+        SkillsCommand::Update { spec, all } => update_skills(spec.as_deref(), all),
         SkillsCommand::Uninstall { spec } => uninstall_skill(&spec),
         SkillsCommand::Enable { spec, apps } => toggle_skill(&app_type, &spec, &apps, true),
         SkillsCommand::Disable { spec, apps } => toggle_skill(&app_type, &spec, &apps, false),
@@ -276,6 +293,94 @@ fn install_skill(app_type: &AppType, spec: &str) -> Result<(), AppError> {
         ))
     );
     Ok(())
+}
+
+fn check_skill_updates() -> Result<(), AppError> {
+    let service = SkillService::new()?;
+    let result = run_async(service.check_updates())?;
+
+    if result.updates.is_empty() {
+        if result.failures.is_empty() {
+            println!("{}", info("All repository-backed skills are up to date."));
+        }
+    } else {
+        let mut table = create_table();
+        table.set_header(vec!["Directory", "Name"]);
+        for update in &result.updates {
+            table.add_row(vec![update.directory.clone(), update.name.clone()]);
+        }
+        println!("{table}");
+    }
+
+    if result.failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Message(format!(
+            "Update check incomplete:\n{}",
+            result.failures.join("\n")
+        )))
+    }
+}
+
+fn update_skills(spec: Option<&str>, all: bool) -> Result<(), AppError> {
+    let service = SkillService::new()?;
+    let mut check_failures = Vec::new();
+    let ids = if all {
+        let check = run_async(service.check_updates())?;
+        check_failures = check.failures;
+        check
+            .updates
+            .into_iter()
+            .map(|update| update.id)
+            .collect::<Vec<_>>()
+    } else {
+        let spec =
+            spec.ok_or_else(|| AppError::InvalidInput("Provide a skill or use --all".to_string()))?;
+        let index = SkillService::load_index()?;
+        let skill = index
+            .skills
+            .values()
+            .find(|skill| {
+                skill.directory.eq_ignore_ascii_case(spec) || skill.id.eq_ignore_ascii_case(spec)
+            })
+            .ok_or_else(|| AppError::Message(format!("Skill not found: {spec}")))?;
+        vec![skill.id.clone()]
+    };
+
+    if ids.is_empty() {
+        if check_failures.is_empty() {
+            println!("{}", info("All repository-backed skills are up to date."));
+            return Ok(());
+        }
+        return Err(AppError::Message(format!(
+            "No updates were applied because the update check was incomplete:\n{}",
+            check_failures.join("\n")
+        )));
+    }
+
+    let batch = run_async(async { Ok(service.update_skills(&ids).await) })?;
+    if !batch.updated.is_empty() {
+        println!(
+            "{}",
+            success(&format!("✓ Updated {} skill(s)", batch.updated.len()))
+        );
+    }
+
+    let mut failures = check_failures;
+    failures.extend(
+        batch
+            .failures
+            .into_iter()
+            .map(|failure| format!("{}: {}", failure.id, failure.error)),
+    );
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Message(format!(
+            "Some skill updates need attention:\n{}",
+            failures.join("\n")
+        )))
+    }
 }
 
 fn uninstall_skill(spec: &str) -> Result<(), AppError> {

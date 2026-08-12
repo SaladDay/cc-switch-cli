@@ -2222,6 +2222,8 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ManagedAuthRemove { .. }
         | Action::SkillsInstall { .. }
         | Action::SkillsDiscover { .. }
+        | Action::SkillsCheckUpdates
+        | Action::SkillsUpdate { .. }
         | Action::SkillsOpenImport
         | Action::SkillsScanUnmanaged
         | Action::EditorDiscard
