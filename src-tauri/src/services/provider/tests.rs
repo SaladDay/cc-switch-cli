@@ -333,6 +333,99 @@ fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
 }
 
 #[test]
+fn capture_codex_temp_launch_snapshot_preserves_disable_web_search_option() {
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "official".to_string();
+        let mut settings = codex_settings("model_reasoning_effort = \"medium\"\n");
+        settings.as_object_mut().expect("settings object").insert(
+            crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY.to_string(),
+            json!(true),
+        );
+        manager.providers.insert(
+            "official".to_string(),
+            Provider::with_id(
+                "official".to_string(),
+                "OpenAI Official".to_string(),
+                settings,
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+    let temp = TempDir::new().expect("create temp codex home");
+    std::fs::write(temp.path().join("config.toml"), "model = \"gpt-5.6\"\n").expect("write config");
+
+    ProviderService::capture_codex_temp_launch_snapshot(&state, "official", temp.path())
+        .expect("capture temp launch snapshot");
+
+    let providers = ProviderService::list(&state, AppType::Codex).expect("list providers");
+    let provider = providers.get("official").expect("provider should remain");
+    assert_eq!(
+        provider
+            .settings_config
+            .get(crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY),
+        Some(&json!(true)),
+        "the live rebuild must carry provider-owned catalog options"
+    );
+}
+
+#[test]
+fn backfill_codex_current_preserves_disable_web_search_option() {
+    let temp = TempDir::new().expect("create temp codex home");
+    let _guard = TestEnvGuard::isolated(temp.path());
+    let codex_home = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_home).expect("create codex home");
+    std::fs::write(codex_home.join("config.toml"), "model = \"gpt-5.6\"\n").expect("write config");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "current".to_string();
+        let mut settings = codex_settings("model = \"gpt-5.6\"\n");
+        settings.as_object_mut().expect("settings object").insert(
+            crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY.to_string(),
+            json!(true),
+        );
+        manager.providers.insert(
+            "current".to_string(),
+            Provider::with_id("current".to_string(), "Current".to_string(), settings, None),
+        );
+        manager.providers.insert(
+            "next".to_string(),
+            Provider::with_id(
+                "next".to_string(),
+                "Next".to_string(),
+                codex_settings("model = \"gpt-x\"\n"),
+                None,
+            ),
+        );
+    }
+
+    ProviderService::backfill_codex_current(&mut config, "next", Some("current"))
+        .expect("backfill current provider");
+
+    let provider = config
+        .get_manager(&AppType::Codex)
+        .and_then(|manager| manager.providers.get("current"))
+        .expect("provider should remain");
+    assert_eq!(
+        provider
+            .settings_config
+            .get(crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY),
+        Some(&json!(true)),
+        "backfill must carry provider-owned catalog options"
+    );
+}
+
+#[test]
 fn capture_codex_temp_launch_snapshot_clears_auth_when_auth_file_is_missing() {
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);

@@ -49,6 +49,13 @@ impl ProviderService {
         raw_settings.insert("auth".to_string(), auth);
         raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
         let mut settings_to_store = Value::Object(raw_settings);
+        // The rebuild projects only {auth, config}; carry provider-owned
+        // catalog options (e.g. disableWebSearch) so they survive the switch
+        // cycle.
+        crate::codex_config::merge_codex_provider_catalog_options(
+            &mut settings_to_store,
+            &provider,
+        );
         if Self::codex_live_write_category(&provider) == Some("official") {
             crate::codex_config::strip_codex_unified_session_bucket_from_settings(
                 &mut settings_to_store,
@@ -451,6 +458,11 @@ impl ProviderService {
                     &mut settings_for_storage,
                 )?;
             }
+            // Carry provider-owned catalog options across the live rebuild.
+            crate::codex_config::merge_codex_provider_catalog_options(
+                &mut settings_for_storage,
+                &snapshot_provider,
+            );
             snapshot_provider.settings_config = settings_for_storage;
             snapshot_provider = Self::migrate_provider_snapshot_for_storage(
                 &AppType::Codex,
@@ -473,7 +485,13 @@ impl ProviderService {
             if let Some(auth) = capture_auth {
                 raw_settings.insert("auth".to_string(), auth);
             }
-            snapshot_provider.settings_config = Value::Object(raw_settings);
+            let mut settings_for_storage = Value::Object(raw_settings);
+            // Carry provider-owned catalog options across the live rebuild.
+            crate::codex_config::merge_codex_provider_catalog_options(
+                &mut settings_for_storage,
+                &snapshot_provider,
+            );
+            snapshot_provider.settings_config = settings_for_storage;
         };
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(current) = manager.providers.get_mut(current_id) {
