@@ -45,6 +45,7 @@ pub enum ProviderAddTemplate {
     Qiniu,
     Fenno,
     Deepseek,
+    Orcarouter,
 }
 
 impl ProviderAddTemplate {
@@ -65,6 +66,7 @@ impl ProviderAddTemplate {
             Self::Qiniu => "qiniu",
             Self::Fenno => "fenno",
             Self::Deepseek => "deepseek",
+            Self::Orcarouter => "orcarouter",
         }
     }
 
@@ -85,6 +87,7 @@ impl ProviderAddTemplate {
                 | Self::Qiniu
                 | Self::Fenno
                 | Self::Deepseek
+                | Self::Orcarouter
         )
     }
 }
@@ -97,6 +100,17 @@ disable_response_storage = true
 [model_providers.custom]
 name = "deepseek"
 base_url = "https://api.deepseek.com"
+wire_api = "responses"
+requires_openai_auth = true"#;
+
+const ORCAROUTER_CODEX_CONFIG: &str = r#"model_provider = "custom"
+model = "orcarouter/fusion"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.custom]
+name = "orcarouter"
+base_url = "https://api.orcarouter.ai/v1"
 wire_api = "responses"
 requires_openai_auth = true"#;
 
@@ -198,6 +212,10 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
                 template: ProviderAddTemplate::CodexOauth,
                 label: "Codex",
             },
+            ProviderAddTemplateChoice {
+                template: ProviderAddTemplate::Orcarouter,
+                label: "OrcaRouter",
+            },
         ],
         AppType::Codex => vec![
             ProviderAddTemplateChoice {
@@ -207,6 +225,10 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
             ProviderAddTemplateChoice {
                 template: ProviderAddTemplate::OpenaiOfficial,
                 label: "OpenAI Official",
+            },
+            ProviderAddTemplateChoice {
+                template: ProviderAddTemplate::Orcarouter,
+                label: "OrcaRouter",
             },
         ],
         AppType::Gemini => vec![
@@ -354,6 +376,7 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         ProviderAddTemplate::OpenaiOfficial => "OpenAI Official",
         ProviderAddTemplate::GoogleOauth => "Google OAuth",
         ProviderAddTemplate::Deepseek => "DeepSeek",
+        ProviderAddTemplate::Orcarouter => "OrcaRouter",
         ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
@@ -376,6 +399,7 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         ProviderAddTemplate::OpenaiOfficial => Some("https://chatgpt.com/codex"),
         ProviderAddTemplate::GoogleOauth => Some("https://ai.google.dev"),
         ProviderAddTemplate::Deepseek => Some("https://platform.deepseek.com"),
+        ProviderAddTemplate::Orcarouter => Some("https://www.orcarouter.ai"),
         ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
@@ -395,6 +419,7 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         | ProviderAddTemplate::OpenaiOfficial
         | ProviderAddTemplate::GoogleOauth => Some("official"),
         ProviderAddTemplate::Deepseek => Some("cn_official"),
+        ProviderAddTemplate::Orcarouter => Some("aggregator"),
         ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Qiniu
@@ -441,6 +466,19 @@ fn template_default_meta(
             }),
             ..Default::default()
         }),
+        ProviderAddTemplate::Orcarouter => {
+            if matches!(app_type, AppType::Claude) {
+                // OrcaRouter exposes a native Anthropic-compatible endpoint, so
+                // Claude Code talks to it in its default Anthropic format
+                // (meta.api_format stays unset).
+                None
+            } else {
+                Some(ProviderMeta {
+                    api_format: Some("openai_chat".to_string()),
+                    ..Default::default()
+                })
+            }
+        }
         ProviderAddTemplate::GoogleOauth => Some(ProviderMeta {
             partner_promotion_key: Some("google-official".to_string()),
             ..Default::default()
@@ -471,6 +509,7 @@ fn template_default_meta(
 fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> {
     match template {
         ProviderAddTemplate::Deepseek => Some("deepseek"),
+        ProviderAddTemplate::Orcarouter => Some("orcarouter"),
         ProviderAddTemplate::Runapi => Some("runapi"),
         ProviderAddTemplate::Qiniu => Some("qiniu"),
         ProviderAddTemplate::Fenno => Some("fenno"),
@@ -491,6 +530,7 @@ fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> 
 fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static str> {
     match template {
         ProviderAddTemplate::Deepseek => Some("#1E88E5"),
+        ProviderAddTemplate::Orcarouter => Some("#7C3AED"),
         ProviderAddTemplate::Custom
         | ProviderAddTemplate::ClaudeOfficial
         | ProviderAddTemplate::CodexOauth
@@ -523,6 +563,7 @@ fn build_provider_template_settings_config(
         })),
         ProviderAddTemplate::OpenaiOfficial => build_codex_official_settings_config(None),
         ProviderAddTemplate::Deepseek => Ok(build_codex_deepseek_settings_config()),
+        ProviderAddTemplate::Orcarouter => build_orcarouter_template_settings_config(app_type),
         ProviderAddTemplate::GoogleOauth => Ok(json!({ "env": {} })),
         ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
@@ -553,6 +594,44 @@ fn build_codex_deepseek_settings_config() -> Value {
                 {
                     "model": "deepseek-v4-pro",
                     "displayName": "DeepSeek V4 Pro",
+                    "contextWindow": 1000000,
+                },
+            ],
+        },
+    })
+}
+
+fn build_orcarouter_template_settings_config(app_type: &AppType) -> Result<Value, AppError> {
+    match app_type {
+        AppType::Claude => Ok(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.orcarouter.ai/v1",
+                "ANTHROPIC_MODEL": "orcarouter/fusion",
+            }
+        })),
+        AppType::Codex => Ok(build_codex_orcarouter_settings_config()),
+        _ => Err(unsupported_template_error(ProviderAddTemplate::Orcarouter)),
+    }
+}
+
+fn build_codex_orcarouter_settings_config() -> Value {
+    json!({
+        "config": ORCAROUTER_CODEX_CONFIG,
+        "modelCatalog": {
+            "models": [
+                {
+                    "model": "orcarouter/fusion",
+                    "displayName": "OrcaRouter Fusion",
+                    "contextWindow": 1000000,
+                },
+                {
+                    "model": "orcarouter/fusion-flash",
+                    "displayName": "OrcaRouter Fusion Flash",
+                    "contextWindow": 200000,
+                },
+                {
+                    "model": "orcarouter/fusion-mini",
+                    "displayName": "OrcaRouter Fusion Mini",
                     "contextWindow": 1000000,
                 },
             ],
@@ -1161,6 +1240,7 @@ requires_openai_auth = true
                 "Custom",
                 "Claude Official",
                 "Codex",
+                "OrcaRouter",
                 "* AICodeMirror",
                 "* ClaudeAPI",
                 "* Cubence",
@@ -1177,6 +1257,7 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "OpenAI Official",
+                "OrcaRouter",
                 "* AICodeMirror",
                 "* Cubence",
                 "* OpenModel",
@@ -1824,6 +1905,116 @@ requires_openai_auth = true
             reasoning.output_format.as_deref(),
             Some("reasoning_content")
         );
+    }
+
+    #[test]
+    fn cli_codex_orcarouter_template_matches_preset_values() {
+        let provider =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Orcarouter, &[])
+                .expect("build OrcaRouter Codex provider");
+
+        assert_eq!(provider.id, "orcarouter");
+        assert_eq!(provider.name, "OrcaRouter");
+        assert_eq!(
+            provider.website_url.as_deref(),
+            Some("https://www.orcarouter.ai")
+        );
+        assert_eq!(provider.category.as_deref(), Some("aggregator"));
+        assert_eq!(provider.icon.as_deref(), Some("orcarouter"));
+        assert_eq!(provider.icon_color.as_deref(), Some("#7C3AED"));
+        assert!(
+            provider.settings_config.get("auth").is_none(),
+            "OrcaRouter preset should not persist an empty API key snapshot"
+        );
+
+        let config = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("OrcaRouter Codex config should be TOML string");
+        assert!(config.contains("model_provider = \"custom\""));
+        assert!(config.contains("model = \"orcarouter/fusion\""));
+        assert!(config.contains("disable_response_storage = true"));
+        assert!(config.contains("[model_providers.custom]"));
+        assert!(config.contains("name = \"orcarouter\""));
+        assert!(config.contains("base_url = \"https://api.orcarouter.ai/v1\""));
+        assert!(config.contains("wire_api = \"responses\""));
+        assert!(config.contains("requires_openai_auth = true"));
+
+        assert_eq!(
+            provider.settings_config["modelCatalog"],
+            json!({
+                "models": [
+                    {
+                        "model": "orcarouter/fusion",
+                        "displayName": "OrcaRouter Fusion",
+                        "contextWindow": 1000000,
+                    },
+                    {
+                        "model": "orcarouter/fusion-flash",
+                        "displayName": "OrcaRouter Fusion Flash",
+                        "contextWindow": 200000,
+                    },
+                    {
+                        "model": "orcarouter/fusion-mini",
+                        "displayName": "OrcaRouter Fusion Mini",
+                        "contextWindow": 1000000,
+                    },
+                ],
+            })
+        );
+
+        let meta = provider
+            .meta
+            .expect("OrcaRouter metadata should be present");
+        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
+    }
+
+    #[test]
+    fn cli_claude_orcarouter_template_uses_native_anthropic_format() {
+        let provider =
+            build_provider_template_seed(&AppType::Claude, ProviderAddTemplate::Orcarouter, &[])
+                .expect("build OrcaRouter Claude provider");
+
+        assert_eq!(provider.name, "OrcaRouter");
+        assert_eq!(
+            provider.website_url.as_deref(),
+            Some("https://www.orcarouter.ai")
+        );
+        assert_eq!(provider.category.as_deref(), Some("aggregator"));
+
+        let env = provider
+            .settings_config
+            .get("env")
+            .and_then(Value::as_object)
+            .expect("OrcaRouter Claude preset should write an env block");
+        assert_eq!(
+            env["ANTHROPIC_BASE_URL"],
+            json!("https://api.orcarouter.ai/v1")
+        );
+        assert_eq!(env["ANTHROPIC_MODEL"], json!("orcarouter/fusion"));
+
+        // Claude talks to OrcaRouter's native Anthropic-compatible endpoint.
+        assert!(
+            provider.meta.is_none(),
+            "OrcaRouter Claude preset should leave meta.api_format unset"
+        );
+    }
+
+    #[test]
+    fn cli_orcarouter_template_rejected_for_unsupported_apps() {
+        for app_type in [
+            AppType::Gemini,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            assert!(
+                build_provider_template_seed(&app_type, ProviderAddTemplate::Orcarouter, &[])
+                    .is_err(),
+                "OrcaRouter preset should not be available for {app_type:?}"
+            );
+        }
     }
 
     #[test]

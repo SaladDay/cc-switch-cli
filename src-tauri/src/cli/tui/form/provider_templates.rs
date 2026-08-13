@@ -25,6 +25,17 @@ base_url = "https://api.deepseek.com"
 wire_api = "responses"
 requires_openai_auth = true"#;
 
+const ORCAROUTER_CODEX_CONFIG: &str = r#"model_provider = "custom"
+model = "orcarouter/fusion"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.custom]
+name = "orcarouter"
+base_url = "https://api.orcarouter.ai/v1"
+wire_api = "responses"
+requires_openai_auth = true"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderTemplateId {
     Custom,
@@ -33,6 +44,7 @@ enum ProviderTemplateId {
     OpenAiOfficial,
     DeepSeek,
     GoogleOAuth,
+    OrcaRouter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +64,7 @@ impl SponsorProviderPreset {
     }
 }
 
-static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [
+static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 4] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -65,9 +77,13 @@ static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [
         id: ProviderTemplateId::CodexOAuth,
         label: "Codex",
     },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::OrcaRouter,
+        label: "OrcaRouter",
+    },
 ];
 
-static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
+static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 3] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -75,6 +91,10 @@ static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::OpenAiOfficial,
         label: "OpenAI Official",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::OrcaRouter,
+        label: "OrcaRouter",
     },
 ];
 
@@ -459,6 +479,80 @@ impl ProviderAddFormState {
                     self.codex_local_routing_field_idx = 0;
                     self.codex_model_catalog_idx = 0;
                     self.codex_model_catalog_field = CodexModelCatalogField::Model;
+                }
+                ProviderTemplateId::OrcaRouter => {
+                    self.reset_claude_template_state();
+                    self.extra = json!({
+                        "category": "aggregator",
+                        "icon": "orcarouter",
+                        "iconColor": "#7C3AED",
+                    });
+                    self.name.set("OrcaRouter");
+                    self.website_url.set("https://www.orcarouter.ai");
+                    if matches!(self.app_type, AppType::Claude) {
+                        self.claude_base_url.set("https://api.orcarouter.ai/v1");
+                        self.claude_model.set("orcarouter/fusion");
+                        self.claude_fallback_model_touched = true;
+                    } else if matches!(self.app_type, AppType::Codex) {
+                        self.extra["settingsConfig"] = json!({
+                            "config": ORCAROUTER_CODEX_CONFIG,
+                            "modelCatalog": {
+                                "models": [
+                                    {
+                                        "model": "orcarouter/fusion",
+                                        "displayName": "OrcaRouter Fusion",
+                                        "contextWindow": 1000000,
+                                    },
+                                    {
+                                        "model": "orcarouter/fusion-flash",
+                                        "displayName": "OrcaRouter Fusion Flash",
+                                        "contextWindow": 200000,
+                                    },
+                                    {
+                                        "model": "orcarouter/fusion-mini",
+                                        "displayName": "OrcaRouter Fusion Mini",
+                                        "contextWindow": 1000000,
+                                    },
+                                ],
+                            },
+                        });
+                        self.codex_api_key.set("");
+                        self.codex_base_url.set("https://api.orcarouter.ai/v1");
+                        self.codex_model.set("orcarouter/fusion");
+                        self.codex_wire_api = CodexWireApi::Responses;
+                        self.codex_requires_openai_auth = true;
+                        self.codex_env_key.set("");
+                        self.claude_api_format = ClaudeApiFormat::OpenAiChat;
+                        self.codex_model_catalog = vec![
+                            CodexModelCatalogRow {
+                                model: "orcarouter/fusion".to_string(),
+                                display_name: "OrcaRouter Fusion".to_string(),
+                                context_window: "1000000".to_string(),
+                                supports_parallel_tool_calls: None,
+                                input_modalities: Vec::new(),
+                                base_instructions: String::new(),
+                            },
+                            CodexModelCatalogRow {
+                                model: "orcarouter/fusion-flash".to_string(),
+                                display_name: "OrcaRouter Fusion Flash".to_string(),
+                                context_window: "200000".to_string(),
+                                supports_parallel_tool_calls: None,
+                                input_modalities: Vec::new(),
+                                base_instructions: String::new(),
+                            },
+                            CodexModelCatalogRow {
+                                model: "orcarouter/fusion-mini".to_string(),
+                                display_name: "OrcaRouter Fusion Mini".to_string(),
+                                context_window: "1000000".to_string(),
+                                supports_parallel_tool_calls: None,
+                                input_modalities: Vec::new(),
+                                base_instructions: String::new(),
+                            },
+                        ];
+                        self.codex_local_routing_field_idx = 0;
+                        self.codex_model_catalog_idx = 0;
+                        self.codex_model_catalog_field = CodexModelCatalogField::Model;
+                    }
                 }
                 ProviderTemplateId::GoogleOAuth => {
                     self.extra = json!({

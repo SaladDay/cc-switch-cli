@@ -103,6 +103,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Claude Official",
             "Codex",
+            "OrcaRouter",
             "* AICodeMirror",
             "* ClaudeAPI",
             "* Cubence",
@@ -121,6 +122,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "OpenAI Official",
+            "OrcaRouter",
             "* AICodeMirror",
             "* Cubence",
             "* OpenModel",
@@ -211,9 +213,19 @@ fn cli_provider_templates_match_tui_serializer_output() {
         ),
         (AppType::Claude, ProviderAddTemplate::CodexOauth, "Codex"),
         (
+            AppType::Claude,
+            ProviderAddTemplate::Orcarouter,
+            "OrcaRouter",
+        ),
+        (
             AppType::Codex,
             ProviderAddTemplate::OpenaiOfficial,
             "OpenAI Official",
+        ),
+        (
+            AppType::Codex,
+            ProviderAddTemplate::Orcarouter,
+            "OrcaRouter",
         ),
         (
             AppType::Gemini,
@@ -393,6 +405,103 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
                 },
             ],
         })
+    );
+}
+
+#[test]
+fn provider_add_form_orcarouter_codex_template_matches_preset_values() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    let existing_ids = Vec::<String>::new();
+
+    form.apply_template(
+        template_index_by_label(AppType::Codex, "OrcaRouter"),
+        &existing_ids,
+    );
+
+    assert_eq!(form.id.value, "orcarouter");
+    assert_eq!(form.name.value, "OrcaRouter");
+    assert_eq!(form.website_url.value, "https://www.orcarouter.ai");
+    assert_eq!(form.codex_base_url.value, "https://api.orcarouter.ai/v1");
+    assert_eq!(form.codex_model.value, "orcarouter/fusion");
+    assert_eq!(form.codex_wire_api, CodexWireApi::Responses);
+    assert!(form.codex_requires_openai_auth);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["category"], "aggregator");
+    assert_eq!(provider["icon"], "orcarouter");
+    assert_eq!(provider["iconColor"], "#7C3AED");
+    assert_eq!(provider["meta"]["apiFormat"], "openai_chat");
+
+    let cfg = provider["settingsConfig"]["config"]
+        .as_str()
+        .expect("settingsConfig.config should be TOML string");
+    assert!(cfg.contains("model = \"orcarouter/fusion\""));
+    assert!(cfg.contains("disable_response_storage = true"));
+    assert!(cfg.contains("name = \"orcarouter\""));
+    assert!(cfg.contains("base_url = \"https://api.orcarouter.ai/v1\""));
+    assert!(cfg.contains("wire_api = \"responses\""));
+    assert!(cfg.contains("requires_openai_auth = true"));
+
+    assert_eq!(
+        provider["settingsConfig"]["modelCatalog"],
+        json!({
+            "models": [
+                {
+                    "model": "orcarouter/fusion",
+                    "displayName": "OrcaRouter Fusion",
+                    "contextWindow": 1000000,
+                },
+                {
+                    "model": "orcarouter/fusion-flash",
+                    "displayName": "OrcaRouter Fusion Flash",
+                    "contextWindow": 200000,
+                },
+                {
+                    "model": "orcarouter/fusion-mini",
+                    "displayName": "OrcaRouter Fusion Mini",
+                    "contextWindow": 1000000,
+                },
+            ],
+        })
+    );
+}
+
+#[test]
+fn provider_add_form_orcarouter_claude_template_uses_native_anthropic() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    let existing_ids = Vec::<String>::new();
+
+    form.apply_template(
+        template_index_by_label(AppType::Claude, "OrcaRouter"),
+        &existing_ids,
+    );
+
+    assert_eq!(form.name.value, "OrcaRouter");
+    assert_eq!(form.claude_base_url.value, "https://api.orcarouter.ai/v1");
+    assert_eq!(form.claude_model.value, "orcarouter/fusion");
+    assert_eq!(
+        form.claude_api_format,
+        crate::cli::tui::form::ClaudeApiFormat::Anthropic
+    );
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
+        json!("https://api.orcarouter.ai/v1")
+    );
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_MODEL"],
+        json!("orcarouter/fusion")
+    );
+    // Native Anthropic format: no apiFormat override. (The form's generic
+    // commonConfig meta is stripped by the same normalization the CLI↔TUI
+    // serializer parity test applies.)
+    assert!(
+        provider
+            .get("meta")
+            .and_then(|meta| meta.get("apiFormat"))
+            .is_none(),
+        "Claude OrcaRouter preset should not write an apiFormat meta"
     );
 }
 
