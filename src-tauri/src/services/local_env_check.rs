@@ -48,22 +48,26 @@ impl LocalTool {
         match self {
             LocalTool::Claude => "Claude",
             LocalTool::Codex => "Codex",
-            LocalTool::Gemini => "Gemini",
+            LocalTool::Gemini => "Gemini / Antigravity",
             LocalTool::OpenCode => "OpenCode",
             LocalTool::Hermes => "Hermes",
             LocalTool::OpenClaw => "OpenClaw",
         }
     }
 
-    fn binary_name(self) -> &'static str {
+    pub fn binary_names(self) -> &'static [&'static str] {
         match self {
-            LocalTool::Claude => "claude",
-            LocalTool::Codex => "codex",
-            LocalTool::Gemini => "gemini",
-            LocalTool::OpenCode => "opencode",
-            LocalTool::Hermes => "hermes",
-            LocalTool::OpenClaw => "openclaw",
+            LocalTool::Claude => &["claude"],
+            LocalTool::Codex => &["codex"],
+            LocalTool::Gemini => &["antigravity", "agy", "gemini"],
+            LocalTool::OpenCode => &["opencode"],
+            LocalTool::Hermes => &["hermes"],
+            LocalTool::OpenClaw => &["openclaw"],
         }
+    }
+
+    fn binary_name(self) -> &'static str {
+        self.binary_names()[0]
     }
 
     fn version_args(self) -> &'static [&'static str] {
@@ -215,7 +219,9 @@ async fn check_local_environment_progressive_with<F, P, ProbeFuture>(
 
 pub fn check_tool_installed(app_type: &AppType) -> bool {
     let tool = LocalTool::from_app_type(app_type);
-    is_tool_installed(tool.binary_name())
+    tool.binary_names()
+        .iter()
+        .any(|&bin| is_tool_installed(bin))
 }
 
 fn is_tool_installed(bin: &str) -> bool {
@@ -230,9 +236,14 @@ async fn check_tool(
         return None;
     }
 
-    let executable = match which::which(tool.binary_name()) {
-        Ok(path) => path,
-        Err(_) => {
+    let executable = tool
+        .binary_names()
+        .iter()
+        .find_map(|&bin| which::which(bin).ok());
+
+    let executable = match executable {
+        Some(path) => path,
+        None => {
             return Some(ToolCheckResult {
                 tool,
                 display_name: tool.display_name(),
@@ -853,10 +864,21 @@ mod tests {
 
         assert_eq!(
             display_names,
-            vec!["Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw"]
+            vec![
+                "Claude",
+                "Codex",
+                "Gemini / Antigravity",
+                "OpenCode",
+                "Hermes",
+                "OpenClaw"
+            ]
         );
         assert_eq!(LocalTool::Hermes.binary_name(), "hermes");
         assert_eq!(LocalTool::OpenClaw.binary_name(), "openclaw");
+        assert_eq!(
+            LocalTool::Gemini.binary_names(),
+            &["antigravity", "agy", "gemini"]
+        );
         assert_eq!(LocalTool::Hermes.version_timeout(), Duration::from_secs(10));
         assert_eq!(LocalTool::Claude.version_timeout(), Duration::from_secs(5));
     }

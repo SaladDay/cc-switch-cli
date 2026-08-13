@@ -297,6 +297,8 @@ use crate::provider::ProviderManager;
 pub enum AppType {
     Claude,
     Codex,
+    #[clap(alias = "antigravity", alias = "agy")]
+    #[serde(alias = "antigravity", alias = "agy")]
     Gemini,
     OpenCode,
     Hermes,
@@ -353,17 +355,17 @@ impl FromStr for AppType {
         match normalized.as_str() {
             "claude" => Ok(AppType::Claude),
             "codex" => Ok(AppType::Codex),
-            "gemini" => Ok(AppType::Gemini),
+            "gemini" | "antigravity" | "agy" => Ok(AppType::Gemini),
             "opencode" => Ok(AppType::OpenCode),
             "hermes" => Ok(AppType::Hermes),
             "openclaw" => Ok(AppType::OpenClaw),
             other => Err(AppError::localized(
                 "unsupported_app",
                 format!(
-                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw。"
+                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini (antigravity/agy), opencode, hermes, openclaw。"
                 ),
                 format!(
-                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw."
+                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini (antigravity/agy), opencode, hermes, openclaw."
                 ),
             )),
         }
@@ -1019,5 +1021,13 @@ mod tests {
             config.mcp.openclaw.servers.contains_key("openclaw-tool"),
             "OpenClaw legacy MCP entries should be preserved"
         );
+    }
+
+    #[test]
+    fn app_type_parses_antigravity_aliases() {
+        use std::str::FromStr;
+        assert_eq!(AppType::from_str("antigravity").unwrap(), AppType::Gemini);
+        assert_eq!(AppType::from_str("agy").unwrap(), AppType::Gemini);
+        assert_eq!(AppType::from_str("gemini").unwrap(), AppType::Gemini);
     }
 }

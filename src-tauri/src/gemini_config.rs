@@ -5,15 +5,41 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// 获取 Gemini 配置目录路径（支持设置覆盖）
+/// 获取 Gemini / Antigravity 配置目录路径（支持设置覆盖与环境变量覆盖）
 pub fn get_gemini_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_gemini_override_dir() {
         return custom;
     }
 
-    dirs::home_dir()
-        .expect("无法获取用户主目录")
-        .join(".gemini")
+    if let Ok(env_dir) = std::env::var("ANTIGRAVITY_CONFIG_DIR") {
+        if !env_dir.trim().is_empty() {
+            return PathBuf::from(env_dir.trim());
+        }
+    }
+
+    if let Ok(env_dir) = std::env::var("GEMINI_CONFIG_DIR") {
+        if !env_dir.trim().is_empty() {
+            return PathBuf::from(env_dir.trim());
+        }
+    }
+
+    let home = dirs::home_dir().expect("无法获取用户主目录");
+    let antigravity_dir = home.join(".antigravity");
+    if antigravity_dir.exists() {
+        return antigravity_dir;
+    }
+
+    let gemini_dir = home.join(".gemini");
+    if gemini_dir.exists() {
+        return gemini_dir;
+    }
+
+    antigravity_dir
+}
+
+/// 获取 Antigravity 配置目录路径别名
+pub fn get_antigravity_dir() -> PathBuf {
+    get_gemini_dir()
 }
 
 /// 获取 Gemini .env 文件路径
@@ -730,5 +756,16 @@ KEY_WITH-DASH=value";
         });
 
         assert!(validate_gemini_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn test_get_gemini_dir_supports_antigravity_env() {
+        std::env::set_var("ANTIGRAVITY_CONFIG_DIR", "/tmp/test_antigravity_dir");
+        assert_eq!(get_gemini_dir(), PathBuf::from("/tmp/test_antigravity_dir"));
+        assert_eq!(
+            get_antigravity_dir(),
+            PathBuf::from("/tmp/test_antigravity_dir")
+        );
+        std::env::remove_var("ANTIGRAVITY_CONFIG_DIR");
     }
 }

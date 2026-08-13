@@ -172,15 +172,15 @@ fn check_gemini_doctor() -> Result<(), AppError> {
     let settings_path = crate::gemini_config::get_gemini_settings_path();
 
     let mut rows = vec![
-        check_file_exists("Gemini .env", &env_path),
-        check_file_exists("Gemini settings.json", &settings_path),
+        check_file_exists("Gemini / Antigravity .env", &env_path),
+        check_file_exists("Gemini / Antigravity settings.json", &settings_path),
     ];
 
     match current {
         Some(provider_id) => rows.push(ok_row("Current provider", provider_id)),
         None => rows.push(warn_row(
             "Current provider",
-            "no current Gemini provider selected".to_string(),
+            "no current Gemini / Antigravity provider selected".to_string(),
         )),
     }
 
