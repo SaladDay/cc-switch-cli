@@ -488,10 +488,12 @@ impl ProviderAddFormState {
                 "partnerPromotionKey": preset.partner_promotion_key,
             }
         });
-        if preset.id == "runapi" {
+        if preset.id == "runapi" || preset.id == "openmodel" {
             if let Some(obj) = extra.as_object_mut() {
                 obj.insert("category".to_string(), json!("aggregator"));
-                obj.insert("icon".to_string(), json!("runapi"));
+                if preset.id == "runapi" {
+                    obj.insert("icon".to_string(), json!("runapi"));
+                }
             }
         } else if preset.id == "qiniu" {
             if let Some(obj) = extra.as_object_mut() {

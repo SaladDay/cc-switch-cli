@@ -4116,6 +4116,30 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_check_updates() -> &'static str {
+        if is_chinese() {
+            "检查更新"
+        } else {
+            "check updates"
+        }
+    }
+
+    pub fn tui_key_update() -> &'static str {
+        if is_chinese() {
+            "更新"
+        } else {
+            "update"
+        }
+    }
+
+    pub fn tui_key_update_all() -> &'static str {
+        if is_chinese() {
+            "全部更新"
+        } else {
+            "update all"
+        }
+    }
+
     pub fn tui_key_discover() -> &'static str {
         if is_chinese() {
             "发现"
@@ -5508,6 +5532,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_skills_check_updates_title() -> &'static str {
+        if is_chinese() {
+            "检查 Skill 更新"
+        } else {
+            "Check Skill Updates"
+        }
+    }
+
+    pub fn tui_skills_update_title() -> &'static str {
+        if is_chinese() {
+            "更新 Skill"
+        } else {
+            "Update Skills"
+        }
+    }
+
     pub fn tui_skills_install_prompt() -> &'static str {
         if is_chinese() {
             "输入技能目录，或完整标识（owner/name:directory）："
@@ -5770,6 +5810,38 @@ pub mod texts {
             format!(
                 "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
+        }
+    }
+
+    pub fn tui_skills_update_marker() -> &'static str {
+        if is_chinese() {
+            "[可更新]"
+        } else {
+            "[update]"
+        }
+    }
+
+    pub fn tui_skills_updates_available(count: usize) -> String {
+        if is_chinese() {
+            format!("{count} 个可更新")
+        } else {
+            format!("{count} update(s)")
+        }
+    }
+
+    pub fn tui_label_update_status() -> &'static str {
+        if is_chinese() {
+            "更新状态"
+        } else {
+            "Update"
+        }
+    }
+
+    pub fn tui_skills_update_available() -> &'static str {
+        if is_chinese() {
+            "有可用更新"
+        } else {
+            "Update available"
         }
     }
 
@@ -8525,6 +8597,56 @@ pub mod texts {
             format!("安装失败（{spec}）: {err}")
         } else {
             format!("Install failed ({spec}): {err}")
+        }
+    }
+
+    pub fn tui_toast_skills_update_check_finished(updates: usize, failures: usize) -> String {
+        if failures > 0 {
+            if is_chinese() {
+                format!("发现 {updates} 个更新；{failures} 项检查失败。")
+            } else {
+                format!("Found {updates} update(s); {failures} check(s) failed.")
+            }
+        } else if updates == 0 {
+            if is_chinese() {
+                "Skills 已是最新。".to_string()
+            } else {
+                "Skills are up to date.".to_string()
+            }
+        } else if is_chinese() {
+            format!("发现 {updates} 个可用更新。")
+        } else {
+            format!("Found {updates} available update(s).")
+        }
+    }
+
+    pub fn tui_toast_skills_update_check_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("更新检查失败: {err}")
+        } else {
+            format!("Update check failed: {err}")
+        }
+    }
+
+    pub fn tui_toast_skills_updated(updated: usize, failures: usize) -> String {
+        if failures > 0 {
+            if is_chinese() {
+                format!("已更新 {updated} 个 Skill；{failures} 项需要处理。")
+            } else {
+                format!("Updated {updated} skill(s); {failures} issue(s) need attention.")
+            }
+        } else if is_chinese() {
+            format!("已更新 {updated} 个 Skill。")
+        } else {
+            format!("Updated {updated} skill(s).")
+        }
+    }
+
+    pub fn tui_toast_skills_update_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("Skill 更新失败: {err}")
+        } else {
+            format!("Skill update failed: {err}")
         }
     }
 

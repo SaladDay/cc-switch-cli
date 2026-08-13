@@ -18,6 +18,17 @@ fn install_script_path() -> PathBuf {
     repo_root().join("install.sh")
 }
 
+const LINUX_INSTALL_ARCHES: [(&str, &str); 2] = [("x86_64", "x64"), ("aarch64", "arm64")];
+const LINUX_LIBC_MODES: [&str; 3] = ["auto", "musl", "glibc"];
+
+fn linux_asset_name(asset_arch: &str, mode: &str) -> String {
+    match mode {
+        "auto" | "musl" => format!("cc-switch-cli-linux-{asset_arch}-musl.tar.gz"),
+        "glibc" => format!("cc-switch-cli-linux-{asset_arch}.tar.gz"),
+        _ => unreachable!("test matrix contains only supported libc modes"),
+    }
+}
+
 fn write_executable(path: &Path, contents: &str) {
     fs::write(path, contents).expect("script should be written");
     let mut perms = fs::metadata(path)
@@ -38,6 +49,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::new_with_arch("x86_64")
+    }
+
+    fn new_with_arch(arch: &str) -> Self {
         let temp = tempfile::tempdir().expect("temp dir should exist");
         let home = temp.path().join("home");
         let fakebin = temp.path().join("fakebin");
@@ -67,17 +82,16 @@ impl Harness {
             .expect("tar should run");
         assert!(status.success(), "tar should create archive");
 
-        write_executable(
-            &fakebin.join("uname"),
-            r#"#!/usr/bin/env bash
+        let uname_script = r#"#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
   -s) printf 'Linux\n' ;;
-  -m) printf 'x86_64\n' ;;
+  -m) printf '__ARCH__\n' ;;
   *) /usr/bin/uname "$@" ;;
 esac
-"#,
-        );
+"#
+        .replace("__ARCH__", arch);
+        write_executable(&fakebin.join("uname"), &uname_script);
 
         write_executable(
             &fakebin.join("curl"),
@@ -102,7 +116,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 printf '%s' "$url" > "${CC_SWITCH_TEST_LOG_DIR}/last-url"
-if [ "${CC_SWITCH_TEST_FAIL_MUSL:-0}" = "1" ] && [ "${url##*/}" = "cc-switch-cli-linux-x64-musl.tar.gz" ]; then
+printf '%s\n' "$url" >> "${CC_SWITCH_TEST_LOG_DIR}/requested-urls"
+asset_name="${url##*/}"
+if [ "${CC_SWITCH_TEST_FAIL_MUSL:-0}" = "1" ] && [[ "${asset_name}" == *-musl.tar.gz ]]; then
   exit 22
 fi
 cp "${CC_SWITCH_TEST_ARCHIVE_PATH}" "$output"
@@ -190,38 +206,51 @@ fn install_script_force_overwrites_and_warns_about_shadowed_path() {
 
 #[test]
 #[serial]
-fn install_script_supports_linux_glibc_override() {
-    let harness = Harness::new();
+fn install_script_selects_exact_linux_libc_asset_for_supported_architectures() {
+    for (uname_arch, asset_arch) in LINUX_INSTALL_ARCHES {
+        for mode in LINUX_LIBC_MODES {
+            let expected_asset = linux_asset_name(asset_arch, mode);
+            let harness = Harness::new_with_arch(uname_arch);
+            let output = harness.run(&[("CC_SWITCH_LINUX_LIBC", mode)], None);
+            assert!(
+                output.status.success(),
+                "{mode} install should succeed on {uname_arch}"
+            );
 
-    let output = harness.run(&[("CC_SWITCH_LINUX_LIBC", "glibc")], None);
-    assert!(
-        output.status.success(),
-        "glibc override install should succeed"
-    );
-
-    let requested_url = fs::read_to_string(harness.logs_dir.join("last-url"))
-        .expect("download url should be logged");
-    assert!(
-        requested_url.ends_with("/cc-switch-cli-linux-x64.tar.gz"),
-        "expected glibc asset request, got {requested_url}"
-    );
+            let requested_url = fs::read_to_string(harness.logs_dir.join("last-url"))
+                .expect("download url should be logged");
+            assert!(
+                requested_url.ends_with(&expected_asset),
+                "expected {expected_asset} for {uname_arch}/{mode}, got {requested_url}"
+            );
+        }
+    }
 }
 
 #[test]
 #[serial]
-fn install_script_falls_back_to_glibc_when_musl_download_fails() {
+fn install_script_keeps_existing_binary_when_auto_musl_download_fails() {
     let harness = Harness::new();
+    let installed_path = harness.install_dir.join("cc-switch");
+    write_executable(&installed_path, "#!/usr/bin/env bash\necho old build\n");
 
-    let output = harness.run(&[("CC_SWITCH_TEST_FAIL_MUSL", "1")], None);
-    assert!(
-        output.status.success(),
-        "glibc fallback install should succeed"
+    let output = harness.run(
+        &[("CC_SWITCH_TEST_FAIL_MUSL", "1"), ("CC_SWITCH_FORCE", "1")],
+        None,
     );
+    assert!(!output.status.success());
 
-    let requested_url = fs::read_to_string(harness.logs_dir.join("last-url"))
-        .expect("download url should be logged");
-    assert!(
-        requested_url.ends_with("/cc-switch-cli-linux-x64.tar.gz"),
-        "expected fallback glibc asset request, got {requested_url}"
+    let requested_urls = fs::read_to_string(harness.logs_dir.join("requested-urls"))
+        .expect("download urls should be logged");
+    assert_eq!(
+        requested_urls.lines().count(),
+        1,
+        "regression for #398: auto mode must make exactly one request"
     );
+    assert!(requested_urls.ends_with("cc-switch-cli-linux-x64-musl.tar.gz\n"));
+
+    let installed =
+        fs::read_to_string(installed_path).expect("existing binary should remain readable");
+    assert!(installed.contains("old build"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("No binary was installed or replaced"));
 }

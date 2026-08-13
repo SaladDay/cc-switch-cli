@@ -661,6 +661,8 @@ fn load_skills_index_for_migration(
             repo_branch: None,
             apps: SkillApps::only(&crate::app_config::AppType::Claude),
             installed_at,
+            content_hash: None,
+            updated_at: 0,
         };
         index.skills.insert(directory, record);
     }

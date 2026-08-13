@@ -456,6 +456,8 @@ mod tests {
             readme_url: None,
             apps: crate::app_config::SkillApps::default(),
             installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
         }
     }
 
@@ -634,6 +636,47 @@ mod tests {
             matches!(action, Action::SwitchRoute(Route::SkillsDiscover)),
             "f in Skills page should navigate to Discover"
         );
+    }
+
+    #[test]
+    fn skills_manual_update_keys_only_update_detected_items() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Skills;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        let skill = installed_skill("hello-skill", "Hello Skill");
+        let id = skill.id.clone();
+        data.skills.installed.push(skill);
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('r')), &data),
+            Action::SkillsCheckUpdates
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('u')), &data),
+            Action::None
+        ));
+
+        app.skill_updates.insert(
+            id.clone(),
+            crate::services::skill::SkillUpdateInfo {
+                id: id.clone(),
+                name: "Hello Skill".to_string(),
+                directory: "hello-skill".to_string(),
+                current_hash: Some("old".to_string()),
+                remote_hash: "new".to_string(),
+            },
+        );
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('u')), &data),
+            Action::SkillsUpdate { ids } if ids == vec![id.clone()]
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('U')), &data),
+            Action::SkillsUpdate { ids } if ids == vec![id]
+        ));
     }
 
     #[test]
@@ -13538,6 +13581,26 @@ mod tests {
         let action = app.on_key(key(KeyCode::Esc), &data());
         assert!(matches!(action, Action::CancelUpdateCheck));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn skill_operation_loading_overlay_cannot_be_dismissed() {
+        let mut app = App::new(None);
+        app.overlay = Overlay::Loading {
+            kind: LoadingKind::SkillOperation,
+            title: texts::tui_skills_update_title().to_string(),
+            message: "Working...".to_string(),
+        };
+
+        let action = app.on_key(key(KeyCode::Esc), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Loading {
+                kind: LoadingKind::SkillOperation,
+                ..
+            }
+        ));
     }
 
     #[test]

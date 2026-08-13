@@ -591,18 +591,15 @@ async fn local_body_overrides_apply_after_protocol_conversion() {
 
 #[tokio::test]
 async fn claude_opencode_go_openai_chat_sends_only_bearer_no_x_api_key() {
-    // Issue #330: OpenCode Go is a strict Anthropic-protocol endpoint. The user
-    // stores the credential in ANTHROPIC_AUTH_TOKEN (Bearer semantics) and picks
-    // the openai_chat API format. The proxy must forward only
-    // `Authorization: Bearer` upstream — the extra `x-api-key` the adapter used
-    // to add triggered a 401 "The API key you provided is invalid.".
+    // Issue #330: legacy/editor paths may retain ANTHROPIC_API_KEY, but the
+    // OpenAI Chat endpoint still requires Authorization: Bearer.
     let mut provider = Provider::with_id(
         "opencode-go".to_string(),
         "OpenCode Go".to_string(),
         json!({
             "env": {
                 "ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go",
-                "ANTHROPIC_AUTH_TOKEN": "sk-oc-token"
+                "ANTHROPIC_API_KEY": "sk-oc-token"
             }
         }),
         None,
@@ -619,7 +616,6 @@ async fn claude_opencode_go_openai_chat_sends_only_bearer_no_x_api_key() {
         request.url().as_str(),
         "https://opencode.ai/zen/go/v1/chat/completions"
     );
-    // ANTHROPIC_AUTH_TOKEN => ClaudeAuth: Bearer only, no x-api-key (the #330 fix).
     assert_eq!(
         header_value(&request, "authorization"),
         Some("Bearer sk-oc-token")

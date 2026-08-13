@@ -1,0 +1,94 @@
+name: Android ARM64 experimental build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-experimental-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_API_LEVEL: "24"
+  ANDROID_NDK_VERSION: "27.2.12479018"
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.91.1"
+
+jobs:
+  build:
+    name: Build Android ARM64 with ring
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: aarch64-linux-android-ring
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Configure Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+
+          ndk="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          toolchain="${ndk}/toolchains/llvm/prebuilt/linux-x86_64"
+          linker="${toolchain}/bin/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+
+          test -x "${linker}"
+          test -x "${toolchain}/bin/llvm-ar"
+
+          echo "AR_aarch64_linux_android=${toolchain}/bin/llvm-ar" >> "${GITHUB_ENV}"
+          echo "CC_aarch64_linux_android=${linker}" >> "${GITHUB_ENV}"
+          echo "CXX_aarch64_linux_android=${toolchain}/bin/aarch64-linux-android${ANDROID_API_LEVEL}-clang++" >> "${GITHUB_ENV}"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${linker}" >> "${GITHUB_ENV}"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--sysroot=${toolchain}/sysroot" >> "${GITHUB_ENV}"
+          echo "ANDROID_NDK_HOME=${ndk}" >> "${GITHUB_ENV}"
+          echo "${toolchain}/bin" >> "${GITHUB_PATH}"
+
+      - name: Build
+        working-directory: src-tauri
+        run: cargo build --release --locked --target aarch64-linux-android --features rquickjs/bindgen
+
+      - name: Verify and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="src-tauri/target/aarch64-linux-android/release/cc-switch"
+          test -x "${binary}"
+          file "${binary}"
+          llvm-readelf --file-header --program-headers "${binary}"
+
+          mkdir -p dist staging
+          cp "${binary}" staging/cc-switch
+          chmod 755 staging/cc-switch
+          tar -C staging -czf dist/cc-switch-cli-android-arm64-ring.tar.gz cc-switch
+          (
+            cd dist
+            sha256sum cc-switch-cli-android-arm64-ring.tar.gz \
+              > cc-switch-cli-android-arm64-ring.tar.gz.sha256
+          )
+
+      - name: Upload experimental artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-switch-cli-android-arm64-ring-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

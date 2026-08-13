@@ -478,6 +478,10 @@ pub(crate) enum SkillsReq {
         spec: String,
         app: AppType,
     },
+    CheckUpdates,
+    Update {
+        ids: Vec<String>,
+    },
 }
 
 pub(crate) enum SkillsMsg {
@@ -490,6 +494,12 @@ pub(crate) enum SkillsMsg {
     InstallFinished {
         spec: String,
         result: Result<crate::services::skill::InstalledSkill, String>,
+    },
+    UpdatesChecked {
+        result: Result<crate::services::skill::SkillUpdateCheckResult, String>,
+    },
+    SkillsUpdated {
+        result: Result<crate::services::skill::SkillUpdateBatchResult, String>,
     },
 }
 

@@ -43,18 +43,19 @@ pub(super) fn render_skill_detail(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    render_page_key_bar(
-        frame,
-        chunks[0],
-        theme,
-        &[
-            ("Space", texts::tui_key_toggle()),
-            ("m", texts::tui_key_apps()),
-            ("d", texts::tui_key_uninstall()),
-            ("s", texts::tui_key_sync()),
-        ],
-        app.focus == Focus::Content,
-    );
+    let mut keys = vec![
+        ("Space", texts::tui_key_toggle()),
+        ("m", texts::tui_key_apps()),
+        ("d", texts::tui_key_uninstall()),
+        ("s", texts::tui_key_sync()),
+    ];
+    if skill.repo_owner.is_some() && skill.repo_name.is_some() {
+        keys.push(("r", texts::tui_key_check_updates()));
+    }
+    if app.skill_updates.contains_key(&skill.id) {
+        keys.push(("u", texts::tui_key_update()));
+    }
+    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
     let mut lines = vec![
         Line::from(vec![
@@ -112,6 +113,16 @@ pub(super) fn render_skill_detail(
             Span::styled(texts::tui_label_readme(), Style::default().fg(theme.accent)),
             Span::raw(": "),
             Span::raw(url.to_string()),
+        ]));
+    }
+    if app.skill_updates.contains_key(&skill.id) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                texts::tui_label_update_status(),
+                Style::default().fg(theme.accent),
+            ),
+            Span::raw(": "),
+            Span::raw(texts::tui_skills_update_available()),
         ]));
     }
 

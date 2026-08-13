@@ -206,6 +206,9 @@ impl App {
         Some(match key.code {
             KeyCode::Esc => {
                 let kind = *kind;
+                if kind == LoadingKind::SkillOperation {
+                    return Some(Action::None);
+                }
                 self.overlay = Overlay::None;
                 if kind == LoadingKind::UpdateCheck {
                     Action::CancelUpdateCheck

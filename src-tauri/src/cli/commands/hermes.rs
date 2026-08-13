@@ -217,27 +217,19 @@ fn open_directory(path: &Path) -> Result<bool, String> {
     }
 
     #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("open");
-        command.arg(path);
-        command
-    };
+    let mut command = Command::new("open");
 
     #[cfg(target_os = "linux")]
-    let mut command = {
-        let mut command = Command::new("xdg-open");
-        command.arg(path);
-        command
-    };
+    let mut command = Command::new("xdg-open");
 
     #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("explorer");
-        command.arg(path);
-        command
-    };
+    let mut command = Command::new("explorer");
+
+    #[cfg(target_os = "android")]
+    let mut command = Command::new("termux-open");
 
     let status = command
+        .arg(path)
         .status()
         .map_err(|error| format!("Failed to open directory {}: {error}", path.display()))?;
 

@@ -49,7 +49,7 @@ impl SponsorModelFamily {
 
 pub(crate) fn sponsor_model_family(preset_id: &str) -> Option<SponsorModelFamily> {
     match preset_id {
-        "packycode" | "aicodemirror" | "cubence" => Some(SponsorModelFamily::Claude),
+        "packycode" | "aicodemirror" | "cubence" | "openmodel" => Some(SponsorModelFamily::Claude),
         "runapi" => Some(SponsorModelFamily::RunApiClaude),
         "qiniu" | "fenno" => Some(SponsorModelFamily::Gpt),
         _ => None,
@@ -222,6 +222,10 @@ mod tests {
         );
         assert_eq!(
             sponsor_model_family("cubence"),
+            Some(SponsorModelFamily::Claude)
+        );
+        assert_eq!(
+            sponsor_model_family("openmodel"),
             Some(SponsorModelFamily::Claude)
         );
         assert_eq!(

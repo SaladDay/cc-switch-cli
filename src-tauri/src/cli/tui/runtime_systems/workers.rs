@@ -3772,6 +3772,16 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
                             result: Err(err.clone()),
                         });
                     }
+                    SkillsReq::CheckUpdates => {
+                        let _ = tx.send(SkillsMsg::UpdatesChecked {
+                            result: Err(err.clone()),
+                        });
+                    }
+                    SkillsReq::Update { .. } => {
+                        let _ = tx.send(SkillsMsg::SkillsUpdated {
+                            result: Err(err.clone()),
+                        });
+                    }
                 }
             }
             return;
@@ -3800,6 +3810,16 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
                     SkillsReq::Install { spec, .. } => {
                         let _ = tx.send(SkillsMsg::InstallFinished {
                             spec,
+                            result: Err(err.clone()),
+                        });
+                    }
+                    SkillsReq::CheckUpdates => {
+                        let _ = tx.send(SkillsMsg::UpdatesChecked {
+                            result: Err(err.clone()),
+                        });
+                    }
+                    SkillsReq::Update { .. } => {
+                        let _ = tx.send(SkillsMsg::SkillsUpdated {
                             result: Err(err.clone()),
                         });
                     }
@@ -3896,6 +3916,16 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
                     .block_on(async { service.install(&spec_clone, &app_clone).await })
                     .map_err(|e| e.to_string());
                 let _ = tx.send(SkillsMsg::InstallFinished { spec, result });
+            }
+            SkillsReq::CheckUpdates => {
+                let result = rt
+                    .block_on(service.check_updates())
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(SkillsMsg::UpdatesChecked { result });
+            }
+            SkillsReq::Update { ids } => {
+                let result = Ok(rt.block_on(service.update_skills(&ids)));
+                let _ = tx.send(SkillsMsg::SkillsUpdated { result });
             }
         }
     }

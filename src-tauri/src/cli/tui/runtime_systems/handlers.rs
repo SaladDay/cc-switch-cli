@@ -1357,9 +1357,89 @@ pub(crate) fn handle_skills_msg(
                 );
             }
         },
+        SkillsMsg::UpdatesChecked { result } => match result {
+            Ok(result) => {
+                app.overlay = Overlay::None;
+                let update_count = result.updates.len();
+                let failure_count = result.failures.len();
+                app.skill_updates = result
+                    .updates
+                    .into_iter()
+                    .map(|update| (update.id.clone(), update))
+                    .collect();
+                let summary =
+                    texts::tui_toast_skills_update_check_finished(update_count, failure_count);
+                if result.failures.is_empty() {
+                    app.push_toast(summary, ToastKind::Success);
+                } else {
+                    app.push_copyable_toast(
+                        summary,
+                        ToastKind::Warning,
+                        result.failures.join("\n"),
+                    );
+                }
+            }
+            Err(err) => {
+                app.overlay = Overlay::None;
+                app.push_toast(
+                    texts::tui_toast_skills_update_check_failed(&err),
+                    ToastKind::Error,
+                );
+            }
+        },
+        SkillsMsg::SkillsUpdated { result } => match result {
+            Ok(result) => {
+                app.overlay = Overlay::None;
+                let updated_count = result.updated.len();
+                let failure_count = result.failures.len();
+                clear_completed_skill_update_markers(app, &result);
+                if updated_count > 0 {
+                    *data = UiData::load(&app.app_type)?;
+                    invalidation = CacheInvalidation::DataReloaded;
+                }
+                let summary = texts::tui_toast_skills_updated(updated_count, failure_count);
+                if result.failures.is_empty() {
+                    app.push_toast(summary, ToastKind::Success);
+                } else {
+                    let details = result
+                        .failures
+                        .iter()
+                        .map(|failure| format!("{}: {}", failure.id, failure.error))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    app.push_copyable_toast(
+                        summary,
+                        if updated_count == 0 {
+                            ToastKind::Error
+                        } else {
+                            ToastKind::Warning
+                        },
+                        details,
+                    );
+                }
+            }
+            Err(err) => {
+                app.overlay = Overlay::None;
+                app.push_toast(
+                    texts::tui_toast_skills_update_failed(&err),
+                    ToastKind::Error,
+                );
+            }
+        },
     }
 
     Ok(invalidation)
+}
+
+fn clear_completed_skill_update_markers(
+    app: &mut App,
+    result: &crate::services::skill::SkillUpdateBatchResult,
+) {
+    for skill in &result.updated {
+        if !result.failures.iter().any(|failure| failure.id == skill.id) {
+            app.skill_updates.remove(&skill.id);
+        }
+    }
 }
 
 fn is_webdav_loading_overlay(app: &App) -> bool {
@@ -1931,6 +2011,92 @@ mod tests {
     fn session_cost_overlay_is_applied_only_while_sessions_route_is_visible() {
         assert!(session_cost_overlay_is_visible(&Route::Sessions));
         assert!(!session_cost_overlay_is_visible(&Route::Main));
+    }
+
+    #[test]
+    fn skill_update_failures_remain_inspectable_in_tui_feedback() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Skills;
+        let mut data = UiData::default();
+
+        handle_skills_msg(
+            &mut app,
+            &mut data,
+            SkillsMsg::UpdatesChecked {
+                result: Ok(crate::services::skill::SkillUpdateCheckResult {
+                    updates: Vec::new(),
+                    failures: vec!["owner/repo: network unavailable".to_string()],
+                }),
+            },
+        )
+        .expect("handle partial update check");
+        assert_eq!(
+            app.toast.as_ref().and_then(|toast| toast.copy_text()),
+            Some("owner/repo: network unavailable")
+        );
+
+        handle_skills_msg(
+            &mut app,
+            &mut data,
+            SkillsMsg::SkillsUpdated {
+                result: Ok(crate::services::skill::SkillUpdateBatchResult {
+                    updated: Vec::new(),
+                    failures: vec![crate::services::skill::SkillUpdateFailure {
+                        id: "owner/repo:demo".to_string(),
+                        error: "deployment failed".to_string(),
+                    }],
+                }),
+            },
+        )
+        .expect("handle partial update result");
+        assert_eq!(
+            app.toast.as_ref().and_then(|toast| toast.copy_text()),
+            Some("owner/repo:demo: deployment failed")
+        );
+    }
+
+    #[test]
+    fn partial_skill_deployment_keeps_the_tui_retry_marker() {
+        let mut app = App::new(Some(AppType::Claude));
+        let id = "owner/repo:demo";
+        app.skill_updates.insert(
+            id.to_string(),
+            crate::services::skill::SkillUpdateInfo {
+                id: id.to_string(),
+                name: "Demo".to_string(),
+                directory: "demo".to_string(),
+                current_hash: Some("old".to_string()),
+                remote_hash: "new".to_string(),
+            },
+        );
+        let updated = crate::app_config::InstalledSkill {
+            id: id.to_string(),
+            name: "Demo".to_string(),
+            description: None,
+            directory: "demo".to_string(),
+            repo_owner: Some("owner".to_string()),
+            repo_name: Some("repo".to_string()),
+            repo_branch: Some("main".to_string()),
+            readme_url: None,
+            apps: crate::app_config::SkillApps::default(),
+            installed_at: 1,
+            content_hash: Some("new".to_string()),
+            updated_at: 2,
+        };
+        let mut result = crate::services::skill::SkillUpdateBatchResult {
+            updated: vec![updated],
+            failures: vec![crate::services::skill::SkillUpdateFailure {
+                id: id.to_string(),
+                error: "deployment failed".to_string(),
+            }],
+        };
+
+        clear_completed_skill_update_markers(&mut app, &result);
+        assert!(app.skill_updates.contains_key(id));
+
+        result.failures.clear();
+        clear_completed_skill_update_markers(&mut app, &result);
+        assert!(!app.skill_updates.contains_key(id));
     }
 
     #[test]

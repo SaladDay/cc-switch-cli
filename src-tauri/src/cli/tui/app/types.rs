@@ -4563,6 +4563,7 @@ pub struct ManagedAuthLoginState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadingKind {
     Generic,
+    SkillOperation,
     Proxy,
     WebDav,
     S3,

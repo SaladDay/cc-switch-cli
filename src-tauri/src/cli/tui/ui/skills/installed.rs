@@ -15,7 +15,7 @@ pub(super) fn render_skills_installed(
         app,
         texts::menu_manage_skills(),
         &keys,
-        Some(installed_summary(data)),
+        Some(installed_summary(app, data)),
     );
 
     let visible = skills_installed_filtered(app, data);
@@ -31,8 +31,14 @@ pub(super) fn render_skills_installed(
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = visible.iter().map(|skill| {
+        let display_name = skill_display_name(&skill.name, &skill.directory);
+        let display_name = if app.skill_updates.contains_key(&skill.id) {
+            format!("{display_name} {}", texts::tui_skills_update_marker())
+        } else {
+            display_name.to_string()
+        };
         Row::new(vec![
-            Cell::from(skill_display_name(&skill.name, &skill.directory).to_string()),
+            Cell::from(display_name),
             Cell::from(skill_marker(skill.apps.claude)),
             Cell::from(skill_marker(skill.apps.codex)),
             Cell::from(skill_marker(skill.apps.gemini)),
@@ -73,7 +79,7 @@ pub(super) fn render_skills_installed(
     frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
 }
 
-fn installed_summary(data: &UiData) -> String {
+fn installed_summary(app: &App, data: &UiData) -> String {
     let enabled_claude = data
         .skills
         .installed
@@ -105,13 +111,21 @@ fn installed_summary(data: &UiData) -> String {
         .filter(|s| s.apps.hermes)
         .count();
 
-    texts::tui_skills_installed_counts(
+    let counts = texts::tui_skills_installed_counts(
         enabled_claude,
         enabled_codex,
         enabled_gemini,
         enabled_opencode,
         enabled_hermes,
-    )
+    );
+    if app.skill_updates.is_empty() {
+        counts
+    } else {
+        format!(
+            "{counts} · {}",
+            texts::tui_skills_updates_available(app.skill_updates.len())
+        )
+    }
 }
 
 fn skill_marker(enabled: bool) -> &'static str {

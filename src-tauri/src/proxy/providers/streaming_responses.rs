@@ -16,6 +16,61 @@ fn response_object_from_event(data: &Value) -> &Value {
     data.get("response").unwrap_or(data)
 }
 
+fn anthropic_sse(event_name: &str, payload: &Value) -> Bytes {
+    Bytes::from(format!(
+        "event: {event_name}\ndata: {}\n\n",
+        serde_json::to_string(payload).unwrap_or_default()
+    ))
+}
+
+fn message_start_sse(message_id: &Option<String>, model: &Option<String>, usage: Value) -> Bytes {
+    anthropic_sse(
+        "message_start",
+        &json!({
+            "type": "message_start",
+            "message": {
+                "id": message_id.clone().unwrap_or_default(),
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "stop_reason": Value::Null,
+                "stop_sequence": Value::Null,
+                "model": model.clone().unwrap_or_default(),
+                "usage": usage
+            }
+        }),
+    )
+}
+
+fn responses_error_details(data: &Value, fallback: &str) -> (String, String) {
+    let response = response_object_from_event(data);
+    let error = response.get("error").unwrap_or(response);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or(fallback)
+        .to_string();
+    let error_type = error
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("code").and_then(Value::as_str))
+        .unwrap_or("upstream_error")
+        .to_string();
+    (message, error_type)
+}
+
+fn error_sse(message: &str, error_type: &str) -> Bytes {
+    anthropic_sse(
+        "error",
+        &json!({
+            "type": "error",
+            "error": { "type": error_type, "message": message }
+        }),
+    )
+}
+
 #[inline]
 fn content_part_key(data: &Value) -> Option<String> {
     if let (Some(item_id), Some(content_index)) = (
@@ -119,12 +174,20 @@ pub fn create_anthropic_sse_stream_from_responses(
         let mut tool_args_by_index: HashMap<u32, Vec<String>> = HashMap::new();
         let mut last_tool_index: Option<u32> = None;
 
+        let stream = stream
+            .map(|result| (result, false))
+            .chain(futures::stream::once(async {
+                (Ok::<Bytes, std::io::Error>(Bytes::new()), true)
+            }));
         tokio::pin!(stream);
 
-        while let Some(chunk) = stream.next().await {
+        while let Some((chunk, is_eof)) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
+                    if is_eof && !buffer.trim().is_empty() {
+                        buffer.push_str("\n\n");
+                    }
 
                     while let Some(block) = take_sse_block(&mut buffer) {
                         if block.trim().is_empty() {
@@ -147,11 +210,31 @@ pub fn create_anthropic_sse_stream_from_responses(
                         }
 
                         let data_str = data_parts.join("\n");
-                        let event_name = event_type.as_deref().unwrap_or("");
                         let data: Value = match serde_json::from_str(&data_str) {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
+                        let event_name = event_type
+                            .as_deref()
+                            .filter(|name| !name.is_empty())
+                            .or_else(|| data.get("type").and_then(Value::as_str))
+                            .unwrap_or("");
+
+                        if matches!(
+                            event_name,
+                            "response.output_text.delta"
+                                | "response.refusal.delta"
+                                | "response.function_call_arguments.delta"
+                                | "response.reasoning.delta"
+                        ) && !has_sent_message_start
+                        {
+                            yield Ok(message_start_sse(
+                                &message_id,
+                                &current_model,
+                                json!({ "input_tokens": 0, "output_tokens": 0 }),
+                            ));
+                            has_sent_message_start = true;
+                        }
 
                         match event_name {
                             "response.created" => {
@@ -164,43 +247,19 @@ pub fn create_anthropic_sse_stream_from_responses(
                                 }
 
                                 has_sent_message_start = true;
-                                let event = json!({
-                                    "type": "message_start",
-                                    "message": {
-                                        "id": message_id.clone().unwrap_or_default(),
-                                        "type": "message",
-                                        "role": "assistant",
-                                        // Spec-required fields; missing `content` crashes the
-                                        // official Anthropic SDK stream accumulator.
-                                        "content": [],
-                                        "stop_reason": serde_json::Value::Null,
-                                        "stop_sequence": serde_json::Value::Null,
-                                        "model": current_model.clone().unwrap_or_default(),
-                                        "usage": build_anthropic_usage_from_responses(response_obj.get("usage"))
-                                    }
-                                });
-                                let sse = format!("event: message_start\ndata: {}\n\n", serde_json::to_string(&event).unwrap_or_default());
-                                yield Ok(Bytes::from(sse));
+                                yield Ok(message_start_sse(
+                                    &message_id,
+                                    &current_model,
+                                    build_anthropic_usage_from_responses(response_obj.get("usage")),
+                                ));
                             }
                             "response.content_part.added" => {
                                 if !has_sent_message_start {
-                                    let start_event = json!({
-                                        "type": "message_start",
-                                        "message": {
-                                            "id": message_id.clone().unwrap_or_default(),
-                                            "type": "message",
-                                            "role": "assistant",
-                                            // Spec-required fields; missing `content` crashes the
-                                            // official Anthropic SDK stream accumulator.
-                                            "content": [],
-                                            "stop_reason": serde_json::Value::Null,
-                                            "stop_sequence": serde_json::Value::Null,
-                                            "model": current_model.clone().unwrap_or_default(),
-                                            "usage": { "input_tokens": 0, "output_tokens": 0 }
-                                        }
-                                    });
-                                    let sse = format!("event: message_start\ndata: {}\n\n", serde_json::to_string(&start_event).unwrap_or_default());
-                                    yield Ok(Bytes::from(sse));
+                                    yield Ok(message_start_sse(
+                                        &message_id,
+                                        &current_model,
+                                        json!({ "input_tokens": 0, "output_tokens": 0 }),
+                                    ));
                                     has_sent_message_start = true;
                                 }
 
@@ -305,23 +364,11 @@ pub fn create_anthropic_sse_stream_from_responses(
                                             }
                                         }
                                         if !has_sent_message_start {
-                                            let start_event = json!({
-                                                "type": "message_start",
-                                                "message": {
-                                                    "id": message_id.clone().unwrap_or_default(),
-                                                    "type": "message",
-                                                    "role": "assistant",
-                                                    // Spec-required fields; missing `content` crashes the
-                                                    // official Anthropic SDK stream accumulator.
-                                                    "content": [],
-                                                    "stop_reason": serde_json::Value::Null,
-                                                    "stop_sequence": serde_json::Value::Null,
-                                                    "model": current_model.clone().unwrap_or_default(),
-                                                    "usage": { "input_tokens": 0, "output_tokens": 0 }
-                                                }
-                                            });
-                                            let sse = format!("event: message_start\ndata: {}\n\n", serde_json::to_string(&start_event).unwrap_or_default());
-                                            yield Ok(Bytes::from(sse));
+                                            yield Ok(message_start_sse(
+                                                &message_id,
+                                                &current_model,
+                                                json!({ "input_tokens": 0, "output_tokens": 0 }),
+                                            ));
                                             has_sent_message_start = true;
                                         }
 
@@ -568,10 +615,45 @@ pub fn create_anthropic_sse_stream_from_responses(
                                     }
                                 }
                             }
-                            "response.completed" => {
+                            "response.completed" | "response.incomplete" => {
                                 let response_obj = response_object_from_event(&data);
+                                if matches!(
+                                    response_obj.get("status").and_then(Value::as_str),
+                                    Some("failed" | "cancelled")
+                                ) || response_obj
+                                    .get("error")
+                                    .is_some_and(|error| !error.is_null())
+                                {
+                                    let (message, error_type) = responses_error_details(
+                                        &data,
+                                        "Responses upstream returned a failed terminal response",
+                                    );
+                                    stream_completion.record_error(message.clone());
+                                    yield Ok(error_sse(&message, &error_type));
+                                    return;
+                                }
+                                if !has_sent_message_start {
+                                    if let Some(id) = response_obj.get("id").and_then(Value::as_str) {
+                                        message_id = Some(id.to_string());
+                                    }
+                                    if let Some(model) = response_obj.get("model").and_then(Value::as_str) {
+                                        current_model = Some(model.to_string());
+                                    }
+                                    yield Ok(message_start_sse(
+                                        &message_id,
+                                        &current_model,
+                                        json!({ "input_tokens": 0, "output_tokens": 0 }),
+                                    ));
+                                }
+                                let terminal_status = response_obj
+                                    .get("status")
+                                    .and_then(Value::as_str)
+                                    .or(match event_name {
+                                        "response.incomplete" => Some("incomplete"),
+                                        _ => Some("completed"),
+                                    });
                                 let stop_reason = map_responses_stop_reason(
-                                    response_obj.get("status").and_then(|s| s.as_str()),
+                                    terminal_status,
                                     has_tool_use,
                                     response_obj
                                         .pointer("/incomplete_details/reason")
@@ -601,13 +683,24 @@ pub fn create_anthropic_sse_stream_from_responses(
                                             |u| build_anthropic_usage_from_responses(Some(u))
                                         )
                                 });
-                                let sse = format!("event: message_delta\ndata: {}\n\n", serde_json::to_string(&delta_event).unwrap_or_default());
-                                yield Ok(Bytes::from(sse));
+                                yield Ok(anthropic_sse("message_delta", &delta_event));
 
                                 let stop_event = json!({"type": "message_stop"});
-                                let stop_sse = format!("event: message_stop\ndata: {}\n\n", serde_json::to_string(&stop_event).unwrap_or_default());
                                 stream_completion.record_success();
-                                yield Ok(Bytes::from(stop_sse));
+                                yield Ok(anthropic_sse("message_stop", &stop_event));
+                                return;
+                            }
+                            "response.failed" | "error" => {
+                                let (message, error_type) = responses_error_details(
+                                    &data,
+                                    if event_name == "response.failed" {
+                                        "Responses upstream reported response.failed"
+                                    } else {
+                                        "Responses upstream emitted an error event"
+                                    },
+                                );
+                                stream_completion.record_error(message.clone());
+                                yield Ok(error_sse(&message, &error_type));
                                 return;
                             }
                             "response.output_text.done" => {
@@ -622,28 +715,24 @@ pub fn create_anthropic_sse_stream_from_responses(
                                     }
                                 }
                             }
-                            "response.output_item.done" | "response.in_progress" => {}
+                            "response.output_item.done"
+                            | "response.in_progress"
+                            | "response.queued" => {}
                             _ => {}
                         }
                     }
                 }
                 Err(error) => {
                     stream_completion.record_error(error.to_string());
-                    let error_event = json!({
-                        "type": "error",
-                        "error": {
-                            "type": "stream_error",
-                            "message": format!("Stream error: {error}")
-                        }
-                    });
-                    let sse = format!("event: error\ndata: {}\n\n", serde_json::to_string(&error_event).unwrap_or_default());
-                    yield Ok(Bytes::from(sse));
+                    yield Ok(error_sse(&format!("Stream error: {error}"), "stream_error"));
                     return;
                 }
             }
         }
 
-        stream_completion.record_success();
+        let message = "Responses upstream stream ended before a terminal event";
+        stream_completion.record_error(message.to_string());
+        yield Ok(error_sse(message, "stream_truncated"));
     }
 }
 
@@ -674,6 +763,89 @@ mod tests {
                 serde_json::from_str::<Value>(data).ok()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn terminal_only_event_emits_complete_lifecycle_without_trailing_blank_line() {
+        let input = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_terminal\",\"model\":\"gpt-5.4\",\"status\":\"completed\"}}";
+
+        let (merged, completion) = collect_stream(vec![Bytes::from(input)]).await;
+        let events = parse_anthropic_events(&merged);
+        let event_types: Vec<_> = events
+            .iter()
+            .filter_map(|event| event["type"].as_str())
+            .collect();
+
+        assert_eq!(
+            event_types,
+            ["message_start", "message_delta", "message_stop"]
+        );
+        assert_eq!(events[0]["message"]["id"], "resp_terminal");
+        assert_eq!(events[0]["message"]["model"], "gpt-5.4");
+        assert_eq!(completion.outcome(), Some(Ok(())));
+    }
+
+    #[tokio::test]
+    async fn failed_responses_emit_error_without_message_stop() {
+        let cases = [
+            (
+                "response.failed",
+                "event: response.failed\ndata: {\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"message\":\"upstream failed\"}}}\n\n",
+                "upstream failed",
+            ),
+            (
+                "standalone error",
+                "event: error\ndata: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"too many requests\"}}\n\n",
+                "too many requests",
+            ),
+            (
+                "failed completion",
+                "event: response.completed\ndata: {\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"message\":\"failed wrapper\"}}}\n\n",
+                "failed wrapper",
+            ),
+            (
+                "cancelled completion",
+                "event: response.completed\ndata: {\"response\":{\"status\":\"cancelled\"}}\n\n",
+                "Responses upstream returned a failed terminal response",
+            ),
+        ];
+
+        for (case, input, expected_message) in cases {
+            let (merged, completion) = collect_stream(vec![Bytes::from(input)]).await;
+            let events = parse_anthropic_events(&merged);
+
+            assert_eq!(events.len(), 1, "{case}");
+            assert_eq!(events[0]["type"], "error", "{case}");
+            assert_eq!(events[0]["error"]["message"], expected_message, "{case}");
+            assert!(!merged.contains("event: message_stop"), "{case}");
+            assert_eq!(
+                completion.outcome(),
+                Some(Err(expected_message.to_string())),
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn eof_without_terminal_event_is_reported_as_truncated() {
+        let input = concat!(
+            "event: response.created\n",
+            "data: {\"response\":{\"id\":\"resp_truncated\",\"model\":\"gpt-5.4\"}}\n\n"
+        );
+
+        let (merged, completion) = collect_stream(vec![Bytes::from(input)]).await;
+        let events = parse_anthropic_events(&merged);
+
+        assert_eq!(events[0]["type"], "message_start");
+        assert_eq!(events[1]["type"], "error");
+        assert_eq!(events[1]["error"]["type"], "stream_truncated");
+        assert!(!merged.contains("event: message_stop"));
+        assert_eq!(
+            completion.outcome(),
+            Some(Err(
+                "Responses upstream stream ended before a terminal event".to_string()
+            ))
+        );
     }
 
     #[tokio::test]

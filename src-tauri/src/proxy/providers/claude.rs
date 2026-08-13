@@ -444,6 +444,13 @@ impl ClaudeAdapter {
         }
         None
     }
+
+    fn api_format_auth_strategy(&self, provider: &Provider) -> Option<AuthStrategy> {
+        match self.get_api_format(provider) {
+            "openai_chat" | "openai_responses" => Some(AuthStrategy::Bearer),
+            _ => None,
+        }
+    }
 }
 
 impl Default for ClaudeAdapter {
@@ -544,12 +551,12 @@ impl ProviderAdapter for ClaudeAdapter {
         let strategy = match provider_type {
             ProviderType::OpenRouter => AuthStrategy::Bearer,
             ProviderType::ClaudeAuth => AuthStrategy::ClaudeAuth,
-            // Align with Anthropic SDK semantics: ANTHROPIC_AUTH_TOKEN → Bearer,
-            // ANTHROPIC_API_KEY → x-api-key. Emitting the wrong/extra header
-            // breaks strict Anthropic-protocol endpoints such as OpenCode Go
-            // (issue #330); a direct `apiKey` field keeps the x-api-key default.
+            // OpenAI-compatible formats use Bearer regardless of the stored env
+            // field. Anthropic format keeps the SDK field semantics:
+            // ANTHROPIC_AUTH_TOKEN → Bearer, ANTHROPIC_API_KEY → x-api-key.
             _ => self
-                .infer_anthropic_auth_strategy(provider)
+                .api_format_auth_strategy(provider)
+                .or_else(|| self.infer_anthropic_auth_strategy(provider))
                 .unwrap_or(AuthStrategy::Anthropic),
         };
         self.extract_key(provider)
@@ -773,6 +780,34 @@ mod tests {
             .expect("auth should resolve");
         assert_eq!(auth.api_key, "sk-api-key");
         assert_eq!(auth.strategy, AuthStrategy::Anthropic);
+    }
+
+    #[test]
+    fn openai_api_formats_use_bearer_even_with_anthropic_api_key() {
+        let adapter = ClaudeAdapter::new();
+
+        for api_format in ["openai_chat", "openai_responses"] {
+            let provider: Provider = serde_json::from_value(json!({
+                "id": format!("test-{api_format}"),
+                "name": "OpenAI-compatible",
+                "settingsConfig": {
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go",
+                        "ANTHROPIC_API_KEY": "sk-api-key"
+                    }
+                },
+                "meta": {
+                    "apiFormat": api_format
+                }
+            }))
+            .expect("provider should deserialize");
+
+            let auth = adapter
+                .extract_auth(&provider)
+                .expect("auth should resolve");
+            assert_eq!(auth.api_key, "sk-api-key");
+            assert_eq!(auth.strategy, AuthStrategy::Bearer);
+        }
     }
 
     #[test]

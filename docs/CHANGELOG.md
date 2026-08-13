@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.1] - 2026-08-06
+
+### Added
+
+- **Android / Termux (Experimental)**: Add a manual ARM64 Bionic build workflow and use `termux-open` for directory actions on Android. Android remains an experimental, separately built target and is not included in the standard release assets. Addresses [#370](https://github.com/SaladDay/cc-switch-cli/issues/370).
+
+### Changed
+
+- **Sponsors / Provider Presets**: Feature AICodeMirror in the sponsor documentation, update its registration link, and place its preset first across supported apps.
+
+### Fixed
+
+- **Updater / Linux libc Safety**: Keep Linux `auto` and `musl` updates on the static musl build, require an explicit `CC_SWITCH_LINUX_LIBC=glibc` opt-in for glibc assets, and report the asset that is actually selected without silently crossing the libc boundary. A failed download now leaves the installed binary unchanged and reports the error clearly. Fixes [#398](https://github.com/SaladDay/cc-switch-cli/issues/398).
+- **Database / Large SQL Imports**: Batch exported `INSERT` statements and restore sync-preserved tables in one transaction, reducing statement and commit overhead for large backup imports. Fixes [#391](https://github.com/SaladDay/cc-switch-cli/issues/391).
+- **Proxy / Responses Streaming**: Handle failed, cancelled, incomplete, terminal-only, and final unterminated Responses events consistently, while reporting truncated streams and request outcomes accurately. Addresses [#390](https://github.com/SaladDay/cc-switch-cli/issues/390).
+- **Proxy / OpenAI-compatible Authentication**: Always use bearer authentication for Claude providers configured with OpenAI Chat Completions or Responses format, even when the key is stored in the Anthropic API-key field. Native Anthropic authentication behavior is unchanged. Fixes [#330](https://github.com/SaladDay/cc-switch-cli/issues/330).
+
+### Upgrade notes
+
+- The database schema remains at v16; no migration is required.
+- Android/Termux support remains experimental and is available through the manual Android workflow rather than the standard installer, updater, or release assets.
+- This patch is recommended for Linux updater users, large backup imports, Responses streaming routes, and OpenAI-compatible Claude providers.
+
+### Thanks
+
+Thank you to everyone who reported an issue, shared diagnostics, followed up on a fix, proposed a change, or opened a pull request during this patch cycle:
+
+- Issue reports and follow-up testing: [@jiangxianfengge](https://github.com/jiangxianfengge) and [@nmbtwzt](https://github.com/nmbtwzt) ([#330](https://github.com/SaladDay/cc-switch-cli/issues/330)), [@maxwell-feng](https://github.com/maxwell-feng) ([#370](https://github.com/SaladDay/cc-switch-cli/issues/370)), [@wildoranges](https://github.com/wildoranges) ([#390](https://github.com/SaladDay/cc-switch-cli/issues/390)), [@Huasushis](https://github.com/Huasushis) ([#391](https://github.com/SaladDay/cc-switch-cli/issues/391)), and [@Golden-Pigeon](https://github.com/Golden-Pigeon) ([#398](https://github.com/SaladDay/cc-switch-cli/issues/398)).
+- Pull requests and proposals: [@huzhongyyuan](https://github.com/huzhongyyuan) ([#395](https://github.com/SaladDay/cc-switch-cli/issues/395), [#396](https://github.com/SaladDay/cc-switch-cli/pull/396)) and [@edabchann](https://github.com/edabchann) ([#397](https://github.com/SaladDay/cc-switch-cli/issues/397)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and all upstream CC-Switch contributors whose provider, proxy, backup, and platform behavior helped shape this release.
+
+Some acknowledged reports and proposals remain open or await user verification; inclusion here does not mark them as fixed or merged.
+
 ## [5.10.0] - 2026-08-02
 
 ### Added

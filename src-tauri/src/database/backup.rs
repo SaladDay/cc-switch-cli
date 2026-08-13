@@ -17,6 +17,8 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
+const INSERT_BATCH_MAX_ROWS: usize = 200;
+const INSERT_BATCH_MAX_BYTES: usize = 1024 * 1024;
 
 // A full-copy step keeps one source snapshot stable for the entire copy. The
 // connection's busy handler already performs bounded lock retries, so adding
@@ -308,9 +310,12 @@ impl Database {
         target_conn: &Connection,
         tables: &[&str],
     ) -> Result<(), AppError> {
+        let tx = target_conn
+            .unchecked_transaction()
+            .map_err(|e| AppError::Database(format!("开启恢复事务失败: {e}")))?;
+
         for table in tables {
-            if !Self::table_exists(source_conn, table)? || !Self::table_exists(target_conn, table)?
-            {
+            if !Self::table_exists(source_conn, table)? || !Self::table_exists(&tx, table)? {
                 continue;
             }
 
@@ -319,23 +324,28 @@ impl Database {
                 continue;
             }
 
-            target_conn
-                .execute(&format!("DELETE FROM \"{table}\""), [])
+            let quoted_table = Self::quote_ident(table);
+            let quoted_columns = columns
+                .iter()
+                .map(|column| Self::quote_ident(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            tx.execute(&format!("DELETE FROM {quoted_table}"), [])
                 .map_err(|e| AppError::Database(format!("清空表 {table} 失败: {e}")))?;
 
             let placeholders = (1..=columns.len())
                 .map(|idx| format!("?{idx}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let cols = columns
-                .iter()
-                .map(|column| format!("\"{column}\""))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let insert_sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({placeholders})");
+            let insert_sql =
+                format!("INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})");
+            let mut insert_stmt = tx
+                .prepare(&insert_sql)
+                .map_err(|e| AppError::Database(format!("准备表 {table} 插入语句失败: {e}")))?;
 
             let mut stmt = source_conn
-                .prepare(&format!("SELECT * FROM \"{table}\""))
+                .prepare(&format!("SELECT {quoted_columns} FROM {quoted_table}"))
                 .map_err(|e| AppError::Database(format!("读取表 {table} 失败: {e}")))?;
             let mut rows = stmt
                 .query([])
@@ -350,12 +360,14 @@ impl Database {
                     );
                 }
 
-                target_conn
-                    .execute(&insert_sql, rusqlite::params_from_iter(values.iter()))
+                insert_stmt
+                    .execute(rusqlite::params_from_iter(values.iter()))
                     .map_err(|e| AppError::Database(format!("恢复表 {table} 数据失败: {e}")))?;
             }
         }
 
+        tx.commit()
+            .map_err(|e| AppError::Database(format!("提交恢复事务失败: {e}")))?;
         Ok(())
     }
 
@@ -818,6 +830,7 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut tables = Vec::new();
+        let mut triggers = Vec::new();
         let mut rows = stmt
             .query([])
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -831,10 +844,15 @@ impl Database {
                 continue;
             }
 
+            if obj_type == "trigger" {
+                triggers.push(sql);
+                continue;
+            }
+
             output.push_str(&sql);
             output.push_str(";\n");
 
-            if obj_type == "table" && !name.starts_with("sqlite_") {
+            if obj_type == "table" {
                 tables.push(name);
             }
         }
@@ -859,13 +877,23 @@ impl Database {
                 continue;
             }
 
+            let quoted_table = Self::quote_ident(&table);
+            let quoted_columns = columns
+                .iter()
+                .map(|column| Self::quote_ident(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert_prefix = format!("INSERT INTO {quoted_table} ({quoted_columns}) VALUES ");
+
             let mut stmt = conn
-                .prepare(&format!("SELECT * FROM \"{table}\""))
+                .prepare(&format!("SELECT {quoted_columns} FROM {quoted_table}"))
                 .map_err(|e| AppError::Database(e.to_string()))?;
             let mut rows = stmt
                 .query([])
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
+            let mut pending_rows = 0;
+            let mut batch = String::new();
             while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
                 let mut values = Vec::with_capacity(columns.len());
                 for idx in 0..columns.len() {
@@ -882,20 +910,47 @@ impl Database {
                     Self::neutralize_export_row(&table, &columns, &mut values, policy);
                 }
 
-                let cols = columns
-                    .iter()
-                    .map(|c| format!("\"{c}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                output.push_str(&format!(
-                    "INSERT INTO \"{table}\" ({cols}) VALUES ({});\n",
+                let row_sql = format!(
+                    "({})",
                     values
                         .iter()
                         .map(Self::format_owned_sql_value)
                         .collect::<Result<Vec<_>, _>>()?
                         .join(", ")
-                ));
+                );
+                let separator_bytes = usize::from(pending_rows > 0);
+                if pending_rows > 0
+                    && batch.len() + separator_bytes + row_sql.len() + 2 > INSERT_BATCH_MAX_BYTES
+                {
+                    batch.push_str(";\n");
+                    output.push_str(&batch);
+                    pending_rows = 0;
+                }
+
+                if pending_rows == 0 {
+                    batch.clear();
+                    batch.push_str(&insert_prefix);
+                } else {
+                    batch.push(',');
+                }
+                batch.push_str(&row_sql);
+                pending_rows += 1;
+
+                if pending_rows >= INSERT_BATCH_MAX_ROWS {
+                    batch.push_str(";\n");
+                    output.push_str(&batch);
+                    pending_rows = 0;
+                }
             }
+            if pending_rows > 0 {
+                batch.push_str(";\n");
+                output.push_str(&batch);
+            }
+        }
+
+        for sql in triggers {
+            output.push_str(&sql);
+            output.push_str(";\n");
         }
 
         output.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
@@ -904,8 +959,9 @@ impl Database {
 
     /// 获取表的列名列表
     fn get_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, AppError> {
+        let quoted_table = Self::quote_ident(table);
         let mut stmt = conn
-            .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+            .prepare(&format!("PRAGMA table_info({quoted_table})"))
             .map_err(|e| AppError::Database(e.to_string()))?;
         let iter = stmt
             .query_map([], |row| row.get::<_, String>(1))
@@ -1102,6 +1158,156 @@ mod tests {
         })
         .expect_err("an unbounded SQLite backup step should complete atomically");
         assert!(incomplete.to_string().contains("full-copy step"));
+    }
+
+    #[test]
+    fn dump_sql_batches_rows_into_multi_row_inserts() -> Result<(), AppError> {
+        let source = Connection::open_in_memory()?;
+        source.execute_batch(
+            "CREATE TABLE batch_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             WITH RECURSIVE rows(id) AS (
+                 VALUES(1) UNION ALL SELECT id + 1 FROM rows WHERE id < 450
+             )
+             INSERT INTO batch_rows SELECT id, printf('value-%d', id) FROM rows;",
+        )?;
+
+        let sql = Database::dump_sql(&source, None)?;
+        assert_eq!(sql.matches("INSERT INTO \"batch_rows\"").count(), 3);
+
+        let target = Connection::open_in_memory()?;
+        target.execute_batch(&sql)?;
+        let count: i64 =
+            target.query_row("SELECT COUNT(*) FROM batch_rows", [], |row| row.get(0))?;
+        assert_eq!(count, 450);
+        Ok(())
+    }
+
+    #[test]
+    fn dump_sql_round_trips_special_values_before_creating_triggers() -> Result<(), AppError> {
+        let source = Connection::open_in_memory()?;
+        source.execute_batch(
+            r#"CREATE TABLE "special""rows" (
+                 id INTEGER PRIMARY KEY,
+                 "text""value" TEXT NOT NULL,
+                 blob_value BLOB NOT NULL,
+                 nullable TEXT,
+                 generated TEXT GENERATED ALWAYS AS ("text""value" || '-generated') STORED
+             );
+             INSERT INTO "special""rows" (id, "text""value", blob_value, nullable) VALUES
+                 (1, 'O''Brien,
+第二行 😀', X'00FF10', NULL),
+                 (2, 'kept', X'', 'value');
+             CREATE TRIGGER ignore_second_row
+             BEFORE INSERT ON "special""rows" WHEN NEW.id = 2
+             BEGIN SELECT RAISE(IGNORE); END;"#,
+        )?;
+
+        let sql = Database::dump_sql(&source, None)?;
+        assert!(
+            sql.find("INSERT INTO \"special\"\"rows\"").unwrap()
+                < sql.find("CREATE TRIGGER ignore_second_row").unwrap()
+        );
+
+        let target = Connection::open_in_memory()?;
+        target.execute_batch(&sql)?;
+        target.execute(
+            r#"INSERT INTO "special""rows" (id, "text""value", blob_value)
+               VALUES (2, 'ignored', X'01')"#,
+            [],
+        )?;
+        let values: (String, String, Option<String>, String, i64) = target.query_row(
+            r#"SELECT "text""value", hex(blob_value), nullable, generated,
+                      (SELECT COUNT(*) FROM "special""rows")
+               FROM "special""rows" WHERE id = 1"#,
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        assert_eq!(
+            values,
+            (
+                "O'Brien,\n第二行 😀".into(),
+                "00FF10".into(),
+                None,
+                "O'Brien,\n第二行 😀-generated".into(),
+                2
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dump_sql_splits_batches_by_statement_size() -> Result<(), AppError> {
+        let source = Connection::open_in_memory()?;
+        source.execute(
+            "CREATE TABLE large_rows (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)",
+            [],
+        )?;
+        let payload = "x".repeat(super::INSERT_BATCH_MAX_BYTES / 2 + 1024);
+        for id in 1..=3 {
+            source.execute(
+                "INSERT INTO large_rows VALUES (?1, ?2)",
+                rusqlite::params![id, payload],
+            )?;
+        }
+
+        let sql = Database::dump_sql(&source, None)?;
+        let inserts = sql
+            .lines()
+            .filter(|line| line.starts_with("INSERT INTO \"large_rows\""))
+            .collect::<Vec<_>>();
+        assert_eq!(inserts.len(), 3);
+        assert!(inserts
+            .iter()
+            .all(|statement| statement.len() <= super::INSERT_BATCH_MAX_BYTES));
+        Ok(())
+    }
+
+    #[test]
+    fn restore_tables_rolls_back_all_tables_on_failure() -> Result<(), AppError> {
+        let source = Connection::open_in_memory()?;
+        source.execute_batch(
+            r#"CREATE TABLE first_table (
+                 value TEXT NOT NULL,
+                 generated TEXT GENERATED ALWAYS AS (value || '-generated') STORED
+             );
+             CREATE TABLE second_table (value INTEGER NOT NULL);
+             INSERT INTO first_table (value) VALUES ('replacement');
+             INSERT INTO second_table VALUES (-1);"#,
+        )?;
+        let target = Connection::open_in_memory()?;
+        target.execute_batch(
+            r#"CREATE TABLE first_table (
+                 value TEXT NOT NULL,
+                 generated TEXT GENERATED ALWAYS AS (value || '-generated') STORED
+             );
+             CREATE TABLE second_table (value INTEGER NOT NULL CHECK (value >= 0));
+             INSERT INTO first_table (value) VALUES ('sentinel');
+             INSERT INTO second_table VALUES (7);"#,
+        )?;
+
+        let error = Database::restore_tables(&source, &target, &["first_table", "second_table"])
+            .expect_err("the second table must fail its constraint");
+        assert!(error.to_string().contains("second_table"), "{error}");
+
+        let first: (String, String) =
+            target.query_row("SELECT value, generated FROM first_table", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        let second: i64 =
+            target.query_row("SELECT value FROM second_table", [], |row| row.get(0))?;
+        assert_eq!(
+            (first.0.as_str(), first.1.as_str(), second),
+            ("sentinel", "sentinel-generated", 7)
+        );
+        Ok(())
     }
 
     #[test]

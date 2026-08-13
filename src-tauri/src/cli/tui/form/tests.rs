@@ -103,13 +103,14 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Claude Official",
             "Codex",
+            "* AICodeMirror",
             "* ClaudeAPI",
+            "* Cubence",
+            "* OpenModel",
+            "* RunAPI",
             "* Qiniu",
             "* FennoAI",
-            "* RunAPI",
-            "* Cubence",
             "* PackyCode",
-            "* AICodeMirror",
             "* DDS",
         ]
     );
@@ -120,12 +121,13 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "OpenAI Official",
+            "* AICodeMirror",
+            "* Cubence",
+            "* OpenModel",
+            "* RunAPI",
             "* Qiniu",
             "* FennoAI",
-            "* RunAPI",
-            "* Cubence",
             "* PackyCode",
-            "* AICodeMirror",
             "* DDS",
             "DeepSeek",
         ]
@@ -137,10 +139,11 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "Google OAuth",
-            "* Qiniu",
-            "* Cubence",
-            "* PackyCode",
             "* AICodeMirror",
+            "* Cubence",
+            "* OpenModel",
+            "* Qiniu",
+            "* PackyCode",
         ]
     );
 
@@ -149,12 +152,13 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         opencode_labels,
         vec![
             "Custom",
+            "* AICodeMirror",
+            "* Cubence",
+            "* OpenModel",
+            "* RunAPI",
             "* Qiniu",
             "* FennoAI",
-            "* RunAPI",
-            "* Cubence",
-            "* PackyCode",
-            "* AICodeMirror"
+            "* PackyCode"
         ]
     );
     assert!(
@@ -167,12 +171,13 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         hermes_labels,
         vec![
             "Custom",
+            "* AICodeMirror",
+            "* Cubence",
+            "* OpenModel",
+            "* RunAPI",
             "* Qiniu",
             "* FennoAI",
-            "* RunAPI",
-            "* Cubence",
-            "* PackyCode",
-            "* AICodeMirror"
+            "* PackyCode"
         ]
     );
 
@@ -181,12 +186,13 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         openclaw_labels,
         vec![
             "Custom",
+            "* AICodeMirror",
+            "* Cubence",
+            "* OpenModel",
+            "* RunAPI",
             "* Qiniu",
             "* FennoAI",
-            "* RunAPI",
-            "* Cubence",
-            "* PackyCode",
-            "* AICodeMirror"
+            "* PackyCode"
         ]
     );
     assert!(
@@ -223,6 +229,36 @@ fn cli_provider_templates_match_tui_serializer_output() {
             AppType::Claude,
             ProviderAddTemplate::Packycode,
             "* PackyCode",
+        ),
+        (
+            AppType::Claude,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::Codex,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::Gemini,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::OpenCode,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::Hermes,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
+        ),
+        (
+            AppType::OpenClaw,
+            ProviderAddTemplate::Openmodel,
+            "* OpenModel",
         ),
         (
             AppType::Codex,
@@ -516,7 +552,7 @@ fn provider_add_form_aicodemirror_preset_keeps_affiliate_register_url_in_metadat
 
     assert_eq!(
         aicodemirror.register_url(),
-        "https://www.aicodemirror.ai/register?invitecode=9915W3"
+        "https://www.aicodemirror.ai/register?invitecode=77V9EA"
     );
     assert!(
         super::provider_templates::provider_sponsor_presets(&AppType::Hermes)
@@ -2150,6 +2186,14 @@ fn provider_add_form_aicodemirror_template_claude_sets_partner_meta_and_base_url
         provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
         "https://api.aicodemirror.ai/api/claudecode"
     );
+    assert!(form.claude_api_key.value.is_empty());
+    assert_eq!(form.claude_api_key_field, ClaudeApiKeyField::AuthToken);
+    assert!(provider["settingsConfig"]["env"]
+        .get("ANTHROPIC_AUTH_TOKEN")
+        .is_none());
+    assert!(provider["settingsConfig"]["env"]
+        .get("ANTHROPIC_MODEL")
+        .is_none());
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
 }
@@ -2170,6 +2214,9 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
     assert!(cfg.contains("model = \"gpt-5.6-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
+    assert!(form.codex_api_key.value.is_empty());
+    assert_eq!(form.codex_env_key.value, "OPENAI_API_KEY");
+    assert!(provider["settingsConfig"].get("auth").is_none());
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
 
@@ -2205,6 +2252,14 @@ fn provider_add_form_aicodemirror_template_gemini_sets_partner_meta_and_base_url
         provider["settingsConfig"]["env"]["GOOGLE_GEMINI_BASE_URL"],
         "https://api.aicodemirror.ai/api/gemini"
     );
+    assert_eq!(
+        provider["settingsConfig"]["env"]["GEMINI_MODEL"],
+        crate::provider_preset_models::GEMINI_DEFAULT_MODEL
+    );
+    assert!(form.gemini_api_key.value.is_empty());
+    assert!(provider["settingsConfig"]["env"]
+        .get("GEMINI_API_KEY")
+        .is_none());
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
 }
@@ -4742,12 +4797,13 @@ fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
         labels,
         vec![
             "Custom",
+            "* AICodeMirror",
+            "* Cubence",
+            "* OpenModel",
+            "* RunAPI",
             "* Qiniu",
             "* FennoAI",
-            "* RunAPI",
-            "* Cubence",
-            "* PackyCode",
-            "* AICodeMirror"
+            "* PackyCode"
         ]
     );
 }
@@ -4764,12 +4820,13 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         openclaw_labels,
         vec![
             "Custom",
+            "* AICodeMirror",
+            "* Cubence",
+            "* OpenModel",
+            "* RunAPI",
             "* Qiniu",
             "* FennoAI",
-            "* RunAPI",
-            "* Cubence",
-            "* PackyCode",
-            "* AICodeMirror"
+            "* PackyCode"
         ]
     );
     assert!(
@@ -4937,6 +4994,13 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
         provider["settingsConfig"]["options"]["baseURL"],
         "https://api.aicodemirror.ai/api/claudecode"
     );
+    let model_ids = provider["settingsConfig"]["models"]
+        .as_object()
+        .expect("AICodeMirror OpenCode models should be an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(model_ids, ["claude-sonnet-5", "claude-opus-5"]);
     assert_eq!(
         provider["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
         "Claude Sonnet 5"
