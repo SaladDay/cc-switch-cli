@@ -24,6 +24,11 @@ pub fn get_gemini_dir() -> PathBuf {
     }
 
     let home = dirs::home_dir().expect("无法获取用户主目录");
+    let gemini_antigravity_dir = home.join(".gemini").join("antigravity-cli");
+    if gemini_antigravity_dir.exists() && gemini_antigravity_dir.is_dir() {
+        return gemini_antigravity_dir;
+    }
+
     let antigravity_dir = home.join(".antigravity");
     if antigravity_dir.exists() {
         return antigravity_dir;
