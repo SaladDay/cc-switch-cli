@@ -2640,7 +2640,11 @@ impl ProxyService {
         let mut effective_provider = provider.clone();
         effective_provider.settings_config =
             self.build_live_snapshot_from_provider(&AppType::Claude, provider)?;
-        let mut effective_settings = effective_provider.settings_config.clone();
+        let live_settings = self.read_claude_live().ok();
+        let mut effective_settings = Self::merge_claude_live_overlay(
+            live_settings.as_ref(),
+            &effective_provider.settings_config,
+        );
         let (proxy_url, _) = self.build_proxy_urls_for_app(&AppType::Claude).await?;
 
         Self::apply_claude_takeover_fields_for_provider(
@@ -2649,6 +2653,21 @@ impl ProxyService {
             &effective_provider,
         );
         self.write_claude_live(&effective_settings)
+    }
+
+    fn merge_claude_live_overlay(live: Option<&Value>, provider_snapshot: &Value) -> Value {
+        let (Some(live_object), Some(provider_object)) = (
+            live.and_then(Value::as_object),
+            provider_snapshot.as_object(),
+        ) else {
+            return provider_snapshot.clone();
+        };
+
+        let mut merged = live_object.clone();
+        for (key, value) in provider_object {
+            merged.insert(key.clone(), value.clone());
+        }
+        Value::Object(merged)
     }
 
     pub async fn sync_codex_live_from_provider_while_proxy_active(
@@ -4150,8 +4169,12 @@ impl ProxyService {
         let Some(expected_session_token) = session.session_token.as_deref() else {
             return ExternalProxyStatusProbe::Unreachable;
         };
+        // Loopback-only probe: never route through HTTP(S)_PROXY env, or a
+        // system forward proxy hijacks the local status check and the TUI
+        // reports the worker as not running.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
+            .no_proxy()
             .build();
         let Ok(client) = client else {
             return ExternalProxyStatusProbe::Unreachable;
@@ -9547,7 +9570,12 @@ requires_openai_auth = true
                     "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "Stale Fable",
                     "CLAUDE_CODE_SUBAGENT_MODEL": "stale-subagent"
                 },
-                "permissions": { "allow": ["Bash"] }
+                "permissions": { "allow": ["Bash"] },
+                "statusLine": {
+                    "type": "command",
+                    "command": "~/.claude/statusline.sh",
+                    "padding": 0
+                }
             }))
             .expect("seed taken-over live file");
 
@@ -9561,6 +9589,12 @@ requires_openai_auth = true
             live.get("permissions"),
             provider_b.settings_config.get("permissions"),
             "provider-derived live settings should be refreshed"
+        );
+        assert_eq!(
+            live.get("statusLine")
+                .and_then(|value| value.get("command")),
+            Some(&json!("~/.claude/statusline.sh")),
+            "Claude live-only statusLine should survive proxy target refresh"
         );
         let env = env_object(&live);
         assert_env_str(

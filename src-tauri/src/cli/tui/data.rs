@@ -1175,8 +1175,27 @@ pub struct UiData {
     pub proxy: ProxySnapshot,
     pub usage: UsageSnapshot,
     pub pricing: ModelPricingSnapshot,
+    pub model_routes: ModelRouteSnapshot,
     pub(crate) quota: QuotaSnapshot,
     pub(crate) reload_token: UiDataReloadToken,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ModelRouteRow {
+    pub id: String,
+    pub pattern: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub priority: i32,
+    pub enabled: bool,
+    pub hit_count: i64,
+    pub last_hit_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelRouteSnapshot {
+    pub rows: Vec<ModelRouteRow>,
 }
 
 pub(crate) fn load_state() -> Result<AppState, AppError> {
@@ -1265,6 +1284,7 @@ impl UiData {
             ProviderLoadMode::SnapshotOnly => load_skills_snapshot_from_state(state)?,
         };
         let proxy = load_proxy_snapshot_from_state(state, app_type)?;
+        let model_routes = load_model_routes_snapshot(state, app_type, &providers)?;
 
         Ok(Self {
             providers,
@@ -1275,6 +1295,7 @@ impl UiData {
             proxy,
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
+            model_routes,
             quota: QuotaSnapshot::default(),
             reload_token: next_reload_token(),
         })
@@ -1299,6 +1320,7 @@ impl UiData {
             proxy,
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
+            model_routes: self.model_routes.clone(),
             quota: QuotaSnapshot::default(),
             reload_token: next_reload_token(),
         }
@@ -1452,6 +1474,39 @@ pub(crate) fn quota_target_for_provider(
     row: &ProviderRow,
 ) -> Option<QuotaTarget> {
     crate::cli::provider_quota::quota_target_for_provider(app_type, &row.id, &row.provider)
+}
+
+fn load_model_routes_snapshot(
+    state: &AppState,
+    app_type: &AppType,
+    providers: &ProvidersSnapshot,
+) -> Result<ModelRouteSnapshot, AppError> {
+    let rows = state
+        .db
+        .list_model_routes(app_type.as_str())?
+        .into_iter()
+        .map(|route| {
+            let provider_name = providers
+                .rows
+                .iter()
+                .find(|p| p.id == route.provider_id)
+                .map(|p| provider_display_name(app_type, p))
+                .unwrap_or_else(|| route.provider_id.clone());
+
+            ModelRouteRow {
+                id: route.id,
+                pattern: route.pattern,
+                provider_id: route.provider_id,
+                provider_name,
+                priority: route.priority,
+                enabled: route.enabled,
+                hit_count: route.hit_count,
+                last_hit_at: route.last_hit_at,
+            }
+        })
+        .collect();
+
+    Ok(ModelRouteSnapshot { rows })
 }
 
 #[cfg(test)]

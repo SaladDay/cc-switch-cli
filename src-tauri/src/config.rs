@@ -62,7 +62,16 @@ pub fn get_claude_mcp_path() -> PathBuf {
 }
 
 /// 获取 Claude Code 主配置文件路径
+///
+/// Claude Code 优先使用 `~/.claude.json`；若不存在才回落到
+/// `~/.claude/settings.json`（旧版/测试布局）或 `~/.claude/claude.json`。
 pub fn get_claude_settings_path() -> PathBuf {
+    let home = home_dir().expect("无法获取用户主目录");
+    let modern = home.join(".claude.json");
+    if modern.exists() {
+        return modern;
+    }
+
     let dir = get_claude_config_dir();
     let settings = dir.join("settings.json");
     if settings.exists() {

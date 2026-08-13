@@ -2117,6 +2117,7 @@ impl SkillService {
         Ok(skills)
     }
 
+    #[allow(clippy::redundant_closure)]
     pub async fn search_skills_sh(
         &self,
         query: &str,
@@ -2205,6 +2206,7 @@ impl SkillService {
             })
             .collect();
 
+        #[allow(clippy::needless_borrow)]
         // Add local SSOT-only skills not in repos.
         Self::merge_local_ssot_skills(&index, &mut out)?;
 

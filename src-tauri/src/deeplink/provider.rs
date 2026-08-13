@@ -260,65 +260,38 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
 }
 
 fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
-    // The `model_provider` key is always the shared `custom` id; the human
-    // readable provider name is preserved in the `name` field of the
-    // `[model_providers.custom]` table. Codex rejects a provider table whose
-    // `name` is missing or empty ("provider name must not be empty", #333), so
-    // the display name is always written (falling back to `custom`).
-    let provider_display_name = request
-        .name
-        .as_deref()
-        .unwrap_or("custom")
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect::<String>()
-        .trim()
-        .to_string();
-    let provider_display_name = if provider_display_name.is_empty() {
-        "custom".to_string()
-    } else {
-        provider_display_name
-    };
-
-    // Model name: use deeplink model or default
     let model_name = request
         .model
         .as_deref()
-        .unwrap_or("gpt-5-codex")
-        .to_string();
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("gpt-5.4");
 
-    // Endpoint: normalize trailing slashes (use primary endpoint only)
     let endpoint = get_primary_endpoint(request)
         .trim()
         .trim_end_matches('/')
         .to_string();
 
-    // Escape every user-controlled value through toml_edit so quotes/specials
-    // in the display name or endpoint cannot corrupt the generated TOML.
-    let provider_display_name = toml_edit::Value::from(provider_display_name.as_str()).to_string();
-    let model_name = toml_edit::Value::from(model_name.as_str()).to_string();
-    let endpoint = toml_edit::Value::from(endpoint.as_str()).to_string();
+    // Generate a provider key from the name (same logic as clean_codex_provider_key)
+    let provider_key =
+        crate::codex_config::clean_codex_provider_key(request.name.as_deref().unwrap_or("custom"));
 
-    // Build config.toml content
-    let config_toml = format!(
-        r#"model_provider = "custom"
-model = {model_name}
-model_reasoning_effort = "high"
-disable_response_storage = true
-
-[model_providers.custom]
-name = {provider_display_name}
-base_url = {endpoint}
-wire_api = "responses"
-requires_openai_auth = true
-"#
+    // Use upstream model_provider + [model_providers.<key>] format
+    let config_snippet = format!(
+        "model_provider = \"{provider_key}\"\n\
+         model = \"{model_name}\"\n\
+         \n\
+         [model_providers.{provider_key}]\n\
+         base_url = \"{endpoint}\"\n\
+         wire_api = \"responses\"\n\
+         requires_openai_auth = false\n\
+         env_key = \"OPENAI_API_KEY\""
     );
 
     json!({
         "auth": {
             "OPENAI_API_KEY": request.api_key,
         },
-        "config": config_toml
+        "config": config_snippet
     })
 }
 
