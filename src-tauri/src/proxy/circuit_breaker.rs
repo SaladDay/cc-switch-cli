@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::RwLock;
 
@@ -52,13 +52,20 @@ pub struct CircuitBreaker {
     failed_requests: Arc<AtomicU32>,
     last_opened_at: Arc<RwLock<Option<Instant>>>,
     config: Arc<RwLock<CircuitBreakerConfig>>,
-    half_open_requests: Arc<AtomicU32>,
+    half_open_permits: Arc<Mutex<HalfOpenPermitState>>,
+}
+
+#[derive(Default)]
+struct HalfOpenPermitState {
+    generation: u64,
+    in_flight: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct AllowResult {
     pub allowed: bool,
     pub used_half_open_permit: bool,
+    pub(super) half_open_generation: Option<u64>,
 }
 
 impl CircuitBreaker {
@@ -71,7 +78,7 @@ impl CircuitBreaker {
             failed_requests: Arc::new(AtomicU32::new(0)),
             last_opened_at: Arc::new(RwLock::new(None)),
             config: Arc::new(RwLock::new(config)),
-            half_open_requests: Arc::new(AtomicU32::new(0)),
+            half_open_permits: Arc::new(Mutex::new(HalfOpenPermitState::default())),
         }
     }
 
@@ -105,6 +112,7 @@ impl CircuitBreaker {
             CircuitState::Closed => AllowResult {
                 allowed: true,
                 used_half_open_permit: false,
+                half_open_generation: None,
             },
             CircuitState::Open => {
                 let config = self.config.read().await;
@@ -117,11 +125,13 @@ impl CircuitBreaker {
                             CircuitState::Closed => AllowResult {
                                 allowed: true,
                                 used_half_open_permit: false,
+                                half_open_generation: None,
                             },
                             CircuitState::HalfOpen => self.allow_half_open_probe(),
                             CircuitState::Open => AllowResult {
                                 allowed: false,
                                 used_half_open_permit: false,
+                                half_open_generation: None,
                             },
                         };
                     }
@@ -130,6 +140,7 @@ impl CircuitBreaker {
                 AllowResult {
                     allowed: false,
                     used_half_open_permit: false,
+                    half_open_generation: None,
                 }
             }
             CircuitState::HalfOpen => self.allow_half_open_probe(),
@@ -218,38 +229,43 @@ impl CircuitBreaker {
 
     fn allow_half_open_probe(&self) -> AllowResult {
         let max_half_open_requests = 1u32;
-        let current = self.half_open_requests.fetch_add(1, Ordering::SeqCst);
+        let mut permits = self
+            .half_open_permits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        if current < max_half_open_requests {
+        if permits.in_flight < max_half_open_requests {
+            permits.in_flight += 1;
             AllowResult {
                 allowed: true,
                 used_half_open_permit: true,
+                half_open_generation: Some(permits.generation),
             }
         } else {
-            self.half_open_requests.fetch_sub(1, Ordering::SeqCst);
             AllowResult {
                 allowed: false,
                 used_half_open_permit: false,
+                half_open_generation: None,
             }
         }
     }
 
     pub fn release_half_open_permit(&self) {
-        let mut current = self.half_open_requests.load(Ordering::SeqCst);
-        loop {
-            if current == 0 {
-                return;
-            }
+        let mut permits = self
+            .half_open_permits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        permits.in_flight = permits.in_flight.saturating_sub(1);
+    }
 
-            match self.half_open_requests.compare_exchange(
-                current,
-                current - 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return,
-                Err(actual) => current = actual,
-            }
+    /// 仅归还指定半开代际的许可，避免旧请求释放新一轮探测名额。
+    pub(super) fn release_half_open_permit_for_generation(&self, generation: u64) {
+        let mut permits = self
+            .half_open_permits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if permits.generation == generation {
+            permits.in_flight = permits.in_flight.saturating_sub(1);
         }
     }
 
@@ -266,9 +282,14 @@ impl CircuitBreaker {
             return;
         }
 
-        *state = CircuitState::HalfOpen;
+        let mut permits = self
+            .half_open_permits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        permits.generation = permits.generation.wrapping_add(1);
+        permits.in_flight = 0;
         self.consecutive_successes.store(0, Ordering::SeqCst);
-        self.half_open_requests.store(0, Ordering::SeqCst);
+        *state = CircuitState::HalfOpen;
     }
 
     async fn transition_to_closed(&self) {
