@@ -5308,7 +5308,8 @@ mod tests {
         app.route = Route::Providers;
         app.focus = Focus::Content;
 
-        let data = UiData::default();
+        let mut data = UiData::default();
+        data.config.common_snippet = "[features]\ngoals = true\n".to_string();
         app.on_key(key(KeyCode::Char('a')), &data);
         app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
         app.on_key(key(KeyCode::Tab), &data); // fields -> preview
@@ -5323,6 +5324,9 @@ mod tests {
                 EditorSubmit::ProviderFormApplyCodexConfigToml
             ))
         ));
+        let editor_text = app.editor.as_ref().map(|editor| editor.text()).unwrap();
+        assert!(editor_text.contains("[features]"), "{editor_text}");
+        assert!(editor_text.contains("goals = true"), "{editor_text}");
     }
 
     #[test]
@@ -15175,6 +15179,169 @@ mod tests {
             app.form,
             Some(FormState::ProviderAdd(ref form))
                 if matches!(form.page, form::ProviderFormPage::Main)
+        ));
+    }
+
+    #[test]
+    fn provider_quick_config_pages_route_keys_to_matching_app() {
+        let claude_snippet = r#"{
+            "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }
+        }"#;
+        let mut claude_provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "sk-provider" } }),
+            None,
+        );
+        claude_provider.meta = Some(crate::provider::ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        });
+        let mut claude_form = ProviderAddFormState::from_provider_with_common_snippet(
+            AppType::Claude,
+            &claude_provider,
+            claude_snippet,
+        );
+        claude_form.open_claude_quick_config_page();
+        claude_form.claude_quick_config_idx = 1;
+
+        let mut claude_app = App::new(Some(AppType::Claude));
+        claude_app.form = Some(FormState::ProviderAdd(claude_form));
+        let mut claude_data = data();
+        claude_data.config.common_snippet = claude_snippet.to_string();
+
+        assert!(matches!(
+            claude_app.on_key(key(KeyCode::Enter), &claude_data),
+            Action::None
+        ));
+        assert!(matches!(
+            claude_app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if !form.claude_teammates && !form.include_common_config
+        ));
+
+        let codex_snippet = "[features]\ngoals = true\n";
+        let codex_config = "model_provider = \"myco\"\nmodel = \"gpt-x\"\n\n[model_providers.myco]\nname = \"My Codex\"\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\n";
+        let mut codex_provider = Provider::with_id(
+            "myco".to_string(),
+            "My Codex".to_string(),
+            json!({ "config": codex_config }),
+            None,
+        );
+        codex_provider.meta = Some(crate::provider::ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        });
+        let mut codex_form = ProviderAddFormState::from_provider_with_common_snippet(
+            AppType::Codex,
+            &codex_provider,
+            codex_snippet,
+        );
+        codex_form.open_codex_quick_config_page();
+
+        let mut codex_app = App::new(Some(AppType::Codex));
+        codex_app.form = Some(FormState::ProviderAdd(codex_form));
+        let mut codex_data = data();
+        codex_data.config.common_snippet = codex_snippet.to_string();
+
+        assert!(matches!(
+            codex_app.on_key(key(KeyCode::Char(' ')), &codex_data),
+            Action::None
+        ));
+        assert!(matches!(
+            codex_app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if !form.codex_goal_mode && !form.include_common_config
+        ));
+    }
+
+    #[test]
+    fn provider_template_enter_preserves_effective_common_quick_config() {
+        let cases = [
+            (
+                AppType::Claude,
+                r#"{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}}"#,
+            ),
+            (AppType::Codex, "[features]\ngoals = true\n"),
+        ];
+
+        for (app_type, common_snippet) in cases {
+            let mut app = App::new(Some(app_type.clone()));
+            app.route = Route::Providers;
+            app.focus = Focus::Content;
+            app.form = Some(FormState::ProviderAdd(
+                ProviderAddFormState::new_with_common_snippet(app_type.clone(), common_snippet),
+            ));
+            let mut data = data();
+            data.config.common_snippet = common_snippet.to_string();
+
+            assert!(matches!(
+                app.on_key(key(KeyCode::Enter), &data),
+                Action::None
+            ));
+
+            let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+                panic!("expected provider form for {app_type:?}");
+            };
+            assert!(form.include_common_config);
+            match app_type {
+                AppType::Claude => assert!(form.claude_teammates),
+                AppType::Codex => assert!(form.codex_goal_mode),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_claude_common_snippet_allows_quick_edit_and_detaches_sharing() {
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        form.include_common_config = true;
+        form.open_claude_quick_config_page();
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(form));
+        let mut data = data();
+        data.config.common_snippet = r#"{"env": {"#.to_string();
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected Claude provider form");
+        };
+        assert!(form.claude_hide_attribution);
+        assert!(!form.include_common_config);
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn malformed_codex_common_snippet_blocks_quick_edit_with_visible_warning() {
+        let mut form = ProviderAddFormState::new(AppType::Codex);
+        form.include_common_config = true;
+        form.open_codex_quick_config_page();
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(form));
+        let mut data = data();
+        data.config.common_snippet = "[features\ngoals = true".to_string();
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected Codex provider form");
+        };
+        assert!(form.include_common_config);
+        assert!(!form.codex_goal_mode);
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
         ));
     }
 

@@ -735,6 +735,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Enables Claude Code's Tool Search capability by writing env.ENABLE_TOOL_SEARCH=true; turning it off removes the variable.",
             ),
         ),
+        ProviderAddField::ClaudeEffortMax => HelpContent::new(
+            texts::tui_label_claude_effort_max(),
+            help_lines(
+                "将 Claude Code 的思考强度设为最大，写入 env.CLAUDE_CODE_EFFORT_LEVEL=max；关闭时移除该变量。",
+                "Sets Claude Code's thinking effort to maximum by writing env.CLAUDE_CODE_EFFORT_LEVEL=max; turning it off removes the variable.",
+            ),
+        ),
         ProviderAddField::ClaudeDisableAutoUpgrade => HelpContent::new(
             texts::tui_label_claude_disable_auto_upgrade(),
             help_lines(

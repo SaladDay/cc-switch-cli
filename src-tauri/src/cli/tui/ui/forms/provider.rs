@@ -690,7 +690,8 @@ fn render_provider_preview(
                     );
                 }
                 CodexPreviewSection::Config => {
-                    let config_text = codex_config_preview_text(provider);
+                    let config_text =
+                        codex_config_preview_text(provider, &data.config.common_snippet);
                     render_form_text_preview(
                         frame,
                         texts::tui_codex_config_toml_title(),
@@ -706,7 +707,7 @@ fn render_provider_preview(
         }
 
         let auth_text = codex_auth_preview_text(provider);
-        let config_text = codex_config_preview_text(provider);
+        let config_text = codex_config_preview_text(provider, &data.config.common_snippet);
 
         let preview = Layout::default()
             .direction(Direction::Vertical)
@@ -808,7 +809,10 @@ pub(crate) fn codex_auth_preview_text(provider: &super::form::ProviderAddFormSta
     serde_json::to_string_pretty(&auth_value).unwrap_or_else(|_| "{}".to_string())
 }
 
-pub(crate) fn codex_config_preview_text(provider: &super::form::ProviderAddFormState) -> String {
+pub(crate) fn codex_config_preview_text(
+    provider: &super::form::ProviderAddFormState,
+    common_snippet: &str,
+) -> String {
     const MAX_PREVIEW_CATALOG_ROWS: usize = 128;
 
     let scalar_bytes = [
@@ -818,6 +822,11 @@ pub(crate) fn codex_config_preview_text(provider: &super::form::ProviderAddFormS
         provider.codex_base_url.value.as_str(),
         provider.codex_model.value.as_str(),
         provider.codex_env_key.value.as_str(),
+        if provider.include_common_config {
+            common_snippet
+        } else {
+            ""
+        },
     ]
     .into_iter()
     .try_fold(0usize, |total, text| total.checked_add(text.len()));
@@ -833,7 +842,10 @@ pub(crate) fn codex_config_preview_text(provider: &super::form::ProviderAddFormS
     {
         return texts::tui_preview_omitted_too_large().to_string();
     }
-    bounded_toml_preview(&provider.effective_codex_config_text())
+    let config = provider
+        .effective_codex_config_text_with_common_config(common_snippet)
+        .unwrap_or_else(|_| provider.effective_codex_config_text());
+    bounded_toml_preview(&config)
 }
 
 struct QuickConfigPage<'a> {
@@ -1881,6 +1893,7 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeTeammates => texts::tui_label_claude_teammates().to_string(),
         ProviderAddField::ClaudeToolSearch => texts::tui_label_claude_tool_search().to_string(),
+        ProviderAddField::ClaudeEffortMax => texts::tui_label_claude_effort_max().to_string(),
         ProviderAddField::ClaudeDisableAutoUpgrade => {
             texts::tui_label_claude_disable_auto_upgrade().to_string()
         }
@@ -2012,6 +2025,13 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeToolSearch => {
             if provider.claude_tool_search {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::ClaudeEffortMax => {
+            if provider.claude_effort_max {
                 format!("[{}]", texts::tui_marker_active())
             } else {
                 "[ ]".to_string()

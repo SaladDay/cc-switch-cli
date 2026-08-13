@@ -2,6 +2,7 @@ use crate::app_config::AppType;
 use crate::claude_model_config::{
     set_claude_role_model, CLAUDE_DEFAULT_MODEL_ENV_KEY, CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY,
 };
+use crate::cli::i18n::texts;
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
 use crate::provider_preset_models::CODEX_DEFAULT_MODEL;
 use crate::services::ProviderService;
@@ -14,6 +15,216 @@ use super::{
     ClaudeApiFormat, ClaudeModelRole, GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState,
     UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
+
+pub(crate) fn normalize_gemini_common_config_for_form(snippet: &str) -> Result<Value, String> {
+    let snippet = snippet.trim();
+    if snippet.is_empty() {
+        return Ok(json!({}));
+    }
+
+    let Value::Object(entries) = serde_json::from_str::<Value>(snippet)
+        .map_err(|error| texts::common_config_snippet_invalid_json(&error.to_string()))?
+    else {
+        return Err(texts::common_config_snippet_not_object().to_string());
+    };
+
+    let forbidden_keys = entries
+        .keys()
+        .filter(|key| {
+            key.as_str() == "GOOGLE_GEMINI_BASE_URL"
+                || key.as_str() == "GEMINI_API_KEY"
+                || ProviderService::is_sensitive_common_config_key_for_preview(key)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !forbidden_keys.is_empty() {
+        return Err(texts::gemini_common_config_invalid_keys(
+            &forbidden_keys.join(", "),
+        ));
+    }
+
+    let mut env = serde_json::Map::new();
+    for (key, value) in entries {
+        let Some(value) = value.as_str() else {
+            return Err(texts::gemini_common_config_invalid_values().to_string());
+        };
+        let value = value.trim();
+        if !value.is_empty() {
+            env.insert(key, Value::String(value.to_string()));
+        }
+    }
+    Ok(Value::Object(env))
+}
+
+const CLAUDE_COMMON_CONFIG_FORBIDDEN_KEYS: [&str; 3] = ["__proto__", "constructor", "prototype"];
+
+fn sanitize_claude_common_config_value_for_form(value: Value) -> Value {
+    match value {
+        Value::Object(entries) => Value::Object(
+            entries
+                .into_iter()
+                .filter(|(key, _)| !CLAUDE_COMMON_CONFIG_FORBIDDEN_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| (key, sanitize_claude_common_config_value_for_form(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(sanitize_claude_common_config_value_for_form)
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+pub(crate) fn sanitize_claude_common_config_for_form(snippet: &str) -> Result<Value, String> {
+    let value = serde_json::from_str::<Value>(snippet)
+        .map_err(|error| texts::common_config_snippet_invalid_json(&error.to_string()))?;
+    if !value.is_object() {
+        return Err(texts::common_config_snippet_not_object().to_string());
+    }
+    Ok(sanitize_claude_common_config_value_for_form(value))
+}
+
+fn json_value_is_subset_for_form(target: &Value, source: &Value) -> bool {
+    match source {
+        Value::Object(source_map) => {
+            let Some(target_map) = target.as_object() else {
+                return false;
+            };
+            source_map.iter().all(|(key, source_value)| {
+                target_map.get(key).is_some_and(|target_value| {
+                    json_value_is_subset_for_form(target_value, source_value)
+                })
+            })
+        }
+        Value::Array(source_array) => {
+            let Some(target_array) = target.as_array() else {
+                return false;
+            };
+            target_array.len() == source_array.len()
+                && target_array
+                    .iter()
+                    .zip(source_array)
+                    .all(|(target_value, source_value)| {
+                        json_value_is_subset_for_form(target_value, source_value)
+                    })
+        }
+        _ => target == source,
+    }
+}
+
+fn json_deep_remove_for_form(target: &mut Value, source: &Value) {
+    let (Some(target_map), Some(source_map)) = (target.as_object_mut(), source.as_object()) else {
+        return;
+    };
+
+    for (key, source_value) in source_map {
+        let mut remove_key = false;
+        if let Some(target_value) = target_map.get_mut(key) {
+            if source_value.is_object() && target_value.is_object() {
+                json_deep_remove_for_form(target_value, source_value);
+                remove_key = target_value
+                    .as_object()
+                    .is_some_and(serde_json::Map::is_empty);
+            } else if json_value_is_subset_for_form(target_value, source_value) {
+                // Upstream's form utility treats arrays as atomic values: it
+                // removes the field only when length, order, and values all
+                // match, instead of deleting matching array members.
+                remove_key = true;
+            }
+        }
+        if remove_key {
+            target_map.remove(key);
+        }
+    }
+}
+
+pub(crate) fn claude_settings_contain_common_config_for_form(
+    settings: &Value,
+    common_snippet: &str,
+) -> bool {
+    sanitize_claude_common_config_for_form(common_snippet)
+        .ok()
+        .filter(|source| source.as_object().is_some_and(|object| !object.is_empty()))
+        .is_some_and(|source| json_value_is_subset_for_form(settings, &source))
+}
+
+fn sanitize_toml_common_config_value_for_form(value: toml::Value) -> toml::Value {
+    match value {
+        toml::Value::Table(entries) => toml::Value::Table(
+            entries
+                .into_iter()
+                .filter(|(key, _)| !CLAUDE_COMMON_CONFIG_FORBIDDEN_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| (key, sanitize_toml_common_config_value_for_form(value)))
+                .collect(),
+        ),
+        toml::Value::Array(items) => toml::Value::Array(
+            items
+                .into_iter()
+                .map(sanitize_toml_common_config_value_for_form)
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn toml_value_is_subset_for_form(target: &toml::Value, source: &toml::Value) -> bool {
+    match source {
+        toml::Value::Table(source_table) => {
+            let Some(target_table) = target.as_table() else {
+                return false;
+            };
+            source_table.iter().all(|(key, source_value)| {
+                target_table.get(key).is_some_and(|target_value| {
+                    toml_value_is_subset_for_form(target_value, source_value)
+                })
+            })
+        }
+        toml::Value::Array(source_array) => {
+            let Some(target_array) = target.as_array() else {
+                return false;
+            };
+            target_array.len() == source_array.len()
+                && target_array
+                    .iter()
+                    .zip(source_array)
+                    .all(|(target_value, source_value)| {
+                        toml_value_is_subset_for_form(target_value, source_value)
+                    })
+        }
+        _ => target == source,
+    }
+}
+
+pub(crate) fn codex_settings_contain_common_config_for_form(
+    settings: &Value,
+    common_snippet: &str,
+) -> bool {
+    let config = settings
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match (
+        toml::from_str::<toml::Value>(config),
+        toml::from_str::<toml::Value>(common_snippet),
+    ) {
+        (Ok(target), Ok(source)) => {
+            let source = sanitize_toml_common_config_value_for_form(source);
+            source.as_table().is_some_and(|table| !table.is_empty())
+                && toml_value_is_subset_for_form(&target, &source)
+        }
+        _ => {
+            // Match the upstream UI's malformed-TOML fallback.
+            let target = config.split_whitespace().collect::<Vec<_>>().join(" ");
+            let source = common_snippet
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            !source.is_empty() && target.contains(&source)
+        }
+    }
+}
 
 impl ProviderAddFormState {
     pub(crate) fn existing_codex_config_text(&self) -> &str {
@@ -45,6 +256,30 @@ impl ProviderAddFormState {
             fallback_model
         };
         self.effective_custom_codex_config_text(model)
+    }
+
+    pub(crate) fn effective_codex_config_text_with_common_config(
+        &self,
+        common_snippet: &str,
+    ) -> Result<String, String> {
+        let config = self.effective_codex_config_text();
+        if !self.include_common_config || common_snippet.trim().is_empty() {
+            return Ok(config);
+        }
+
+        let settings = json!({ "config": config });
+        let effective = ProviderService::apply_common_config_to_settings_for_preview(
+            &AppType::Codex,
+            &settings,
+            common_snippet,
+        )
+        .map_err(|err| err.to_string())?;
+
+        Ok(effective
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
     }
 
     fn codex_config_and_model_catalog_for_save(&self) -> (String, Vec<Value>) {
@@ -207,6 +442,13 @@ impl ProviderAddFormState {
                         env_obj.insert("ENABLE_TOOL_SEARCH".to_string(), json!("true"));
                     } else {
                         env_obj.remove("ENABLE_TOOL_SEARCH");
+                    }
+                }
+                if self.claude_effort_max_touched {
+                    if self.claude_effort_max {
+                        env_obj.insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), json!("max"));
+                    } else {
+                        env_obj.remove("CLAUDE_CODE_EFFORT_LEVEL");
                     }
                 }
                 if self.claude_disable_auto_upgrade_touched {
@@ -550,21 +792,51 @@ impl ProviderAddFormState {
         common_snippet: &str,
     ) -> Result<Value, String> {
         let mut provider_value = self.to_provider_json_value();
-        let snippet = common_snippet.trim();
-        if snippet.is_empty() {
-            return Ok(provider_value);
-        }
-        if !ProviderAddFormState::supports_common_config(&self.app_type) {
+        let raw_snippet = common_snippet.trim();
+        if raw_snippet.is_empty()
+            || !self.include_common_config
+            || !ProviderAddFormState::supports_common_config(&self.app_type)
+        {
             return Ok(provider_value);
         }
 
-        let provider: crate::provider::Provider = serde_json::from_value(provider_value.clone())
-            .map_err(|e| crate::cli::i18n::texts::tui_toast_invalid_json(&e.to_string()))?;
-        let effective_settings = ProviderService::build_effective_live_snapshot(
+        let normalized_gemini_snippet = if matches!(self.app_type, AppType::Gemini) {
+            let normalized = normalize_gemini_common_config_for_form(raw_snippet)?;
+            if normalized.as_object().is_none_or(serde_json::Map::is_empty) {
+                return Ok(provider_value);
+            }
+            Some(
+                serde_json::to_string(&normalized)
+                    .map_err(|error| texts::failed_to_serialize_json(&error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let snippet = normalized_gemini_snippet.as_deref().unwrap_or(raw_snippet);
+        ProviderService::validate_common_config_snippet_for_preview(&self.app_type, snippet)
+            .map_err(|e| e.to_string())?;
+
+        let normalized_claude_snippet = if matches!(self.app_type, AppType::Claude) {
+            Some(
+                serde_json::to_string(&sanitize_claude_common_config_for_form(snippet)?)
+                    .map_err(|error| texts::failed_to_serialize_json(&error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let snippet = normalized_claude_snippet.as_deref().unwrap_or(snippet);
+        let settings = provider_value
+            .get("settingsConfig")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        // A form preview applies only the common snippet. The durable live
+        // snapshot builder also performs app-specific file reconciliation
+        // (notably reading Gemini settings.json), which upstream form hooks do
+        // not do and which must never leak into the provider's raw draft.
+        let effective_settings = ProviderService::apply_common_config_to_settings_for_preview(
             &self.app_type,
-            &provider,
-            Some(snippet),
-            true,
+            &settings,
+            snippet,
         )
         .map_err(|e| e.to_string())?;
 
@@ -909,10 +1181,6 @@ impl ProviderAddFormState {
         meta_obj.insert("usage_script".to_string(), Value::Object(script));
     }
 
-    pub(crate) fn should_strip_common_config_from_applied_settings_json(&self) -> bool {
-        self.include_common_config && self.should_write_common_config_meta()
-    }
-
     fn should_write_common_config_meta(&self) -> bool {
         ProviderAddFormState::supports_common_config(&self.app_type)
             && (!self.mode.is_edit()
@@ -960,6 +1228,27 @@ impl ProviderAddFormState {
                 if context_window > 0 {
                     obj.insert("contextWindow".to_string(), json!(context_window));
                 }
+            }
+
+            if let Some(supports_parallel_tool_calls) = row.supports_parallel_tool_calls {
+                obj.insert(
+                    "supportsParallelToolCalls".to_string(),
+                    json!(supports_parallel_tool_calls),
+                );
+            }
+
+            let input_modalities = row
+                .input_modalities
+                .iter()
+                .filter(|modality| !modality.trim().is_empty())
+                .collect::<Vec<_>>();
+            if !input_modalities.is_empty() {
+                obj.insert("inputModalities".to_string(), json!(input_modalities));
+            }
+
+            let base_instructions = row.base_instructions.trim();
+            if !base_instructions.is_empty() {
+                obj.insert("baseInstructions".to_string(), json!(base_instructions));
             }
 
             models.push(Value::Object(obj));
@@ -1082,13 +1371,30 @@ pub(crate) fn strip_common_config_from_settings(
     settings_value: &mut Value,
     common_snippet: &str,
 ) -> Result<(), String> {
-    let snippet = common_snippet.trim();
+    let raw_snippet = common_snippet.trim();
+    let normalized_gemini_snippet = if matches!(app_type, AppType::Gemini) {
+        let normalized = normalize_gemini_common_config_for_form(raw_snippet)?;
+        if normalized.as_object().is_none_or(serde_json::Map::is_empty) {
+            return Ok(());
+        }
+        Some(
+            serde_json::to_string(&normalized)
+                .map_err(|error| texts::failed_to_serialize_json(&error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let snippet = normalized_gemini_snippet.as_deref().unwrap_or(raw_snippet);
     if snippet.is_empty() {
         return Ok(());
     }
 
     match app_type {
-        AppType::Claude | AppType::Gemini => {
+        AppType::Claude => {
+            let source = sanitize_claude_common_config_for_form(snippet)?;
+            json_deep_remove_for_form(settings_value, &source);
+        }
+        AppType::Gemini => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,
                 settings_value,
@@ -1140,6 +1446,14 @@ pub(crate) fn claude_tool_search_enabled(settings_config: &Value) -> bool {
         return false;
     };
     value.as_str() == Some("true") || value.as_str() == Some("1")
+}
+
+pub(crate) fn claude_effort_max_enabled(settings_config: &Value) -> bool {
+    settings_config
+        .get("env")
+        .and_then(|env| env.get("CLAUDE_CODE_EFFORT_LEVEL"))
+        .and_then(Value::as_str)
+        == Some("max")
 }
 
 pub(crate) fn claude_disable_auto_upgrade_enabled(settings_config: &Value) -> bool {

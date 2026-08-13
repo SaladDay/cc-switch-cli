@@ -2,7 +2,9 @@ use serde_json::{json, Value};
 
 use crate::app_config::{AppType, McpServer};
 use crate::cli::i18n::texts;
-use crate::cli::tui::form::strip_common_config_from_settings;
+use crate::cli::tui::form::{
+    normalize_gemini_common_config_for_form, strip_common_config_from_settings,
+};
 use crate::commands::workspace;
 use crate::database::ModelPricingUpdate;
 use crate::error::AppError;
@@ -15,7 +17,7 @@ use crate::services::{McpService, PromptService, ProviderService};
 
 use super::super::app::{CommonSnippetViewSource, EditorSubmit, ToastKind};
 use super::super::data::{load_state, UiData};
-use super::super::form::FormState;
+use super::super::form::{FormState, ProviderAddFormState};
 use super::helpers::{
     refresh_openclaw_workspace_data, run_external_editor_for_current_editor, select_prompt_by_id,
 };
@@ -78,6 +80,7 @@ enum CommonSnippetFormat {
     Formatted(String),
     InvalidJson(String),
     InvalidToml(String),
+    InvalidConfig(String),
     NotObject,
     SerializeFailed(String),
 }
@@ -102,6 +105,12 @@ fn canonical_common_snippet(app_type: &AppType, content: &str) -> CommonSnippetF
 
     if !value.is_object() {
         return CommonSnippetFormat::NotObject;
+    }
+
+    if matches!(app_type, AppType::Gemini) {
+        if let Err(error) = normalize_gemini_common_config_for_form(edited) {
+            return CommonSnippetFormat::InvalidConfig(error);
+        }
     }
 
     match serde_json::to_string_pretty(&value) {
@@ -143,6 +152,10 @@ pub(super) fn format_common_snippet(
                 texts::common_config_snippet_invalid_json(&err),
                 ToastKind::Error,
             );
+            return Ok(());
+        }
+        CommonSnippetFormat::InvalidConfig(err) => {
+            ctx.app.push_toast(err, ToastKind::Error);
             return Ok(());
         }
         CommonSnippetFormat::NotObject => {
@@ -521,6 +534,55 @@ fn submit_prompt_edit(
     Ok(())
 }
 
+fn apply_provider_value_and_refresh_quick_config(
+    form: &mut ProviderAddFormState,
+    provider_value: Value,
+    common_snippet: &str,
+) -> Result<(), String> {
+    let previous = form.clone();
+    let result = form
+        .apply_provider_json_value_to_fields(provider_value)
+        .and_then(|_| form.refresh_quick_config_from_common_snippet(common_snippet));
+    if result.is_err() {
+        *form = previous;
+    }
+    result
+}
+
+fn common_config_enabled_after_settings_edit(
+    form: &ProviderAddFormState,
+    settings: &Value,
+    common_snippet: &str,
+) -> Option<bool> {
+    if !ProviderAddFormState::supports_common_config(&form.app_type) {
+        return None;
+    }
+
+    Some(
+        ProviderAddFormState::settings_contain_common_config_for_form(
+            &form.app_type,
+            settings,
+            common_snippet,
+        ),
+    )
+}
+
+fn set_provider_common_config_enabled(provider_value: &mut Value, enabled: bool) {
+    let Some(provider_obj) = provider_value.as_object_mut() else {
+        return;
+    };
+    let meta = provider_obj
+        .entry("meta".to_string())
+        .or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    if let Some(meta) = meta.as_object_mut() {
+        meta.remove("applyCommonConfig");
+        meta.insert("commonConfigEnabled".to_string(), Value::Bool(enabled));
+    }
+}
+
 fn submit_provider_form_apply_json(
     ctx: &mut RuntimeActionContext<'_>,
     content: String,
@@ -544,7 +606,12 @@ fn submit_provider_form_apply_json(
 
     let provider_value = match ctx.app.form.as_ref() {
         Some(FormState::ProviderAdd(form)) => {
-            if form.should_strip_common_config_from_applied_settings_json() {
+            let common_config_enabled = common_config_enabled_after_settings_edit(
+                form,
+                &settings_value,
+                &ctx.data.config.common_snippet,
+            );
+            if common_config_enabled == Some(true) {
                 if let Err(err) = strip_common_config_from_settings(
                     &form.app_type,
                     &mut settings_value,
@@ -559,6 +626,9 @@ fn submit_provider_form_apply_json(
             if let Some(obj) = provider_value.as_object_mut() {
                 obj.insert("settingsConfig".to_string(), settings_value.clone());
             }
+            if let Some(enabled) = common_config_enabled {
+                set_provider_common_config_enabled(&mut provider_value, enabled);
+            }
             Some(provider_value)
         }
         _ => None,
@@ -566,9 +636,11 @@ fn submit_provider_form_apply_json(
 
     if let Some(provider_value) = provider_value {
         let apply_result = match ctx.app.form.as_mut() {
-            Some(FormState::ProviderAdd(form)) => {
-                form.apply_provider_json_value_to_fields(provider_value)
-            }
+            Some(FormState::ProviderAdd(form)) => apply_provider_value_and_refresh_quick_config(
+                form,
+                provider_value,
+                &ctx.data.config.common_snippet,
+            ),
             _ => Ok(()),
         };
 
@@ -697,6 +769,7 @@ fn submit_provider_form_apply_codex_auth(
 
     let provider_value = match ctx.app.form.as_ref() {
         Some(FormState::ProviderAdd(form)) => {
+            let common_config_enabled = form.include_common_config.then_some(true);
             let mut provider_value = form.to_provider_json_value();
             if let Some(settings_value) = provider_value
                 .as_object_mut()
@@ -709,22 +782,25 @@ fn submit_provider_form_apply_codex_auth(
                     settings_obj.insert("auth".to_string(), auth_value);
                 }
             }
+            if let Some(enabled) = common_config_enabled {
+                set_provider_common_config_enabled(&mut provider_value, enabled);
+            }
             Some(provider_value)
         }
         _ => None,
     };
 
     if let Some(provider_value) = provider_value {
-        let apply_result = match ctx.app.form.as_mut() {
-            Some(FormState::ProviderAdd(form)) => {
-                form.apply_provider_json_value_to_fields(provider_value)
+        if let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_mut() {
+            let api_key = provider_value
+                .pointer("/settingsConfig/auth/OPENAI_API_KEY")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            form.extra = provider_value;
+            if !form.is_codex_official_provider() {
+                form.codex_api_key.set(api_key);
             }
-            _ => Ok(()),
-        };
-
-        if let Err(err) = apply_result {
-            ctx.app.push_toast(err, ToastKind::Error);
-            return Ok(());
         }
     }
 
@@ -768,6 +844,33 @@ fn submit_provider_form_apply_codex_config_toml(
                     settings_obj.insert("config".to_string(), Value::String(config_text));
                 }
             }
+            let settings_value = provider_value
+                .get("settingsConfig")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let common_config_enabled = common_config_enabled_after_settings_edit(
+                form,
+                &settings_value,
+                &ctx.data.config.common_snippet,
+            );
+            if common_config_enabled == Some(true) {
+                if let Some(settings_value) = provider_value
+                    .as_object_mut()
+                    .and_then(|obj| obj.get_mut("settingsConfig"))
+                {
+                    if let Err(err) = strip_common_config_from_settings(
+                        &form.app_type,
+                        settings_value,
+                        &ctx.data.config.common_snippet,
+                    ) {
+                        ctx.app.push_toast(err, ToastKind::Error);
+                        return Ok(());
+                    }
+                }
+            }
+            if let Some(enabled) = common_config_enabled {
+                set_provider_common_config_enabled(&mut provider_value, enabled);
+            }
             Some(provider_value)
         }
         _ => None,
@@ -775,9 +878,11 @@ fn submit_provider_form_apply_codex_config_toml(
 
     if let Some(provider_value) = provider_value {
         let apply_result = match ctx.app.form.as_mut() {
-            Some(FormState::ProviderAdd(form)) => {
-                form.apply_provider_json_value_to_fields(provider_value)
-            }
+            Some(FormState::ProviderAdd(form)) => apply_provider_value_and_refresh_quick_config(
+                form,
+                provider_value,
+                &ctx.data.config.common_snippet,
+            ),
             _ => Ok(()),
         };
 
@@ -1081,6 +1186,7 @@ fn submit_config_common_snippet(
     source: CommonSnippetViewSource,
     content: String,
 ) -> Result<(), AppError> {
+    let previous_snippet = ctx.data.config.common_snippet.clone();
     let (next_snippet, toast) = match canonical_common_snippet(&app_type, &content) {
         CommonSnippetFormat::Empty => (None, texts::common_config_snippet_cleared()),
         CommonSnippetFormat::Formatted(value) => {
@@ -1100,6 +1206,10 @@ fn submit_config_common_snippet(
             );
             return Ok(());
         }
+        CommonSnippetFormat::InvalidConfig(err) => {
+            ctx.app.push_toast(err, ToastKind::Error);
+            return Ok(());
+        }
         CommonSnippetFormat::NotObject => {
             ctx.app
                 .push_toast(texts::common_config_snippet_not_object(), ToastKind::Error);
@@ -1110,6 +1220,31 @@ fn submit_config_common_snippet(
                 .push_toast(texts::failed_to_serialize_json(&err), ToastKind::Error);
             return Ok(());
         }
+    };
+
+    let reconciled_codex_form = if matches!(source, CommonSnippetViewSource::ProviderForm)
+        && matches!(app_type, AppType::Codex)
+    {
+        match ctx.app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) if form.app_type == app_type => {
+                let mut next_form = form.clone();
+                if let Err(err) = next_form.replace_common_config_snippet(
+                    &previous_snippet,
+                    next_snippet.as_deref().unwrap_or_default(),
+                ) {
+                    // Upstream's async Codex hook completes the TOML
+                    // remove/add operation before it updates or persists the
+                    // snippet. Keep the editor and both states unchanged when
+                    // that form-local reconciliation fails.
+                    ctx.app.push_toast(err, ToastKind::Error);
+                    return Ok(());
+                }
+                Some(next_form)
+            }
+            _ => None,
+        }
+    } else {
+        None
     };
 
     let state = load_state()?;
@@ -1126,6 +1261,28 @@ fn submit_config_common_snippet(
     ctx.app.editor = None;
     ctx.app.push_toast(toast, ToastKind::Success);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
+    if matches!(source, CommonSnippetViewSource::ProviderForm) {
+        if let Some(next_form) = reconciled_codex_form {
+            if let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_mut() {
+                *form = next_form;
+            }
+        } else {
+            // Claude persists before reconciling in the upstream hook. Gemini
+            // reconciliation is synchronous and cannot fail after the
+            // canonical form validation above, so both retain that ordering.
+            let refresh_result = match ctx.app.form.as_mut() {
+                Some(FormState::ProviderAdd(form)) if form.app_type == app_type => form
+                    .replace_common_config_snippet(
+                        &previous_snippet,
+                        &ctx.data.config.common_snippet,
+                    ),
+                _ => Ok(()),
+            };
+            if let Err(err) = refresh_result {
+                ctx.app.push_toast(err, ToastKind::Warning);
+            }
+        }
+    }
     if matches!(source, CommonSnippetViewSource::Global) {
         ctx.app.overlay = crate::cli::tui::app::Overlay::None;
     }
@@ -1159,6 +1316,28 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn gemini_common_snippet_editor_enforces_upstream_ui_rules() {
+        for invalid in [
+            r#"{"SHARED":1}"#,
+            r#"{"GOOGLE_GEMINI_BASE_URL":"https://common.example"}"#,
+            r#"{"OPENAI_API_KEY":"secret"}"#,
+        ] {
+            assert!(matches!(
+                canonical_common_snippet(&AppType::Gemini, invalid),
+                CommonSnippetFormat::InvalidConfig(_)
+            ));
+        }
+
+        assert!(matches!(
+            canonical_common_snippet(
+                &AppType::Gemini,
+                r#"{"SHARED":"  normalized when applied  ","BLANK":"   "}"#,
+            ),
+            CommonSnippetFormat::Formatted(_)
+        ));
     }
 
     struct EnvGuard {
@@ -1352,6 +1531,364 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
+    fn provider_json_apply_refreshes_effective_common_quick_config() {
+        let common_snippet = r#"{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}}"#;
+        let mut fixture = runtime_ctx(AppType::Claude);
+        fixture.data.config.common_snippet = common_snippet.to_string();
+        fixture.app.form = Some(FormState::ProviderAdd(
+            crate::cli::tui::form::ProviderAddFormState::new_with_common_snippet(
+                AppType::Claude,
+                common_snippet,
+            ),
+        ));
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ProviderFormApplyJson,
+            r#"{
+                "env": {
+                    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+                    "PROVIDER_ONLY": "keep"
+                }
+            }"#
+            .to_string(),
+        )
+        .expect("effective JSON should apply");
+
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert!(form.include_common_config);
+        assert!(form.claude_teammates);
+        let raw = form.to_provider_json_value();
+        assert!(raw["settingsConfig"]["env"]
+            .get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+            .is_none());
+        assert_eq!(raw["settingsConfig"]["env"]["PROVIDER_ONLY"], "keep");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn gemini_form_effective_preview_does_not_read_live_settings() {
+        let _fixture = runtime_ctx(AppType::Gemini);
+        let settings_path = crate::gemini_config::get_gemini_settings_path();
+        std::fs::create_dir_all(settings_path.parent().expect("Gemini settings parent"))
+            .expect("create isolated Gemini config directory");
+        std::fs::write(&settings_path, "{not valid json")
+            .expect("seed malformed isolated live settings");
+
+        let common_snippet = r#"{"SHARED":"common"}"#;
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new_with_common_snippet(
+            AppType::Gemini,
+            common_snippet,
+        );
+        form.extra = json!({
+            "settingsConfig": {
+                "env": {"PROVIDER_ONLY": "keep"},
+                "config": {}
+            }
+        });
+
+        let effective = form
+            .to_provider_json_value_with_common_config(common_snippet)
+            .expect("form preview should only merge the common env snippet");
+        assert_eq!(effective["settingsConfig"]["env"]["SHARED"], "common");
+        assert_eq!(effective["settingsConfig"]["config"], json!({}));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn codex_toml_apply_refreshes_effective_common_quick_config() {
+        let common_snippet = "[features]\ngoals = true\n";
+        let mut fixture = runtime_ctx(AppType::Codex);
+        fixture.data.config.common_snippet = common_snippet.to_string();
+        fixture.app.form = Some(FormState::ProviderAdd(
+            crate::cli::tui::form::ProviderAddFormState::new_with_common_snippet(
+                AppType::Codex,
+                common_snippet,
+            ),
+        ));
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ProviderFormApplyCodexConfigToml,
+            "model_provider = \"myco\"\n\n[features]\ngoals = true\n\n[model_providers.myco]\nname = \"My Codex\"\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\n"
+                .to_string(),
+        )
+        .expect("effective Codex TOML should apply");
+
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert!(form.include_common_config);
+        assert!(form.codex_goal_mode);
+        let raw_config = form.to_provider_json_value()["settingsConfig"]["config"]
+            .as_str()
+            .expect("raw Codex config should be text")
+            .to_string();
+        assert!(!crate::codex_config::is_codex_goal_mode_enabled(
+            &raw_config
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn codex_auth_apply_preserves_config_state_with_malformed_common_snippet() {
+        let mut fixture = runtime_ctx(AppType::Codex);
+        fixture.data.config.common_snippet = "[features\ngoals = true".to_string();
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+        form.id.set("relay");
+        form.name.set("Relay");
+        form.codex_base_url.set("https://api.example.com/v1");
+        form.include_common_config = true;
+        form.codex_goal_mode = true;
+        form.extra = json!({
+            "settingsConfig": {
+                "auth": { "OPENAI_API_KEY": "old-key" },
+                "config": "model = \"gpt-5.4\"\n\n[features]\ngoals = true\n"
+            }
+        });
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+        fixture.app.open_editor(
+            "Codex auth.json",
+            crate::cli::tui::app::EditorKind::Json,
+            "{}",
+            EditorSubmit::ProviderFormApplyCodexAuth,
+        );
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ProviderFormApplyCodexAuth,
+            r#"{"OPENAI_API_KEY":"new-key","CUSTOM":"keep"}"#.to_string(),
+        )
+        .expect("auth-only edit should not parse the common TOML");
+
+        assert!(ctx.app.editor.is_none());
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert!(form.include_common_config);
+        assert!(form.codex_goal_mode);
+        assert_eq!(form.codex_api_key.value, "new-key");
+        let raw = form.to_provider_json_value();
+        assert_eq!(raw["settingsConfig"]["auth"]["OPENAI_API_KEY"], "new-key");
+        assert_eq!(raw["settingsConfig"]["auth"]["CUSTOM"], "keep");
+        assert_eq!(raw["meta"]["commonConfigEnabled"], true);
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn provider_settings_edit_disables_sharing_when_common_values_are_removed() {
+        {
+            let claude_snippet = r#"{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}}"#;
+            let mut fixture = runtime_ctx(AppType::Claude);
+            fixture.data.config.common_snippet = claude_snippet.to_string();
+            fixture.app.form = Some(FormState::ProviderAdd(
+                crate::cli::tui::form::ProviderAddFormState::new_with_common_snippet(
+                    AppType::Claude,
+                    claude_snippet,
+                ),
+            ));
+            let mut ctx = runtime_action_ctx(&mut fixture);
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyJson,
+                r#"{"env":{"PROVIDER_ONLY":"keep"}}"#.to_string(),
+            )
+            .expect("Claude JSON should apply");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected Claude provider form");
+            };
+            assert!(!form.include_common_config);
+            assert!(!form.claude_teammates);
+            assert_eq!(
+                form.to_provider_json_value()["meta"]["commonConfigEnabled"],
+                false
+            );
+        }
+
+        {
+            let codex_snippet = "[features]\ngoals = true\n";
+            let mut fixture = runtime_ctx(AppType::Codex);
+            fixture.data.config.common_snippet = codex_snippet.to_string();
+            fixture.app.form = Some(FormState::ProviderAdd(
+                crate::cli::tui::form::ProviderAddFormState::new_with_common_snippet(
+                    AppType::Codex,
+                    codex_snippet,
+                ),
+            ));
+            let mut ctx = runtime_action_ctx(&mut fixture);
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyCodexConfigToml,
+                "model_provider = \"myco\"\n\n[features]\ngoals = false\n\n[model_providers.myco]\nname = \"My Codex\"\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\n"
+                    .to_string(),
+            )
+            .expect("Codex TOML should apply");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected Codex provider form");
+            };
+            assert!(!form.include_common_config);
+            assert!(!form.codex_goal_mode);
+            assert_eq!(
+                form.to_provider_json_value()["meta"]["commonConfigEnabled"],
+                false
+            );
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn provider_settings_edit_reenables_sharing_when_common_values_are_added() {
+        {
+            let common_snippet = r#"{"env":{"SHARED":"claude"}}"#;
+            let mut fixture = runtime_ctx(AppType::Claude);
+            fixture.data.config.common_snippet = common_snippet.to_string();
+            fixture.app.form = Some(FormState::ProviderAdd(
+                crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
+            ));
+            let mut ctx = runtime_action_ctx(&mut fixture);
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyJson,
+                r#"{"env":{"SHARED":"claude","PROVIDER_ONLY":"keep"}}"#.to_string(),
+            )
+            .expect("Claude settings should apply");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected Claude provider form");
+            };
+            assert!(form.include_common_config);
+            let raw = form.to_provider_json_value();
+            assert!(raw["settingsConfig"]["env"].get("SHARED").is_none());
+            assert_eq!(raw["settingsConfig"]["env"]["PROVIDER_ONLY"], "keep");
+        }
+
+        {
+            let common_snippet = "[features]\ngoals = true\n";
+            let mut fixture = runtime_ctx(AppType::Codex);
+            fixture.data.config.common_snippet = common_snippet.to_string();
+            fixture.app.form = Some(FormState::ProviderAdd(
+                crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex),
+            ));
+            let mut ctx = runtime_action_ctx(&mut fixture);
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyCodexConfigToml,
+                "model = \"gpt-5.4\"\n\n[features]\ngoals = true\n".to_string(),
+            )
+            .expect("Codex config should apply");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected Codex provider form");
+            };
+            assert!(form.include_common_config);
+            let raw = form.to_provider_json_value();
+            let raw_config = raw["settingsConfig"]["config"]
+                .as_str()
+                .expect("raw Codex config");
+            assert!(!crate::codex_config::is_codex_goal_mode_enabled(raw_config));
+        }
+
+        {
+            let common_snippet = r#"{"SHARED":"gemini"}"#;
+            let mut fixture = runtime_ctx(AppType::Gemini);
+            fixture.data.config.common_snippet = common_snippet.to_string();
+            fixture.app.form = Some(FormState::ProviderAdd(
+                crate::cli::tui::form::ProviderAddFormState::new(AppType::Gemini),
+            ));
+            let mut ctx = runtime_action_ctx(&mut fixture);
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyJson,
+                r#"{"env":{"SHARED":"gemini","PROVIDER_ONLY":"keep"},"config":{}}"#.to_string(),
+            )
+            .expect("Gemini settings should apply");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected Gemini provider form");
+            };
+            assert!(form.include_common_config);
+            let raw = form.to_provider_json_value();
+            assert!(raw["settingsConfig"]["env"].get("SHARED").is_none());
+            assert_eq!(raw["settingsConfig"]["env"]["PROVIDER_ONLY"], "keep");
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn provider_settings_edit_with_malformed_snippet_matches_upstream_disable_behavior() {
+        {
+            let mut fixture = runtime_ctx(AppType::Claude);
+            fixture.data.config.common_snippet = r#"{"env":{"#.to_string();
+            let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+            form.include_common_config = true;
+            fixture.app.form = Some(FormState::ProviderAdd(form));
+            let mut ctx = runtime_action_ctx(&mut fixture);
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyJson,
+                r#"{"env":{"PROVIDER_ONLY":"keep"}}"#.to_string(),
+            )
+            .expect("Claude settings edit should proceed");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected Claude provider form");
+            };
+            assert!(!form.include_common_config);
+            assert_eq!(
+                form.to_provider_json_value()["settingsConfig"]["env"]["PROVIDER_ONLY"],
+                "keep"
+            );
+        }
+
+        {
+            let mut fixture = runtime_ctx(AppType::Codex);
+            fixture.data.config.common_snippet = "[features\ngoals = true".to_string();
+            let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+            form.include_common_config = true;
+            fixture.app.form = Some(FormState::ProviderAdd(form));
+            let mut ctx = runtime_action_ctx(&mut fixture);
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyCodexConfigToml,
+                "model = \"gpt-5.4\"\n".to_string(),
+            )
+            .expect("Codex config edit should proceed");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected Codex provider form");
+            };
+            assert!(!form.include_common_config);
+            assert!(form.to_provider_json_value()["settingsConfig"]["config"]
+                .as_str()
+                .is_some_and(|config| config.contains("model = \"gpt-5.4\"")));
+        }
+
+        {
+            let mut fixture = runtime_ctx(AppType::Gemini);
+            fixture.data.config.common_snippet = r#"{"BROKEN":"#.to_string();
+            let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Gemini);
+            form.include_common_config = true;
+            fixture.app.form = Some(FormState::ProviderAdd(form));
+            let mut ctx = runtime_action_ctx(&mut fixture);
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyJson,
+                r#"{"env":{"PROVIDER_ONLY":"keep"}}"#.to_string(),
+            )
+            .expect("Gemini settings edit should proceed");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected Gemini provider form");
+            };
+            assert!(!form.include_common_config);
+            assert_eq!(
+                form.to_provider_json_value()["settingsConfig"]["env"]["PROVIDER_ONLY"],
+                "keep"
+            );
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn submit_local_proxy_headers_keeps_editor_and_previous_state_on_invalid_input() {
         let mut fixture = runtime_ctx(AppType::Claude);
         let previous =
@@ -1492,6 +2029,13 @@ mod tests {
     #[serial(home_settings)]
     fn submit_config_common_snippet_returns_to_form_without_view_overlay() {
         let mut fixture = runtime_ctx(AppType::Claude);
+        let initial_snippet = r#"{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}}"#;
+        fixture.app.form = Some(FormState::ProviderAdd(
+            crate::cli::tui::form::ProviderAddFormState::new_with_common_snippet(
+                AppType::Claude,
+                initial_snippet,
+            ),
+        ));
 
         let mut ctx = RuntimeActionContext {
             terminal: &mut fixture.terminal,
@@ -1518,7 +2062,7 @@ mod tests {
                 app_type: AppType::Claude,
                 source: crate::cli::tui::app::CommonSnippetViewSource::ProviderForm,
             },
-            r#"{"env":{"COMMON_FLAG":"1"}}"#.to_string(),
+            r#"{"env":{"ENABLE_TOOL_SEARCH":"true"}}"#.to_string(),
         )
         .expect("common snippet submit should succeed");
 
@@ -1526,6 +2070,117 @@ mod tests {
         assert!(matches!(
             ctx.app.overlay,
             crate::cli::tui::app::Overlay::None
+        ));
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert!(!form.claude_teammates);
+        assert!(form.claude_tool_search);
+
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::ProviderForm,
+            },
+            String::new(),
+        )
+        .expect("clearing common snippet should succeed");
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert!(!form.include_common_config);
+        assert!(!form.claude_teammates);
+        assert!(!form.claude_tool_search);
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_common_snippet_reconciles_malformed_old_codex_form_to_saved_replacement() {
+        let mut fixture = runtime_ctx(AppType::Codex);
+        fixture.data.config.common_snippet = "[features\ngoals = true".to_string();
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+        form.include_common_config = true;
+        form.extra = json!({
+            "settingsConfig": {
+                "config": "model = \"gpt-5.4\"\n"
+            }
+        });
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Codex,
+                source: CommonSnippetViewSource::ProviderForm,
+            },
+            "[features]\ngoals = true\n".to_string(),
+        )
+        .expect("valid replacement should be saved and applied");
+
+        assert_eq!(
+            ctx.data.config.common_snippet.trim(),
+            "[features]\ngoals = true"
+        );
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected Codex provider form");
+        };
+        assert!(form.include_common_config);
+        assert!(form.codex_goal_mode);
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn codex_common_snippet_reconcile_failure_keeps_editor_and_global_snippet_unchanged() {
+        let mut fixture = runtime_ctx(AppType::Codex);
+        let previous_snippet = fixture.data.config.common_snippet.clone();
+        let malformed_config = "[features\ngoals = true";
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+        form.include_common_config = true;
+        form.extra = json!({
+            "settingsConfig": {
+                "config": malformed_config
+            }
+        });
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+        fixture.app.open_editor(
+            "Common Snippet",
+            crate::cli::tui::app::EditorKind::Toml,
+            &previous_snippet,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Codex,
+                source: CommonSnippetViewSource::ProviderForm,
+            },
+        );
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Codex,
+                source: CommonSnippetViewSource::ProviderForm,
+            },
+            "[features]\ngoals = true\n".to_string(),
+        )
+        .expect("reconciliation failure should be reported in-place");
+
+        assert!(ctx.app.editor.is_some());
+        assert_eq!(ctx.data.config.common_snippet, previous_snippet);
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected Codex provider form");
+        };
+        assert!(form.include_common_config);
+        assert_eq!(
+            form.to_provider_json_value()["settingsConfig"]["config"],
+            malformed_config
+        );
+        assert!(matches!(
+            ctx.app.toast,
+            Some(Toast {
+                kind: ToastKind::Error,
+                ..
+            })
         ));
     }
 
@@ -3253,7 +3908,7 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
-    fn submit_provider_form_apply_json_preserves_missing_meta_subset_detection() {
+    fn submit_provider_form_apply_json_materializes_inferred_common_config_state() {
         let mut fixture = runtime_ctx(AppType::Claude);
 
         fixture.data.config.common_snippet = r#"{
@@ -3321,19 +3976,17 @@ mod tests {
             panic!("expected provider form");
         };
         let raw = form.to_provider_json_value();
+        assert_eq!(
+            raw["meta"]["commonConfigEnabled"], true,
+            "upstream materializes the inferred common config state when the provider form is edited"
+        );
         assert!(
-            raw.get("meta")
-                .and_then(|meta| meta.get("commonConfigEnabled"))
-                .is_none(),
-            "settings JSON edits on a missing-meta provider must not synthesize explicit common config metadata"
+            raw["settingsConfig"].get("alwaysThinkingEnabled").is_none(),
+            "materialized sharing keeps common top-level values out of raw provider settings"
         );
-        assert_eq!(
-            raw["settingsConfig"]["alwaysThinkingEnabled"], false,
-            "missing-meta providers must keep the common subset when metadata remains absent"
-        );
-        assert_eq!(
-            raw["settingsConfig"]["env"]["COMMON_FLAG"], "1",
-            "missing-meta providers need the common subset for backend subset detection"
+        assert!(
+            raw["settingsConfig"]["env"].get("COMMON_FLAG").is_none(),
+            "materialized sharing keeps common environment values out of raw provider settings"
         );
         assert_eq!(
             raw["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"], "https://edited.example",

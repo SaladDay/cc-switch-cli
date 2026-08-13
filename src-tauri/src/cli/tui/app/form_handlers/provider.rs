@@ -39,7 +39,12 @@ impl App {
             KeyCode::Enter => {
                 let existing_ids = data.existing_provider_ids();
                 provider.apply_template(provider.template_idx, &existing_ids);
+                let refresh_result =
+                    provider.refresh_quick_config_from_common_snippet(&data.config.common_snippet);
                 provider.focus = FormFocus::Fields;
+                if let Err(err) = refresh_result {
+                    self.push_toast(err, ToastKind::Warning);
+                }
                 Some(Action::None)
             }
             _ => None,
@@ -558,6 +563,13 @@ impl App {
                 provider.toggle_claude_tool_search();
                 Action::None
             }
+            ProviderAddField::ClaudeEffortMax => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.toggle_claude_effort_max();
+                Action::None
+            }
             ProviderAddField::ClaudeDisableAutoUpgrade => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
@@ -724,7 +736,16 @@ impl App {
                 Some(Action::None)
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
-                Some(self.handle_provider_field_activate(selected, key, data))
+                let toggle_result = {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return None;
+                    };
+                    provider.toggle_claude_quick_config_field(selected, &data.config.common_snippet)
+                };
+                if let Err(err) = toggle_result {
+                    self.push_toast(err, ToastKind::Warning);
+                }
+                Some(Action::None)
             }
             _ => None,
         }
@@ -768,7 +789,16 @@ impl App {
                 Some(Action::None)
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
-                Some(self.handle_provider_field_activate(selected, key, data))
+                let toggle_result = {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return None;
+                    };
+                    provider.toggle_codex_quick_config_field(selected, &data.config.common_snippet)
+                };
+                if let Err(err) = toggle_result {
+                    self.push_toast(err, ToastKind::Warning);
+                }
+                Some(Action::None)
             }
             _ => None,
         }
@@ -1502,15 +1532,19 @@ impl App {
         };
 
         if matches!(provider.app_type, AppType::Codex) {
-            self.handle_codex_provider_preview_key(key)
+            self.handle_codex_provider_preview_key(key, data)
         } else {
             self.handle_regular_provider_preview_key(key, data)
         }
     }
 
-    fn handle_codex_provider_preview_key(&mut self, key: KeyEvent) -> Option<Action> {
+    fn handle_codex_provider_preview_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
         match key.code {
-            KeyCode::Enter => Some(self.open_codex_provider_preview_editor()),
+            KeyCode::Enter => Some(self.open_codex_provider_preview_editor(data)),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.adjust_codex_preview_scroll(|scroll| scroll.saturating_sub(1));
                 Some(Action::None)
@@ -1531,7 +1565,7 @@ impl App {
         }
     }
 
-    fn open_codex_provider_preview_editor(&mut self) -> Action {
+    fn open_codex_provider_preview_editor(&mut self, data: &UiData) -> Action {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
             return Action::None;
         };
@@ -1555,13 +1589,15 @@ impl App {
                 );
             }
             form::CodexPreviewSection::Config => {
-                let provider_json = provider.to_provider_json_value();
-                let config_text = provider_json
-                    .get("settingsConfig")
-                    .and_then(|value| value.get("config"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let config_text = match provider
+                    .effective_codex_config_text_with_common_config(&data.config.common_snippet)
+                {
+                    Ok(config_text) => config_text,
+                    Err(err) => {
+                        self.push_toast(err, ToastKind::Error);
+                        return Action::None;
+                    }
+                };
                 self.open_editor(
                     texts::tui_codex_config_toml_title(),
                     EditorKind::Plain,

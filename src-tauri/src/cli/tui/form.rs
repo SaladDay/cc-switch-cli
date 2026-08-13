@@ -28,9 +28,11 @@ pub(crate) use provider_json::strip_provider_internal_fields;
 pub(crate) use super::text_edit::{TextEditSession, TextInput};
 pub(crate) use codex_config::parse_codex_config_snippet;
 pub(crate) use provider_json::claude_disable_auto_upgrade_enabled;
+pub(crate) use provider_json::claude_effort_max_enabled;
 pub(crate) use provider_json::claude_hide_attribution_enabled;
 pub(crate) use provider_json::claude_teammates_enabled;
 pub(crate) use provider_json::claude_tool_search_enabled;
+pub(crate) use provider_json::normalize_gemini_common_config_for_form;
 pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_json::{normalize_usage_interval, normalize_usage_timeout};
 pub(crate) use provider_request_overrides::{
@@ -258,6 +260,7 @@ pub enum ProviderAddField {
     ClaudeHideAttribution,
     ClaudeTeammates,
     ClaudeToolSearch,
+    ClaudeEffortMax,
     ClaudeDisableAutoUpgrade,
     CodexOAuthAccount,
     CodexFastMode,
@@ -403,6 +406,11 @@ pub struct CodexModelCatalogRow {
     pub model: String,
     pub display_name: String,
     pub context_window: String,
+    /// Upstream-supported native Responses profile fields are hidden in the
+    /// compact TUI, but still need to survive load -> save.
+    pub supports_parallel_tool_calls: Option<bool>,
+    pub input_modalities: Vec<String>,
+    pub base_instructions: String,
 }
 
 pub(crate) fn parse_codex_model_catalog_context_window(raw: &str) -> Option<u64> {
@@ -552,6 +560,8 @@ pub struct ProviderAddFormState {
     claude_teammates_touched: bool,
     pub claude_tool_search: bool,
     claude_tool_search_touched: bool,
+    pub claude_effort_max: bool,
+    claude_effort_max_touched: bool,
     pub claude_disable_auto_upgrade: bool,
     claude_disable_auto_upgrade_touched: bool,
     pub is_full_url: bool,

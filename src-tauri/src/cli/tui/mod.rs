@@ -2,6 +2,8 @@ mod app;
 mod clipboard;
 pub(crate) mod data;
 mod form;
+#[cfg(test)]
+pub(crate) use form::{ProviderAddField, ProviderAddFormState};
 pub(crate) mod help;
 pub(crate) mod icons;
 mod input;

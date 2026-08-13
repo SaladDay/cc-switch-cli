@@ -2840,6 +2840,9 @@ fn codex_model_catalog_renders_only_the_selected_large_collection_window() {
             model: format!("MODEL-{index:05}"),
             display_name: format!("Display {index:05}"),
             context_window: "128k".to_string(),
+            supports_parallel_tool_calls: None,
+            input_modalities: Vec::new(),
+            base_instructions: String::new(),
         })
         .collect();
     form.codex_model_catalog[selected].model = format!("SELECTED-CODEX-{}", "X".repeat(1_000_000));
@@ -3042,9 +3045,28 @@ fn compact_codex_preview_builds_only_the_selected_bounded_section() {
         "{auth}"
     );
 
-    let config = super::codex_config_preview_text(&form);
+    let config = super::codex_config_preview_text(&form, "");
     assert_eq!(config, texts::tui_preview_omitted_too_large());
     assert!(!config.contains(hidden_config_secret));
+}
+
+#[test]
+fn codex_toml_preview_includes_enabled_common_config() {
+    let common_snippet = "[features]\ngoals = true\n";
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new_with_common_snippet(
+        AppType::Codex,
+        common_snippet,
+    );
+    form.extra = json!({
+        "settingsConfig": {
+            "config": "model = \"gpt-5.4\"\n"
+        }
+    });
+
+    let config = super::codex_config_preview_text(&form, common_snippet);
+
+    assert!(config.contains("[features]"), "{config}");
+    assert!(config.contains("goals = true"), "{config}");
 }
 
 #[test]

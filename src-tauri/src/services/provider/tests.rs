@@ -143,6 +143,48 @@ fn common_config_sensitive_key_matcher_covers_credentials_without_overmatching()
 }
 
 #[test]
+fn gemini_backend_common_config_preserves_upstream_raw_json_semantics() {
+    ProviderService::validate_common_config_snippet_for_preview(
+        &AppType::Gemini,
+        r#"{"COUNT":1,"BLANK":"   ","OPENAI_API_KEY":"secret"}"#,
+    )
+    .expect("upstream backend accepts arbitrary JSON-object values");
+
+    let settings = json!({
+        "env": {
+            "PROVIDER_ONLY": "keep"
+        }
+    });
+    let applied = ProviderService::apply_common_config_to_settings_for_preview(
+        &AppType::Gemini,
+        &settings,
+        r#"{"COUNT":1,"BLANK":"   ","OPENAI_API_KEY":"secret"}"#,
+    )
+    .expect("raw Gemini JSON should apply");
+    assert_eq!(applied["env"]["COUNT"], 1);
+    assert_eq!(applied["env"]["BLANK"], "   ");
+    assert_eq!(applied["env"]["OPENAI_API_KEY"], "secret");
+    assert_eq!(applied["env"]["PROVIDER_ONLY"], "keep");
+
+    let removed = ProviderService::remove_common_config_from_settings_for_preview(
+        &AppType::Gemini,
+        &applied,
+        r#"{"COUNT":1,"BLANK":"   ","OPENAI_API_KEY":"secret"}"#,
+    )
+    .expect("raw Gemini JSON should remove");
+    assert!(removed["env"].get("COUNT").is_none());
+    assert!(removed["env"].get("BLANK").is_none());
+    assert!(removed["env"].get("OPENAI_API_KEY").is_none());
+    assert_eq!(removed["env"]["PROVIDER_ONLY"], "keep");
+
+    assert!(ProviderService::settings_contain_common_config_for_preview(
+        &AppType::Gemini,
+        &json!({ "env": {} }),
+        "{}",
+    ));
+}
+
+#[test]
 fn common_config_extractors_strip_all_credential_shapes() {
     let claude = json!({
         "apiKey": "top-level-secret",
@@ -3091,6 +3133,252 @@ fn provider_add_strips_common_snippet_before_claude_snapshot_persist() {
         Some("token"),
         "provider-specific env keys should remain in the stored snapshot"
     );
+}
+
+#[test]
+#[serial]
+fn tui_claude_quick_config_round_trip_crosses_storage_normalization() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    let common_snippet = r#"{
+        "attribution": { "commit": "", "pr": "" },
+        "env": {
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+            "ENABLE_TOOL_SEARCH": "true",
+            "CLAUDE_CODE_EFFORT_LEVEL": "max",
+            "DISABLE_AUTOUPDATER": "1"
+        }
+    }"#;
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    config.common_config_snippets.claude = Some(common_snippet.to_string());
+    let state = state_from_config(config);
+
+    let mut form = crate::cli::tui::ProviderAddFormState::new_with_common_snippet(
+        AppType::Claude,
+        common_snippet,
+    );
+    form.id.set("p1");
+    form.name.set("Provider One");
+    form.claude_base_url.set("https://claude.example");
+    form.claude_api_key.set("sk-provider");
+    assert_eq!(form.claude_quick_config_enabled_count(), 5);
+
+    let provider: Provider = serde_json::from_value(form.to_provider_json_value())
+        .expect("form payload should deserialize");
+    ProviderService::add(&state, AppType::Claude, provider).expect("provider add should succeed");
+
+    let stored = state
+        .db
+        .get_provider_by_id("p1", AppType::Claude.as_str())
+        .expect("read provider from database")
+        .expect("stored provider");
+    assert_eq!(
+        stored
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config),
+        Some(true)
+    );
+    assert!(stored.settings_config.get("attribution").is_none());
+    let stored_env = stored
+        .settings_config
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("stored provider env");
+    for common_key in [
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+        "ENABLE_TOOL_SEARCH",
+        "CLAUDE_CODE_EFFORT_LEVEL",
+        "DISABLE_AUTOUPDATER",
+    ] {
+        assert!(
+            !stored_env.contains_key(common_key),
+            "{common_key} should remain common-owned in storage"
+        );
+    }
+
+    let reopened = crate::cli::tui::ProviderAddFormState::from_provider_with_common_snippet(
+        AppType::Claude,
+        &stored,
+        common_snippet,
+    );
+    assert_eq!(reopened.claude_quick_config_enabled_count(), 5);
+    assert!(!reopened.has_unsaved_changes());
+}
+
+#[test]
+#[serial]
+fn tui_claude_quick_edit_persists_legacy_inferred_common_config() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    let common_snippet = r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#;
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    config.common_config_snippets.claude = Some(common_snippet.to_string());
+    let state = state_from_config(config);
+
+    let legacy_provider = Provider::with_id(
+        "legacy-provider".to_string(),
+        "Legacy Provider".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-provider",
+                "ANTHROPIC_BASE_URL": "https://claude.example",
+                "CC_SWITCH_SHARED": "1"
+            }
+        }),
+        None,
+    );
+    let mut form = crate::cli::tui::ProviderAddFormState::from_provider_with_common_snippet(
+        AppType::Claude,
+        &legacy_provider,
+        common_snippet,
+    );
+    assert!(form.include_common_config);
+
+    form.toggle_claude_quick_config_field(
+        crate::cli::tui::ProviderAddField::ClaudeToolSearch,
+        common_snippet,
+    )
+    .expect("provider-only quick edit should succeed");
+    let edited: Provider = serde_json::from_value(form.to_provider_json_value())
+        .expect("edited form payload should deserialize");
+    ProviderService::add(&state, AppType::Claude, edited).expect("provider add should succeed");
+
+    let stored = state
+        .db
+        .get_provider_by_id("legacy-provider", AppType::Claude.as_str())
+        .expect("read provider from database")
+        .expect("stored provider");
+    assert_eq!(
+        stored
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config),
+        Some(true)
+    );
+    let stored_env = stored
+        .settings_config
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("stored provider env");
+    assert!(!stored_env.contains_key("CC_SWITCH_SHARED"));
+    assert_eq!(
+        stored_env.get("ENABLE_TOOL_SEARCH").and_then(Value::as_str),
+        Some("true")
+    );
+
+    let reopened = crate::cli::tui::ProviderAddFormState::from_provider_with_common_snippet(
+        AppType::Claude,
+        &stored,
+        common_snippet,
+    );
+    assert!(reopened.include_common_config);
+    assert!(reopened.claude_tool_search);
+}
+
+#[test]
+#[serial]
+fn tui_codex_conflicting_quick_edit_preserves_storage_only_settings() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    let common_snippet = "[features]\ngoals = true\n";
+    let provider_config = "model_provider = \"myco\"\nmodel = \"gpt-x\"\n\n[model_providers.myco]\nname = \"My Codex\"\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\n";
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    config.common_config_snippets.codex = Some(common_snippet.to_string());
+    let state = state_from_config(config);
+
+    let mut provider = Provider::with_id(
+        "myco".to_string(),
+        "My Codex".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": "sk-provider" },
+            "config": provider_config,
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "gpt-x",
+                        "displayName": "GPT X",
+                        "contextWindow": 200000,
+                        "supportsParallelToolCalls": true,
+                        "inputModalities": ["text", "image"],
+                        "baseInstructions": "Use native Responses."
+                    },
+                    { "model": "gpt-y", "displayName": "GPT Y", "contextWindow": 128000 }
+                ]
+            },
+            "futureSetting": { "keep": true }
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        apply_common_config: Some(true),
+        ..Default::default()
+    });
+
+    let mut form = crate::cli::tui::ProviderAddFormState::from_provider_with_common_snippet(
+        AppType::Codex,
+        &provider,
+        common_snippet,
+    );
+    form.toggle_codex_quick_config_field(
+        crate::cli::tui::ProviderAddField::CodexGoalMode,
+        common_snippet,
+    )
+    .expect("inherited goal mode should be editable");
+    let edited: Provider = serde_json::from_value(form.to_provider_json_value())
+        .expect("edited form payload should deserialize");
+    ProviderService::add(&state, AppType::Codex, edited).expect("provider add should succeed");
+
+    let stored = state
+        .db
+        .get_provider_by_id("myco", AppType::Codex.as_str())
+        .expect("read provider from database")
+        .expect("stored provider");
+    assert_eq!(
+        stored
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config),
+        Some(false)
+    );
+    assert_eq!(
+        stored.settings_config["modelCatalog"]["models"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        stored.settings_config["modelCatalog"]["models"][0]["supportsParallelToolCalls"],
+        true
+    );
+    assert_eq!(
+        stored.settings_config["modelCatalog"]["models"][0]["inputModalities"],
+        json!(["text", "image"])
+    );
+    assert_eq!(
+        stored.settings_config["modelCatalog"]["models"][0]["baseInstructions"],
+        "Use native Responses."
+    );
+    assert_eq!(
+        stored.settings_config["futureSetting"],
+        json!({ "keep": true })
+    );
+
+    let reopened = crate::cli::tui::ProviderAddFormState::from_provider_with_common_snippet(
+        AppType::Codex,
+        &stored,
+        common_snippet,
+    );
+    assert!(!reopened.include_common_config);
+    assert!(!reopened.codex_goal_mode);
+    assert!(reopened.codex_local_routing_enabled);
+    assert_eq!(reopened.codex_model_catalog.len(), 2);
 }
 
 #[test]

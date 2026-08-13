@@ -1485,6 +1485,29 @@ impl ProviderService {
         )
     }
 
+    pub(crate) fn apply_common_config_to_settings_for_preview(
+        app_type: &AppType,
+        settings_config: &Value,
+        common_config_snippet: &str,
+    ) -> Result<Value, AppError> {
+        common_config::apply_common_config_to_settings(
+            app_type,
+            settings_config,
+            common_config_snippet,
+        )
+    }
+
+    pub(crate) fn is_sensitive_common_config_key_for_preview(name: &str) -> bool {
+        common_config::is_sensitive_config_key(name)
+    }
+
+    pub(crate) fn validate_common_config_snippet_for_preview(
+        app_type: &AppType,
+        common_config_snippet: &str,
+    ) -> Result<(), AppError> {
+        common_config::validate_common_config_snippet(app_type, Some(common_config_snippet))
+    }
+
     pub(crate) fn settings_contain_common_config_for_preview(
         app_type: &AppType,
         settings_config: &Value,

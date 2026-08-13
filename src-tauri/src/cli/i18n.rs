@@ -2428,6 +2428,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_claude_effort_max() -> &'static str {
+        if is_chinese() {
+            "最大强度思考"
+        } else {
+            "Max Effort Thinking"
+        }
+    }
+
     pub fn tui_label_claude_disable_auto_upgrade() -> &'static str {
         if is_chinese() {
             "禁用自动升级"
@@ -12653,6 +12661,22 @@ pub mod texts {
         }
     }
 
+    pub fn gemini_common_config_invalid_keys(keys: &str) -> String {
+        if is_chinese() {
+            format!("Gemini 通用配置包含不可共享的键：{keys}")
+        } else {
+            format!("Gemini common config contains keys that cannot be shared: {keys}")
+        }
+    }
+
+    pub fn gemini_common_config_invalid_values() -> &'static str {
+        if is_chinese() {
+            "Gemini 通用配置中的值必须是字符串"
+        } else {
+            "Gemini common config values must be strings"
+        }
+    }
+
     pub fn common_config_snippet_saved() -> &'static str {
         // Rendered as a success toast, which already prepends a checkmark.
         if is_chinese() {
@@ -12668,6 +12692,14 @@ pub mod texts {
             "已清除通用配置片段"
         } else {
             "Common config snippet cleared"
+        }
+    }
+
+    pub fn common_config_snippet_required() -> &'static str {
+        if is_chinese() {
+            "请先配置一个非空的通用配置片段"
+        } else {
+            "Configure a non-empty common config snippet first"
         }
     }
 

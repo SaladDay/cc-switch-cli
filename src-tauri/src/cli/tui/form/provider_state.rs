@@ -11,7 +11,10 @@ use super::super::text_edit::{
 };
 
 use super::provider_json::{
-    merge_json_values, should_hide_provider_field, strip_common_config_from_settings,
+    claude_settings_contain_common_config_for_form, codex_settings_contain_common_config_for_form,
+    merge_json_values, normalize_gemini_common_config_for_form,
+    sanitize_claude_common_config_for_form, should_hide_provider_field,
+    strip_common_config_from_settings,
 };
 use super::provider_state_loading::populate_form_from_provider;
 use super::{
@@ -105,8 +108,16 @@ impl ProviderAddFormState {
     }
 
     pub fn new_with_common_snippet(app_type: AppType, common_snippet: &str) -> Self {
-        let include_common_config =
-            Self::snippet_has_effective_common_config(&app_type, common_snippet);
+        let include_common_config = if matches!(app_type, AppType::Claude) {
+            // The upstream new-provider effect checks the raw object's key
+            // count before its merge helper skips prototype-pollution keys.
+            serde_json::from_str::<Value>(common_snippet.trim())
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .is_some_and(|object| !object.is_empty())
+        } else {
+            Self::snippet_has_effective_common_config(&app_type, common_snippet)
+        };
         let is_codex = matches!(app_type, AppType::Codex);
         let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
@@ -175,6 +186,8 @@ impl ProviderAddFormState {
             claude_teammates_touched: false,
             claude_tool_search: false,
             claude_tool_search_touched: false,
+            claude_effort_max: false,
+            claude_effort_max_touched: false,
             claude_disable_auto_upgrade: false,
             claude_disable_auto_upgrade_touched: false,
             is_full_url: false,
@@ -236,6 +249,7 @@ impl ProviderAddFormState {
             hermes_rate_limit_delay: TextInput::new(""),
             initial_snapshot: Value::Null,
         };
+        let _ = form.refresh_quick_config_from_common_snippet(common_snippet);
         form.capture_initial_snapshot();
         form
     }
@@ -269,9 +283,9 @@ impl ProviderAddFormState {
             .meta
             .as_ref()
             .and_then(|meta| meta.apply_common_config);
-        form.include_common_config = explicit_common_config.unwrap_or_else(|| {
-            Self::provider_settings_contain_common_config(&app_type, provider, common_snippet)
-        });
+        let inferred_common_config =
+            Self::provider_settings_contain_common_config(&app_type, provider, common_snippet);
+        form.include_common_config = explicit_common_config.unwrap_or(inferred_common_config);
         form.include_common_config_touched = explicit_common_config.is_some();
 
         if !Self::supports_common_config(&app_type) {
@@ -280,6 +294,23 @@ impl ProviderAddFormState {
         }
 
         populate_form_from_provider(&mut form, &app_type, provider);
+        let refresh_failed = form.include_common_config
+            && !inferred_common_config
+            && form
+                .refresh_quick_config_from_common_snippet(common_snippet)
+                .is_err();
+        if refresh_failed
+            || (form.include_common_config
+                && matches!(app_type, AppType::Codex | AppType::Gemini)
+                && !Self::snippet_has_effective_common_config(&app_type, common_snippet))
+        {
+            // All upstream hooks disable sharing when initialization cannot
+            // apply/parse the stored snippet. Codex and Gemini additionally
+            // disable it when a valid snippet has no effective entries;
+            // Claude's apply path marks even an empty object as an internal
+            // update and therefore preserves an explicit enabled flag.
+            form.include_common_config = false;
+        }
         form.capture_initial_snapshot();
 
         form
@@ -325,10 +356,14 @@ impl ProviderAddFormState {
                 .parse::<toml_edit::DocumentMut>()
                 .ok()
                 .is_some_and(|doc| doc.as_table().iter().next().is_some()),
-            AppType::Claude | AppType::Gemini => serde_json::from_str::<Value>(snippet)
+            AppType::Claude => sanitize_claude_common_config_for_form(snippet)
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|obj| !obj.is_empty()),
+            AppType::Gemini => normalize_gemini_common_config_for_form(snippet)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .is_some_and(|env| !env.is_empty()),
             AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
         }
     }
@@ -342,11 +377,63 @@ impl ProviderAddFormState {
             return false;
         }
 
-        ProviderService::settings_contain_common_config_for_preview(
+        Self::settings_contain_common_config_for_form(
             app_type,
             &provider.settings_config,
             common_snippet,
         )
+    }
+
+    pub(crate) fn settings_contain_common_config_for_form(
+        app_type: &AppType,
+        settings: &Value,
+        common_snippet: &str,
+    ) -> bool {
+        if !Self::supports_common_config(app_type) {
+            return false;
+        }
+        if !Self::snippet_has_effective_common_config(app_type, common_snippet) {
+            // Upstream UI membership checks treat `{}` and comment-only TOML
+            // as not applied even though the backend's empty subset check is
+            // vacuously true. Keep that distinction at the TUI boundary.
+            return false;
+        }
+
+        match app_type {
+            AppType::Claude => {
+                claude_settings_contain_common_config_for_form(settings, common_snippet)
+            }
+            AppType::Codex => {
+                codex_settings_contain_common_config_for_form(settings, common_snippet)
+            }
+            AppType::Gemini => {
+                let Ok(normalized) = normalize_gemini_common_config_for_form(common_snippet) else {
+                    return false;
+                };
+                if normalized.as_object().is_none_or(serde_json::Map::is_empty) {
+                    return false;
+                }
+                let Ok(snippet) = serde_json::to_string(&normalized) else {
+                    return false;
+                };
+                ProviderService::settings_contain_common_config_for_preview(
+                    app_type, settings, &snippet,
+                )
+            }
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+        }
+    }
+
+    fn validate_common_config_snippet_for_form(
+        app_type: &AppType,
+        common_snippet: &str,
+    ) -> Result<(), String> {
+        if matches!(app_type, AppType::Gemini) {
+            normalize_gemini_common_config_for_form(common_snippet).map(|_| ())
+        } else {
+            ProviderService::validate_common_config_snippet_for_preview(app_type, common_snippet)
+                .map_err(|error| error.to_string())
+        }
     }
 
     fn capture_initial_snapshot(&mut self) {
@@ -627,6 +714,7 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::ClaudeTeammates
             | ProviderAddField::ClaudeToolSearch
+            | ProviderAddField::ClaudeEffortMax
             | ProviderAddField::ClaudeDisableAutoUpgrade
             | ProviderAddField::GeminiAuthType
             | ProviderAddField::OpenClawApiProtocol
@@ -694,6 +782,7 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::ClaudeTeammates
             | ProviderAddField::ClaudeToolSearch
+            | ProviderAddField::ClaudeEffortMax
             | ProviderAddField::ClaudeDisableAutoUpgrade
             | ProviderAddField::GeminiAuthType
             | ProviderAddField::OpenClawApiProtocol
@@ -906,13 +995,14 @@ impl ProviderAddFormState {
             .retain(|error| error.field != field);
     }
 
-    /// The four Claude quick toggles, in upstream order. They live on the
+    /// The five Claude quick toggles, in upstream order. They live on the
     /// "快捷配置菜单" sub-page rather than the main field list.
     pub fn claude_quick_config_fields(&self) -> Vec<ProviderAddField> {
         vec![
             ProviderAddField::ClaudeHideAttribution,
             ProviderAddField::ClaudeTeammates,
             ProviderAddField::ClaudeToolSearch,
+            ProviderAddField::ClaudeEffortMax,
             ProviderAddField::ClaudeDisableAutoUpgrade,
         ]
     }
@@ -922,6 +1012,7 @@ impl ProviderAddFormState {
             self.claude_hide_attribution,
             self.claude_teammates,
             self.claude_tool_search,
+            self.claude_effort_max,
             self.claude_disable_auto_upgrade,
         ]
         .into_iter()
@@ -1014,6 +1105,258 @@ impl ProviderAddFormState {
         self.page = ProviderFormPage::Main;
         self.focus = FormFocus::Fields;
         self.clear_text_edit();
+    }
+
+    pub(crate) fn refresh_quick_config_from_common_snippet(
+        &mut self,
+        common_snippet: &str,
+    ) -> Result<(), String> {
+        if !self.include_common_config {
+            return Ok(());
+        }
+
+        let effective_provider = self.to_provider_json_value_with_common_config(common_snippet)?;
+        let effective = effective_provider
+            .get("settingsConfig")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        match self.app_type {
+            AppType::Claude => {
+                self.claude_hide_attribution = super::claude_hide_attribution_enabled(&effective);
+                self.claude_teammates = super::claude_teammates_enabled(&effective);
+                self.claude_tool_search = super::claude_tool_search_enabled(&effective);
+                self.claude_effort_max = super::claude_effort_max_enabled(&effective);
+                self.claude_disable_auto_upgrade =
+                    super::claude_disable_auto_upgrade_enabled(&effective);
+            }
+            AppType::Codex => {
+                if let Some(config) = effective.get("config").and_then(Value::as_str) {
+                    self.codex_goal_mode = crate::codex_config::is_codex_goal_mode_enabled(config);
+                    self.codex_remote_compaction =
+                        crate::codex_config::is_codex_remote_compaction_enabled(config);
+                }
+            }
+            AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
+        }
+        Ok(())
+    }
+
+    fn materialize_common_config_for_quick_edit(
+        &mut self,
+        common_snippet: &str,
+    ) -> Result<(), String> {
+        let field_errors = self.field_errors.clone();
+        let usage_query_field_errors = self.usage_query_field_errors.clone();
+        let raw_provider_value = self.to_provider_json_value();
+        let mut provider_value = self.to_provider_json_value_with_common_config(common_snippet)?;
+        if matches!(self.app_type, AppType::Codex) {
+            // The backend's Codex live snapshot intentionally contains only
+            // auth.json and config.toml. Rehydrating the form from that live
+            // shape must not discard provider-owned storage fields such as
+            // modelCatalog or future settingsConfig siblings.
+            let raw_settings = raw_provider_value
+                .get("settingsConfig")
+                .and_then(Value::as_object);
+            let effective_settings = provider_value
+                .get_mut("settingsConfig")
+                .and_then(Value::as_object_mut);
+            if let (Some(raw_settings), Some(effective_settings)) =
+                (raw_settings, effective_settings)
+            {
+                for (key, value) in raw_settings {
+                    effective_settings
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        }
+        self.apply_provider_json_value_to_fields(provider_value)?;
+        self.field_errors = field_errors;
+        self.usage_query_field_errors = usage_query_field_errors;
+        self.include_common_config = false;
+        self.include_common_config_touched = true;
+        Ok(())
+    }
+
+    fn common_config_overrides_quick_config_value(
+        &self,
+        field: ProviderAddField,
+        desired: bool,
+        common_snippet: &str,
+    ) -> Result<bool, String> {
+        if !self.include_common_config || common_snippet.trim().is_empty() {
+            return Ok(false);
+        }
+
+        let mut candidate = self.clone();
+        match field {
+            ProviderAddField::ClaudeHideAttribution => {
+                candidate.claude_hide_attribution = desired;
+                candidate.claude_hide_attribution_touched = true;
+            }
+            ProviderAddField::ClaudeTeammates => {
+                candidate.claude_teammates = desired;
+                candidate.claude_teammates_touched = true;
+            }
+            ProviderAddField::ClaudeToolSearch => {
+                candidate.claude_tool_search = desired;
+                candidate.claude_tool_search_touched = true;
+            }
+            ProviderAddField::ClaudeEffortMax => {
+                candidate.claude_effort_max = desired;
+                candidate.claude_effort_max_touched = true;
+            }
+            ProviderAddField::ClaudeDisableAutoUpgrade => {
+                candidate.claude_disable_auto_upgrade = desired;
+                candidate.claude_disable_auto_upgrade_touched = true;
+            }
+            ProviderAddField::CodexGoalMode => {
+                candidate.codex_goal_mode = desired;
+                candidate.codex_goal_mode_touched = true;
+            }
+            ProviderAddField::CodexRemoteCompaction => {
+                candidate.codex_remote_compaction = desired;
+                candidate.codex_remote_compaction_touched = true;
+            }
+            _ => return Ok(false),
+        }
+
+        let effective = candidate.to_provider_json_value_with_common_config(common_snippet)?;
+        let settings = effective
+            .get("settingsConfig")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let effective_value = match field {
+            ProviderAddField::ClaudeHideAttribution => {
+                super::claude_hide_attribution_enabled(&settings)
+            }
+            ProviderAddField::ClaudeTeammates => super::claude_teammates_enabled(&settings),
+            ProviderAddField::ClaudeToolSearch => super::claude_tool_search_enabled(&settings),
+            ProviderAddField::ClaudeEffortMax => super::claude_effort_max_enabled(&settings),
+            ProviderAddField::ClaudeDisableAutoUpgrade => {
+                super::claude_disable_auto_upgrade_enabled(&settings)
+            }
+            ProviderAddField::CodexGoalMode => settings
+                .get("config")
+                .and_then(Value::as_str)
+                .is_some_and(crate::codex_config::is_codex_goal_mode_enabled),
+            ProviderAddField::CodexRemoteCompaction => settings
+                .get("config")
+                .and_then(Value::as_str)
+                .is_some_and(crate::codex_config::is_codex_remote_compaction_enabled),
+            _ => return Ok(false),
+        };
+
+        Ok(effective_value != desired)
+    }
+
+    fn current_quick_config_value(&self, field: ProviderAddField) -> Option<bool> {
+        match field {
+            ProviderAddField::ClaudeHideAttribution => Some(self.claude_hide_attribution),
+            ProviderAddField::ClaudeTeammates => Some(self.claude_teammates),
+            ProviderAddField::ClaudeToolSearch => Some(self.claude_tool_search),
+            ProviderAddField::ClaudeEffortMax => Some(self.claude_effort_max),
+            ProviderAddField::ClaudeDisableAutoUpgrade => Some(self.claude_disable_auto_upgrade),
+            ProviderAddField::CodexGoalMode => Some(self.codex_goal_mode),
+            ProviderAddField::CodexRemoteCompaction => Some(self.codex_remote_compaction),
+            _ => None,
+        }
+    }
+
+    pub fn toggle_claude_quick_config_field(
+        &mut self,
+        field: ProviderAddField,
+        common_snippet: &str,
+    ) -> Result<(), String> {
+        if !matches!(
+            field,
+            ProviderAddField::ClaudeHideAttribution
+                | ProviderAddField::ClaudeTeammates
+                | ProviderAddField::ClaudeToolSearch
+                | ProviderAddField::ClaudeEffortMax
+                | ProviderAddField::ClaudeDisableAutoUpgrade
+        ) {
+            return Ok(());
+        }
+        let Some(currently_enabled) = self.current_quick_config_value(field) else {
+            return Ok(());
+        };
+        let desired = !currently_enabled;
+        if self.include_common_config
+            && !Self::snippet_has_effective_common_config(&self.app_type, common_snippet)
+        {
+            // Claude's upstream quick editor still mutates provider settings
+            // when its shared snippet is malformed or has no content. The
+            // membership effect then detaches that provider from sharing.
+            self.include_common_config = false;
+            self.include_common_config_touched = true;
+        } else if self.common_config_overrides_quick_config_value(field, desired, common_snippet)? {
+            // Upstream edits the effective settings document. Removing one of
+            // its shared values makes that provider independent of the
+            // shared snippet, while retaining the other currently effective
+            // values as provider-owned settings.
+            self.materialize_common_config_for_quick_edit(common_snippet)?;
+        }
+        if self.include_common_config
+            && Self::snippet_has_effective_common_config(&self.app_type, common_snippet)
+        {
+            // A legacy provider may infer sharing from its stored subset while
+            // lacking explicit metadata. A quick edit is an intentional form
+            // mutation, so persist the inferred enabled state on save.
+            self.include_common_config_touched = true;
+        }
+
+        match field {
+            ProviderAddField::ClaudeHideAttribution => self.toggle_claude_hide_attribution(),
+            ProviderAddField::ClaudeTeammates => self.toggle_claude_teammates(),
+            ProviderAddField::ClaudeToolSearch => self.toggle_claude_tool_search(),
+            ProviderAddField::ClaudeEffortMax => self.toggle_claude_effort_max(),
+            ProviderAddField::ClaudeDisableAutoUpgrade => self.toggle_claude_disable_auto_upgrade(),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn toggle_codex_quick_config_field(
+        &mut self,
+        field: ProviderAddField,
+        common_snippet: &str,
+    ) -> Result<(), String> {
+        if !matches!(
+            field,
+            ProviderAddField::CodexGoalMode | ProviderAddField::CodexRemoteCompaction
+        ) {
+            return Ok(());
+        }
+        let Some(currently_enabled) = self.current_quick_config_value(field) else {
+            return Ok(());
+        };
+        let desired = !currently_enabled;
+        if self.include_common_config
+            && !Self::snippet_has_effective_common_config(&self.app_type, common_snippet)
+        {
+            // Codex's membership effect disables sharing after the next
+            // config edit when a valid snippet has no effective TOML keys.
+            // Invalid TOML still blocks the edit and surfaces its parse error.
+            Self::validate_common_config_snippet_for_form(&self.app_type, common_snippet)?;
+            self.include_common_config = false;
+            self.include_common_config_touched = true;
+        } else if self.common_config_overrides_quick_config_value(field, desired, common_snippet)? {
+            self.materialize_common_config_for_quick_edit(common_snippet)?;
+        }
+        if self.include_common_config
+            && Self::snippet_has_effective_common_config(&self.app_type, common_snippet)
+        {
+            self.include_common_config_touched = true;
+        }
+
+        match field {
+            ProviderAddField::CodexGoalMode => self.toggle_codex_goal_mode(),
+            ProviderAddField::CodexRemoteCompaction => self.toggle_codex_remote_compaction(),
+            _ => {}
+        }
+        Ok(())
     }
 
     pub fn supports_local_proxy_settings(&self) -> bool {
@@ -1200,6 +1543,9 @@ impl ProviderAddFormState {
             model: model.to_string(),
             display_name: String::new(),
             context_window: String::new(),
+            supports_parallel_tool_calls: None,
+            input_modalities: Vec::new(),
+            base_instructions: String::new(),
         });
         self.codex_model_catalog_idx = self.codex_model_catalog.len().saturating_sub(1);
         true
@@ -2054,6 +2400,11 @@ impl ProviderAddFormState {
         self.claude_tool_search_touched = true;
     }
 
+    pub fn toggle_claude_effort_max(&mut self) {
+        self.claude_effort_max = !self.claude_effort_max;
+        self.claude_effort_max_touched = true;
+    }
+
     pub fn toggle_claude_disable_auto_upgrade(&mut self) {
         self.claude_disable_auto_upgrade = !self.claude_disable_auto_upgrade;
         self.claude_disable_auto_upgrade_touched = true;
@@ -2190,6 +2541,8 @@ impl ProviderAddFormState {
         let previous_usage_query_field_idx = self.usage_query_field_idx;
         let previous_codex_local_routing_field_idx = self.codex_local_routing_field_idx;
         let previous_local_proxy_settings_field_idx = self.local_proxy_settings_field_idx;
+        let previous_claude_quick_config_idx = self.claude_quick_config_idx;
+        let previous_codex_quick_config_idx = self.codex_quick_config_idx;
         let previous_codex_model_catalog_field = self.codex_model_catalog_field;
         let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
@@ -2207,16 +2560,19 @@ impl ProviderAddFormState {
         merge_json_values(&mut merged_extra, &overlay);
         next.extra = merged_extra;
 
-        if provider
+        if let Some(enabled) = provider
             .meta
             .as_ref()
             .and_then(|meta| meta.apply_common_config)
-            .is_none()
         {
+            // This is an in-place form rehydration, not a fresh upstream-hook
+            // initialization. Honor the editor payload's explicit flag; the
+            // caller refreshes it against the actual common snippet next.
+            next.include_common_config = enabled;
+            next.include_common_config_touched = true;
+        } else {
             next.include_common_config = previous_include_common_config;
             next.include_common_config_touched = previous_include_common_config_touched;
-        } else {
-            next.include_common_config_touched = true;
         }
 
         next.mode = previous_mode.clone();
@@ -2251,6 +2607,10 @@ impl ProviderAddFormState {
         };
         next.local_proxy_settings_field_idx = previous_local_proxy_settings_field_idx
             .min(next.local_proxy_settings_fields().len().saturating_sub(1));
+        next.claude_quick_config_idx = previous_claude_quick_config_idx
+            .min(next.claude_quick_config_fields().len().saturating_sub(1));
+        next.codex_quick_config_idx = previous_codex_quick_config_idx
+            .min(next.codex_quick_config_fields().len().saturating_sub(1));
         let hermes_model_fields_len = next.hermes_model_field_count();
         next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
             0
@@ -2281,6 +2641,8 @@ impl ProviderAddFormState {
         let previous_usage_query_field_idx = self.usage_query_field_idx;
         let previous_codex_local_routing_field_idx = self.codex_local_routing_field_idx;
         let previous_local_proxy_settings_field_idx = self.local_proxy_settings_field_idx;
+        let previous_claude_quick_config_idx = self.claude_quick_config_idx;
+        let previous_codex_quick_config_idx = self.codex_quick_config_idx;
         let previous_codex_model_catalog_field = self.codex_model_catalog_field;
         let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
@@ -2308,16 +2670,16 @@ impl ProviderAddFormState {
         let mut next = Self::from_provider(self.app_type.clone(), &provider);
         next.extra = provider_value;
 
-        if provider
+        if let Some(enabled) = provider
             .meta
             .as_ref()
             .and_then(|meta| meta.apply_common_config)
-            .is_none()
         {
+            next.include_common_config = enabled;
+            next.include_common_config_touched = true;
+        } else {
             next.include_common_config = previous_include_common_config;
             next.include_common_config_touched = previous_include_common_config_touched;
-        } else {
-            next.include_common_config_touched = true;
         }
 
         next.mode = previous_mode.clone();
@@ -2353,6 +2715,10 @@ impl ProviderAddFormState {
         };
         next.local_proxy_settings_field_idx = previous_local_proxy_settings_field_idx
             .min(next.local_proxy_settings_fields().len().saturating_sub(1));
+        next.claude_quick_config_idx = previous_claude_quick_config_idx
+            .min(next.claude_quick_config_fields().len().saturating_sub(1));
+        next.codex_quick_config_idx = previous_codex_quick_config_idx
+            .min(next.codex_quick_config_fields().len().saturating_sub(1));
         let hermes_model_fields_len = next.hermes_model_field_count();
         next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
             0
@@ -2373,26 +2739,141 @@ impl ProviderAddFormState {
 
     pub fn toggle_include_common_config(&mut self, common_snippet: &str) -> Result<(), String> {
         let next_enabled = !self.include_common_config;
-        if self.include_common_config && !next_enabled {
-            let mut provider_value = self.to_provider_json_value();
+        if next_enabled {
+            Self::validate_common_config_snippet_for_form(&self.app_type, common_snippet)?;
+            if !matches!(self.app_type, AppType::Claude)
+                && !Self::snippet_has_effective_common_config(&self.app_type, common_snippet)
+            {
+                return Err(texts::common_config_snippet_required().to_string());
+            }
+            let mut next = self.clone();
+            next.include_common_config = true;
+            next.include_common_config_touched = true;
+            next.refresh_quick_config_from_common_snippet(common_snippet)?;
+            *self = next;
+            return Ok(());
+        }
+
+        if self.include_common_config {
+            let mut next = self.clone();
+            let field_errors = next.field_errors.clone();
+            let usage_query_field_errors = next.usage_query_field_errors.clone();
+            let mut provider_value = next.to_provider_json_value();
             if let Some(settings_value) = provider_value
                 .as_object_mut()
                 .and_then(|obj| obj.get_mut("settingsConfig"))
             {
-                strip_common_config_from_settings(&self.app_type, settings_value, common_snippet)?;
+                if let Err(err) = strip_common_config_from_settings(
+                    &next.app_type,
+                    settings_value,
+                    common_snippet,
+                ) {
+                    // Upstream turns the switch off even when removing a
+                    // malformed snippet fails, while keeping the settings
+                    // document unchanged and surfacing the parse error.
+                    next.include_common_config = false;
+                    next.include_common_config_touched = true;
+                    *self = next;
+                    return Err(err);
+                }
             }
 
             if let Ok(provider) = serde_json::from_value::<Provider>(provider_value) {
                 let stripped_settings = provider.settings_config.clone();
-                self.apply_provider_json_to_fields(&provider);
-                if let Some(extra_obj) = self.extra.as_object_mut() {
+                next.apply_provider_json_to_fields(&provider);
+                if let Some(extra_obj) = next.extra.as_object_mut() {
                     extra_obj.insert("settingsConfig".to_string(), stripped_settings);
                 }
             }
+            next.field_errors = field_errors;
+            next.usage_query_field_errors = usage_query_field_errors;
+            next.include_common_config = false;
+            next.include_common_config_touched = true;
+            *self = next;
         }
-        self.include_common_config = next_enabled;
-        self.include_common_config_touched = true;
         Ok(())
+    }
+
+    pub(crate) fn replace_common_config_snippet(
+        &mut self,
+        previous_snippet: &str,
+        next_snippet: &str,
+    ) -> Result<(), String> {
+        if !self.include_common_config {
+            if !next_snippet.trim().is_empty() {
+                Self::validate_common_config_snippet_for_form(&self.app_type, next_snippet)?;
+            }
+            let settings = self
+                .to_provider_json_value()
+                .get("settingsConfig")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            if Self::settings_contain_common_config_for_form(
+                &self.app_type,
+                &settings,
+                next_snippet,
+            ) {
+                // Upstream membership effects run after every snippet change,
+                // even while the switch is off. The values already present in
+                // the draft are the effective view, so no apply step is needed.
+                self.include_common_config = true;
+                self.include_common_config_touched = true;
+            }
+            return Ok(());
+        }
+
+        if !next_snippet.trim().is_empty() {
+            Self::validate_common_config_snippet_for_form(&self.app_type, next_snippet)?;
+        }
+
+        if let Err(previous_error) =
+            Self::validate_common_config_snippet_for_form(&self.app_type, previous_snippet)
+        {
+            if matches!(self.app_type, AppType::Codex | AppType::Gemini) {
+                // Upstream skips removal when the previous Codex/Gemini
+                // snippet cannot be parsed, then applies the valid replacement
+                // (or simply disables sharing when the snippet was cleared).
+                let mut next = self.clone();
+                next.include_common_config = false;
+                next.include_common_config_touched = true;
+                if !next_snippet.trim().is_empty() {
+                    next.include_common_config = true;
+                    next.refresh_quick_config_from_common_snippet(next_snippet)?;
+                }
+                *self = next;
+                return Ok(());
+            }
+
+            // Claude ignores the malformed-old removal error when clearing,
+            // but a non-empty replacement reports it and its membership effect
+            // turns sharing off against the newly saved snippet.
+            self.include_common_config = false;
+            self.include_common_config_touched = true;
+            return if next_snippet.trim().is_empty() {
+                Ok(())
+            } else {
+                Err(previous_error)
+            };
+        }
+
+        let previous = self.clone();
+        let result = (|| {
+            self.toggle_include_common_config(previous_snippet)?;
+            if !next_snippet.trim().is_empty() {
+                self.include_common_config_touched = true;
+                // Upstream keeps the switch enabled after replacing an
+                // enabled snippet with a valid non-empty document, even when
+                // Gemini normalization yields no effective env entries. Its
+                // membership effect detaches only after a later env edit.
+                self.include_common_config = true;
+                self.refresh_quick_config_from_common_snippet(next_snippet)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            *self = previous;
+        }
+        result
     }
 
     pub(super) fn opencode_primary_model_id(&self) -> Option<String> {
@@ -2538,11 +3019,42 @@ pub(crate) fn codex_model_catalog_row_from_value(value: &Value) -> Option<CodexM
                 .or_else(|| value.as_i64().map(|value| value.to_string()))
         })
         .unwrap_or_default();
+    let supports_parallel_tool_calls = value
+        .get("supportsParallelToolCalls")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            value
+                .get("supports_parallel_tool_calls")
+                .and_then(Value::as_bool)
+        });
+    let input_modalities = value
+        .get("inputModalities")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("input_modalities").and_then(Value::as_array))
+        .map(|modalities| {
+            modalities
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|modality| !modality.trim().is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let base_instructions = value
+        .get("baseInstructions")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("base_instructions").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     Some(CodexModelCatalogRow {
         model,
         display_name,
         context_window,
+        supports_parallel_tool_calls,
+        input_modalities,
+        base_instructions,
     })
 }
 

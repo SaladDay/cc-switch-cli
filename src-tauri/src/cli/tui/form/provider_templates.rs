@@ -162,6 +162,8 @@ impl ProviderAddFormState {
         self.claude_teammates_touched = false;
         self.claude_tool_search = false;
         self.claude_tool_search_touched = false;
+        self.claude_effort_max = false;
+        self.claude_effort_max_touched = false;
         self.claude_disable_auto_upgrade = false;
         self.claude_disable_auto_upgrade_touched = false;
         self.claude_quick_config_idx = 0;
@@ -281,6 +283,7 @@ impl ProviderAddFormState {
                     self.claude_hide_attribution = defaults.claude_hide_attribution;
                     self.claude_teammates = defaults.claude_teammates;
                     self.claude_tool_search = defaults.claude_tool_search;
+                    self.claude_effort_max = defaults.claude_effort_max;
                     self.claude_disable_auto_upgrade = defaults.claude_disable_auto_upgrade;
                     self.codex_oauth_account_id = defaults.codex_oauth_account_id;
                     self.codex_fast_mode = defaults.codex_fast_mode;
@@ -440,11 +443,17 @@ impl ProviderAddFormState {
                             model: "deepseek-v4-flash".to_string(),
                             display_name: "DeepSeek V4 Flash".to_string(),
                             context_window: "1000000".to_string(),
+                            supports_parallel_tool_calls: None,
+                            input_modalities: Vec::new(),
+                            base_instructions: String::new(),
                         },
                         CodexModelCatalogRow {
                             model: "deepseek-v4-pro".to_string(),
                             display_name: "DeepSeek V4 Pro".to_string(),
                             context_window: "1000000".to_string(),
+                            supports_parallel_tool_calls: None,
+                            input_modalities: Vec::new(),
+                            base_instructions: String::new(),
                         },
                     ];
                     self.codex_local_routing_field_idx = 0;
