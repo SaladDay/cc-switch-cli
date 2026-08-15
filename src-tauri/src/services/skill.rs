@@ -131,6 +131,14 @@ pub enum SkillStorageLocation {
     Unified,
 }
 
+/// 结果 of a skills SSOT storage migration (`migrate_storage`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MigrationResult {
+    pub migrated_count: usize,
+    pub skipped_count: usize,
+    pub errors: Vec<String>,
+}
+
 /// Explicit app matrix submitted when importing unmanaged skills.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -621,6 +629,124 @@ impl SkillService {
         };
         create_managed_config_dir_all(&dir)?;
         Ok(dir)
+    }
+
+    /// Migrate the skills SSOT directory between storage locations.
+    ///
+    /// Walks the current SSOT directory itself (each subdirectory is one skill),
+    /// moves every skill into the target location, backs the source up first,
+    /// persists the new `skill_storage_location`, then refreshes app dirs.
+    pub fn migrate_storage(target: SkillStorageLocation) -> Result<MigrationResult, AppError> {
+        let current = crate::settings::get_skill_storage_location();
+        if current == target {
+            return Ok(MigrationResult::default());
+        }
+
+        let old_dir = Self::get_ssot_dir()?;
+        let new_dir = match target {
+            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
+            SkillStorageLocation::Unified => crate::config::home_dir()
+                .unwrap_or_else(|| get_app_config_dir())
+                .join(".agents")
+                .join("skills"),
+        };
+        fs::create_dir_all(&new_dir).map_err(|e| AppError::io(&new_dir, e))?;
+        Self::validate_skill_storage_destination(&new_dir)?;
+
+        // 步骤 0【迁移前备份】: 目录复制（简单可靠），后续可精化为 zip 归档。
+        let backup_dir = get_app_config_dir().join("skill-backups");
+        let has_skills = old_dir.is_dir()
+            && fs::read_dir(&old_dir)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false);
+        if has_skills {
+            fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+            let stamp = Utc::now().format("%Y%m%d%H%M%S");
+            let snapshot = backup_dir.join(format!("skills-{stamp}"));
+            Self::copy_dir_recursive(&old_dir, &snapshot)?;
+        }
+
+        let mut result = MigrationResult::default();
+        let mut migrated_dirs: Vec<String> = Vec::new();
+        if old_dir.is_dir() {
+            for entry in fs::read_dir(&old_dir).map_err(|e| AppError::io(&old_dir, e))? {
+                let entry = entry.map_err(|e| AppError::io(&old_dir, e))?;
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+
+                let directory = entry.file_name().to_string_lossy().to_string();
+                if directory.starts_with('.') {
+                    continue;
+                }
+
+                let src = old_dir.join(&directory);
+                let dst = new_dir.join(&directory);
+                if !src.exists() {
+                    result.skipped_count += 1;
+                    continue;
+                }
+                if dst.exists() {
+                    result.skipped_count += 1;
+                    continue;
+                }
+
+                match fs::rename(&src, &dst) {
+                    Ok(()) => {
+                        migrated_dirs.push(directory);
+                        result.migrated_count += 1;
+                    }
+                    Err(_) => match Self::copy_dir_recursive(&src, &dst) {
+                        Ok(()) => {
+                            let _ = fs::remove_dir_all(&src);
+                            migrated_dirs.push(directory);
+                            result.migrated_count += 1;
+                        }
+                        Err(e) => result.errors.push(format!("{directory}: {e}")),
+                    },
+                }
+            }
+        }
+
+        crate::settings::set_skill_storage_location(target)?;
+
+        // 刷新 app 目录（best effort：失败仅告警，不影响迁移结果）。
+        let method = crate::settings::get_skill_sync_method();
+        for directory in &migrated_dirs {
+            for app in Self::supported_skill_apps().filter(Self::app_supports_skills) {
+                if let Err(e) = Self::sync_to_app_dir(directory, &app, method) {
+                    log::warn!("迁移后同步 Skill {directory} 到 {app:?} 失败: {e}");
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Reject migration targets that alias an app's skills directory
+    /// (the CLI has no `paths_alias`, so canonicalized paths are compared).
+    fn validate_skill_storage_destination(dest: &Path) -> Result<(), AppError> {
+        for app in Self::skill_source_apps() {
+            if !Self::app_supports_skills(&app) {
+                continue;
+            }
+            let app_dir = match Self::get_app_skills_dir(&app) {
+                Ok(dir) => dir,
+                Err(_) => continue,
+            };
+            if let (Ok(dest_canon), Ok(app_canon)) = (dest.canonicalize(), app_dir.canonicalize()) {
+                if dest_canon == app_canon {
+                    return Err(AppError::Message(format!(
+                        "迁移目标 {} 与 {} 的 skills 目录别名（{}），拒绝迁移",
+                        dest.display(),
+                        app.as_str(),
+                        app_canon.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn get_app_skills_dir(app: &AppType) -> Result<PathBuf, AppError> {
@@ -2683,6 +2809,103 @@ mod tests {
         assert_eq!(
             SkillService::repos_fingerprint(&repos),
             "a/repo@dev|b/repo@main"
+        );
+    }
+
+    #[test]
+    fn migrate_storage_noop_when_same_target() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        crate::settings::set_skill_storage_location(SkillStorageLocation::CcSwitch)
+            .expect("set cc_switch storage");
+
+        let result = SkillService::migrate_storage(SkillStorageLocation::CcSwitch)
+            .expect("noop migration must succeed");
+        assert_eq!(result.migrated_count, 0, "noop must not migrate anything");
+        assert_eq!(result.skipped_count, 0, "noop must not skip anything");
+        assert!(
+            result.errors.is_empty(),
+            "noop must not record errors: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            crate::settings::get_skill_storage_location(),
+            SkillStorageLocation::CcSwitch
+        );
+    }
+
+    #[test]
+    fn migrate_storage_moves_skills_and_updates_setting() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        crate::settings::set_skill_storage_location(SkillStorageLocation::CcSwitch)
+            .expect("set cc_switch storage");
+
+        let old_dir = SkillService::get_ssot_dir().expect("resolve cc_switch SSOT");
+        let skill_dir = old_dir.join("test-skill");
+        fs::create_dir_all(&skill_dir).expect("create test skill directory");
+        fs::write(skill_dir.join("SKILL.md"), "# Test Skill").expect("write test skill manifest");
+
+        let result = SkillService::migrate_storage(SkillStorageLocation::Unified)
+            .expect("migrate to unified storage must succeed");
+        assert_eq!(result.migrated_count, 1, "one skill must migrate");
+        assert!(
+            result.errors.is_empty(),
+            "migration must not record errors: {:?}",
+            result.errors
+        );
+
+        let new_dir = SkillService::get_ssot_dir().expect("resolve unified SSOT");
+        assert!(
+            new_dir.join("test-skill").join("SKILL.md").exists(),
+            "skill must exist in the new SSOT: {:?}",
+            new_dir
+        );
+        assert!(
+            !skill_dir.exists(),
+            "old skill directory must be gone: {:?}",
+            skill_dir
+        );
+        assert_eq!(
+            crate::settings::get_skill_storage_location(),
+            SkillStorageLocation::Unified
+        );
+    }
+
+    #[test]
+    fn migrate_storage_creates_backup_first() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        crate::settings::set_skill_storage_location(SkillStorageLocation::CcSwitch)
+            .expect("set cc_switch storage");
+
+        let old_dir = SkillService::get_ssot_dir().expect("resolve cc_switch SSOT");
+        let skill_dir = old_dir.join("test-skill");
+        fs::create_dir_all(&skill_dir).expect("create test skill directory");
+        fs::write(skill_dir.join("SKILL.md"), "# Test Skill").expect("write test skill manifest");
+
+        SkillService::migrate_storage(SkillStorageLocation::Unified)
+            .expect("migrate to unified storage must succeed");
+
+        let backup_root = get_app_config_dir().join("skill-backups");
+        assert!(
+            backup_root.is_dir(),
+            "backup root must exist: {:?}",
+            backup_root
+        );
+        let snapshots: Vec<_> = fs::read_dir(&backup_root)
+            .expect("read backup root")
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            !snapshots.is_empty(),
+            "backup must contain at least one snapshot"
+        );
+        let snapshot = snapshots[0].path();
+        assert!(
+            snapshot.join("test-skill").join("SKILL.md").exists(),
+            "backup snapshot must contain the migrated skill: {:?}",
+            snapshot
         );
     }
 }
