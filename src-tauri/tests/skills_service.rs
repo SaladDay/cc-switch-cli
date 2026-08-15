@@ -379,3 +379,24 @@ fn storage_location_persists_and_roundtrips() {
         "set value should be readable back after persisting"
     );
 }
+
+#[test]
+fn storage_location_cli_roundtrips_via_service() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    set_skill_storage_location(SkillStorageLocation::Unified).expect("set unified");
+    assert_eq!(
+        get_skill_storage_location(),
+        SkillStorageLocation::Unified,
+        "value set through settings API should be readable"
+    );
+
+    set_skill_storage_location(SkillStorageLocation::CcSwitch).expect("set cc_switch");
+    assert_eq!(
+        get_skill_storage_location(),
+        SkillStorageLocation::CcSwitch,
+        "switching back should roundtrip"
+    );
+}
