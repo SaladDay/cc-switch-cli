@@ -611,7 +611,14 @@ impl SkillService {
     // ---------------------------------------------------------------------
 
     pub fn get_ssot_dir() -> Result<PathBuf, AppError> {
-        let dir = get_app_config_dir().join("skills");
+        let location = crate::settings::get_skill_storage_location();
+        let dir = match location {
+            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
+            SkillStorageLocation::Unified => crate::config::home_dir()
+                .unwrap_or_else(|| get_app_config_dir())
+                .join(".agents")
+                .join("skills"),
+        };
         create_managed_config_dir_all(&dir)?;
         Ok(dir)
     }
@@ -2466,6 +2473,28 @@ mod tests {
         assert_eq!(
             SkillService::branch_candidates("HEAD", Some("trunk".to_string()), false),
             vec!["trunk", "main", "master"]
+        );
+    }
+
+    #[test]
+    fn get_ssot_dir_switches_on_location() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+
+        crate::settings::set_skill_storage_location(SkillStorageLocation::CcSwitch)
+            .expect("set cc_switch storage");
+        let cc_dir = SkillService::get_ssot_dir().expect("resolve cc_switch SSOT");
+        assert!(
+            cc_dir.ends_with(".cc-switch/skills"),
+            "cc_switch mode: {cc_dir:?}"
+        );
+
+        crate::settings::set_skill_storage_location(SkillStorageLocation::Unified)
+            .expect("set unified storage");
+        let agents_dir = SkillService::get_ssot_dir().expect("resolve unified SSOT");
+        assert!(
+            agents_dir.ends_with(".agents/skills"),
+            "unified mode: {agents_dir:?}"
         );
     }
 
