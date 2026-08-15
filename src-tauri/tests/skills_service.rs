@@ -1,6 +1,6 @@
 use cc_switch_lib::{
-    get_skill_storage_location, set_skill_storage_location, AppType, Database, ImportSkillSelection,
-    SkillApps, SkillService, SkillStorageLocation,
+    get_skill_storage_location, set_skill_storage_location, AppType, Database,
+    ImportSkillSelection, SkillApps, SkillService, SkillStorageLocation,
 };
 
 #[path = "support.rs"]
@@ -371,8 +371,7 @@ fn storage_location_persists_and_roundtrips() {
     let _guard = lock_test_mutex();
     reset_test_fs();
 
-    set_skill_storage_location(SkillStorageLocation::Unified)
-        .expect("set skill storage location");
+    set_skill_storage_location(SkillStorageLocation::Unified).expect("set skill storage location");
 
     assert_eq!(
         get_skill_storage_location(),
