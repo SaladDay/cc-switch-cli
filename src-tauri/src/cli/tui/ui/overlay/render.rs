@@ -263,6 +263,15 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::SkillsStorageLocationPicker { selected } => {
+            super::pickers::render_skills_storage_location_picker_overlay(
+                frame,
+                data,
+                content_area,
+                theme,
+                *selected,
+            )
+        }
         Overlay::McpKeyValuePicker { kind, selected } => {
             super::mcp_key_value::render_mcp_key_value_picker_overlay(
                 frame,

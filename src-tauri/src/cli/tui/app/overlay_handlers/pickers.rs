@@ -85,6 +85,9 @@ impl App {
         if let Some(action) = self.handle_sync_method_picker_key(key, data) {
             return Some(action);
         }
+        if let Some(action) = self.handle_storage_location_picker_key(key, data) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
             return Some(action);
         }
@@ -276,6 +279,42 @@ impl App {
                     Action::None
                 } else {
                     Action::SkillsSetSyncMethod { method }
+                }
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_storage_location_picker_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
+        let Overlay::SkillsStorageLocationPicker { selected } = &mut self.overlay else {
+            return None;
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.close_overlay();
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(1);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let location = storage_location_for_picker_index(*selected);
+                let unchanged = location == data.skills.storage_location;
+                self.overlay = Overlay::None;
+                if unchanged {
+                    Action::None
+                } else {
+                    Action::SkillsSetStorageLocation { location }
                 }
             }
             _ => Action::None,

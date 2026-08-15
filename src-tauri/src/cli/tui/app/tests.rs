@@ -10736,6 +10736,30 @@ mod tests {
     }
 
     #[test]
+    fn settings_skills_storage_location_item_opens_picker_overlay() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::SkillsStorageLocation))
+            .expect("SkillsStorageLocation missing from SettingsItem::ALL");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::SkillsStorageLocationPicker { selected }
+                if *selected == storage_location_picker_index(
+                    crate::settings::get_skill_storage_location()
+                )
+        ));
+    }
+
+    #[test]
     #[serial(home_settings)]
     fn visible_apps_picker_rejects_zero_selection_without_closing() {
         let temp_home = TempDir::new().expect("create temp home");

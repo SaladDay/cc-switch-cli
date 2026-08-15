@@ -318,6 +318,7 @@ pub struct SkillsSnapshot {
     pub installed: Vec<crate::services::skill::InstalledSkill>,
     pub repos: Vec<crate::services::skill::SkillRepo>,
     pub sync_method: crate::services::skill::SyncMethod,
+    pub storage_location: crate::services::skill::SkillStorageLocation,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3636,6 +3637,7 @@ fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
         installed: SkillService::list_installed()?,
         repos: SkillService::list_repos()?,
         sync_method: SkillService::get_sync_method()?,
+        storage_location: crate::settings::get_skill_storage_location(),
     })
 }
 
@@ -3651,6 +3653,7 @@ fn load_skills_snapshot_from_state(state: &AppState) -> Result<SkillsSnapshot, A
         installed,
         repos: state.db.get_skill_repos()?,
         sync_method: SkillService::get_sync_method()?,
+        storage_location: crate::settings::get_skill_storage_location(),
     })
 }
 

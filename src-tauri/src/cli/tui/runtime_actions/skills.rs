@@ -2,7 +2,7 @@ use crate::app_config::{AppType, SkillApps};
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 use crate::services::{
-    skill::{ImportSkillSelection, SyncMethod},
+    skill::{ImportSkillSelection, SkillStorageLocation, SyncMethod},
     SkillService,
 };
 
@@ -159,6 +159,21 @@ pub(super) fn set_sync_method(
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         texts::tui_toast_skills_sync_method_set(texts::tui_skills_sync_method_name(method)),
+        ToastKind::Success,
+    );
+    Ok(())
+}
+
+pub(super) fn set_storage_location(
+    ctx: &mut RuntimeActionContext<'_>,
+    location: SkillStorageLocation,
+) -> Result<(), AppError> {
+    SkillService::migrate_storage(location)?;
+    *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        texts::tui_toast_skills_storage_location_set(texts::tui_skills_storage_location_name(
+            location,
+        )),
         ToastKind::Success,
     );
     Ok(())

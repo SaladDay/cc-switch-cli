@@ -4693,6 +4693,9 @@ pub enum Overlay {
     SkillsSyncMethodPicker {
         selected: usize,
     },
+    SkillsStorageLocationPicker {
+        selected: usize,
+    },
     McpKeyValuePicker {
         kind: crate::cli::tui::form::McpKeyValueKind,
         selected: usize,
@@ -4858,6 +4861,7 @@ impl Overlay {
                 | Overlay::SkillsAppsPicker { .. }
                 | Overlay::SkillsImportPicker { .. }
                 | Overlay::SkillsSyncMethodPicker { .. }
+                | Overlay::SkillsStorageLocationPicker { .. }
                 | Overlay::McpKeyValuePicker { .. }
                 | Overlay::McpTypePicker { .. }
                 | Overlay::SpeedtestResult { .. }
@@ -4900,6 +4904,7 @@ impl Overlay {
             | Overlay::SkillsAppsPicker { .. }
             | Overlay::SkillsImportPicker { .. }
             | Overlay::SkillsSyncMethodPicker { .. }
+            | Overlay::SkillsStorageLocationPicker { .. }
             | Overlay::McpKeyValuePicker { .. }
             | Overlay::McpTypePicker { .. }
             | Overlay::Loading { .. }
