@@ -629,22 +629,34 @@ fn sync_method(method: Option<SyncMethod>) -> Result<(), AppError> {
 fn storage_location(location: Option<SkillStorageLocation>) -> Result<(), AppError> {
     match location {
         Some(target) => {
+            let current = crate::settings::get_skill_storage_location();
+            if current == target {
+                println!("Skill 存储位置已是当前值，无需迁移。");
+                return Ok(());
+            }
             let result = SkillService::migrate_storage(target)?;
             let label = match target {
                 SkillStorageLocation::CcSwitch => "cc-switch (~/.cc-switch/skills)",
                 SkillStorageLocation::Unified => "unified (~/.agents/skills)",
             };
-            println!(
-                "{}",
-                success(&format!(
-                    "Skill 存储位置已切换为 {label}: {} 迁移, {} 跳过, {} 错误",
-                    result.migrated_count,
-                    result.skipped_count,
-                    result.errors.len()
-                ))
-            );
-            for e in &result.errors {
-                eprintln!("  - {e}");
+            if result.errors.is_empty() {
+                println!(
+                    "{}",
+                    success(&format!(
+                        "Skill 存储位置已切换为 {label}: {} 迁移, {} 跳过",
+                        result.migrated_count, result.skipped_count
+                    ))
+                );
+            } else {
+                eprintln!(
+                    "Skill 存储位置切换为 {label} 但部分失败: {} 失败, {} 跳过",
+                    result.errors.len(),
+                    result.skipped_count
+                );
+                for e in &result.errors {
+                    eprintln!("  - {e}");
+                }
+                eprintln!("备份位于 {{config_dir}}/skill-backups/，可手工恢复。");
             }
         }
         None => {

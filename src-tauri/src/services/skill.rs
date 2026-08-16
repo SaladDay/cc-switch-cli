@@ -126,6 +126,7 @@ pub enum SyncMethod {
 pub enum SkillStorageLocation {
     /// CC Switch 管理目录 (~/.cc-switch/skills/)
     #[default]
+    #[value(alias = "cc_switch")]
     CcSwitch,
     /// Agent Skills 统一标准目录 (~/.agents/skills/)
     Unified,
@@ -618,15 +619,23 @@ impl SkillService {
     // Paths
     // ---------------------------------------------------------------------
 
-    pub fn get_ssot_dir() -> Result<PathBuf, AppError> {
-        let location = crate::settings::get_skill_storage_location();
-        let dir = match location {
+    /// 解析指定存储位置对应的 SSOT 目录路径（不创建目录）。
+    ///
+    /// `get_ssot_dir()` 与 `migrate_storage()` 共用此函数，保证两处路径解析一致；
+    /// unified 模式的目标在 `~/.agents/skills`（不在受管 config root 下），
+    /// 因此 `create_managed_config_dir_all` 会自然退化为普通 `create_dir_all`。
+    fn ssot_dir_for(location: SkillStorageLocation) -> PathBuf {
+        match location {
             SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
             SkillStorageLocation::Unified => crate::config::home_dir()
                 .unwrap_or_else(|| get_app_config_dir())
                 .join(".agents")
                 .join("skills"),
-        };
+        }
+    }
+
+    pub fn get_ssot_dir() -> Result<PathBuf, AppError> {
+        let dir = Self::ssot_dir_for(crate::settings::get_skill_storage_location());
         create_managed_config_dir_all(&dir)?;
         Ok(dir)
     }
@@ -643,14 +652,9 @@ impl SkillService {
         }
 
         let old_dir = Self::get_ssot_dir()?;
-        let new_dir = match target {
-            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
-            SkillStorageLocation::Unified => crate::config::home_dir()
-                .unwrap_or_else(|| get_app_config_dir())
-                .join(".agents")
-                .join("skills"),
-        };
-        fs::create_dir_all(&new_dir).map_err(|e| AppError::io(&new_dir, e))?;
+        let new_dir = Self::ssot_dir_for(target);
+        // 与 get_ssot_dir 一致：目标目录用受管安全创建（Unix 下拒绝符号链接组件）。
+        create_managed_config_dir_all(&new_dir)?;
         Self::validate_skill_storage_destination(&new_dir)?;
 
         // 步骤 0【迁移前备份】: 目录复制（简单可靠），后续可精化为 zip 归档。
@@ -699,11 +703,24 @@ impl SkillService {
                     }
                     Err(_) => match Self::copy_dir_recursive(&src, &dst) {
                         Ok(()) => {
-                            let _ = fs::remove_dir_all(&src);
+                            if let Err(e) = fs::remove_dir_all(&src) {
+                                // 源未删干净：新旧各有一份，提示用户手动清理。
+                                result.errors.push(format!(
+                                    "{directory}: 源目录清理失败（已复制，旧目录保留）: {e}"
+                                ));
+                            }
                             migrated_dirs.push(directory);
                             result.migrated_count += 1;
                         }
-                        Err(e) => result.errors.push(format!("{directory}: {e}")),
+                        Err(e) => {
+                            // 复制失败可能留下半成品目标目录：清理它，避免后续
+                            // sync_to_app_dir 用残缺副本覆盖 app 完整副本。
+                            let clean_msg = match fs::remove_dir_all(&dst) {
+                                Ok(()) => String::new(),
+                                Err(ce) => format!("；清理半成品目标目录失败: {ce}"),
+                            };
+                            result.errors.push(format!("{directory}: {e}{clean_msg}"));
+                        }
                     },
                 }
             }
@@ -2906,6 +2923,49 @@ mod tests {
             snapshot.join("test-skill").join("SKILL.md").exists(),
             "backup snapshot must contain the migrated skill: {:?}",
             snapshot
+        );
+    }
+
+    /// P1-1 回归：迁移目标路径被占用导致 rename 与 copy 都失败时，
+    /// 失败项必须记入 errors，源目录保持不动，且存储位置不得切换
+    /// （避免后续 sync_to_app_dir 用半成品覆盖 app 完整副本）。
+    #[test]
+    fn migrate_storage_keeps_source_and_setting_on_failure() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        crate::settings::set_skill_storage_location(SkillStorageLocation::CcSwitch)
+            .expect("set cc_switch storage");
+
+        let old_dir = SkillService::get_ssot_dir().expect("resolve cc_switch SSOT");
+        let skill_dir = old_dir.join("test-skill");
+        fs::create_dir_all(&skill_dir).expect("create test skill directory");
+        fs::write(skill_dir.join("SKILL.md"), "# Test Skill").expect("write test skill manifest");
+
+        // 让迁移目标路径变成一个普通文件（而非目录）：
+        // rename 失败（dest 已是文件），copy 的 create_dir_all(dest) 也失败 → Err 分支。
+        let new_dir = crate::config::home_dir()
+            .expect("home")
+            .join(".agents")
+            .join("skills");
+        fs::create_dir_all(new_dir.parent().expect("parent")).expect("create parent");
+        fs::write(&new_dir, "blocker").expect("write blocker file at dest path");
+
+        // 目标路径被文件占用：受管创建在迁移任何内容前就应失败（P1-3 行为），
+        // 源目录与设置都必须保持原样。
+        let err = SkillService::migrate_storage(SkillStorageLocation::Unified)
+            .expect_err("migration must fail when dest path is blocked by a file");
+        assert!(
+            err.to_string().contains("File exists") || err.to_string().contains("AlreadyExists"),
+            "error should mention the blocked destination: {err}"
+        );
+        assert!(
+            skill_dir.join("SKILL.md").exists(),
+            "source skill must remain untouched after failure"
+        );
+        assert_eq!(
+            crate::settings::get_skill_storage_location(),
+            SkillStorageLocation::CcSwitch,
+            "location must not switch when migration fails early"
         );
     }
 }

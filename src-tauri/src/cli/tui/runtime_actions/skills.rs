@@ -168,14 +168,33 @@ pub(super) fn set_storage_location(
     ctx: &mut RuntimeActionContext<'_>,
     location: SkillStorageLocation,
 ) -> Result<(), AppError> {
-    SkillService::migrate_storage(location)?;
+    let result = SkillService::migrate_storage(location)?;
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
-    ctx.app.push_toast(
-        texts::tui_toast_skills_storage_location_set(texts::tui_skills_storage_location_name(
-            location,
-        )),
-        ToastKind::Success,
-    );
+    let name = texts::tui_skills_storage_location_name(location);
+    if result.errors.is_empty() {
+        let msg = if result.skipped_count > 0 {
+            format!(
+                "{}（{} 个跳过）",
+                texts::tui_toast_skills_storage_location_set(&name),
+                result.skipped_count
+            )
+        } else {
+            texts::tui_toast_skills_storage_location_set(&name)
+        };
+        ctx.app.push_toast(msg, ToastKind::Success);
+    } else {
+        let first = result.errors.first().cloned().unwrap_or_default();
+        ctx.app.push_toast(
+            format!(
+                "{}：{} 个失败（{} 个跳过），已尝试清理半成品。首条错误: {}",
+                texts::tui_toast_skills_storage_location_set(&name),
+                result.errors.len(),
+                result.skipped_count,
+                first
+            ),
+            ToastKind::Warning,
+        );
+    }
     Ok(())
 }
 
