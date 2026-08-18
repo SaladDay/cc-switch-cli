@@ -4,14 +4,16 @@
 //! 失败时不写标记，下一次启动自动重试。
 
 use crate::codex_config::{
-    extract_codex_experimental_bearer_token, get_codex_config_dir, read_codex_config_text,
-    read_codex_live_settings, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+    extract_codex_experimental_bearer_token, get_codex_config_dir, get_codex_config_path,
+    read_codex_config_text, read_codex_live_settings, validate_config_toml,
+    CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
 };
 use crate::codex_state_db::codex_state_db_paths;
 #[cfg(test)]
 use crate::codex_state_db::CODEX_STATE_DB_FILENAME;
 use crate::config::{
-    atomic_write, copy_file, create_managed_config_parent_dirs, get_app_config_dir,
+    atomic_write, copy_file, create_managed_config_dir_all, create_managed_config_parent_dirs,
+    get_app_config_dir, write_text_file,
 };
 use crate::database::{is_official_seed_id, run_sqlite_backup_to_completion, Database};
 use crate::error::AppError;
@@ -20,17 +22,31 @@ use crate::settings::{
     CodexThirdPartyHistoryProviderBucketMigration,
 };
 use chrono::{Local, Utc};
-use rusqlite::{backup::Backup, params_from_iter, Connection, OpenFlags};
+use rusqlite::{
+    backup::Backup, params_from_iter, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use toml_edit::DocumentMut;
 
 const MIGRATION_NAME: &str = "codex-history-provider-migration-v2";
+const THREAD_NAME_MIGRATION_NAME: &str = "codex-legacy-thread-name-migration-v1";
+const THREAD_NAME_REPAIR_LOCK_FILE: &str = "codex-thread-name-repair.lock";
+const THREAD_NAME_BACKUP_MARKER_FILE: &str = ".cc-switch-managed-repair";
+const THREAD_NAME_BACKUP_MARKER: &str = "codex-legacy-thread-name-repair-v2\n";
+const THREAD_NAME_INDEX_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const THREAD_NAME_STATE_DB_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const THREAD_NAME_CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
 /// 还原操作自身的备份目录（与迁移备份分开，保持迁移账本目录纯净）。
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
@@ -40,6 +56,64 @@ const STATE_DB_ID_CHUNK: usize = 500;
 /// 串行化官方历史的迁移与还原：开启迁移和关闭还原可能先后触发，
 /// 需要避免对同一批 jsonl / state DB 双向并发改写。
 static CODEX_OFFICIAL_HISTORY_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Debug)]
+struct ThreadNameRepairLock(fs::File);
+
+impl Drop for ThreadNameRepairLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn acquire_thread_name_repair_lock() -> Result<ThreadNameRepairLock, AppError> {
+    let config_dir = get_app_config_dir();
+    create_managed_config_dir_all(&config_dir)?;
+    let path = config_dir.join(THREAD_NAME_REPAIR_LOCK_FILE);
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let file = options
+            .open(&path)
+            .map_err(|error| AppError::io(&path, error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| AppError::io(&path, error))?;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err(AppError::InvalidInput(format!(
+                "Codex thread name repair lock is not a private regular file: {}",
+                path.display()
+            )));
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| AppError::io(&path, error))?;
+        file.lock().map_err(|error| AppError::io(&path, error))?;
+        return Ok(ThreadNameRepairLock(file));
+    }
+    #[cfg(not(unix))]
+    {
+        let file = options
+            .open(&path)
+            .map_err(|error| AppError::io(&path, error))?;
+        if !file
+            .metadata()
+            .map_err(|error| AppError::io(&path, error))?
+            .is_file()
+        {
+            return Err(AppError::InvalidInput(format!(
+                "Codex thread name repair lock is not a regular file: {}",
+                path.display()
+            )));
+        }
+        file.lock().map_err(|error| AppError::io(&path, error))?;
+        Ok(ThreadNameRepairLock(file))
+    }
+}
 
 fn lock_codex_official_history_op() -> std::sync::MutexGuard<'static, ()> {
     CODEX_OFFICIAL_HISTORY_OP_LOCK
@@ -115,6 +189,69 @@ pub struct CodexHistoryProviderBucketMigrationOutcome {
 pub struct CodexProviderTemplateBucketMigrationOutcome {
     pub migrated_provider_ids: Vec<String>,
     pub skipped_reason: Option<String>,
+}
+
+pub fn repair_codex_legacy_thread_names(apply: bool) -> Result<usize, AppError> {
+    let _repair_lock = apply.then(acquire_thread_name_repair_lock).transpose()?;
+    let codex_dir = get_codex_config_dir();
+    let config_text = read_codex_config_text_for_repair()?;
+    validate_config_toml(&config_text)?;
+    let backup_root = migration_backup_root(THREAD_NAME_MIGRATION_NAME);
+    let db_paths = codex_state_db_paths(&codex_dir, &config_text);
+    if apply {
+        let mut preflight_errors = Vec::new();
+        for db_path in &db_paths {
+            if let Err(error) =
+                repair_codex_state_db_legacy_thread_names(db_path, &codex_dir, &backup_root, false)
+            {
+                preflight_errors.push(format!("{}: {error}", db_path.display()));
+            }
+        }
+        if !preflight_errors.is_empty() {
+            return Err(AppError::Message(format!(
+                "Codex thread name repair preflight failed; no repair was applied: {}",
+                preflight_errors.join("; ")
+            )));
+        }
+    }
+    let mut migrated = 0;
+    let mut errors = Vec::new();
+    for db_path in db_paths {
+        match repair_codex_state_db_legacy_thread_names(&db_path, &codex_dir, &backup_root, apply) {
+            Ok(Some(changed)) => migrated += changed,
+            Ok(None) => {}
+            Err(error) => errors.push(format!("{}: {error}", db_path.display())),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(AppError::Message(format!(
+            "Codex thread name repair failed after repairing {migrated} row(s); each committed database remains independently backed up: {}",
+            errors.join("; ")
+        )));
+    }
+    Ok(migrated)
+}
+
+fn read_codex_config_text_for_repair() -> Result<String, AppError> {
+    let path = get_codex_config_path();
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(AppError::io(&path, error)),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(AppError::InvalidInput(format!(
+            "Codex config must be a regular non-symlink file: {}",
+            path.display()
+        )));
+    }
+    let (bytes, _) = read_bounded_regular_file(&path, THREAD_NAME_CONFIG_MAX_BYTES)?;
+    String::from_utf8(bytes).map_err(|_| {
+        AppError::InvalidInput(format!(
+            "Codex config is not valid UTF-8: {}",
+            path.display()
+        ))
+    })
 }
 
 pub fn maybe_migrate_codex_third_party_history_provider_bucket(
@@ -790,7 +927,7 @@ fn migration_backup_root(migration_name: &str) -> PathBuf {
     get_app_config_dir()
         .join("backups")
         .join(migration_name)
-        .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
+        .join(Local::now().format("%Y%m%d_%H%M%S_%f").to_string())
 }
 
 fn is_known_cc_switch_legacy_codex_model_provider_id(provider_id: &str) -> bool {
@@ -1545,6 +1682,378 @@ fn migrate_codex_state_db_provider_bucket(
     Ok(changed)
 }
 
+fn repair_codex_state_db_legacy_thread_names(
+    db_path: &Path,
+    codex_dir: &Path,
+    backup_root: &Path,
+    apply: bool,
+) -> Result<Option<usize>, AppError> {
+    let db_metadata = match fs::symlink_metadata(db_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::io(db_path, error)),
+    };
+    if !db_metadata.is_file() || db_metadata.file_type().is_symlink() {
+        return Err(AppError::InvalidInput(format!(
+            "Codex state DB must be a regular non-symlink file: {}",
+            db_path.display()
+        )));
+    }
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let index_path = codex_dir.join("session_index.jsonl");
+    let index_metadata = match fs::symlink_metadata(&index_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::io(&index_path, error)),
+    };
+    if !index_metadata.is_file() || index_metadata.file_type().is_symlink() {
+        return Err(AppError::InvalidInput(format!(
+            "Codex session index must be a regular non-symlink file: {}",
+            index_path.display()
+        )));
+    }
+
+    let db_identity = codex_state_db_identity(db_path)?;
+    let mut conn = open_codex_state_db_for_repair(db_path, apply)?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| AppError::Database(format!("设置 Codex state DB busy_timeout 失败: {e}")))?;
+    if !Database::table_exists(&conn, "threads")?
+        || !Database::has_column(&conn, "threads", "id")?
+        || !Database::has_column(&conn, "threads", "name")?
+        || !Database::has_column(&conn, "threads", "history_mode")?
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Codex state DB threads schema must contain id, name, and history_mode: {}",
+            db_path.display()
+        )));
+    }
+    ensure_codex_state_db_backup_is_bounded(&conn, db_path)?;
+    ensure_codex_threads_id_lookup(&conn, db_path)?;
+    let data_version = codex_state_db_data_version(&conn)?;
+
+    let (snapshot, digest) = read_codex_session_index(&index_path)?;
+    let mut desired = BTreeMap::<String, Option<String>>::new();
+    for line in snapshot.split(|byte| *byte == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        if line.len() > crate::session_manager::providers::utils::MAX_METADATA_LINE_BYTES {
+            return Err(AppError::InvalidInput(format!(
+                "Codex session index contains an oversized record: {}",
+                index_path.display()
+            )));
+        }
+        let value: Value = serde_json::from_slice(line).map_err(|_| {
+            AppError::InvalidInput(format!(
+                "Codex session index contains invalid JSON: {}",
+                index_path.display()
+            ))
+        })?;
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!(
+                    "Codex session index record is missing id: {}",
+                    index_path.display()
+                ))
+            })?;
+        let name = match value.get("thread_name") {
+            Some(Value::String(name)) if !name.trim().is_empty() => Some(name.clone()),
+            Some(Value::String(_)) | Some(Value::Null) => None,
+            _ => {
+                return Err(AppError::InvalidInput(format!(
+                    "Codex session index record is missing thread_name: {}",
+                    index_path.display()
+                )))
+            }
+        };
+        desired.insert(id.to_string(), name);
+    }
+    verify_codex_session_index_digest(&index_path, &digest)?;
+
+    let mut actions = Vec::new();
+    let mut stmt = conn
+        .prepare("SELECT name FROM threads WHERE id = ?1 AND history_mode = 'paginated'")
+        .map_err(|e| AppError::Database(format!("读取 Codex paginated thread 失败: {e}")))?;
+    for (id, source_value) in &desired {
+        let Some(value) = source_value else { continue };
+        let current: Option<Option<String>> = stmt
+            .query_row([id], |row| row.get(0))
+            .optional()
+            .map_err(|e| AppError::Database(format!("读取 Codex thread name 失败: {e}")))?;
+        let Some(current) = current else { continue };
+        if current.as_deref().unwrap_or("").is_empty() {
+            actions.push((id.clone(), value.clone()));
+        }
+    }
+    drop(stmt);
+
+    verify_codex_state_db_identity(db_path, &db_identity)?;
+    if codex_state_db_data_version(&conn)? != data_version {
+        return Err(AppError::Message(format!(
+            "Codex state DB changed while scanning thread names: {}",
+            db_path.display()
+        )));
+    }
+    if !apply || actions.is_empty() {
+        return Ok(Some(actions.len()));
+    }
+
+    backup_codex_state_db(db_path, codex_dir, backup_root, &conn)?;
+    write_thread_name_backup_marker(backup_root)?;
+    verify_codex_session_index_digest(&index_path, &digest)?;
+    verify_codex_state_db_identity(db_path, &db_identity)?;
+    if codex_state_db_data_version(&conn)? != data_version {
+        return Err(AppError::Message(format!(
+            "Codex state DB changed during thread name backup: {}",
+            db_path.display()
+        )));
+    }
+
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| AppError::Database(format!("开启 Codex thread name repair 事务失败: {e}")))?;
+    if codex_state_db_data_version(&tx)? != data_version {
+        return Err(AppError::Message(format!(
+            "Codex state DB changed before thread name repair: {}",
+            db_path.display()
+        )));
+    }
+    let mut changed = 0;
+    for (id, value) in &actions {
+        changed += tx
+            .execute(
+                "UPDATE threads SET name = ?2 WHERE id = ?1 AND history_mode = 'paginated' AND COALESCE(name, '') = ''",
+                (id, value),
+            )
+            .map_err(|e| AppError::Database(format!("修复 Codex thread name 失败: {e}")))?;
+    }
+    verify_codex_session_index_digest(&index_path, &digest)?;
+    verify_codex_state_db_identity(db_path, &db_identity)?;
+    tx.commit()
+        .map_err(|e| AppError::Database(format!("提交 Codex thread name repair 事务失败: {e}")))?;
+
+    if let Err(error) = verify_codex_session_index_digest(&index_path, &digest) {
+        return Err(AppError::Message(format!(
+            "Codex thread names were committed to a snapshot, but session_index.jsonl changed immediately after commit: {error}"
+        )));
+    }
+    if let Err(error) = verify_codex_state_db_identity(db_path, &db_identity) {
+        return Err(AppError::Message(format!(
+            "Codex thread names were committed to a detached state DB snapshot: {error}"
+        )));
+    }
+
+    if let Err(error) = cleanup_codex_thread_name_backups(
+        backup_root,
+        crate::settings::effective_backup_retain_count()
+            .max(1)
+            .saturating_sub(1),
+    ) {
+        log::warn!("Failed to prune old Codex thread name repair backups: {error}");
+    }
+    Ok(Some(changed))
+}
+
+fn open_codex_state_db_for_repair(path: &Path, apply: bool) -> Result<Connection, AppError> {
+    let flags = if apply {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    } else {
+        if ["-wal", "-journal", "-shm"].iter().any(|suffix| {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            PathBuf::from(sidecar).exists()
+        }) {
+            return Err(AppError::InvalidInput(format!(
+                "Codex dry-run refuses a database with an unmerged WAL/journal: {}",
+                path.display()
+            )));
+        }
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI
+    } | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let target = if apply {
+        path.to_string_lossy().into_owned()
+    } else {
+        sqlite_immutable_uri(path)
+    };
+    Connection::open_with_flags(target, flags)
+        .map_err(|e| AppError::Database(format!("打开 Codex state DB 失败: {e}")))
+}
+
+fn sqlite_immutable_uri(path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for byte in path.to_string_lossy().as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'\\' | b'.' | b'_' | b'-') {
+            uri.push(*byte as char);
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
+}
+
+fn ensure_codex_threads_id_lookup(conn: &Connection, db_path: &Path) -> Result<(), AppError> {
+    let detail: String = conn
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT name FROM threads WHERE id = ?1 AND history_mode = 'paginated'",
+            [""],
+            |row| row.get(3),
+        )
+        .map_err(|e| AppError::Database(format!("检查 Codex threads.id 索引失败: {e}")))?;
+    if !detail.contains("USING") {
+        return Err(AppError::InvalidInput(format!(
+            "Codex state DB requires an index for threads.id: {}",
+            db_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn codex_state_db_data_version(conn: &Connection) -> Result<i64, AppError> {
+    conn.query_row("PRAGMA data_version", [], |row| row.get(0))
+        .map_err(|e| AppError::Database(format!("读取 Codex state DB data_version 失败: {e}")))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CodexStateDbIdentity {
+    canonical_path: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume: Option<u32>,
+    #[cfg(windows)]
+    file_index: Option<u64>,
+}
+
+fn codex_state_db_identity(path: &Path) -> Result<CodexStateDbIdentity, AppError> {
+    let canonical_path = fs::canonicalize(path).map_err(|e| AppError::io(path, e))?;
+    let metadata = fs::metadata(&canonical_path).map_err(|e| AppError::io(path, e))?;
+    Ok(CodexStateDbIdentity {
+        canonical_path,
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(windows)]
+        volume: metadata.volume_serial_number(),
+        #[cfg(windows)]
+        file_index: metadata.file_index(),
+    })
+}
+
+fn verify_codex_state_db_identity(
+    path: &Path,
+    expected: &CodexStateDbIdentity,
+) -> Result<(), AppError> {
+    if &codex_state_db_identity(path)? != expected {
+        return Err(AppError::Message(format!(
+            "Codex state DB was replaced during thread name migration: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn read_codex_session_index(path: &Path) -> Result<(Vec<u8>, [u8; 32]), AppError> {
+    read_bounded_regular_file(path, THREAD_NAME_INDEX_MAX_BYTES)
+}
+
+fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<(Vec<u8>, [u8; 32]), AppError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path).map_err(|e| AppError::io(path, e))?;
+    let metadata = file.metadata().map_err(|e| AppError::io(path, e))?;
+    if !metadata.is_file() {
+        return Err(AppError::InvalidInput(format!(
+            "Codex session index must be a regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > max_bytes {
+        return Err(AppError::InvalidInput(format!(
+            "File exceeds {} MiB: {}",
+            max_bytes / (1024 * 1024),
+            path.display()
+        )));
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut snapshot = Vec::with_capacity(metadata.len() as usize);
+    let mut total = 0_u64;
+    loop {
+        let read = file.read(&mut buffer).map_err(|e| AppError::io(path, e))?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > max_bytes {
+            return Err(AppError::InvalidInput(format!(
+                "File exceeds {} MiB: {}",
+                max_bytes / (1024 * 1024),
+                path.display()
+            )));
+        }
+        digest.update(&buffer[..read]);
+        snapshot.extend_from_slice(&buffer[..read]);
+    }
+    Ok((snapshot, digest.finalize().into()))
+}
+
+fn codex_session_index_digest(path: &Path) -> Result<[u8; 32], AppError> {
+    read_codex_session_index(path).map(|(_, digest)| digest)
+}
+
+fn verify_codex_session_index_digest(path: &Path, expected: &[u8; 32]) -> Result<(), AppError> {
+    if &codex_session_index_digest(path)? != expected {
+        return Err(AppError::Message(format!(
+            "Codex session index changed during thread name migration: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_codex_state_db_backup_is_bounded(
+    conn: &Connection,
+    db_path: &Path,
+) -> Result<(), AppError> {
+    ensure_codex_state_db_backup_within(conn, db_path, THREAD_NAME_STATE_DB_MAX_BYTES)
+}
+
+fn ensure_codex_state_db_backup_within(
+    conn: &Connection,
+    db_path: &Path,
+    max_bytes: u64,
+) -> Result<(), AppError> {
+    let page_count: u64 = conn
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .map_err(|e| AppError::Database(format!("读取 Codex state DB page_count 失败: {e}")))?;
+    let page_size: u64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(|e| AppError::Database(format!("读取 Codex state DB page_size 失败: {e}")))?;
+    if page_count.saturating_mul(page_size) > max_bytes {
+        return Err(AppError::InvalidInput(format!(
+            "Codex state DB exceeds {} MiB migration limit: {}",
+            max_bytes / (1024 * 1024),
+            db_path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn placeholders(count: usize) -> String {
     std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
@@ -1599,6 +2108,50 @@ fn backup_codex_state_db(
         )));
     }
     Ok(())
+}
+
+fn cleanup_codex_thread_name_backups(current_root: &Path, keep: usize) -> Result<(), AppError> {
+    let Some(parent) = current_root.parent() else {
+        return Ok(());
+    };
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::io(parent, error)),
+    };
+    let mut generations = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = fs::symlink_metadata(entry.path()).ok()?;
+            (metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && entry.path() != current_root
+                && is_managed_thread_name_backup(&entry.path()))
+            .then_some(entry.path())
+        })
+        .collect::<Vec<_>>();
+    generations.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    for path in generations.into_iter().skip(keep) {
+        fs::remove_dir_all(&path).map_err(|e| AppError::io(&path, e))?;
+    }
+    Ok(())
+}
+
+fn write_thread_name_backup_marker(backup_root: &Path) -> Result<(), AppError> {
+    let marker_path = backup_root.join(THREAD_NAME_BACKUP_MARKER_FILE);
+    create_managed_config_parent_dirs(&marker_path)?;
+    write_text_file(&marker_path, THREAD_NAME_BACKUP_MARKER)
+}
+
+fn is_managed_thread_name_backup(path: &Path) -> bool {
+    let marker_path = path.join(THREAD_NAME_BACKUP_MARKER_FILE);
+    let Ok(metadata) = fs::symlink_metadata(&marker_path) else {
+        return false;
+    };
+    metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && fs::read_to_string(marker_path)
+            .is_ok_and(|contents| contents == THREAD_NAME_BACKUP_MARKER)
 }
 
 fn create_codex_state_backup_file(backup_path: &Path) -> Result<(), AppError> {
@@ -1736,12 +2289,14 @@ fn copy_existing_file(source: &Path, target: &Path) -> Result<(), AppError> {
 }
 
 fn relative_backup_path(path: &Path, root: &Path) -> PathBuf {
-    if let Ok(relative) = path.strip_prefix(root) {
+    let normalized_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if let Ok(relative) = normalized_path.strip_prefix(&normalized_root) {
         return relative.to_path_buf();
     }
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
+    normalized_path.hash(&mut hasher);
     let hash = hasher.finish();
     let file_name = path
         .file_name()
@@ -3872,5 +4427,130 @@ model_provider = "aihubmix"
 
         let ids = collect_source_model_provider_ids(&db).expect("collect ids");
         assert!(!ids.contains("my-local-relay"));
+    }
+    #[test]
+    fn explicit_thread_name_repair_is_dry_run_and_paginated_only() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        fs::write(
+            codex_dir.join("session_index.jsonl"),
+            "{\"id\":\"repair\",\"thread_name\":\"legacy name\"}\n{\"id\":\"full\",\"thread_name\":\"must not change\"}\n{\"id\":\"named\",\"thread_name\":\"must not overwrite\"}\n",
+        )
+        .expect("write index");
+        let state_path = codex_dir.join("state.sqlite");
+        let conn = Connection::open(&state_path).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, history_mode TEXT, archived INTEGER);
+             INSERT INTO threads VALUES
+                ('repair', NULL, 'paginated', 1),
+                ('full', NULL, 'legacy', 0),
+                ('named', 'user name', 'paginated', 0);",
+        )
+        .expect("seed state db");
+        drop(conn);
+        let backup = dir.path().join("backups").join("generation");
+
+        assert_eq!(
+            repair_codex_state_db_legacy_thread_names(&state_path, &codex_dir, &backup, false)
+                .expect("dry run"),
+            Some(1)
+        );
+        assert!(!backup.exists());
+        assert_eq!(
+            repair_codex_state_db_legacy_thread_names(&state_path, &codex_dir, &backup, true)
+                .expect("apply"),
+            Some(1)
+        );
+        let conn = Connection::open(&state_path).expect("reopen state db");
+        let row = |id: &str| -> (Option<String>, i64) {
+            conn.query_row(
+                "SELECT name, archived FROM threads WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read thread")
+        };
+        assert_eq!(row("repair"), (Some("legacy name".to_string()), 1));
+        assert_eq!(row("full"), (None, 0));
+        assert_eq!(row("named"), (Some("user name".to_string()), 0));
+    }
+
+    #[test]
+    fn thread_name_repair_never_changes_nonempty_names() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let index = codex_dir.join("session_index.jsonl");
+        fs::write(&index, "{\"id\":\"one\",\"thread_name\":\"old\"}\n").expect("write index");
+        let state_path = codex_dir.join("state.sqlite");
+        let conn = Connection::open(&state_path).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, history_mode TEXT);
+             INSERT INTO threads VALUES ('one', NULL, 'paginated');",
+        )
+        .expect("seed state db");
+        drop(conn);
+        assert_eq!(
+            repair_codex_state_db_legacy_thread_names(
+                &state_path,
+                &codex_dir,
+                &dir.path().join("backups").join("first"),
+                true,
+            )
+            .expect("initial backfill"),
+            Some(1)
+        );
+        for (generation, source) in [
+            ("renamed", "{\"id\":\"one\",\"thread_name\":\"new\"}\n"),
+            ("tombstone", "{\"id\":\"one\",\"thread_name\":\"\"}\n"),
+        ] {
+            fs::write(&index, source).expect("update index");
+            assert_eq!(
+                repair_codex_state_db_legacy_thread_names(
+                    &state_path,
+                    &codex_dir,
+                    &dir.path().join("backups").join(generation),
+                    true,
+                )
+                .expect("preserve nonempty name"),
+                Some(0)
+            );
+        }
+        let conn = Connection::open(&state_path).expect("reopen state db");
+        let name: String = conn
+            .query_row("SELECT name FROM threads WHERE id = 'one'", [], |row| {
+                row.get(0)
+            })
+            .expect("read preserved name");
+        assert_eq!(name, "old");
+    }
+
+    #[test]
+    fn thread_name_backup_cleanup_never_removes_current_generation() {
+        let dir = tempdir().expect("tempdir");
+        let parent = dir.path().join("repair-backups");
+        let current = parent.join("20260803_120000_000003");
+        let old_a = parent.join("20260803_120000_000001");
+        let old_b = parent.join("20260803_120000_000002");
+        let unknown = parent.join("user-owned");
+        for generation in [&current, &old_a, &old_b] {
+            fs::create_dir_all(generation).expect("create generation");
+        }
+        fs::create_dir_all(&unknown).expect("create unknown directory");
+        for generation in [&old_a, &old_b] {
+            fs::write(
+                generation.join(THREAD_NAME_BACKUP_MARKER_FILE),
+                THREAD_NAME_BACKUP_MARKER,
+            )
+            .expect("mark managed generation");
+        }
+
+        cleanup_codex_thread_name_backups(&current, 0).expect("clean old generations");
+
+        assert!(current.is_dir());
+        assert!(unknown.is_dir());
+        assert!(!old_a.exists());
+        assert!(!old_b.exists());
     }
 }

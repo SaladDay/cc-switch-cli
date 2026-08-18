@@ -581,6 +581,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_sessions_repair_codex_names_as_dry_run_by_default() {
+        let cli = Cli::parse_from(["cc-switch", "sessions", "repair-codex-names"]);
+
+        match cli.command {
+            Some(Commands::Sessions(
+                super::commands::sessions::SessionsCommand::RepairCodexNames { apply },
+            )) => assert!(!apply),
+            _ => panic!("expected sessions repair-codex-names command"),
+        }
+    }
+
+    #[test]
+    fn parses_sessions_repair_codex_names_apply_flag() {
+        let cli = Cli::parse_from(["cc-switch", "sessions", "repair-codex-names", "--apply"]);
+
+        match cli.command {
+            Some(Commands::Sessions(
+                super::commands::sessions::SessionsCommand::RepairCodexNames { apply },
+            )) => assert!(apply),
+            _ => panic!("expected sessions repair-codex-names command"),
+        }
+    }
+
+    #[test]
     fn parses_sessions_list_with_backend_provider_id() {
         let cli = Cli::parse_from(["cc-switch", "sessions", "list", "--provider", "opencode"]);
 
