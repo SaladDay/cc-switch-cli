@@ -4,6 +4,8 @@
 //! either transport receives the same validation and restore guarantees.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::OnceLock;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,22 @@ pub(crate) const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_SYNC_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(crate) const MAX_DEVICE_NAME_LEN: usize = 64;
+
+/// Serialize uploads and downloads across every cloud transport. Separate
+/// WebDAV and S3 locks allowed both to replace the database and Skills SSOT at
+/// the same time.
+pub(crate) fn sync_mutex() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+pub(crate) async fn run_with_sync_lock<T, Fut>(operation: Fut) -> Result<T, AppError>
+where
+    Fut: Future<Output = Result<T, AppError>>,
+{
+    let _guard = sync_mutex().lock().await;
+    operation.await
+}
 
 pub(crate) fn localized(
     key: &'static str,
@@ -427,6 +445,18 @@ pub(crate) fn normalize_device_name(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn webdav_and_s3_share_one_sync_mutex() {
+        let webdav_lock = crate::services::webdav_sync::sync_mutex();
+        let s3_lock = crate::services::s3_sync::sync_mutex();
+        assert!(std::ptr::eq(webdav_lock, s3_lock));
+
+        let guard = webdav_lock.lock().await;
+        assert!(s3_lock.try_lock().is_err());
+        drop(guard);
+        assert!(s3_lock.try_lock().is_ok());
+    }
 
     fn manifest(db_compat_version: Option<u32>) -> SyncManifest {
         SyncManifest {

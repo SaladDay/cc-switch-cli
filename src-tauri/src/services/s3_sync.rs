@@ -1,8 +1,6 @@
 //! S3-compatible implementation of the shared v2 cloud-sync protocol.
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::sync::OnceLock;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -14,10 +12,10 @@ use crate::settings::{
 
 use super::s3::{self, S3Credentials};
 use super::sync_protocol::{
-    apply_snapshot_with_restore_guard, build_local_snapshot, localized, sha256_hex,
-    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
-    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
-    PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    apply_snapshot_with_restore_guard, build_local_snapshot, localized, run_with_sync_lock,
+    sha256_hex, validate_artifact_size_limit, validate_manifest_compat, verify_artifact,
+    ArtifactMeta, RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES,
+    MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 use super::webdav_sync::SyncDecision;
 
@@ -44,17 +42,9 @@ pub struct S3RemoteInfo {
 
 pub struct S3SyncService;
 
-fn sync_mutex() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-async fn run_with_sync_lock<T, Fut>(operation: Fut) -> Result<T, AppError>
-where
-    Fut: Future<Output = Result<T, AppError>>,
-{
-    let _guard = sync_mutex().lock().await;
-    operation.await
+#[cfg(test)]
+pub(crate) fn sync_mutex() -> &'static tokio::sync::Mutex<()> {
+    super::sync_protocol::sync_mutex()
 }
 
 impl S3SyncService {

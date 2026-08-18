@@ -388,7 +388,7 @@ fn daemon_owned_pidfile_can_initialize_and_run_v16_migration_without_self_deadlo
     let conn = db.conn.lock().expect("lock migrated database");
     assert_eq!(
         Database::get_user_version(&conn).expect("schema version"),
-        16
+        SCHEMA_VERSION
     );
     let stale_rows: i64 = conn
         .query_row(
@@ -462,7 +462,7 @@ fn init_refuses_v16_migration_while_an_external_process_holds_the_database() {
     assert_eq!(
         Database::get_user_version(&migrated.conn.lock().expect("migrated database lock"))
             .expect("migrated schema version"),
-        16
+        SCHEMA_VERSION
     );
 }
 
@@ -907,6 +907,23 @@ fn schema_create_tables_include_usage_daily_rollups() {
         normalize_default(&skill_enabled_hermes.default).as_deref(),
         Some("0")
     );
+}
+
+#[test]
+fn schema_create_tables_include_session_usage_dedup_ledger() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    assert!(Database::table_exists(&conn, "session_usage_dedup").expect("check dedup table"));
+    assert!(index_exists(&conn, "idx_session_usage_dedup_semantic"));
+
+    conn.execute(
+        "INSERT INTO session_usage_dedup
+         (data_source, request_id, semantic_id, has_entry_id)
+         VALUES ('pi_session', 'request', 'semantic', 1)",
+        [],
+    )
+    .expect("insert dedup row");
 }
 
 #[test]
@@ -1964,6 +1981,21 @@ fn schema_migration_v15_resets_only_codex_session_usage() {
         )
         .expect("read post-migration counts");
     assert_eq!(counts, (0, 1, 0, 1));
+}
+
+#[test]
+fn schema_migration_v16_adds_session_usage_dedup_ledger() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::set_user_version(&conn, 16).expect("set user_version=16");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v16 to current");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        SCHEMA_VERSION
+    );
+    assert!(Database::table_exists(&conn, "session_usage_dedup").expect("check dedup table"));
+    assert!(index_exists(&conn, "idx_session_usage_dedup_semantic"));
 }
 
 #[test]
@@ -3133,8 +3165,8 @@ fn model_pricing_seeds_gpt_5_6_family_and_aliases() {
 
     let expected = [
         ("gpt-5.6-sol", "5", "30", "0.50", "6.25"),
-        ("gpt-5.6-terra", "2.50", "15", "0.25", "3.125"),
-        ("gpt-5.6-luna", "1", "6", "0.10", "1.25"),
+        ("gpt-5.6-terra", "2", "12", "0.20", "2.50"),
+        ("gpt-5.6-luna", "0.20", "1.20", "0.02", "0.25"),
         ("gpt-5.6", "5", "30", "0.50", "6.25"),
         ("gpt-5.6-high", "5", "30", "0.50", "6.25"),
     ];
@@ -3169,16 +3201,30 @@ fn model_pricing_seeds_synced_upstream_catalog() {
 
     let expected = [
         ("claude-fable-5", "10", "50", "1.00", "12.50"),
+        ("claude-opus-4-6", "5", "25", "0.50", "6.25"),
+        ("claude-sonnet-4-6", "3", "15", "0.30", "3.75"),
+        ("gpt-5.6-terra", "2", "12", "0.20", "2.50"),
+        ("gpt-5.6-luna", "0.20", "1.20", "0.02", "0.25"),
+        ("gpt-5.3-codex-spark", "1.75", "14", "0.175", "0"),
+        ("gemini-3.7-flash", "0.75", "3.75", "0.075", "0"),
         ("gemini-3.6-flash", "1.50", "7.50", "0.15", "0"),
+        ("gemini-3.5-flash-lite", "0.30", "2.50", "0.03", "0"),
         ("step-3.7-flash", "0.19", "1.13", "0.04", "0"),
         ("doubao-seed-2-1-pro", "0.84", "4.2", "0.17", "0"),
-        ("deepseek-v4-pro", "0.435", "0.87", "0.003625", "0"),
+        ("deepseek-v4-flash-0731", "0.44", "1.32", "0.014", "0"),
+        ("deepseek-v4-pro", "1.32", "3.96", "0.044", "0"),
+        ("kimi-k2.7-code-highspeed", "1.90", "8.00", "0.38", "0"),
         ("kimi-k3", "3.00", "15.00", "0.30", "0"),
         ("minimax-m3", "0.30", "1.20", "0.06", "0"),
         ("glm-5.2", "1.4", "4.4", "0.26", "0"),
+        ("glm-5-turbo", "1.2", "4", "0.24", "0"),
+        ("glm-5v-turbo", "1.2", "4", "0.24", "0"),
         ("mimo-v2.5-pro", "0.435", "0.87", "0.0036", "0"),
+        ("qwen3.8-max", "2", "6", "0.25", "2.50"),
         ("qwen3.7-plus", "0.40", "1.60", "0.08", "0"),
-        ("grok-4.5", "2", "6", "0.50", "0"),
+        ("qwen3.6-flash", "0.1875", "1.125", "0.0375", "0"),
+        ("grok-4.6", "2", "6", "0.50", "0"),
+        ("grok-4.5", "2", "6", "0.30", "0"),
         ("mistral-small-4", "0.10", "0.30", "0.01", "0"),
     ];
 
@@ -3235,6 +3281,27 @@ fn model_pricing_repairs_synced_values_without_overwriting_custom_prices() {
             [],
         )
         .expect("set custom Qwen pricing");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '1.68',
+                 output_cost_per_million = '3.36',
+                 cache_read_cost_per_million = '0.14'
+             WHERE model_id = 'deepseek-v4-pro'",
+            [],
+        )
+        .expect("restore historical DeepSeek V4 Pro pricing");
+        conn.execute(
+            "UPDATE model_pricing SET cache_read_cost_per_million = '0.50'
+             WHERE model_id = 'grok-4.5'",
+            [],
+        )
+        .expect("restore old Grok 4.5 cached price");
+        conn.execute(
+            "UPDATE model_pricing SET input_cost_per_million = '9'
+             WHERE model_id = 'deepseek-v4-flash-0731'",
+            [],
+        )
+        .expect("set custom DeepSeek alias pricing");
     }
 
     db.ensure_model_pricing_seeded()
@@ -3278,6 +3345,43 @@ fn model_pricing_repairs_synced_values_without_overwriting_custom_prices() {
         ("9".to_string(), "0".to_string()),
         "custom pricing must not be replaced"
     );
+
+    let deepseek: (String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = 'deepseek-v4-pro'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("query repaired DeepSeek pricing");
+    assert_eq!(
+        deepseek,
+        ("1.32".to_string(), "3.96".to_string(), "0.044".to_string())
+    );
+
+    let grok_cache_read: String = conn
+        .query_row(
+            "SELECT cache_read_cost_per_million FROM model_pricing
+             WHERE model_id = 'grok-4.5'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query repaired Grok 4.5 pricing");
+    assert_eq!(grok_cache_read, "0.30");
+
+    let custom_deepseek: String = conn
+        .query_row(
+            "SELECT input_cost_per_million FROM model_pricing
+             WHERE model_id = 'deepseek-v4-flash-0731'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query custom DeepSeek alias pricing");
+    assert_eq!(
+        custom_deepseek, "9",
+        "custom alias pricing must be preserved"
+    );
 }
 
 #[test]
@@ -3293,11 +3397,24 @@ fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
         .expect("restore upstream zero cache-write seed");
         conn.execute(
             "UPDATE model_pricing
-             SET input_cost_per_million = '9', cache_creation_cost_per_million = '0'
+             SET input_cost_per_million = '2.50',
+                 output_cost_per_million = '15',
+                 cache_read_cost_per_million = '0.25',
+                 cache_creation_cost_per_million = '0'
              WHERE model_id = 'gpt-5.6-terra'",
             [],
         )
-        .expect("set custom Terra pricing");
+        .expect("restore pre-v3.20 Terra pricing");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '1',
+                 output_cost_per_million = '6',
+                 cache_read_cost_per_million = '0.10',
+                 cache_creation_cost_per_million = '1.25'
+             WHERE model_id = 'gpt-5.6-luna'",
+            [],
+        )
+        .expect("restore pre-v3.20 Luna pricing");
     }
 
     db.ensure_model_pricing_seeded()
@@ -3314,6 +3431,59 @@ fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
         .expect("query repaired Sol pricing");
     assert_eq!(sol_cache_write, "6.25");
 
+    let terra: (String, String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'gpt-5.6-terra'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("query repaired Terra pricing");
+    assert_eq!(
+        terra,
+        (
+            "2".to_string(),
+            "12".to_string(),
+            "0.20".to_string(),
+            "2.50".to_string()
+        )
+    );
+    let luna: (String, String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'gpt-5.6-luna'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("query repaired Luna pricing");
+    assert_eq!(
+        luna,
+        (
+            "0.20".to_string(),
+            "1.20".to_string(),
+            "0.02".to_string(),
+            "0.25".to_string()
+        )
+    );
+    drop(conn);
+
+    let custom_db = Database::memory().expect("create custom-price db");
+    {
+        let conn = custom_db.conn.lock().expect("lock custom conn");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '9', cache_creation_cost_per_million = '0'
+             WHERE model_id = 'gpt-5.6-terra'",
+            [],
+        )
+        .expect("set custom Terra pricing");
+    }
+    custom_db
+        .ensure_model_pricing_seeded()
+        .expect("repair catalog with custom Terra price");
+    let conn = custom_db.conn.lock().expect("lock custom conn");
     let terra_custom: (String, String) = conn
         .query_row(
             "SELECT input_cost_per_million, cache_creation_cost_per_million
