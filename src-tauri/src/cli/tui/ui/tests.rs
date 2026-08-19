@@ -4079,6 +4079,88 @@ fn provider_form_fields_show_dashed_divider_before_common_snippet() {
 }
 
 #[test]
+fn add_form_template_chips_keep_selected_visible_when_narrow() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    // Select the last sponsor preset, which is well beyond a 40-column viewport.
+    form.template_idx = form.template_count().saturating_sub(1);
+    app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(form));
+
+    let data = minimal_data(&app.app_type);
+    // 100 columns gives the template chip viewport enough room to show
+    // several chips at once while still requiring horizontal scrolling to
+    // reach the last sponsor preset.
+    let buf = render_with_size(&app, &data, 100, 20);
+
+    let selected_label = "* DDS";
+    let mut found = false;
+    for y in 0..buf.area.height {
+        let line = line_at(&buf, y);
+        if line.contains(selected_label) {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "selected template chip should remain visible in a narrow viewport"
+    );
+}
+
+#[test]
+fn add_form_template_chips_scroll_right_reveals_hidden_chip() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(
+        crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
+    ));
+
+    let data = minimal_data(&app.app_type);
+    // 100 columns leaves a comfortable template viewport while still being
+    // narrow enough that the last sponsor chip is initially off-screen.
+    let buf = render_with_size(&app, &data, 100, 20);
+
+    let mut chips_y = None;
+    for y in 0..buf.area.height {
+        let line = line_at(&buf, y);
+        if line.contains("Custom") && line.contains("Claude Official") {
+            chips_y = Some(y);
+            break;
+        }
+    }
+    let chips_y = chips_y.expect("template chips row missing from add form");
+    let initial = line_at(&buf, chips_y);
+    assert!(
+        initial.contains("Custom") && initial.contains("Claude Official"),
+        "initial viewport should show the first chips, got: {initial}"
+    );
+    assert!(
+        !initial.contains("* DDS"),
+        "last sponsor chip should be off-screen initially"
+    );
+
+    // Move selection to the last chip; rendering should scroll it into view.
+    if let Some(crate::cli::tui::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+        form.template_idx = form.template_count().saturating_sub(1);
+    }
+    let buf = render_with_size(&app, &data, 100, 20);
+    let scrolled = line_at(&buf, chips_y);
+    assert!(
+        scrolled.contains("* DDS"),
+        "scrolled viewport should reveal the selected chip, got: {scrolled}"
+    );
+}
+
+#[test]
 fn hermes_models_overlay_separates_models_with_dashed_divider() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
