@@ -106,6 +106,43 @@ fn normalize_launch_settings(provider_id: &str, settings: &Value) -> Result<Valu
     Ok(normalized_settings)
 }
 
+/// Clear the alternate Claude auth field by setting it to an empty string.
+///
+/// When a provider only sets one of `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`,
+/// Claude Code may otherwise fall back to a stale value from the user's global
+/// `~/.claude/settings.json` for the alternate field. Writing an explicit empty
+/// value in the temporary settings file prevents that fallback without making
+/// both auth fields non-empty (which would trigger Claude Code's "both set"
+/// warning).
+pub(crate) fn clear_alternate_claude_auth_field(settings: &mut Value) {
+    let Some(env) = settings.get_mut("env").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+
+    let has_auth_token = env
+        .get(crate::provider::CLAUDE_AUTH_TOKEN_ENV_KEY)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    let has_api_key = env
+        .get(crate::provider::CLAUDE_API_KEY_ENV_KEY)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+
+    if has_auth_token && !has_api_key {
+        env.insert(
+            crate::provider::CLAUDE_API_KEY_ENV_KEY.to_string(),
+            Value::String(String::new()),
+        );
+    } else if has_api_key && !has_auth_token {
+        env.insert(
+            crate::provider::CLAUDE_AUTH_TOKEN_ENV_KEY.to_string(),
+            Value::String(String::new()),
+        );
+    }
+}
+
 pub(crate) fn resolve_claude_binary() -> Result<PathBuf, AppError> {
     which::which("claude").map_err(|_| {
         AppError::localized(
@@ -525,6 +562,49 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn clear_alternate_auth_field_clears_api_key_when_only_auth_token_is_set() {
+        let mut settings = json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-glm",
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        });
+        clear_alternate_claude_auth_field(&mut settings);
+        let env = settings.get("env").unwrap();
+        assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").unwrap(), "sk-glm");
+        assert_eq!(env.get("ANTHROPIC_API_KEY").unwrap(), "");
+    }
+
+    #[test]
+    fn clear_alternate_auth_field_clears_auth_token_when_only_api_key_is_set() {
+        let mut settings = json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "sk-kimi",
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        });
+        clear_alternate_claude_auth_field(&mut settings);
+        let env = settings.get("env").unwrap();
+        assert_eq!(env.get("ANTHROPIC_API_KEY").unwrap(), "sk-kimi");
+        assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").unwrap(), "");
+    }
+
+    #[test]
+    fn clear_alternate_auth_field_does_nothing_when_both_fields_present() {
+        let mut settings = json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-glm",
+                "ANTHROPIC_API_KEY": "sk-kimi",
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        });
+        clear_alternate_claude_auth_field(&mut settings);
+        let env = settings.get("env").unwrap();
+        assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").unwrap(), "sk-glm");
+        assert_eq!(env.get("ANTHROPIC_API_KEY").unwrap(), "sk-kimi");
     }
 
     #[test]
