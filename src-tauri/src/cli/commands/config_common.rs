@@ -207,36 +207,6 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
     }
 }
 
-/// Detects whether a canonicalized Claude common-config snippet sets
-/// `env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` to a truthy value, which
-/// silently disables Claude Code's Monitor tool. No-op for any app type
-/// other than Claude, since the env var only affects Claude Code.
-pub(crate) fn common_config_snippet_disables_monitor_traffic(
-    app_type: &AppType,
-    canonical_snippet: &str,
-) -> bool {
-    if *app_type != AppType::Claude {
-        return false;
-    }
-
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(canonical_snippet) else {
-        return false;
-    };
-
-    let Some(raw) = value.get("env").and_then(|env| {
-        env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-    }) else {
-        return false;
-    };
-
-    match raw {
-        serde_json::Value::Number(n) => n.as_i64() == Some(1),
-        serde_json::Value::Bool(b) => *b,
-        serde_json::Value::String(s) => s == "1" || s == "true",
-        _ => false,
-    }
-}
-
 fn print_monitor_traffic_warning_if_disabled(disables_monitor_traffic: bool) {
     if disables_monitor_traffic {
         println!(
@@ -275,7 +245,7 @@ fn set(
     )?;
     let snippet = canonical_common_snippet(app_type.clone(), &raw)?.unwrap_or_default();
     let disables_monitor_traffic =
-        common_config_snippet_disables_monitor_traffic(&app_type, &snippet);
+        ProviderService::common_config_snippet_disables_monitor_traffic(&app_type, &snippet);
 
     let state = get_state()?;
     ProviderService::set_common_config_snippet(&state, app_type.clone(), Some(snippet))?;
@@ -339,7 +309,7 @@ fn extract(
     if save {
         let snippet = canonical_common_snippet(app_type.clone(), &extracted)?.unwrap_or_default();
         let disables_monitor_traffic =
-            common_config_snippet_disables_monitor_traffic(&app_type, &snippet);
+            ProviderService::common_config_snippet_disables_monitor_traffic(&app_type, &snippet);
         ProviderService::set_common_config_snippet(
             &state,
             app_type.clone(),
@@ -474,55 +444,6 @@ mod tests {
 
     fn seed_current_codex_provider() -> (TempDir, EnvGuard) {
         seed_current_codex_provider_with_meta(None)
-    }
-
-    #[test]
-    fn disables_monitor_traffic_detects_truthy_values() {
-        for truthy in [
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#,
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":true}}"#,
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1"}}"#,
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"true"}}"#,
-        ] {
-            assert!(
-                common_config_snippet_disables_monitor_traffic(&AppType::Claude, truthy),
-                "expected truthy detection for snippet: {truthy}"
-            );
-        }
-    }
-
-    #[test]
-    fn disables_monitor_traffic_ignores_falsy_or_absent_values() {
-        for falsy in [
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":0}}"#,
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":false}}"#,
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"0"}}"#,
-            r#"{"env":{"ANTHROPIC_BASE_URL":"https://provider.example"}}"#,
-            r#"{"alwaysThinkingEnabled":false}"#,
-            "not valid json",
-        ] {
-            assert!(
-                !common_config_snippet_disables_monitor_traffic(&AppType::Claude, falsy),
-                "expected no detection for snippet: {falsy}"
-            );
-        }
-    }
-
-    #[test]
-    fn disables_monitor_traffic_is_noop_for_non_claude_apps() {
-        let snippet = r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#;
-        for app_type in [
-            AppType::Gemini,
-            AppType::OpenCode,
-            AppType::Hermes,
-            AppType::OpenClaw,
-            AppType::Codex,
-        ] {
-            assert!(
-                !common_config_snippet_disables_monitor_traffic(&app_type, snippet),
-                "expected no detection for non-Claude app type: {app_type:?}"
-            );
-        }
     }
 
     #[test]

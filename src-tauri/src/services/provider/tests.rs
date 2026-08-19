@@ -7317,3 +7317,60 @@ fn delete_rejects_last_failover_queue_provider_while_active() {
         .expect("read queued provider")
         .is_some());
 }
+
+#[test]
+fn disables_monitor_traffic_detects_truthy_values() {
+    for truthy in [
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#,
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":true}}"#,
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1"}}"#,
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"true"}}"#,
+    ] {
+        assert!(
+            ProviderService::common_config_snippet_disables_monitor_traffic(
+                &AppType::Claude,
+                truthy
+            ),
+            "expected truthy detection for snippet: {truthy}"
+        );
+    }
+}
+
+#[test]
+fn disables_monitor_traffic_ignores_falsy_or_absent_values() {
+    for falsy in [
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":0}}"#,
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":false}}"#,
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"0"}}"#,
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://provider.example"}}"#,
+        r#"{"alwaysThinkingEnabled":false}"#,
+        "not valid json",
+    ] {
+        assert!(
+            !ProviderService::common_config_snippet_disables_monitor_traffic(
+                &AppType::Claude,
+                falsy
+            ),
+            "expected no detection for snippet: {falsy}"
+        );
+    }
+}
+
+#[test]
+fn disables_monitor_traffic_is_noop_for_non_claude_apps() {
+    let snippet = r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#;
+    for app_type in [
+        AppType::Gemini,
+        AppType::OpenCode,
+        AppType::Hermes,
+        AppType::OpenClaw,
+        AppType::Codex,
+    ] {
+        assert!(
+            !ProviderService::common_config_snippet_disables_monitor_traffic(
+                &app_type, snippet
+            ),
+            "expected no detection for non-Claude app type: {app_type:?}"
+        );
+    }
+}
