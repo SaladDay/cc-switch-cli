@@ -237,6 +237,15 @@ pub(crate) fn common_config_snippet_disables_monitor_traffic(
     }
 }
 
+fn print_monitor_traffic_warning_if_disabled(disables_monitor_traffic: bool) {
+    if disables_monitor_traffic {
+        println!(
+            "{}",
+            warning(texts::common_config_snippet_disables_monitor_traffic())
+        );
+    }
+}
+
 fn format(
     app_type: AppType,
     snippet_text: Option<&str>,
@@ -275,12 +284,7 @@ fn set(
         "{}",
         success(&texts::config_common_snippet_set_for_app(app_type.as_str()))
     );
-    if disables_monitor_traffic {
-        println!(
-            "{}",
-            warning(texts::common_config_snippet_disables_monitor_traffic())
-        );
-    }
+    print_monitor_traffic_warning_if_disabled(disables_monitor_traffic);
 
     let current_id = if app_type.is_additive_mode() {
         String::new()
@@ -342,12 +346,7 @@ fn extract(
             Some(snippet.clone()),
         )?;
         println!("{}", success(texts::common_config_snippet_extracted()));
-        if disables_monitor_traffic {
-            println!(
-                "{}",
-                warning(texts::common_config_snippet_disables_monitor_traffic())
-            );
-        }
+        print_monitor_traffic_warning_if_disabled(disables_monitor_traffic);
         if !snippet.trim().is_empty() {
             println!();
             println!("{}", snippet);
