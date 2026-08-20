@@ -5644,17 +5644,36 @@ pub mod texts {
 
     pub fn tui_settings_skills_storage_location_label() -> &'static str {
         if is_chinese() {
-            "存储位置"
+            "技能存储位置"
         } else {
-            "Storage location"
+            "Skill storage location"
         }
     }
 
     pub fn tui_skills_storage_location_title() -> &'static str {
         if is_chinese() {
-            "选择存储位置"
+            "选择技能存储位置"
         } else {
-            "Select Storage Location"
+            "Select Skill Storage Location"
+        }
+    }
+
+    /// 迁移确认弹窗消息（维护者要求：迁移前需用户确认）。
+    pub fn tui_confirm_skills_migrate_storage(
+        location: crate::services::skill::SkillStorageLocation,
+    ) -> String {
+        let target = match location {
+            crate::services::skill::SkillStorageLocation::CcSwitch => {
+                "cc-switch (~/.cc-switch/skills)"
+            }
+            crate::services::skill::SkillStorageLocation::Unified => "unified (~/.agents/skills)",
+        };
+        if is_chinese() {
+            format!("将迁移全部已管理技能到 {target}，并同步各应用目录。迁移前会自动备份，继续吗？")
+        } else {
+            format!(
+                "This will migrate all managed skills to {target} and re-sync app directories. A backup is created first. Continue?"
+            )
         }
     }
 

@@ -4343,6 +4343,9 @@ pub enum ConfirmAction {
     SkillsUninstall {
         directory: String,
     },
+    SkillsMigrateStorage {
+        location: crate::services::skill::SkillStorageLocation,
+    },
     SkillsRepoRemove {
         owner: String,
         name: String,
@@ -4832,6 +4835,17 @@ pub(crate) fn model_fetch_filter(models: &[String], query: &str) -> ModelFetchFi
 }
 
 impl Overlay {
+    /// 迁移 SSOT 前的确认弹窗（维护者要求：迁移会移动技能文件，需用户确认）。
+    pub fn confirm_skills_migrate_storage(
+        location: crate::services::skill::SkillStorageLocation,
+    ) -> Self {
+        Overlay::Confirm(ConfirmOverlay {
+            title: crate::cli::i18n::texts::tui_confirm_title().to_string(),
+            message: crate::cli::i18n::texts::tui_confirm_skills_migrate_storage(location),
+            action: ConfirmAction::SkillsMigrateStorage { location },
+        })
+    }
+
     pub fn is_active(&self) -> bool {
         !matches!(self, Overlay::None)
     }

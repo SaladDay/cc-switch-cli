@@ -672,66 +672,79 @@ impl SkillService {
 
         let mut result = MigrationResult::default();
         let mut migrated_dirs: Vec<String> = Vec::new();
-        if old_dir.is_dir() {
-            for entry in fs::read_dir(&old_dir).map_err(|e| AppError::io(&old_dir, e))? {
-                let entry = entry.map_err(|e| AppError::io(&old_dir, e))?;
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
 
-                let directory = entry.file_name().to_string_lossy().to_string();
-                if directory.starts_with('.') {
-                    continue;
-                }
+        // 只迁移 DB 管理的技能（对齐上游：仅迁移 db 管理集，不搬未管理目录）。
+        let index = Self::load_index()?;
+        let managed: Vec<String> = index.skills.keys().cloned().collect();
 
-                let src = old_dir.join(&directory);
-                let dst = new_dir.join(&directory);
-                if !src.exists() {
-                    result.skipped_count += 1;
+        for directory in managed {
+            // 脏目录名防穿越（DB 行可能被同步导入污染）。
+            let directory = match Self::require_valid_directory(&directory) {
+                Ok(d) => d,
+                Err(err) => {
+                    result.errors.push(format!("{directory}: {err}"));
                     continue;
                 }
-                if dst.exists() {
-                    result.skipped_count += 1;
-                    continue;
-                }
+            };
 
-                match fs::rename(&src, &dst) {
+            let src = old_dir.join(&directory);
+            let dst = new_dir.join(&directory);
+            if !src.exists() {
+                result.skipped_count += 1;
+                continue;
+            }
+
+            if dst.exists() {
+                // 目标已含同名技能：不覆盖文件，但 symlink 可能仍指向旧存储，
+                // 必须强制刷新到新位置（blocker 3）。
+                result.skipped_count += 1;
+                migrated_dirs.push(directory);
+                continue;
+            }
+
+            match fs::rename(&src, &dst) {
+                Ok(()) => {
+                    migrated_dirs.push(directory);
+                    result.migrated_count += 1;
+                }
+                Err(_) => match Self::copy_dir_recursive(&src, &dst) {
                     Ok(()) => {
+                        if let Err(e) = fs::remove_dir_all(&src) {
+                            // 源未删干净：新旧各有一份，提示用户手动清理。
+                            result.errors.push(format!(
+                                "{directory}: 源目录清理失败（已复制，旧目录保留）: {e}"
+                            ));
+                        }
                         migrated_dirs.push(directory);
                         result.migrated_count += 1;
                     }
-                    Err(_) => match Self::copy_dir_recursive(&src, &dst) {
-                        Ok(()) => {
-                            if let Err(e) = fs::remove_dir_all(&src) {
-                                // 源未删干净：新旧各有一份，提示用户手动清理。
-                                result.errors.push(format!(
-                                    "{directory}: 源目录清理失败（已复制，旧目录保留）: {e}"
-                                ));
-                            }
-                            migrated_dirs.push(directory);
-                            result.migrated_count += 1;
-                        }
-                        Err(e) => {
-                            // 复制失败可能留下半成品目标目录：清理它，避免后续
-                            // sync_to_app_dir 用残缺副本覆盖 app 完整副本。
-                            let clean_msg = match fs::remove_dir_all(&dst) {
-                                Ok(()) => String::new(),
-                                Err(ce) => format!("；清理半成品目标目录失败: {ce}"),
-                            };
-                            result.errors.push(format!("{directory}: {e}{clean_msg}"));
-                        }
-                    },
-                }
+                    Err(e) => {
+                        // 复制失败可能留下半成品目标目录：清理它，避免后续
+                        // sync_to_app_dir 用残缺副本覆盖 app 完整副本。
+                        let clean_msg = match fs::remove_dir_all(&dst) {
+                            Ok(()) => String::new(),
+                            Err(ce) => format!("；清理半成品目标目录失败: {ce}"),
+                        };
+                        result.errors.push(format!("{directory}: {e}{clean_msg}"));
+                    }
+                },
             }
         }
 
         crate::settings::set_skill_storage_location(target)?;
 
-        // 刷新 app 目录（best effort：失败仅告警，不影响迁移结果）。
+        // 刷新 app 目录（best effort）：只同步该 skill 已启用的 app（blocker 1），
+        // 尊重配置的 app 选择而非全量同步。
         let method = crate::settings::get_skill_sync_method();
         for directory in &migrated_dirs {
-            for app in Self::supported_skill_apps().filter(Self::app_supports_skills) {
+            let apps_for_skill: Vec<AppType> = match index.skills.get(directory) {
+                Some(record) => Self::supported_skill_apps()
+                    .filter(Self::app_supports_skills)
+                    .filter(|app| record.apps.is_enabled_for(app))
+                    .collect(),
+                None => Vec::new(),
+            };
+            for app in apps_for_skill {
                 if let Err(e) = Self::sync_to_app_dir(directory, &app, method) {
                     log::warn!("迁移后同步 Skill {directory} 到 {app:?} 失败: {e}");
                 }
@@ -739,6 +752,23 @@ impl SkillService {
         }
 
         Ok(result)
+    }
+
+    /// 拒绝含路径穿越/多段/绝对路径的目录名（对齐上游 require_valid_directory 语义）。
+    fn require_valid_directory(directory: &str) -> Result<String, AppError> {
+        let p = Path::new(directory);
+        let mut components = p.components();
+        let valid = directory.starts_with('.') == false
+            && p.is_absolute() == false
+            && matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none();
+        if valid {
+            Ok(directory.to_string())
+        } else {
+            Err(AppError::Message(format!(
+                "Invalid skill directory (possible path traversal): {directory:?}"
+            )))
+        }
     }
 
     /// Reject migration targets that alias an app's skills directory
@@ -2863,6 +2893,24 @@ mod tests {
         fs::create_dir_all(&skill_dir).expect("create test skill directory");
         fs::write(skill_dir.join("SKILL.md"), "# Test Skill").expect("write test skill manifest");
 
+        // 注入 DB 管理记录（迁移只移动 DB 管理的技能）。
+        let db = Database::init().expect("init db");
+        let skill = crate::app_config::InstalledSkill {
+            id: "local:test-skill".to_string(),
+            name: "Test Skill".to_string(),
+            description: None,
+            directory: "test-skill".to_string(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: crate::app_config::SkillApps::only(&AppType::Claude),
+            installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
+        };
+        db.save_skill(&skill).expect("save managed skill");
+
         let result = SkillService::migrate_storage(SkillStorageLocation::Unified)
             .expect("migrate to unified storage must succeed");
         assert_eq!(result.migrated_count, 1, "one skill must migrate");
@@ -2966,6 +3014,35 @@ mod tests {
             crate::settings::get_skill_storage_location(),
             SkillStorageLocation::CcSwitch,
             "location must not switch when migration fails early"
+        );
+    }
+
+    /// Blocker 2 回归：未管理的目录（无 DB 记录）不得被迁移移动。
+    #[test]
+    fn migrate_storage_skips_unmanaged_dirs() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        crate::settings::set_skill_storage_location(SkillStorageLocation::CcSwitch)
+            .expect("set cc_switch storage");
+
+        let old_dir = SkillService::get_ssot_dir().expect("resolve cc_switch SSOT");
+        // 未管理的目录：只建目录，不注入 DB 记录。
+        let unmanaged = old_dir.join("unmanaged-dir");
+        fs::create_dir_all(&unmanaged).expect("create unmanaged dir");
+        fs::write(unmanaged.join("SKILL.md"), "# Unmanaged").expect("write unmanaged manifest");
+
+        let result = SkillService::migrate_storage(SkillStorageLocation::Unified)
+            .expect("migrate must succeed");
+        assert_eq!(result.migrated_count, 0, "no managed skills to migrate");
+        assert!(
+            unmanaged.exists(),
+            "unmanaged directory must stay in old SSOT: {:?}",
+            old_dir
+        );
+        let new_dir = SkillService::get_ssot_dir().expect("resolve unified SSOT");
+        assert!(
+            !new_dir.join("unmanaged-dir").exists(),
+            "unmanaged directory must not be moved to new SSOT"
         );
     }
 }

@@ -310,12 +310,13 @@ impl App {
             KeyCode::Enter => {
                 let location = storage_location_for_picker_index(*selected);
                 let unchanged = location == data.skills.storage_location;
-                self.overlay = Overlay::None;
                 if unchanged {
-                    Action::None
-                } else {
-                    Action::SkillsSetStorageLocation { location }
+                    self.overlay = Overlay::None;
+                    return Some(Action::None);
                 }
+                // 迁移会移动技能文件：先弹确认（维护者要求），确认后再发 Action。
+                self.overlay = Overlay::confirm_skills_migrate_storage(location);
+                Action::None
             }
             _ => Action::None,
         })
