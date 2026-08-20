@@ -578,6 +578,9 @@ pub struct AppSettings {
     /// Skills 同步方式（auto|symlink|copy）
     #[serde(default)]
     pub skill_sync_method: crate::services::skill::SyncMethod,
+    /// Skill 存储位置：cc_switch（默认）或 unified（~/.agents/skills/）
+    #[serde(default)]
+    pub skill_storage_location: crate::services::skill::SkillStorageLocation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<SecuritySettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -646,6 +649,7 @@ impl Default for AppSettings {
             unify_codex_migrate_existing: None,
             usage_auto_sync: default_usage_auto_sync(),
             skill_sync_method: crate::services::skill::SyncMethod::default(),
+            skill_storage_location: crate::services::skill::SkillStorageLocation::default(),
             security: None,
             webdav_sync: None,
             s3_sync: None,
@@ -1249,6 +1253,21 @@ pub fn effective_backup_retain_count() -> usize {
 pub fn set_skill_sync_method(method: crate::services::skill::SyncMethod) -> Result<(), AppError> {
     let mut settings = get_settings();
     settings.skill_sync_method = method;
+    update_settings(settings)
+}
+
+pub fn get_skill_storage_location() -> crate::services::skill::SkillStorageLocation {
+    settings_store()
+        .read()
+        .map(|s| s.skill_storage_location)
+        .unwrap_or_default()
+}
+
+pub fn set_skill_storage_location(
+    location: crate::services::skill::SkillStorageLocation,
+) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.skill_storage_location = location;
     update_settings(settings)
 }
 

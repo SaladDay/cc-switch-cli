@@ -848,6 +848,9 @@ pub(crate) fn handle_action(
         Action::SkillsUninstall { directory } => skills::uninstall(&mut ctx, directory),
         Action::SkillsSync { app: scope } => skills::sync(&mut ctx, scope),
         Action::SkillsSetSyncMethod { method } => skills::set_sync_method(&mut ctx, method),
+        Action::SkillsSetStorageLocation { location } => {
+            skills::set_storage_location(&mut ctx, location)
+        }
         Action::SkillsDiscover {
             query,
             source,

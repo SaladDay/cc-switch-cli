@@ -2418,6 +2418,58 @@ pub(super) fn render_skills_sync_method_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+pub(super) fn render_skills_storage_location_picker_overlay(
+    frame: &mut Frame<'_>,
+    data: &UiData,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    let locations = [
+        crate::services::skill::SkillStorageLocation::CcSwitch,
+        crate::services::skill::SkillStorageLocation::Unified,
+    ];
+
+    let body_area = overlay_frame(
+        frame,
+        content_area,
+        theme,
+        texts::tui_skills_storage_location_title(),
+        &[
+            ("←→", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_cancel()),
+        ],
+        OverlaySize::FitRows {
+            width: OVERLAY_FIXED_LG.0,
+            body_rows: locations.len() as u16,
+        },
+        overlay_border_style(theme, false),
+    );
+
+    let current = data.skills.storage_location;
+
+    let items = locations.into_iter().map(|location| {
+        let marker = if location == current {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        ListItem::new(Line::from(Span::raw(format!(
+            "{marker}  {}",
+            texts::tui_skills_storage_location_name(location)
+        ))))
+    });
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "app picker renderer receives list state and display labels"

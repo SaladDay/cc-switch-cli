@@ -4378,6 +4378,32 @@ fn settings_page_shows_visible_apps_row_value() {
 
 #[test]
 #[serial(home_settings)]
+fn settings_page_shows_skills_storage_location_row_value() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_skills_storage_location_label()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_skills_storage_location_name(
+            crate::settings::get_skill_storage_location()
+        )),
+        "{all}"
+    );
+}
+
+#[test]
+#[serial(home_settings)]
 fn settings_page_shows_visible_apps_mode_row_value() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");

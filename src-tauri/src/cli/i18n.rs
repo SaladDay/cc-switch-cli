@@ -5642,6 +5642,62 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_skills_storage_location_label() -> &'static str {
+        if is_chinese() {
+            "技能存储位置"
+        } else {
+            "Skill storage location"
+        }
+    }
+
+    pub fn tui_skills_storage_location_title() -> &'static str {
+        if is_chinese() {
+            "选择技能存储位置"
+        } else {
+            "Select Skill Storage Location"
+        }
+    }
+
+    /// 迁移确认弹窗消息（维护者要求：迁移前需用户确认）。
+    pub fn tui_confirm_skills_migrate_storage(
+        location: crate::services::skill::SkillStorageLocation,
+    ) -> String {
+        let target = match location {
+            crate::services::skill::SkillStorageLocation::CcSwitch => {
+                "cc-switch (~/.cc-switch/skills)"
+            }
+            crate::services::skill::SkillStorageLocation::Unified => "unified (~/.agents/skills)",
+        };
+        if is_chinese() {
+            format!("将迁移全部已管理技能到 {target}，并同步各应用目录。迁移前会自动备份，继续吗？")
+        } else {
+            format!(
+                "This will migrate all managed skills to {target} and re-sync app directories. A backup is created first. Continue?"
+            )
+        }
+    }
+
+    pub fn tui_skills_storage_location_name(
+        location: crate::services::skill::SkillStorageLocation,
+    ) -> &'static str {
+        match location {
+            crate::services::skill::SkillStorageLocation::CcSwitch => {
+                if is_chinese() {
+                    "cc-switch (~/.cc-switch/skills)"
+                } else {
+                    "cc-switch (~/.cc-switch/skills)"
+                }
+            }
+            crate::services::skill::SkillStorageLocation::Unified => {
+                if is_chinese() {
+                    "unified (~/.agents/skills)"
+                } else {
+                    "unified (~/.agents/skills)"
+                }
+            }
+        }
+    }
+
     pub fn tui_skills_installed_summary(installed: usize, enabled: usize, app: &str) -> String {
         if is_chinese() {
             format!("已安装: {installed}   当前应用({app})已启用: {enabled}")
@@ -8561,6 +8617,14 @@ pub mod texts {
             format!("同步方式已设置为: {method}")
         } else {
             format!("Sync method set to: {method}")
+        }
+    }
+
+    pub fn tui_toast_skills_storage_location_set(location: &str) -> String {
+        if is_chinese() {
+            format!("存储位置已切换为: {location}")
+        } else {
+            format!("Storage location set to: {location}")
         }
     }
 

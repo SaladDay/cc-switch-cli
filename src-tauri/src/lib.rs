@@ -69,6 +69,7 @@ pub use mcp::{
 };
 pub use provider::{Provider, ProviderMeta, UsageScript};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
+pub use services::skill::SkillStorageLocation;
 pub use services::{
     reapply_current_codex_official_live, AuthService, ConfigService, CredentialStatus,
     EndpointLatency, ExtraUsage, HealthStatus, ImportSkillSelection, ManagedAuthAccount,
@@ -78,10 +79,10 @@ pub use services::{
     SyncDecision, WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
-    get_enable_claude_plugin_integration, get_s3_sync_settings, get_skip_claude_onboarding,
-    get_webdav_sync_settings, set_enable_claude_plugin_integration, set_s3_sync_settings,
-    set_skip_claude_onboarding, set_webdav_sync_settings, update_s3_sync_status, update_settings,
-    update_webdav_sync_status, webdav_jianguoyun_preset, AppSettings, S3SyncSettings,
-    WebDavSyncSettings, WebDavSyncStatus,
+    get_enable_claude_plugin_integration, get_s3_sync_settings, get_skill_storage_location,
+    get_skip_claude_onboarding, get_webdav_sync_settings, set_enable_claude_plugin_integration,
+    set_s3_sync_settings, set_skill_storage_location, set_skip_claude_onboarding,
+    set_webdav_sync_settings, update_s3_sync_status, update_settings, update_webdav_sync_status,
+    webdav_jianguoyun_preset, AppSettings, S3SyncSettings, WebDavSyncSettings, WebDavSyncStatus,
 };
 pub use store::AppState;

@@ -114,6 +114,11 @@ impl App {
                     ConfirmAction::SkillsUninstall { directory } => Action::SkillsUninstall {
                         directory: directory.clone(),
                     },
+                    ConfirmAction::SkillsMigrateStorage { location } => {
+                        Action::SkillsSetStorageLocation {
+                            location: *location,
+                        }
+                    }
                     ConfirmAction::SkillsRepoRemove { owner, name } => Action::SkillsRepoRemove {
                         owner: owner.clone(),
                         name: name.clone(),

@@ -2292,6 +2292,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SkillsUninstall { .. }
         | Action::SkillsSync { .. }
         | Action::SkillsSetSyncMethod { .. }
+        | Action::SkillsSetStorageLocation { .. }
         | Action::SkillsRepoAdd { .. }
         | Action::SkillsRepoRemove { .. }
         | Action::SkillsRepoToggleEnabled { .. }

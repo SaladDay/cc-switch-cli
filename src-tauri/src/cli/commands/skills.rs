@@ -7,7 +7,7 @@ use crate::cli::commands::app_targets::{
 };
 use crate::cli::ui::{create_table, highlight, info, success};
 use crate::error::AppError;
-use crate::services::skill::{ImportSkillSelection, SkillRepo, SyncMethod};
+use crate::services::skill::{ImportSkillSelection, SkillRepo, SkillStorageLocation, SyncMethod};
 use crate::services::SkillService;
 
 #[derive(Subcommand)]
@@ -110,6 +110,12 @@ pub enum SkillsCommand {
         #[arg(value_enum)]
         method: Option<SyncMethod>,
     },
+    /// Get or set the skills SSOT storage location (cc-switch|unified)
+    StorageLocation {
+        /// Optional location to set (omit to show current). Setting triggers migration.
+        #[arg(value_enum)]
+        location: Option<SkillStorageLocation>,
+    },
     /// Manage skill repositories
     #[command(subcommand)]
     Repos(SkillReposCommand),
@@ -164,6 +170,7 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
         SkillsCommand::ImportFromApps { apps, directories } => import_from_apps(apps, directories),
         SkillsCommand::Info { spec } => show_skill_info(&spec),
         SkillsCommand::SyncMethod { method } => sync_method(method),
+        SkillsCommand::StorageLocation { location } => storage_location(location),
         SkillsCommand::Repos(repos_cmd) => execute_repos(repos_cmd),
     }
 }
@@ -614,6 +621,53 @@ fn sync_method(method: Option<SyncMethod>) -> Result<(), AppError> {
             let method = SkillService::get_sync_method()?;
             println!("{}", highlight("Skill Sync Method"));
             println!("{method:?}");
+        }
+    }
+    Ok(())
+}
+
+fn storage_location(location: Option<SkillStorageLocation>) -> Result<(), AppError> {
+    match location {
+        Some(target) => {
+            let current = crate::settings::get_skill_storage_location();
+            if current == target {
+                println!("Skill 存储位置已是当前值，无需迁移。");
+                return Ok(());
+            }
+            let result = SkillService::migrate_storage(target)?;
+            let label = match target {
+                SkillStorageLocation::CcSwitch => "cc-switch (~/.cc-switch/skills)",
+                SkillStorageLocation::Unified => "unified (~/.agents/skills)",
+            };
+            if result.errors.is_empty() {
+                println!(
+                    "{}",
+                    success(&format!(
+                        "Skill 存储位置已切换为 {label}: {} 迁移, {} 跳过",
+                        result.migrated_count, result.skipped_count
+                    ))
+                );
+            } else {
+                eprintln!(
+                    "Skill 存储位置切换为 {label} 但部分失败: {} 失败, {} 跳过",
+                    result.errors.len(),
+                    result.skipped_count
+                );
+                for e in &result.errors {
+                    eprintln!("  - {e}");
+                }
+                eprintln!("备份位于 {{config_dir}}/skill-backups/，可手工恢复。");
+            }
+        }
+        None => {
+            let current = crate::settings::get_skill_storage_location();
+            println!(
+                "{}",
+                match current {
+                    SkillStorageLocation::CcSwitch => "cc-switch",
+                    SkillStorageLocation::Unified => "unified",
+                }
+            );
         }
     }
     Ok(())
