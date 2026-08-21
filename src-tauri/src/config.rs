@@ -4,8 +4,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use crate::cli::i18n::texts;
 use crate::error::AppError;
+use crate::i18n::texts;
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
     #[cfg(test)]

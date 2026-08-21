@@ -47,6 +47,42 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
+  library-only:
+    name: Library without CLI
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: library-without-cli
+
+      - name: Check and compile-test library without CLI dependencies
+        working-directory: src-tauri
+        run: |
+          cargo check --lib --no-default-features
+          cargo test --lib --no-default-features --no-run
+
+      - name: Assert CLI dependencies are absent from the library graph
+        working-directory: src-tauri
+        run: |
+          cargo tree --no-default-features --target all -e normal --depth 1 --prefix none > library-direct-dependencies.txt
+          if grep -E '^(clap|clap_complete|colored|comfy-table|console|crossterm|env_logger|indicatif|inquire|minisign-verify|ratatui|self-replace|semver|shlex|tachyonfx|tar|unicode-width|which|windows-sys|winreg) v' library-direct-dependencies.txt > leaked-cli-dependencies.txt; then
+            printf 'CLI dependencies leaked into the library-only graph:\n'
+            cat leaked-cli-dependencies.txt
+            exit 1
+          fi
+
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-22.04
