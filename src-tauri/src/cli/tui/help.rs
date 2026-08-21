@@ -658,6 +658,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Choose which header carries the API key: ANTHROPIC_AUTH_TOKEN sends Authorization: Bearer; ANTHROPIC_API_KEY sends x-api-key. Only one is sent.",
             ),
         ),
+        ProviderAddField::ClaudeAnthropicApiKeyField => HelpContent::new(
+            texts::tui_label_claude_auth_field(),
+            help_lines(
+                "选择 Claude Code 写入 settings.json 的 API Key 字段名：ANTHROPIC_AUTH_TOKEN（默认）或 ANTHROPIC_API_KEY。切换时会迁移已填写的 key。",
+                "Choose the API key field name written to Claude Code's settings.json: ANTHROPIC_AUTH_TOKEN (default) or ANTHROPIC_API_KEY. The entered key is migrated when switching.",
+            ),
+        ),
         ProviderAddField::CodexImpersonateClaudeCode => HelpContent::new(
             texts::tui_label_codex_impersonate_claude_code(),
             help_lines(

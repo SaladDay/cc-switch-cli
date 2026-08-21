@@ -1878,6 +1878,9 @@ pub(crate) fn provider_field_label_and_value(
             }
         }
         ProviderAddField::ClaudeApiKey => texts::tui_label_api_key().to_string(),
+        ProviderAddField::ClaudeAnthropicApiKeyField => {
+            texts::tui_label_claude_auth_field().to_string()
+        }
         ProviderAddField::ClaudeModelConfig => texts::tui_label_claude_model_config().to_string(),
         ProviderAddField::ClaudeFallbackModel => {
             texts::tui_label_claude_fallback_model().to_string()
@@ -1966,6 +1969,10 @@ pub(crate) fn provider_field_label_and_value(
 
     let value = match field {
         ProviderAddField::ClaudeApiFormat => provider_api_format_label(provider),
+        ProviderAddField::ClaudeAnthropicApiKeyField => {
+            texts::tui_claude_auth_field_value(provider.claude_api_key_field.as_env_key())
+                .to_string()
+        }
         ProviderAddField::CodexAnthropicApiKeyField => {
             texts::tui_codex_anthropic_auth_field_value(provider.claude_api_key_field.as_env_key())
                 .to_string()

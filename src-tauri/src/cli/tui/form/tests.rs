@@ -2664,6 +2664,57 @@ fn provider_add_form_claude_builds_env_settings() {
 }
 
 #[test]
+fn provider_add_form_claude_has_auth_field_selector() {
+    let form = ProviderAddFormState::new(AppType::Claude);
+    let fields = form.fields();
+    assert!(
+        fields.contains(&ProviderAddField::ClaudeAnthropicApiKeyField),
+        "Claude custom provider should expose the auth field selector"
+    );
+}
+
+#[test]
+fn provider_add_form_claude_api_key_field_switches_env_and_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.id.set("p1");
+    form.name.set("Provider One");
+    form.claude_base_url.set("https://kimi.example");
+    form.claude_api_key.set("sk-kimi");
+    form.claude_api_key_field = ClaudeApiKeyField::ApiKey;
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_API_KEY"],
+        "sk-kimi"
+    );
+    assert!(
+        provider["settingsConfig"]["env"]
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .is_none(),
+        "ANTHROPIC_AUTH_TOKEN should be removed when ApiKey is selected"
+    );
+    assert_eq!(provider["meta"]["apiKeyField"], "ANTHROPIC_API_KEY");
+
+    // Switch back to the default auth token.
+    form.claude_api_key_field = ClaudeApiKeyField::AuthToken;
+    let provider = form.to_provider_json_value();
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+        "sk-kimi"
+    );
+    assert!(
+        provider["settingsConfig"]["env"]
+            .get("ANTHROPIC_API_KEY")
+            .is_none(),
+        "ANTHROPIC_API_KEY should be removed when AuthToken is selected"
+    );
+    assert!(
+        provider["meta"].get("apiKeyField").is_none(),
+        "default AuthToken should not write apiKeyField meta"
+    );
+}
+
+#[test]
 fn provider_add_form_claude_api_format_writes_openai_chat_meta() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     form.id.set("p1");
@@ -7056,6 +7107,29 @@ fn provider_edit_form_infers_claude_api_key_field_from_env_when_meta_missing() {
     assert_eq!(
         roundtrip["meta"]["apiKeyField"], "ANTHROPIC_API_KEY",
         "upstream saves non-default Claude auth field in provider meta"
+    );
+}
+
+#[test]
+fn provider_edit_form_claude_exposes_auth_field_selector_for_api_key_env() {
+    let provider_value = json!({
+        "id": "provider-1",
+        "name": "Provider One",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.example.com",
+                "ANTHROPIC_API_KEY": "sk-api-key"
+            }
+        }
+    });
+    let provider: Provider = serde_json::from_value(provider_value).expect("provider json valid");
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_api_key_field, ClaudeApiKeyField::ApiKey);
+    assert!(
+        form.fields()
+            .contains(&ProviderAddField::ClaudeAnthropicApiKeyField),
+        "edit form should expose the Claude auth field selector"
     );
 }
 

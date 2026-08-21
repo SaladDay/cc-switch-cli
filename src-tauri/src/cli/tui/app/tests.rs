@@ -12593,6 +12593,46 @@ mod tests {
     }
 
     #[test]
+    fn provider_add_form_claude_auth_field_enter_toggles_api_key_field() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        // Position the cursor on the Claude auth field selector.
+        let auth_field = super::super::form::ProviderAddField::ClaudeAnthropicApiKeyField;
+        if let Some(super::super::form::FormState::ProviderAdd(provider)) = app.form.as_mut() {
+            provider.focus = super::super::form::FormFocus::Fields;
+            let fields = provider.fields();
+            let idx = fields
+                .iter()
+                .position(|field| *field == auth_field)
+                .expect("ClaudeAnthropicApiKeyField should be present");
+            provider.field_idx = idx;
+            assert_eq!(
+                provider.claude_api_key_field,
+                crate::provider::ClaudeApiKeyField::AuthToken
+            );
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+
+        let field = match app.form.as_ref() {
+            Some(super::super::form::FormState::ProviderAdd(provider)) => {
+                provider.claude_api_key_field
+            }
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(field, crate::provider::ClaudeApiKeyField::ApiKey);
+    }
+
+    #[test]
     fn provider_form_esc_dirty_opens_save_before_close_confirm() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
