@@ -93,7 +93,7 @@ impl AuthService {
                     ))
                 })
                 .map_err(|error| error.to_string()),
-            AUTH_PROVIDER_CLAUDE_OAUTH => claude::manager(crate::config::get_claude_config_dir())
+            AUTH_PROVIDER_CLAUDE_OAUTH => claude::manager(crate::config::get_app_config_dir())
                 .start_login(redirect_uri)
                 .await
                 .map(AuthStartResponse::Browser),
@@ -110,7 +110,7 @@ impl AuthService {
         let auth_provider = ensure_auth_provider(auth_provider)?;
         match auth_provider {
             AUTH_PROVIDER_CLAUDE_OAUTH => {
-                claude::manager(crate::config::get_claude_config_dir())
+                claude::manager(crate::config::get_app_config_dir())
                     .complete_login(callback_url)
                     .await
             }

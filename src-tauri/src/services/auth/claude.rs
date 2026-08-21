@@ -14,8 +14,6 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -70,7 +68,7 @@ impl ClaudeOAuthService {
 
     fn with_token_url(config_dir: PathBuf, token_url: impl Into<String>) -> Self {
         Self {
-            credential_path: config_dir.join(".credentials.json"),
+            credential_path: config_dir.join("credentials").join("claude.json"),
             token_url: token_url.into(),
             pending: Mutex::new(None),
         }
@@ -226,9 +224,7 @@ impl ClaudeOAuthService {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create Claude config dir: {e}"))?;
         }
-        #[cfg(any(not(target_os = "macos"), test))]
         let lock_path = path.with_extension("credentials.lock");
-        #[cfg(any(not(target_os = "macos"), test))]
         let _lock = CredentialLock::acquire(&lock_path)?;
         let mut credentials = match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -256,12 +252,7 @@ impl ClaudeOAuthService {
             "expiresAt".into(),
             serde_json::json!(account.expires_at * 1000),
         );
-        #[cfg(all(target_os = "macos", not(test)))]
-        self.write_keychain(&credentials)?;
-        #[cfg(any(not(target_os = "macos"), test))]
         let write_result = write_secure_json_unlocked(path, &credentials);
-        #[cfg(any(not(target_os = "macos"), test))]
-        #[cfg(any(not(target_os = "macos"), test))]
         write_result?;
         Ok(AuthCompletionResponse {
             account_id: account.id,
@@ -270,29 +261,6 @@ impl ClaudeOAuthService {
             organization_id: account.organization_id,
             is_default: true,
         })
-    }
-
-    #[cfg(target_os = "macos")]
-    fn write_keychain(&self, credentials: &serde_json::Value) -> Result<(), String> {
-        let payload = serde_json::to_string(credentials).map_err(|e| e.to_string())?;
-        let output = std::process::Command::new("security")
-            .args([
-                "add-generic-password",
-                "-U",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-a",
-                "cc-switch",
-                "-w",
-                &payload,
-            ])
-            .output()
-            .map_err(|e| format!("write Claude Keychain credential: {e}"))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err("Claude Keychain write failed".into())
-        }
     }
 }
 
@@ -440,7 +408,7 @@ mod tests {
         assert!(body["code_verifier"].as_str().unwrap().len() >= 43);
 
         let credentials: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(config.path().join(".credentials.json")).unwrap(),
+            &std::fs::read(config.path().join("credentials/claude.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(credentials["claudeAiOauth"]["accessToken"], "access-secret");
