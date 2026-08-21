@@ -76,8 +76,26 @@ jobs:
       - name: Assert CLI dependencies are absent from the library graph
         working-directory: src-tauri
         run: |
+          cli_dependency_names='clap clap_complete colored comfy-table console crossterm env_logger indicatif inquire minisign-verify ratatui self-replace semver shlex tachyonfx tar unicode-width which windows-sys winreg'
+          cli_dependency_pattern="^($(printf '%s' "$cli_dependency_names" | tr ' ' '|')) v"
+
+          cargo tree --target all -e normal --depth 1 --prefix none > default-direct-dependencies.txt
+          for cli_dependency in $cli_dependency_names; do
+            if ! grep -E "^${cli_dependency} v" default-direct-dependencies.txt > /dev/null; then
+              printf 'Known CLI dependency %s was not found in the default graph.\n' "$cli_dependency"
+              exit 1
+            fi
+          done
+
           cargo tree --no-default-features --target all -e normal --depth 1 --prefix none > library-direct-dependencies.txt
-          if grep -E '^(clap|clap_complete|colored|comfy-table|console|crossterm|env_logger|indicatif|inquire|minisign-verify|ratatui|self-replace|semver|shlex|tachyonfx|tar|unicode-width|which|windows-sys|winreg) v' library-direct-dependencies.txt > leaked-cli-dependencies.txt; then
+          for core_dependency in rusqlite serde tokio; do
+            if ! grep -E "^${core_dependency} v" library-direct-dependencies.txt > /dev/null; then
+              printf 'Core dependency %s was not found in the library-only graph.\n' "$core_dependency"
+              exit 1
+            fi
+          done
+
+          if grep -E "$cli_dependency_pattern" library-direct-dependencies.txt > leaked-cli-dependencies.txt; then
             printf 'CLI dependencies leaked into the library-only graph:\n'
             cat leaked-cli-dependencies.txt
             exit 1
