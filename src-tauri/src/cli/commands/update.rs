@@ -341,7 +341,9 @@ fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
 }
 
 fn create_http_client() -> Result<reqwest::Client, AppError> {
-    reqwest::Client::builder()
+    crate::services::global_proxy::initialize_http_client_from_disk_best_effort();
+    crate::proxy::http_client::builder()
+        .map_err(AppError::Message)?
         .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .build()
         .map_err(|e| AppError::Message(format!("Failed to initialize HTTP client: {e}")))

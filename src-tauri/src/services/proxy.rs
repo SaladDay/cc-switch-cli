@@ -4151,6 +4151,7 @@ impl ProxyService {
             return ExternalProxyStatusProbe::Unreachable;
         };
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_millis(500))
             .build();
         let Ok(client) = client else {

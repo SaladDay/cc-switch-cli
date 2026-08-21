@@ -17,6 +17,74 @@ fn visible_apps_mode_label(mode: crate::settings::VisibleAppsMode) -> &'static s
     }
 }
 
+pub(super) fn set_global_outbound_proxy(
+    ctx: &mut RuntimeActionContext<'_>,
+    config: crate::services::GlobalOutboundProxyConfig,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    let full_url = config.to_full_url()?;
+    let outcome = if full_url.is_empty() {
+        crate::services::global_proxy::clear(&state)?
+    } else {
+        crate::services::global_proxy::set(&state, &config)?
+    };
+    let persisted = (!full_url.is_empty())
+        .then(|| crate::services::GlobalOutboundProxyConfig::from_full_url(&full_url))
+        .transpose()?;
+    ctx.data.config.global_outbound_proxy = persisted.clone();
+    ctx.app.global_outbound_proxy_draft = Some(persisted.unwrap_or_default());
+    ctx.data.mark_current_app_data_changed();
+    ctx.app.push_toast(
+        if full_url.is_empty() {
+            crate::t!("Global outbound proxy cleared.", "全局出站代理已清除。")
+        } else {
+            crate::t!("Global outbound proxy saved.", "全局出站代理已保存。")
+        },
+        ToastKind::Success,
+    );
+    if let Some(message) = outcome.daemon_warning {
+        ctx.app.push_toast(message, ToastKind::Warning);
+    }
+    Ok(())
+}
+
+pub(super) fn test_global_outbound_proxy(
+    ctx: &mut RuntimeActionContext<'_>,
+    config: crate::services::GlobalOutboundProxyConfig,
+) -> Result<(), AppError> {
+    if ctx.app.global_outbound_proxy_test_rx.is_some() {
+        ctx.app.push_toast(
+            crate::t!("A proxy test is already running.", "代理测试正在进行中。"),
+            ToastKind::Info,
+        );
+        return Ok(());
+    }
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("cc-switch-proxy-test".to_string())
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("failed to create async runtime: {error}"))
+                .and_then(|runtime| {
+                    runtime
+                        .block_on(crate::services::global_proxy::test(&config))
+                        .map_err(|error| error.to_string())
+                });
+            let _ = sender.send(result);
+        })
+        .map_err(|error| AppError::Message(format!("failed to start proxy test: {error}")))?;
+    ctx.app.global_outbound_proxy_test_rx =
+        Some(std::sync::Arc::new(std::sync::Mutex::new(receiver)));
+    ctx.app.push_toast(
+        crate::t!("Testing proxy...", "正在测试代理……"),
+        ToastKind::Info,
+    );
+    Ok(())
+}
+
 pub(super) fn set_proxy_enabled(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,

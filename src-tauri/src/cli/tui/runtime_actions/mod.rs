@@ -49,6 +49,7 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::ConfigOpenClawAgents
             | super::route::Route::Settings
             | super::route::Route::SettingsProxy
+            | super::route::Route::SettingsOutboundProxy
             | super::route::Route::SettingsManagedAccounts => route.clone(),
             _ => super::route::Route::Main,
         },
@@ -68,6 +69,7 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::SkillDetail { .. }
             | super::route::Route::Settings
             | super::route::Route::SettingsProxy
+            | super::route::Route::SettingsOutboundProxy
             | super::route::Route::SettingsManagedAccounts => route.clone(),
             _ => super::route::Route::Main,
         },
@@ -1033,6 +1035,12 @@ pub(crate) fn handle_action(
             settings::set_proxy_listen_address(&mut ctx, address)
         }
         Action::SetProxyListenPort { port } => settings::set_proxy_listen_port(&mut ctx, port),
+        Action::SetGlobalOutboundProxy { config } => {
+            settings::set_global_outbound_proxy(&mut ctx, config)
+        }
+        Action::TestGlobalOutboundProxy { config } => {
+            settings::test_global_outbound_proxy(&mut ctx, config)
+        }
         Action::SetProxyAutoFailover { app_type, enabled } => {
             settings::set_proxy_auto_failover(&mut ctx, app_type, enabled)
         }

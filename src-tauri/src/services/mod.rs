@@ -11,6 +11,7 @@ pub mod env_checker;
 #[allow(dead_code)]
 #[cfg(feature = "cli")]
 pub mod env_manager;
+pub mod global_proxy;
 #[cfg(feature = "cli")]
 pub mod local_env_check;
 pub mod mcp;
@@ -43,6 +44,9 @@ pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, M
 pub use codex_oauth::CodexOAuthService;
 pub use config::ConfigService;
 pub use copilot_auth::CopilotAuthService;
+pub use global_proxy::{
+    GlobalOutboundProxyConfig, GlobalProxyTestResult, GlobalProxyUpdateOutcome,
+};
 pub use mcp::McpService;
 pub use model_fetch::FetchedModel;
 pub use prompt::PromptService;

@@ -80,7 +80,8 @@ pub use provider::{Provider, ProviderMeta, UsageScript};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
     reapply_current_codex_official_live, AuthService, ConfigService, CredentialStatus,
-    EndpointLatency, ExtraUsage, HealthStatus, ImportSkillSelection, ManagedAuthAccount,
+    EndpointLatency, ExtraUsage, GlobalOutboundProxyConfig, GlobalProxyTestResult,
+    GlobalProxyUpdateOutcome, HealthStatus, ImportSkillSelection, ManagedAuthAccount,
     ManagedAuthDeviceCodeResponse, ManagedAuthStatus, McpService, PromptService, ProviderService,
     ProxyService, QuotaTier, S3RemoteInfo, S3SyncService, S3SyncSummary, SkillService,
     SpeedtestService, StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota,

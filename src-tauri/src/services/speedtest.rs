@@ -96,7 +96,8 @@ impl SpeedtestService {
     }
 
     fn build_client(timeout_secs: u64) -> Result<Client, AppError> {
-        Client::builder()
+        crate::proxy::http_client::builder()
+            .map_err(AppError::Message)?
             .timeout(Duration::from_secs(timeout_secs))
             .redirect(reqwest::redirect::Policy::limited(5))
             .user_agent("cc-switch-speedtest/1.0")

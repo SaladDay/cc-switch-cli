@@ -1,4 +1,4 @@
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -36,7 +36,8 @@ impl ProviderService {
 
         let candidate_urls = build_provider_model_candidate_urls(base_url);
 
-        let client = Client::builder()
+        let client = crate::proxy::http_client::builder()
+            .map_err(AppError::Message)?
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(|e| AppError::Message(e.to_string()))?;

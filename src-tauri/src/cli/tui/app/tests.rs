@@ -9979,6 +9979,232 @@ mod tests {
     }
 
     #[test]
+    fn settings_menu_opens_outbound_proxy_page_with_saved_draft() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::OutboundProxy))
+            .expect("OutboundProxy missing from SettingsItem::ALL");
+        let mut data = UiData::default();
+        data.config.global_outbound_proxy = Some(
+            crate::services::GlobalOutboundProxyConfig::from_full_url(
+                "http://alice:secret@127.0.0.1:7890",
+            )
+            .expect("parse proxy"),
+        );
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::SettingsOutboundProxy)
+        ));
+        assert!(matches!(app.route, Route::SettingsOutboundProxy));
+        assert_eq!(
+            app.global_outbound_proxy_draft,
+            data.config.global_outbound_proxy
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_test_rejects_empty_url() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        app.global_outbound_proxy_draft = Some(Default::default());
+
+        let action = app.on_key(key(KeyCode::Char('t')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let toast = app.toast.as_ref().expect("empty URL should show an error");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert_eq!(
+            toast.message,
+            crate::t!("Proxy URL is empty.", "代理 URL 为空。")
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_url_editor_explains_empty_environment_fallback() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let Overlay::TextInput(input) = &app.overlay else {
+            panic!("expected proxy URL editor");
+        };
+        assert!(
+            input.prompt.contains(crate::t!(
+                "Leave blank to use environment variables.",
+                "留空则使用环境变量"
+            )),
+            "{}",
+            input.prompt
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_empty_url_submit_clears_immediately() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        let saved = crate::services::GlobalOutboundProxyConfig {
+            url: "http://127.0.0.1:7890".to_string(),
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+        };
+        app.global_outbound_proxy_draft = Some(saved.clone());
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new(""),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SetGlobalOutboundProxy { config }
+                if config == crate::services::GlobalOutboundProxyConfig::default()
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.global_outbound_proxy_draft, Some(saved));
+    }
+
+    #[test]
+    fn outbound_proxy_ctrl_s_is_not_a_page_action() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        app.global_outbound_proxy_draft = Some(Default::default());
+
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('s')), &UiData::default()),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn outbound_proxy_valid_url_submit_saves_immediately() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        app.global_outbound_proxy_draft = Some(Default::default());
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new("http://127.0.0.1:7890"),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        let expected = crate::services::GlobalOutboundProxyConfig {
+            url: "http://127.0.0.1:7890".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            matches!(action, Action::SetGlobalOutboundProxy { config } if config == expected)
+                || matches!(
+                    app.overlay,
+                    Overlay::Confirm(ConfirmOverlay {
+                        action: ConfirmAction::SettingsSetGlobalOutboundProxy { ref config },
+                        ..
+                    }) if config == &expected
+                ),
+            "valid input should save directly or request environment-proxy confirmation"
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_invalid_url_submit_reopens_editor_and_does_not_save() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        let saved = crate::services::GlobalOutboundProxyConfig {
+            url: "http://127.0.0.1:7890".to_string(),
+            ..Default::default()
+        };
+        app.global_outbound_proxy_draft = Some(saved.clone());
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new("Extu^"),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.global_outbound_proxy_draft, Some(saved));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsOutboundProxyUrl,
+                ref input,
+                ..
+            }) if input.value == "Extu^"
+        ));
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("validation should open an error popup");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert_eq!(
+            toast.message,
+            "Invalid proxy URL. Enter a full URL, for example http://127.0.0.1:7890 or socks5://127.0.0.1:1080."
+        );
+        assert!(!toast.message.contains("relative URL"));
+    }
+
+    #[test]
+    fn outbound_proxy_t_tests_current_draft() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        let config = crate::services::GlobalOutboundProxyConfig {
+            url: "http://127.0.0.1:7890".to_string(),
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+        };
+        app.global_outbound_proxy_draft = Some(config.clone());
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('t')), &UiData::default()),
+            Action::TestGlobalOutboundProxy { config: tested } if tested == config
+        ));
+    }
+
+    #[test]
+    fn outbound_proxy_test_completion_is_reported_on_tick() {
+        let mut app = App::new(Some(AppType::Claude));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.global_outbound_proxy_test_rx =
+            Some(std::sync::Arc::new(std::sync::Mutex::new(receiver)));
+        sender
+            .send(Ok(crate::services::GlobalProxyTestResult {
+                success: true,
+                latency_ms: 17,
+                error: None,
+            }))
+            .expect("queue proxy test result");
+
+        app.on_tick();
+
+        assert!(app.global_outbound_proxy_test_rx.is_none());
+        let toast = app.toast.as_ref().expect("test result should show a toast");
+        assert_eq!(toast.kind, ToastKind::Success);
+        assert!(toast.message.contains("17"), "{}", toast.message);
+    }
+
+    #[test]
     fn settings_menu_exposes_visible_apps_item() {
         assert!(
             SettingsItem::ALL

@@ -270,6 +270,7 @@ impl ProxyServer {
 
         let app = self.build_router();
         let state = self.state.clone();
+        let proxy_port = local_addr.port();
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, app)
                 .with_graceful_shutdown(async {
@@ -277,6 +278,7 @@ impl ProxyServer {
                 })
                 .await;
 
+            super::http_client::clear_proxy_port(proxy_port);
             state.status.write().await.running = false;
             *state.start_time.write().await = None;
         });

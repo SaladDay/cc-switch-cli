@@ -8,7 +8,6 @@ mod discovery;
 
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -556,9 +555,7 @@ fn merge_repos_from_lock(
 // SkillService
 // ============================================================================
 
-pub struct SkillService {
-    http_client: Client,
-}
+pub struct SkillService;
 
 impl SkillService {
     fn app_supports_skills(app: &AppType) -> bool {
@@ -581,19 +578,7 @@ impl SkillService {
     }
 
     pub fn new() -> Result<Self, AppError> {
-        let http_client = Client::builder()
-            .user_agent("cc-switch")
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| {
-                AppError::localized(
-                    "skills.http_client_failed",
-                    format!("创建 HTTP 客户端失败: {e}"),
-                    format!("Failed to create HTTP client: {e}"),
-                )
-            })?;
-
-        Ok(Self { http_client })
+        Ok(Self)
     }
 
     // ---------------------------------------------------------------------
@@ -2135,9 +2120,9 @@ impl SkillService {
         )
         .map_err(|e| AppError::Message(format!("Invalid skills.sh search URL: {e}")))?;
 
-        let response = self
-            .http_client
+        let response = crate::proxy::http_client::get()
             .get(url)
+            .header(reqwest::header::USER_AGENT, "cc-switch")
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await

@@ -36,6 +36,9 @@ pub enum Request {
     /// daemon writes the desired switch only; app routes start through
     /// `EnsureWorker`.
     SetGlobalEnabled { enabled: bool },
+    /// Foreground asks the daemon and active workers to reload the persisted
+    /// global outbound proxy. The URL itself never crosses IPC.
+    ReloadOutboundProxy,
     /// Force the daemon to stop the worker (if any) and exit.
     Shutdown,
 }
@@ -194,6 +197,11 @@ mod tests {
     fn set_global_enabled_roundtrips_both_polarities() {
         roundtrip_request(Request::SetGlobalEnabled { enabled: true });
         roundtrip_request(Request::SetGlobalEnabled { enabled: false });
+    }
+
+    #[test]
+    fn reload_outbound_proxy_roundtrips() {
+        roundtrip_request(Request::ReloadOutboundProxy);
     }
 
     #[test]

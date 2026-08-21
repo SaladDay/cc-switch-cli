@@ -232,6 +232,11 @@ fn serve_proxy(
                 .start_with_runtime_config(effective_config)
                 .await
                 .map_err(AppError::Message)?;
+            let outbound_proxy_poll_task =
+                spawn_outbound_proxy_reload_poller(state.db.clone());
+            #[cfg(unix)]
+            let outbound_proxy_reload_task =
+                spawn_outbound_proxy_reload_listener(state.db.clone())?;
 
             let announced_to_daemon = {
                 #[cfg(unix)]
@@ -319,6 +324,9 @@ fn serve_proxy(
                 .map_err(|e| AppError::Message(format!("failed to listen for Ctrl-C: {e}")))?;
             session_sync_task.abort();
             usage_maintenance_task.abort();
+            outbound_proxy_poll_task.abort();
+            #[cfg(unix)]
+            outbound_proxy_reload_task.abort();
 
             service
                 .stop_with_restore()
@@ -335,6 +343,58 @@ fn serve_proxy(
 
         result
     })
+}
+
+fn spawn_outbound_proxy_reload_poller(
+    db: std::sync::Arc<crate::Database>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut applied_url = crate::proxy::http_client::get_current_proxy_url();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match db.get_global_proxy_url() {
+                Ok(url) if url != applied_url => {
+                    if let Err(error) = crate::proxy::http_client::apply_proxy(url.as_deref()) {
+                        log::error!("[GlobalProxy] Worker reload failed: {error}");
+                    } else {
+                        applied_url = url;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::debug!("[GlobalProxy] Worker reload check failed: {error}");
+                }
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+fn spawn_outbound_proxy_reload_listener(
+    db: std::sync::Arc<crate::Database>,
+) -> Result<tokio::task::JoinHandle<()>, AppError> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    // SIGWINCH is ignored by default, so an older adopted worker that does not
+    // install this listener will not be terminated by a reload notification.
+    let mut reload_signal = signal(SignalKind::window_change())
+        .map_err(|error| AppError::Message(format!("failed to listen for SIGWINCH: {error}")))?;
+    Ok(tokio::spawn(async move {
+        while reload_signal.recv().await.is_some() {
+            match db.get_global_proxy_url() {
+                Ok(url) => {
+                    if let Err(error) = crate::proxy::http_client::apply_proxy(url.as_deref()) {
+                        log::error!("[GlobalProxy] Worker reload failed: {error}");
+                    }
+                }
+                Err(error) => {
+                    log::error!("[GlobalProxy] Worker failed to read saved configuration: {error}");
+                }
+            }
+        }
+    }))
 }
 
 #[cfg(unix)]

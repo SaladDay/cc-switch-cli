@@ -4360,6 +4360,9 @@ pub enum ConfirmAction {
     SettingsSetClaudePluginIntegration {
         enabled: bool,
     },
+    SettingsSetGlobalOutboundProxy {
+        config: crate::services::GlobalOutboundProxyConfig,
+    },
     VisibleAppsAutoDetection,
     VisibleAppsSwitchToManual {
         apps: crate::settings::VisibleApps,
@@ -4453,6 +4456,9 @@ pub enum TextSubmit {
     ConfigBackupName,
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
+    SettingsOutboundProxyUrl,
+    SettingsOutboundProxyUsername,
+    SettingsOutboundProxyPassword,
     SettingsOpenClawConfigDir,
     SettingsPreferredEditor,
     #[allow(dead_code)]

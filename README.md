@@ -656,6 +656,27 @@ cc-switch
 </details>
 
 <details>
+<summary><b>How do I configure a global outbound proxy?</b></summary>
+
+<br>
+
+Open **Settings → Global Outbound Proxy** in the TUI, or use the CLI:
+
+```bash
+cc-switch settings outbound-proxy set http://127.0.0.1:7890
+cc-switch settings outbound-proxy set socks5://127.0.0.1:1080 --username alice --password secret
+cc-switch settings outbound-proxy show
+cc-switch settings outbound-proxy test
+cc-switch settings outbound-proxy clear
+```
+
+The saved proxy applies to CC-Switch outbound traffic, including provider API forwarding, Skills downloads, WebDAV, model fetches and speed tests, OAuth, and updates. Requests made directly by Claude, Codex, or another external app are affected only when that app is using CC-Switch local routing.
+
+Saved configuration takes precedence over `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`. After it is cleared, CC-Switch falls back to those environment variables. The TUI asks for confirmation when saving while proxy environment variables are present; the CLI prints a warning and continues. User-facing settings and `show` output display credentials in plaintext, while logs, errors, daemon status, and crash diagnostics redact them.
+
+</details>
+
+<details>
 <summary><b>Which apps are supported?</b></summary>
 
 <br>

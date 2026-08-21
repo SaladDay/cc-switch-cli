@@ -56,6 +56,32 @@ pub fn notify_global_switch(enabled: bool) -> Result<(), String> {
     }
 }
 
+/// Ask a live daemon and all active workers to reload the persisted outbound
+/// proxy. A missing daemon is not an error because there is no long-lived
+/// process to update.
+pub fn notify_outbound_proxy_reload() -> Result<(), String> {
+    use std::io::ErrorKind;
+    let socket = paths::socket_path();
+    if !socket.exists() {
+        return Ok(());
+    }
+    match client::round_trip(&socket, &Request::ReloadOutboundProxy) {
+        Ok(Response::Ok) => Ok(()),
+        Ok(Response::Error { message }) => Err(message),
+        Ok(other) => Err(format!("unexpected daemon response: {other:?}")),
+        Err(client::ClientError::Io(error))
+            if matches!(
+                error.kind(),
+                ErrorKind::ConnectionRefused | ErrorKind::NotFound
+            ) =>
+        {
+            let _ = std::fs::remove_file(&socket);
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Acquire the daemon lifetime lease before the Tokio runtime is created.
 /// Keeping this value outside the runtime ensures its flock is released only
 /// after every blocking database task has finished during runtime shutdown.

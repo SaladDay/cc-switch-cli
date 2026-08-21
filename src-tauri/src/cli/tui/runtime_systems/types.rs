@@ -971,7 +971,8 @@ pub(crate) async fn fetch_provider_models_for_tui(
         });
     }
 
-    let client = reqwest::Client::builder()
+    let client = crate::proxy::http_client::builder()
+        .map_err(|e| format!("build http client failed: {e}"))?
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| format!("build http client failed: {e}"))?;

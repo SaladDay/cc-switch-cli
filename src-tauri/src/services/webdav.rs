@@ -196,7 +196,8 @@ fn redact_url(url: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn build_client(timeout_secs: u64) -> Result<Client, AppError> {
-    Client::builder()
+    crate::proxy::http_client::builder()
+        .map_err(AppError::Message)?
         .timeout(Duration::from_secs(timeout_secs.max(1)))
         .build()
         .map_err(|e| AppError::Message(format!("创建 WebDAV HTTP 客户端失败: {e}")))
