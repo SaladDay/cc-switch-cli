@@ -14,6 +14,8 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -208,25 +210,36 @@ impl ClaudeOAuthService {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create Claude config dir: {e}"))?;
         }
-        let mut credentials = match std::fs::read(&path) {
+        let mut credentials = match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
                 .map_err(|e| format!("invalid existing Claude credentials: {e}"))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
             Err(error) => return Err(format!("read Claude credentials: {error}")),
         };
-        credentials["claudeAiOauth"] = serde_json::json!({
-            "accessToken": account.access_token,
-            "refreshToken": account.refresh_token,
-            "expiresAt": account.expires_at * 1000,
-        });
-        let bytes = serde_json::to_vec_pretty(&credentials).map_err(|e| e.to_string())?;
-        crate::config::atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("protect Claude credentials: {e}"))?;
-        }
+        let oauth = credentials
+            .as_object_mut()
+            .ok_or("Claude credentials root must be an object")?
+            .entry("claudeAiOauth")
+            .or_insert_with(|| serde_json::json!({}));
+        let oauth = oauth
+            .as_object_mut()
+            .ok_or("claudeAiOauth must be an object")?;
+        oauth.insert(
+            "accessToken".into(),
+            serde_json::json!(account.access_token),
+        );
+        oauth.insert(
+            "refreshToken".into(),
+            serde_json::json!(account.refresh_token),
+        );
+        oauth.insert(
+            "expiresAt".into(),
+            serde_json::json!(account.expires_at * 1000),
+        );
+        #[cfg(target_os = "macos")]
+        self.write_keychain(&credentials)?;
+        #[cfg(not(target_os = "macos"))]
+        write_secure_json(path, &credentials)?;
         Ok(AuthCompletionResponse {
             account_id: account.id,
             provider: "claude_oauth".into(),
@@ -235,6 +248,57 @@ impl ClaudeOAuthService {
             is_default: true,
         })
     }
+
+    #[cfg(target_os = "macos")]
+    fn write_keychain(&self, credentials: &serde_json::Value) -> Result<(), String> {
+        let payload = serde_json::to_string(credentials).map_err(|e| e.to_string())?;
+        let output = std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-U",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                "cc-switch",
+                "-w",
+                &payload,
+            ])
+            .output()
+            .map_err(|e| format!("write Claude Keychain credential: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err("Claude Keychain write failed".into())
+        }
+    }
+}
+
+fn write_secure_json(path: &PathBuf, value: &serde_json::Value) -> Result<(), String> {
+    let lock = path.with_extension("credentials.lock");
+    let _guard = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+        .map_err(|e| format!("Claude credentials busy or unavailable: {e}"))?;
+    let result = (|| {
+        let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+        let tmp = path.with_extension("credentials.json.tmp");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        use std::io::Write;
+        let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    })();
+    let _ = std::fs::remove_file(path.with_extension("credentials.json.tmp"));
+    let _ = std::fs::remove_file(lock);
+    result
 }
 
 #[cfg(test)]
