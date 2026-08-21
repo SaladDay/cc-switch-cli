@@ -20,8 +20,9 @@ response. Adding another browser OAuth provider therefore adds an adapter and
 dispatch entry, not `start_<provider>_login` methods to the facade.
 
 The public result contains only an authorization URL or an account summary.
-Access and refresh tokens stay in the native config store and are never
-serialized into the JavaScript/N-API response or provider settings.
+Access and refresh tokens are written into Claude Code's native
+`.credentials.json` shape (with mode `0600` on Unix) and are never serialized
+into the JavaScript/N-API response or provider settings.
 
 ## Scope of this draft
 

@@ -61,6 +61,10 @@ pub struct AuthCompletionResponse {
     pub is_default: bool,
 }
 
+fn unsupported(provider: &str, operation: &str) -> String {
+    format!("Auth provider '{provider}' does not support {operation}")
+}
+
 fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
     match auth_provider {
         AUTH_PROVIDER_CODEX_OAUTH => Ok(AUTH_PROVIDER_CODEX_OAUTH),
@@ -89,11 +93,11 @@ impl AuthService {
                     ))
                 })
                 .map_err(|error| error.to_string()),
-            AUTH_PROVIDER_CLAUDE_OAUTH => claude::manager(crate::config::get_app_config_dir())
+            AUTH_PROVIDER_CLAUDE_OAUTH => claude::manager(crate::config::get_claude_config_dir())
                 .start_login(redirect_uri)
                 .await
                 .map(AuthStartResponse::Browser),
-            _ => unreachable!(),
+            _ => unreachable!("validated provider must have a start strategy"),
         }
     }
 
@@ -106,12 +110,12 @@ impl AuthService {
         let auth_provider = ensure_auth_provider(auth_provider)?;
         match auth_provider {
             AUTH_PROVIDER_CLAUDE_OAUTH => {
-                claude::manager(crate::config::get_app_config_dir())
+                claude::manager(crate::config::get_claude_config_dir())
                     .complete_login(callback_url)
                     .await
             }
             AUTH_PROVIDER_CODEX_OAUTH => Err("Auth provider uses device-code polling".into()),
-            _ => unreachable!(),
+            _ => unreachable!("validated provider must have a completion strategy"),
         }
     }
 
@@ -140,7 +144,7 @@ impl AuthService {
                 Err(CodexOAuthError::AuthorizationPending) => Ok(None),
                 Err(error) => Err(error.to_string()),
             },
-            _ => unreachable!(),
+            _ => Err(unsupported(auth_provider, "device-code polling")),
         }
     }
 
@@ -158,7 +162,7 @@ impl AuthService {
                     })
                     .collect())
             }
-            _ => unreachable!(),
+            _ => Err(unsupported(auth_provider, "account listing")),
         }
     }
 
@@ -186,7 +190,7 @@ impl AuthService {
                         .collect(),
                 })
             }
-            _ => unreachable!(),
+            _ => Err(unsupported(auth_provider, "status")),
         }
     }
 
@@ -196,7 +200,7 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::remove_account(account_id)
                 .await
                 .map_err(|error| error.to_string()),
-            _ => unreachable!(),
+            _ => Err(unsupported(auth_provider, "account removal")),
         }
     }
 
@@ -206,7 +210,7 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::set_default_account(account_id)
                 .await
                 .map_err(|error| error.to_string()),
-            _ => unreachable!(),
+            _ => Err(unsupported(auth_provider, "default account selection")),
         }
     }
 
@@ -216,7 +220,7 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::clear_auth()
                 .await
                 .map_err(|error| error.to_string()),
-            _ => unreachable!(),
+            _ => Err(unsupported(auth_provider, "logout")),
         }
     }
 }
@@ -278,5 +282,13 @@ mod tests {
         };
         assert_eq!(response.provider, AUTH_PROVIDER_CLAUDE_OAUTH);
         assert!(response.authorization_url.starts_with("https://claude.ai/"));
+    }
+
+    #[tokio::test]
+    async fn unsupported_claude_account_operations_are_explicit_errors() {
+        let error = AuthService::get_status(AUTH_PROVIDER_CLAUDE_OAUTH)
+            .await
+            .unwrap_err();
+        assert!(error.contains("does not support status"));
     }
 }

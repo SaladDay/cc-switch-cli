@@ -42,7 +42,8 @@ struct StoredAccount {
 }
 
 pub struct ClaudeOAuthService {
-    config_dir: PathBuf,
+    credential_path: PathBuf,
+    token_url: String,
     pending: Mutex<Option<PendingLogin>>,
 }
 
@@ -62,8 +63,13 @@ pub(crate) fn manager(config_dir: PathBuf) -> Arc<ClaudeOAuthService> {
 
 impl ClaudeOAuthService {
     pub fn new(config_dir: PathBuf) -> Self {
+        Self::with_token_url(config_dir, TOKEN_URL)
+    }
+
+    fn with_token_url(config_dir: PathBuf, token_url: impl Into<String>) -> Self {
         Self {
-            config_dir,
+            credential_path: config_dir.join(".credentials.json"),
+            token_url: token_url.into(),
             pending: Mutex::new(None),
         }
     }
@@ -73,16 +79,7 @@ impl ClaudeOAuthService {
         redirect_uri: Option<&str>,
     ) -> Result<BrowserAuthStart, String> {
         let redirect_uri = redirect_uri.unwrap_or(DEFAULT_REDIRECT_URI).trim();
-        let parsed_redirect = url::Url::parse(redirect_uri).ok();
-        if redirect_uri.is_empty()
-            || parsed_redirect.as_ref().map(|url| url.scheme()) != Some("http")
-            || parsed_redirect.as_ref().and_then(|url| url.host_str()) != Some("localhost")
-            || parsed_redirect
-                .as_ref()
-                .and_then(|url| url.port())
-                .is_none()
-            || parsed_redirect.as_ref().map(|url| url.path()) != Some("/callback")
-        {
+        if redirect_uri != DEFAULT_REDIRECT_URI {
             return Err("redirect_uri must be a localhost HTTP callback".to_string());
         }
         let verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -120,10 +117,8 @@ impl ClaudeOAuthService {
     ) -> Result<AuthCompletionResponse, String> {
         let callback =
             url::Url::parse(callback_url).map_err(|e| format!("invalid callback URL: {e}"))?;
-        let pending = self
-            .pending
-            .lock()
-            .await
+        let mut pending_guard = self.pending.lock().await;
+        let pending = pending_guard
             .as_ref()
             .cloned()
             .ok_or("no pending Claude OAuth login")?;
@@ -160,19 +155,16 @@ impl ClaudeOAuthService {
             return Err("Claude OAuth state mismatch".into());
         }
         let code = code.ok_or("Claude OAuth callback did not contain a code")?;
-        // Consume the state only after all callback-local checks pass. This
-        // allows a malformed browser paste to be corrected without issuing a
-        // second authorization request, while still making a valid callback
-        // single-use before token exchange.
-        let pending = self
-            .pending
-            .lock()
-            .await
+        // Consume the exact record while holding the same guard used for all
+        // callback checks. A concurrent start cannot replace A with B between
+        // validation and take, and malformed callbacks remain retryable.
+        let pending = pending_guard
             .take()
             .ok_or("no pending Claude OAuth login")?;
+        drop(pending_guard);
         let body = serde_json::json!({"grant_type":"authorization_code","code":code,"redirect_uri":pending.redirect_uri,"client_id":CLIENT_ID,"code_verifier":pending.verifier,"state":pending.state});
         let response = reqwest::Client::new()
-            .post(TOKEN_URL)
+            .post(&self.token_url)
             .json(&body)
             .send()
             .await
@@ -211,10 +203,30 @@ impl ClaudeOAuthService {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(3600),
         };
-        std::fs::create_dir_all(&self.config_dir).map_err(|e| format!("create auth store: {e}"))?;
-        let bytes = serde_json::to_vec_pretty(&account).map_err(|e| e.to_string())?;
-        crate::config::atomic_write(&self.config_dir.join("claude-oauth.json"), &bytes)
-            .map_err(|e| e.to_string())?;
+        let path = &self.credential_path;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create Claude config dir: {e}"))?;
+        }
+        let mut credentials = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map_err(|e| format!("invalid existing Claude credentials: {e}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(error) => return Err(format!("read Claude credentials: {error}")),
+        };
+        credentials["claudeAiOauth"] = serde_json::json!({
+            "accessToken": account.access_token,
+            "refreshToken": account.refresh_token,
+            "expiresAt": account.expires_at * 1000,
+        });
+        let bytes = serde_json::to_vec_pretty(&credentials).map_err(|e| e.to_string())?;
+        crate::config::atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("protect Claude credentials: {e}"))?;
+        }
         Ok(AuthCompletionResponse {
             account_id: account.id,
             provider: "claude_oauth".into(),
@@ -228,7 +240,25 @@ impl ClaudeOAuthService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{extract::State, routing::post, Json, Router};
     use tempfile::tempdir;
+
+    #[derive(Clone)]
+    struct TokenServerState {
+        request: Arc<Mutex<Option<serde_json::Value>>>,
+    }
+
+    async fn token_handler(
+        State(state): State<TokenServerState>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        *state.request.lock().await = Some(body);
+        Json(serde_json::json!({
+            "access_token": "access-secret",
+            "refresh_token": "refresh-secret",
+            "expires_in": 3600
+        }))
+    }
 
     #[tokio::test]
     async fn start_login_builds_pkce_authorization_request() {
@@ -277,5 +307,52 @@ mod tests {
         let error = service.complete_login(&callback).await.unwrap_err();
         assert!(error.contains("authorization failed"));
         assert!(service.pending.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn successful_exchange_writes_claude_native_credentials_without_public_secrets() {
+        let request = Arc::new(Mutex::new(None));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/token", post(token_handler))
+            .with_state(TokenServerState {
+                request: Arc::clone(&request),
+            });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let config = tempdir().unwrap();
+        let service = ClaudeOAuthService::with_token_url(
+            config.path().to_path_buf(),
+            format!("http://{address}/token"),
+        );
+        let start = service.start_login(None).await.unwrap();
+        let callback = format!(
+            "{}?code=authorization-code&state={}",
+            start.redirect_uri, start.state
+        );
+        let public = service.complete_login(&callback).await.unwrap();
+
+        let body = request.lock().await.clone().unwrap();
+        assert_eq!(body["grant_type"], "authorization_code");
+        assert_eq!(body["code"], "authorization-code");
+        assert_eq!(body["redirect_uri"], DEFAULT_REDIRECT_URI);
+        assert_eq!(body["client_id"], CLIENT_ID);
+        assert!(body["code_verifier"].as_str().unwrap().len() >= 43);
+
+        let credentials: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(config.path().join(".credentials.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(credentials["claudeAiOauth"]["accessToken"], "access-secret");
+        assert_eq!(
+            credentials["claudeAiOauth"]["refreshToken"],
+            "refresh-secret"
+        );
+
+        let public_json = serde_json::to_value(public).unwrap().to_string();
+        assert!(!public_json.contains("access-secret"));
+        assert!(!public_json.contains("refresh-secret"));
+        assert!(service.pending.lock().await.is_none());
     }
 }
