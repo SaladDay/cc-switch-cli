@@ -23,7 +23,7 @@ pub(super) fn set_global_outbound_proxy(
 ) -> Result<(), AppError> {
     let state = load_state()?;
     let full_url = config.to_full_url()?;
-    let outcome = if full_url.is_empty() {
+    let daemon_warning = if full_url.is_empty() {
         crate::services::global_proxy::clear(&state)?
     } else {
         crate::services::global_proxy::set(&state, &config)?
@@ -42,7 +42,7 @@ pub(super) fn set_global_outbound_proxy(
         },
         ToastKind::Success,
     );
-    if let Some(message) = outcome.daemon_warning {
+    if let Some(message) = daemon_warning {
         ctx.app.push_toast(message, ToastKind::Warning);
     }
     Ok(())

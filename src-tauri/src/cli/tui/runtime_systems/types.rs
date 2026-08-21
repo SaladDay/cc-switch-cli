@@ -971,11 +971,7 @@ pub(crate) async fn fetch_provider_models_for_tui(
         });
     }
 
-    let client = crate::proxy::http_client::builder()
-        .map_err(|e| format!("build http client failed: {e}"))?
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("build http client failed: {e}"))?;
+    let client = crate::proxy::http_client::get();
 
     let key = api_key.map(str::trim).filter(|k| !k.is_empty());
     let custom_user_agent = crate::provider::parse_custom_user_agent(custom_user_agent)
@@ -984,7 +980,7 @@ pub(crate) async fn fetch_provider_models_for_tui(
     let mut last_err = String::from("unknown error");
 
     for url in candidate_urls {
-        let mut req = client.get(&url);
+        let mut req = client.get(&url).timeout(Duration::from_secs(5));
         if let Some(key) = key {
             req = match strategy {
                 ModelFetchStrategy::Bearer => req.header("Authorization", format!("Bearer {key}")),

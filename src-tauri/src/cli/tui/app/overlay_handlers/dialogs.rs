@@ -372,7 +372,17 @@ impl App {
                 if trimmed.is_empty() {
                     config = crate::services::GlobalOutboundProxyConfig::default();
                 } else {
-                    config.url = trimmed;
+                    let submitted_auth = url::Url::parse(&trimmed)
+                        .ok()
+                        .filter(|url| !url.username().is_empty() || url.password().is_some())
+                        .and_then(|_| {
+                            crate::services::GlobalOutboundProxyConfig::from_full_url(&trimmed).ok()
+                        });
+                    if let Some(submitted) = submitted_auth {
+                        config = submitted;
+                    } else {
+                        config.url = trimmed;
+                    }
                 }
                 self.validate_and_save_global_outbound_proxy(
                     TextSubmit::SettingsOutboundProxyUrl,
@@ -525,14 +535,7 @@ impl App {
                 TextSubmit::SettingsOutboundProxyUsername
                     | TextSubmit::SettingsOutboundProxyPassword
             );
-        let password_awaiting_username = !config.url.trim().is_empty()
-            && config.username.trim().is_empty()
-            && !config.password.is_empty();
-        let socks_password_awaiting = !config.username.trim().is_empty()
-            && config.password.is_empty()
-            && url::Url::parse(config.url.trim())
-                .is_ok_and(|url| matches!(url.scheme(), "socks5" | "socks5h"));
-        if credential_without_url || password_awaiting_username || socks_password_awaiting {
+        if credential_without_url {
             if !config.url.trim().is_empty() {
                 let url_only = crate::services::GlobalOutboundProxyConfig {
                     url: config.url.clone(),

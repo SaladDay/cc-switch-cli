@@ -77,6 +77,7 @@ impl SkillService {
         let response = crate::proxy::http_client::get()
             .get(url)
             .header(reqwest::header::USER_AGENT, "cc-switch")
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
             .map_err(|error| {
@@ -406,6 +407,7 @@ impl SkillService {
         let response = crate::proxy::http_client::get()
             .get(url)
             .header(reqwest::header::USER_AGENT, "cc-switch")
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
             .map_err(|e| {

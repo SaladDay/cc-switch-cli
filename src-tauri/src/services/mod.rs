@@ -44,7 +44,7 @@ pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, M
 pub use codex_oauth::CodexOAuthService;
 pub use config::ConfigService;
 pub use copilot_auth::CopilotAuthService;
-pub use global_proxy::{GlobalOutboundProxyConfig, GlobalProxyUpdateOutcome};
+pub use global_proxy::GlobalOutboundProxyConfig;
 pub use mcp::McpService;
 pub use model_fetch::FetchedModel;
 pub use prompt::PromptService;

@@ -302,12 +302,6 @@ impl Supervisor {
             inner.shutdown_requested = false;
         }
         self.persist_runtime_session().await?;
-        // Close the startup race with ReloadOutboundProxy: updates sent while
-        // this worker was pending could not target it, so always catch up once
-        // registration becomes visible to subsequent reload requests.
-        if let Err(error) = send_sigwinch(Some(info.pid)) {
-            log::warn!("[daemon] initial outbound proxy reload failed for {app_key}: {error}");
-        }
         Ok(info)
     }
 
@@ -816,7 +810,6 @@ impl Supervisor {
 
     async fn probe_worker_runtime_status(&self, info: &WorkerInfo) -> Option<WorkerRuntimeStatus> {
         let client = reqwest::Client::builder()
-            .no_proxy()
             .timeout(Duration::from_millis(500))
             .build()
             .ok()?;
@@ -1215,7 +1208,7 @@ fn send_sigterm(pid: Option<u32>) -> Result<(), String> {
     send_signal(pid, libc::SIGTERM, "SIGTERM")
 }
 
-fn send_sigwinch(pid: Option<u32>) -> Result<(), String> {
+pub(crate) fn send_sigwinch(pid: Option<u32>) -> Result<(), String> {
     let Some(pid) = pid else {
         return Ok(());
     };

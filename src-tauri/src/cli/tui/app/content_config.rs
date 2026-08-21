@@ -1196,6 +1196,7 @@ impl App {
                 return Action::None;
             }
         };
+        self.global_outbound_proxy_draft = Some(config.clone());
         let environment_variables =
             crate::services::global_proxy::configured_environment_variables();
         if !full_url.is_empty() && !environment_variables.is_empty() {

@@ -658,26 +658,6 @@ cc-switch
 </details>
 
 <details>
-<summary><b>如何配置全局出站代理？</b></summary>
-
-<br>
-
-在 TUI 中打开 **设置 → 全局出站代理**，或使用 CLI：
-
-```bash
-cc-switch settings outbound-proxy set http://127.0.0.1:7890
-cc-switch settings outbound-proxy set socks5://127.0.0.1:1080 --username alice --password secret
-cc-switch settings outbound-proxy show
-cc-switch settings outbound-proxy clear
-```
-
-保存的代理会用于 CC-Switch 的出站流量，包括供应商 API 转发、Skills 下载、WebDAV、模型获取与测速、OAuth 和更新。Claude、Codex 等外部应用自行发出的请求，只有在该应用开启 CC-Switch 本地路由时才会受到影响。
-
-手动保存的配置优先于 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY`；清除后 CC-Switch 会重新使用这些环境变量。存在代理环境变量时，TUI 会在保存前弹窗确认，CLI 则打印提示后继续。设置界面和 `show` 输出会明文显示凭据，但日志、错误信息、daemon 状态和崩溃诊断仍会脱敏。
-
-</details>
-
-<details>
 <summary><b>支持哪些应用？</b></summary>
 
 <br>

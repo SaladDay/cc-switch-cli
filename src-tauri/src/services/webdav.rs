@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use reqwest::{Client, Method, StatusCode};
+use reqwest::{Method, StatusCode};
 use url::Url;
 
 use crate::error::AppError;
@@ -191,18 +191,6 @@ fn redact_url(url: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// HTTP 客户端
-// ---------------------------------------------------------------------------
-
-fn build_client(timeout_secs: u64) -> Result<Client, AppError> {
-    crate::proxy::http_client::builder()
-        .map_err(AppError::Message)?
-        .timeout(Duration::from_secs(timeout_secs.max(1)))
-        .build()
-        .map_err(|e| AppError::Message(format!("创建 WebDAV HTTP 客户端失败: {e}")))
-}
-
 fn apply_auth(builder: reqwest::RequestBuilder, auth: &WebDavAuth) -> reqwest::RequestBuilder {
     match auth {
         Some((user, pass)) => builder.basic_auth(user, pass.as_deref()),
@@ -265,9 +253,12 @@ fn with_service_hint(base_url: &str, message: impl Into<String>) -> String {
 // ---------------------------------------------------------------------------
 
 pub async fn test_connection(base_url: &str, auth: &WebDavAuth) -> Result<(), AppError> {
-    let client = build_client(DEFAULT_TIMEOUT_SECS)?;
+    let client = crate::proxy::http_client::get();
     let method = Method::from_bytes(b"PROPFIND").map_err(|e| AppError::Message(e.to_string()))?;
-    let mut req = client.request(method, base_url).header("Depth", "0");
+    let mut req = client
+        .request(method, base_url)
+        .header("Depth", "0")
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
     req = apply_auth(req, auth);
     let resp = req.send().await.map_err(|e| {
         AppError::Message(with_service_hint(
@@ -292,10 +283,11 @@ pub async fn put_bytes(
     content_type: &str,
 ) -> Result<(), AppError> {
     let base_url = url;
-    let client = build_client(TRANSFER_TIMEOUT_SECS)?;
+    let client = crate::proxy::http_client::get();
     let mut req = client
         .put(url)
         .header("Content-Type", content_type)
+        .timeout(Duration::from_secs(TRANSFER_TIMEOUT_SECS))
         .body(bytes);
     req = apply_auth(req, auth);
     let resp = req.send().await.map_err(|e| {
@@ -320,8 +312,10 @@ pub async fn get_bytes(
     max_bytes: Option<u64>,
 ) -> Result<Option<(Vec<u8>, Option<String>)>, AppError> {
     let base_url = url;
-    let client = build_client(TRANSFER_TIMEOUT_SECS)?;
-    let mut req = client.get(url);
+    let client = crate::proxy::http_client::get();
+    let mut req = client
+        .get(url)
+        .timeout(Duration::from_secs(TRANSFER_TIMEOUT_SECS));
     req = apply_auth(req, auth);
     let resp = req.send().await.map_err(|e| {
         AppError::Message(with_service_hint(
@@ -377,8 +371,10 @@ pub async fn get_bytes(
 
 pub async fn head_etag(url: &str, auth: &WebDavAuth) -> Result<Option<String>, AppError> {
     let base_url = url;
-    let client = build_client(DEFAULT_TIMEOUT_SECS)?;
-    let mut req = client.head(url);
+    let client = crate::proxy::http_client::get();
+    let mut req = client
+        .head(url)
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
     req = apply_auth(req, auth);
     let resp = req.send().await.map_err(|e| {
         AppError::Message(with_service_hint(
@@ -415,9 +411,12 @@ async fn propfind_remote_dir(
     auth: &WebDavAuth,
     base_url: &str,
 ) -> Result<RemoteDirProbe, AppError> {
-    let client = build_client(DEFAULT_TIMEOUT_SECS)?;
+    let client = crate::proxy::http_client::get();
     let method = Method::from_bytes(b"PROPFIND").map_err(|e| AppError::Message(e.to_string()))?;
-    let mut req = client.request(method, url).header("Depth", "0");
+    let mut req = client
+        .request(method, url)
+        .header("Depth", "0")
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
     req = apply_auth(req, auth);
     let resp = req.send().await.map_err(|e| {
         AppError::Message(with_service_hint(
@@ -440,9 +439,11 @@ async fn mkcol_remote_dir(
     auth: &WebDavAuth,
     base_url: &str,
 ) -> Result<StatusCode, AppError> {
-    let client = build_client(DEFAULT_TIMEOUT_SECS)?;
+    let client = crate::proxy::http_client::get();
     let method = Method::from_bytes(b"MKCOL").map_err(|e| AppError::Message(e.to_string()))?;
-    let mut req = client.request(method, url);
+    let mut req = client
+        .request(method, url)
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
     req = apply_auth(req, auth);
     let resp = req.send().await.map_err(|e| {
         AppError::Message(with_service_hint(
@@ -468,8 +469,13 @@ fn should_verify_after_mkcol(status: StatusCode) -> bool {
 /// DELETE a remote collection (directory). Returns Ok(true) if deleted,
 /// Ok(false) if 404/410 (already gone), Err on other failures.
 pub async fn delete_resource(url: &str, auth: &WebDavAuth) -> Result<bool, AppError> {
-    let client = build_client(DEFAULT_TIMEOUT_SECS)?;
-    let req = apply_auth(client.request(Method::DELETE, url), auth);
+    let client = crate::proxy::http_client::get();
+    let req = apply_auth(
+        client
+            .request(Method::DELETE, url)
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+        auth,
+    );
     let resp = req.send().await.map_err(|e| {
         AppError::Message(with_service_hint(
             url,

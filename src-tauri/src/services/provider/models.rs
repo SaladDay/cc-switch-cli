@@ -36,17 +36,13 @@ impl ProviderService {
 
         let candidate_urls = build_provider_model_candidate_urls(base_url);
 
-        let client = crate::proxy::http_client::builder()
-            .map_err(AppError::Message)?
-            .timeout(Duration::from_secs(5))
-            .build()
-            .map_err(|e| AppError::Message(e.to_string()))?;
+        let client = crate::proxy::http_client::get();
 
         let mut last_err_zh = None;
         let mut last_err_en = None;
 
         for url in candidate_urls {
-            let mut req = client.get(&url);
+            let mut req = client.get(&url).timeout(Duration::from_secs(5));
             if let Some(key) = api_key {
                 let key = key.trim();
                 // 同时添加 OpenAI 的 Bearer 和 Anthropic 的 x-api-key 格式，代理服务通常会接受其中之一

@@ -176,7 +176,7 @@ pub enum CodexHistoryCommand {
     Restore,
 }
 
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Clone)]
 pub enum OutboundProxyCommand {
     /// Show the saved outbound proxy and effective source
     Show {
@@ -197,6 +197,25 @@ pub enum OutboundProxyCommand {
     },
     /// Clear the saved proxy and fall back to environment proxy variables
     Clear,
+}
+
+impl std::fmt::Debug for OutboundProxyCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Show { json } => formatter.debug_struct("Show").field("json", json).finish(),
+            Self::Set {
+                url,
+                username,
+                password,
+            } => formatter
+                .debug_struct("Set")
+                .field("url", &crate::proxy::http_client::mask_url(url))
+                .field("username", &username.as_ref().map(|_| "***"))
+                .field("password", &password.as_ref().map(|_| "***"))
+                .finish(),
+            Self::Clear => formatter.write_str("Clear"),
+        }
+    }
 }
 
 pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
@@ -228,11 +247,9 @@ fn show_outbound_proxy(json_output: bool) -> Result<(), AppError> {
     let state = crate::AppState::try_new()?;
     let saved = crate::services::global_proxy::load(&state.db)?;
     let environment_variables = crate::services::global_proxy::configured_environment_variables();
-    let effective_environment_variables =
-        crate::services::global_proxy::effective_environment_variables();
     let effective_source = if saved.is_some() {
         "saved"
-    } else if effective_environment_variables.is_empty() {
+    } else if environment_variables.is_empty() {
         "direct"
     } else {
         "environment"
@@ -281,9 +298,7 @@ fn set_outbound_proxy(
     let state = crate::AppState::try_new()?;
     let config = outbound_proxy_config(url, username, password)?;
     if config.to_full_url()?.is_empty() {
-        return Err(AppError::InvalidInput(
-            "Proxy URL is empty; use `settings outbound-proxy clear` instead".to_string(),
-        ));
+        return clear_outbound_proxy_with_state(&state);
     }
     let environment_variables = crate::services::global_proxy::configured_environment_variables();
     if !environment_variables.is_empty() {
@@ -296,15 +311,19 @@ fn set_outbound_proxy(
         );
     }
 
-    let outcome = crate::services::global_proxy::set(&state, &config)?;
+    let daemon_warning = crate::services::global_proxy::set(&state, &config)?;
     println!("{}", success("Global outbound proxy saved"));
-    print_daemon_reload_warning(outcome.daemon_warning);
+    print_daemon_reload_warning(daemon_warning);
     Ok(())
 }
 
 fn clear_outbound_proxy() -> Result<(), AppError> {
     let state = crate::AppState::try_new()?;
-    let outcome = crate::services::global_proxy::clear(&state)?;
+    clear_outbound_proxy_with_state(&state)
+}
+
+fn clear_outbound_proxy_with_state(state: &crate::AppState) -> Result<(), AppError> {
+    let daemon_warning = crate::services::global_proxy::clear(state)?;
     println!("{}", success("Global outbound proxy cleared"));
     let environment_variables = crate::services::global_proxy::configured_environment_variables();
     if !environment_variables.is_empty() {
@@ -316,7 +335,7 @@ fn clear_outbound_proxy() -> Result<(), AppError> {
             ))
         );
     }
-    print_daemon_reload_warning(outcome.daemon_warning);
+    print_daemon_reload_warning(daemon_warning);
     Ok(())
 }
 
@@ -813,7 +832,7 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{save_manual_visible_apps, set_codex_auth_preservation};
+    use super::{save_manual_visible_apps, set_codex_auth_preservation, OutboundProxyCommand};
     use crate::settings::{VisibleApps, VisibleAppsMode};
     use crate::test_support::TestEnvGuard;
     use serial_test::serial;
@@ -823,6 +842,20 @@ mod tests {
     struct SettingsTestGuard {
         _env: TestEnvGuard,
         _temp: TempDir,
+    }
+
+    #[test]
+    fn outbound_proxy_command_debug_redacts_credentials() {
+        let command = OutboundProxyCommand::Set {
+            url: "http://embedded:secret@127.0.0.1:7890".to_string(),
+            username: Some("alice".to_string()),
+            password: Some("other-secret".to_string()),
+        };
+
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("embedded"), "{debug}");
+        assert!(!debug.contains("alice"), "{debug}");
+        assert!(!debug.contains("secret"), "{debug}");
     }
 
     impl SettingsTestGuard {

@@ -342,11 +342,7 @@ fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
 
 fn create_http_client() -> Result<reqwest::Client, AppError> {
     crate::services::global_proxy::initialize_http_client_from_disk_best_effort();
-    crate::proxy::http_client::builder()
-        .map_err(AppError::Message)?
-        .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| AppError::Message(format!("Failed to initialize HTTP client: {e}")))
+    Ok(crate::proxy::http_client::get())
 }
 
 fn update_manifest_url(repo_url: &str, tag: Option<&str>) -> Result<Url, AppError> {
@@ -371,6 +367,7 @@ async fn fetch_update_manifest(
     let response = client
         .get(url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|e| {
@@ -751,6 +748,7 @@ async fn fetch_latest_release_tag(
         .get(api_url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .header(reqwest::header::ACCEPT, GITHUB_API_ACCEPT)
+        .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|e| AppError::Message(format!("Failed to query latest release: {e}")))?;
@@ -782,6 +780,7 @@ async fn fetch_release_by_tag(
         .get(api_url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .header(reqwest::header::ACCEPT, GITHUB_API_ACCEPT)
+        .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|e| AppError::Message(format!("Failed to query release {tag}: {e}")))?
@@ -800,6 +799,7 @@ async fn fetch_latest_release_tag_from_release_page(
     let response = client
         .get(latest_url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|e| AppError::Message(format!("Failed to query latest release page: {e}")))?
@@ -938,6 +938,7 @@ async fn download_release_asset(
     let response = client
         .get(url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|e| AppError::Message(format!("Failed to download release asset: {e}")))?;
@@ -1063,6 +1064,7 @@ async fn download_text(client: &reqwest::Client, url: &str) -> Result<String, Ap
     let response = client
         .get(url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|e| AppError::Message(format!("Failed to download checksum file: {e}")))?;

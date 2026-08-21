@@ -1,5 +1,4 @@
 use percent_encoding::percent_decode_str;
-use serde::Serialize;
 
 use crate::database::Database;
 use crate::error::AppError;
@@ -15,8 +14,7 @@ const PROXY_ENV_KEYS: [&str; 6] = [
     "all_proxy",
 ];
 
-#[derive(Clone, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct GlobalOutboundProxyConfig {
     pub url: String,
     pub username: String,
@@ -28,14 +26,8 @@ impl std::fmt::Debug for GlobalOutboundProxyConfig {
         formatter
             .debug_struct("GlobalOutboundProxyConfig")
             .field("url", &http_client::mask_url(&self.url))
-            .field(
-                "username",
-                &if self.username.is_empty() { "" } else { "***" },
-            )
-            .field(
-                "password",
-                &if self.password.is_empty() { "" } else { "***" },
-            )
+            .field("username", &(!self.username.is_empty()).then_some("***"))
+            .field("password", &(!self.password.is_empty()).then_some("***"))
             .finish()
     }
 }
@@ -74,61 +66,18 @@ impl GlobalOutboundProxyConfig {
         }
 
         let mut parsed = parse_proxy_url(raw_url)?;
-        if matches!(parsed.scheme(), "socks5" | "socks5h")
-            && !self.username.trim().is_empty()
-            && self.password.is_empty()
-        {
-            return Err(AppError::InvalidInput(
-                crate::t!(
-                    "SOCKS proxy authentication requires a password.",
-                    "SOCKS 代理认证需要填写密码。"
-                )
-                .to_string(),
-            ));
-        }
-        if matches!(parsed.scheme(), "socks5" | "socks5h")
-            && self.username.trim().len() > u8::MAX as usize
-        {
-            return Err(AppError::InvalidInput(
-                crate::t!(
-                    "SOCKS proxy usernames must be at most 255 bytes.",
-                    "SOCKS 代理用户名不能超过 255 字节。"
-                )
-                .to_string(),
-            ));
-        }
-        if matches!(parsed.scheme(), "socks5" | "socks5h") && self.password.len() > u8::MAX as usize
-        {
-            return Err(AppError::InvalidInput(
-                crate::t!(
-                    "SOCKS proxy passwords must be at most 255 bytes.",
-                    "SOCKS 代理密码不能超过 255 字节。"
-                )
-                .to_string(),
-            ));
-        }
-        if self.username.trim().is_empty() {
-            if !self.password.is_empty() {
-                return Err(AppError::InvalidInput(
-                    crate::t!(
-                        "Enter a proxy username before setting a password.",
-                        "设置密码前，请先填写代理用户名。"
-                    )
-                    .to_string(),
-                ));
-            }
-            parsed
-                .set_username("")
-                .map_err(|_| invalid_proxy_username())?;
-            parsed
-                .set_password(None)
-                .map_err(|_| invalid_proxy_password())?;
-        } else {
+        if !self.username.trim().is_empty() {
             parsed
                 .set_username(self.username.trim())
                 .map_err(|_| invalid_proxy_username())?;
+        }
+        if !self.password.is_empty() {
             parsed
                 .set_password(Some(self.password.as_str()))
+                .map_err(|_| invalid_proxy_password())?;
+        } else if !self.username.trim().is_empty() {
+            parsed
+                .set_password(None)
                 .map_err(|_| invalid_proxy_password())?;
         }
 
@@ -136,11 +85,6 @@ impl GlobalOutboundProxyConfig {
         http_client::validate_proxy(Some(&full_url)).map_err(AppError::InvalidInput)?;
         Ok(full_url)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GlobalProxyUpdateOutcome {
-    pub daemon_warning: Option<String>,
 }
 
 pub fn load(db: &Database) -> Result<Option<GlobalOutboundProxyConfig>, AppError> {
@@ -152,26 +96,35 @@ pub fn load(db: &Database) -> Result<Option<GlobalOutboundProxyConfig>, AppError
 pub fn set(
     state: &AppState,
     config: &GlobalOutboundProxyConfig,
-) -> Result<GlobalProxyUpdateOutcome, AppError> {
+) -> Result<Option<String>, AppError> {
     let full_url = config.to_full_url()?;
     update(state, Some(full_url.as_str()))
 }
 
-pub fn clear(state: &AppState) -> Result<GlobalProxyUpdateOutcome, AppError> {
+pub fn clear(state: &AppState) -> Result<Option<String>, AppError> {
     update(state, None)
 }
 
-fn update(state: &AppState, full_url: Option<&str>) -> Result<GlobalProxyUpdateOutcome, AppError> {
+fn update(state: &AppState, full_url: Option<&str>) -> Result<Option<String>, AppError> {
     http_client::validate_proxy(full_url).map_err(AppError::InvalidInput)?;
     state.db.set_global_proxy_url(full_url)?;
     http_client::apply_proxy(full_url).map_err(AppError::Message)?;
 
     #[cfg(unix)]
-    let daemon_warning = crate::daemon::notify_outbound_proxy_reload().err();
+    let reload_warning = [
+        crate::daemon::notify_outbound_proxy_reload().err(),
+        state
+            .proxy_service
+            .notify_foreground_outbound_proxy_reload()
+            .err(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     #[cfg(not(unix))]
-    let daemon_warning = None;
+    let reload_warning: Vec<String> = Vec::new();
 
-    Ok(GlobalProxyUpdateOutcome { daemon_warning })
+    Ok((!reload_warning.is_empty()).then(|| reload_warning.join("; ")))
 }
 
 pub fn configured_environment_variables() -> Vec<String> {
@@ -186,10 +139,6 @@ pub fn configured_environment_variables() -> Vec<String> {
         .collect()
 }
 
-pub fn effective_environment_variables() -> Vec<String> {
-    http_client::effective_environment_proxy_variables()
-}
-
 pub fn initialize_http_client(db: &Database) {
     let saved_url = match db.get_global_proxy_url() {
         Ok(url) => url,
@@ -198,38 +147,33 @@ pub fn initialize_http_client(db: &Database) {
             None
         }
     };
-
-    if let Err(error) = http_client::init(saved_url.as_deref()) {
-        log::error!("[GlobalProxy] Failed to initialize saved configuration: {error}");
-        if let Err(fallback_error) = http_client::init(None) {
-            log::error!(
-                "[GlobalProxy] Failed to initialize environment fallback: {fallback_error}"
-            );
+    if initialize(saved_url.as_deref()).is_err() && saved_url.is_some() {
+        if let Err(error) = db.set_global_proxy_url(None) {
+            log::error!("[GlobalProxy] Failed to clear invalid configuration: {error}");
         }
     }
 }
 
 pub fn initialize_http_client_from_disk_best_effort() {
-    match Database::read_global_proxy_url_from_disk_compatible() {
-        Ok(saved_url) => {
-            if let Err(error) = http_client::init(saved_url.as_deref()) {
-                log::error!("[GlobalProxy] Failed to initialize saved configuration: {error}");
-                if let Err(fallback_error) = http_client::init(None) {
-                    log::error!(
-                        "[GlobalProxy] Failed to initialize environment fallback: {fallback_error}"
-                    );
-                }
-            }
-        }
+    let saved_url = match Database::read_global_proxy_url_from_disk_compatible() {
+        Ok(url) => url,
         Err(error) => {
             log::debug!("[GlobalProxy] Saved configuration unavailable: {error}");
-            if let Err(init_error) = http_client::init(None) {
-                log::error!(
-                    "[GlobalProxy] Failed to initialize environment fallback: {init_error}"
-                );
-            }
+            None
         }
+    };
+    let _ = initialize(saved_url.as_deref());
+}
+
+fn initialize(saved_url: Option<&str>) -> Result<(), ()> {
+    if let Err(error) = http_client::init(saved_url) {
+        log::error!("[GlobalProxy] Failed to initialize saved configuration: {error}");
+        if let Err(error) = http_client::init(None) {
+            log::error!("[GlobalProxy] Failed to initialize environment fallback: {error}");
+        }
+        return Err(());
     }
+    Ok(())
 }
 
 fn parse_proxy_url(raw: &str) -> Result<url::Url, AppError> {
@@ -288,112 +232,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proxy_config_roundtrips_plaintext_credentials() {
-        let parsed =
+    fn proxy_config_roundtrips_credentials() {
+        let config =
             GlobalOutboundProxyConfig::from_full_url("http://user%40name:p%3Ass@127.0.0.1:7890")
                 .expect("parse proxy URL");
 
-        assert_eq!(parsed.url, "http://127.0.0.1:7890/");
-        assert_eq!(parsed.username, "user@name");
-        assert_eq!(parsed.password, "p:ss");
+        assert_eq!(config.url, "http://127.0.0.1:7890/");
+        assert_eq!(config.username, "user@name");
+        assert_eq!(config.password, "p:ss");
         assert_eq!(
-            parsed.to_full_url().expect("merge proxy URL"),
+            config.to_full_url().expect("build proxy URL"),
             "http://user%40name:p%3Ass@127.0.0.1:7890/"
         );
     }
 
     #[test]
-    fn password_requires_username() {
+    fn full_url_credentials_are_preserved_when_fields_are_empty() {
         let config = GlobalOutboundProxyConfig {
-            url: "socks5://127.0.0.1:1080".to_string(),
-            username: String::new(),
-            password: "secret".to_string(),
-        };
-        assert!(config.to_full_url().is_err());
-    }
-
-    #[test]
-    fn credentials_without_url_leave_proxy_unconfigured() {
-        let config = GlobalOutboundProxyConfig {
-            url: String::new(),
-            username: "alice".to_string(),
-            password: "secret".to_string(),
-        };
-
-        assert_eq!(config.to_full_url().expect("empty URL is unconfigured"), "");
-    }
-
-    #[test]
-    fn username_with_empty_password_keeps_explicit_basic_auth() {
-        let config = GlobalOutboundProxyConfig {
-            url: "http://127.0.0.1:7890".to_string(),
-            username: "alice".to_string(),
-            password: String::new(),
+            url: "http://alice:secret@127.0.0.1:7890".to_string(),
+            ..Default::default()
         };
 
         assert_eq!(
             config.to_full_url().expect("build proxy URL"),
-            "http://alice@127.0.0.1:7890/"
+            "http://alice:secret@127.0.0.1:7890/"
         );
-        http_client::explicit_proxy(&config.to_full_url().expect("build proxy URL"))
-            .expect("build authenticated proxy");
     }
 
     #[test]
-    fn socks_username_requires_a_password() {
-        let config = GlobalOutboundProxyConfig {
-            url: "socks5://127.0.0.1:1080".to_string(),
-            username: "alice".to_string(),
-            password: String::new(),
-        };
-
-        let AppError::InvalidInput(message) = config
-            .to_full_url()
-            .expect_err("SOCKS password is required")
-        else {
-            panic!("expected invalid input");
+    fn separate_password_merges_with_embedded_or_empty_username() {
+        let embedded_username = GlobalOutboundProxyConfig {
+            url: "http://alice@127.0.0.1:7890".to_string(),
+            password: "secret".to_string(),
+            ..Default::default()
         };
         assert_eq!(
-            message,
-            crate::t!(
-                "SOCKS proxy authentication requires a password.",
-                "SOCKS 代理认证需要填写密码。"
-            )
+            embedded_username.to_full_url().expect("build proxy URL"),
+            "http://alice:secret@127.0.0.1:7890/"
+        );
+
+        let empty_username = GlobalOutboundProxyConfig {
+            url: "http://127.0.0.1:7890".to_string(),
+            password: "secret".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            empty_username.to_full_url().expect("build proxy URL"),
+            "http://:secret@127.0.0.1:7890/"
         );
     }
 
     #[test]
-    fn socks_credentials_enforce_protocol_byte_limits() {
-        for config in [
-            GlobalOutboundProxyConfig {
-                url: "socks5://127.0.0.1:1080".to_string(),
-                username: "用".repeat(86),
-                password: "secret".to_string(),
-            },
-            GlobalOutboundProxyConfig {
-                url: "socks5h://127.0.0.1:1080".to_string(),
-                username: "alice".to_string(),
-                password: "密".repeat(86),
-            },
-        ] {
-            assert!(matches!(
-                config.to_full_url(),
-                Err(AppError::InvalidInput(_))
-            ));
-        }
-    }
+    fn invalid_url_has_readable_error() {
+        let error = GlobalOutboundProxyConfig::from_full_url("Extu^")
+            .expect_err("invalid URL should fail")
+            .to_string();
 
-    #[test]
-    fn malformed_url_error_never_contains_credentials() {
-        for malformed in ["http://alice:supersecret", "1alice:secret@[@"] {
-            let error = GlobalOutboundProxyConfig::from_full_url(malformed)
-                .expect_err("malformed URL should fail")
-                .to_string();
-            assert!(!error.contains("alice"), "{error}");
-            assert!(!error.contains("secret"), "{error}");
-            assert!(error.contains("127.0.0.1:7890"), "{error}");
-            assert!(!error.contains("relative URL"), "{error}");
-        }
+        assert!(error.contains("Invalid proxy URL"), "{error}");
+        assert!(!error.contains("relative URL"), "{error}");
     }
 
     #[test]
@@ -403,14 +299,14 @@ mod tests {
             username: "alice".to_string(),
             password: "secret".to_string(),
         };
+
         let debug = format!("{config:?}");
         assert!(!debug.contains("alice"));
         assert!(!debug.contains("secret"));
-        assert!(debug.contains("http://127.0.0.1:7890"));
     }
 
     #[test]
-    fn load_splits_persisted_proxy_credentials() {
+    fn load_splits_persisted_credentials() {
         let db = Database::memory().expect("create database");
         db.set_global_proxy_url(Some("socks5://alice:secret@127.0.0.1:1080"))
             .expect("save proxy");

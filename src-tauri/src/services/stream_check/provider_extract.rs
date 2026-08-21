@@ -183,9 +183,7 @@ impl StreamCheckService {
             return Ok(crate::proxy::http_client::get());
         }
 
-        let mut builder = crate::proxy::http_client::builder()
-            .map_err(AppError::Message)?
-            .redirect(reqwest::redirect::Policy::limited(5));
+        let mut builder = Client::builder().redirect(reqwest::redirect::Policy::limited(5));
 
         if let Some(proxy_config) = provider
             .meta
