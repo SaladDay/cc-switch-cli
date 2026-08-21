@@ -129,7 +129,7 @@ pub fn is_chinese() -> bool {
 #[macro_export]
 macro_rules! t {
     ($en:expr, $zh:expr) => {
-        if $crate::cli::i18n::is_chinese() {
+        if $crate::i18n::is_chinese() {
             $zh
         } else {
             $en
@@ -4747,6 +4747,7 @@ pub mod texts {
         }
     }
 
+    #[cfg(feature = "cli")]
     pub fn tui_settings_theme_mode_name(mode: crate::cli::tui::theme::ThemeMode) -> &'static str {
         use crate::cli::tui::theme::ThemeMode;
         if is_chinese() {
@@ -4780,6 +4781,7 @@ pub mod texts {
         }
     }
 
+    #[cfg(feature = "cli")]
     pub fn tui_settings_icon_mode_name(mode: crate::cli::tui::icons::IconMode) -> &'static str {
         use crate::cli::tui::icons::IconMode;
         if is_chinese() {

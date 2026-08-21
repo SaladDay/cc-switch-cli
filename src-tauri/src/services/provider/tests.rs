@@ -3136,6 +3136,7 @@ fn provider_add_strips_common_snippet_before_claude_snapshot_persist() {
 }
 
 #[test]
+#[cfg(feature = "cli")]
 #[serial]
 fn tui_claude_quick_config_round_trip_crosses_storage_normalization() {
     let temp_home = TempDir::new().expect("create temp home");
@@ -3209,6 +3210,7 @@ fn tui_claude_quick_config_round_trip_crosses_storage_normalization() {
 }
 
 #[test]
+#[cfg(feature = "cli")]
 #[serial]
 fn tui_claude_quick_edit_persists_legacy_inferred_common_config() {
     let temp_home = TempDir::new().expect("create temp home");
@@ -3281,6 +3283,7 @@ fn tui_claude_quick_edit_persists_legacy_inferred_common_config() {
 }
 
 #[test]
+#[cfg(feature = "cli")]
 #[serial]
 fn tui_codex_conflicting_quick_edit_preserves_storage_only_settings() {
     let temp_home = TempDir::new().expect("create temp home");

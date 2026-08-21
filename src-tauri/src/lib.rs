@@ -1,3 +1,7 @@
+// The library exposes a curated facade. Without the CLI, shared modules retain
+// private helpers that are only reached by CLI workflows.
+#![cfg_attr(not(feature = "cli"), allow(dead_code))]
+
 // Core modules
 mod app_config;
 mod claude_mcp;
@@ -41,7 +45,12 @@ mod usage_script;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+// Localized validation text is also used by the library-only build.
+#[path = "cli/i18n.rs"]
+pub mod i18n;
+
 // CLI module
+#[cfg(feature = "cli")]
 pub mod cli;
 
 // Public exports

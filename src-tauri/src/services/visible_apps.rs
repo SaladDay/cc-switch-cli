@@ -1,6 +1,6 @@
 use crate::app_config::AppType;
-use crate::cli::i18n::texts;
 use crate::error::AppError;
+use crate::i18n::{self, texts, Language};
 use crate::settings::{self, VisibleApps, VisibleAppsMode};
 use std::collections::HashMap;
 
@@ -174,7 +174,7 @@ pub fn notice_message(notice: &VisibleAppsNotice) -> String {
 }
 
 fn list_separator() -> &'static str {
-    if crate::cli::i18n::current_language() == crate::cli::i18n::Language::Chinese {
+    if i18n::current_language() == Language::Chinese {
         "、"
     } else {
         ", "

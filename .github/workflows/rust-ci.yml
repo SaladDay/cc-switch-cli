@@ -47,6 +47,87 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
+  library-only:
+    name: Library without CLI (${{ matrix.os }})
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            rustflags: -D warnings
+          - os: windows-2022
+            rustflags: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: library-without-cli
+
+      - name: Check and compile-test library without CLI dependencies
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        working-directory: src-tauri
+        run: |
+          cargo check --lib --no-default-features
+          cargo test --lib --no-default-features --no-run
+
+      - name: Check default Windows CLI build
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo check --bin cc-switch
+
+      - name: Assert CLI dependencies are absent from the direct library graph
+        if: runner.os == 'Linux'
+        working-directory: src-tauri
+        run: |
+          # This guard is deliberately limited to direct dependencies. A full-graph
+          # guard would need an allowlist for legitimate core transitives.
+          cli_dependency_names='clap clap_complete colored comfy-table console crossterm env_logger indicatif inquire minisign-verify ratatui self-replace semver shlex tachyonfx tar unicode-width which windows-sys winreg'
+          cli_dependency_pattern="^($(printf '%s' "$cli_dependency_names" | tr ' ' '|')) v"
+
+          cargo tree --target all -e normal --depth 1 --prefix none > default-direct-dependencies.txt
+          for cli_dependency in $cli_dependency_names; do
+            if ! grep -E "^${cli_dependency} v" default-direct-dependencies.txt > /dev/null; then
+              printf 'Known CLI dependency %s was not found in the default graph.\n' "$cli_dependency"
+              exit 1
+            fi
+          done
+
+          cargo tree --no-default-features --target all -e normal --depth 1 --prefix none > library-direct-dependencies.txt
+          if ! grep -E '^cc-switch v' library-direct-dependencies.txt > /dev/null; then
+            printf 'The library-only graph did not identify the cc-switch root package.\n'
+            exit 1
+          fi
+          direct_dependency_count=$(tail -n +2 library-direct-dependencies.txt | wc -l | tr -d ' ')
+          if [ "$direct_dependency_count" -eq 0 ]; then
+            printf 'The library-only graph did not contain any direct dependencies.\n'
+            exit 1
+          fi
+
+          cp library-direct-dependencies.txt controlled-library-direct-dependencies.txt
+          printf 'ratatui v0.0.0\n' >> controlled-library-direct-dependencies.txt
+          if ! grep -E "$cli_dependency_pattern" controlled-library-direct-dependencies.txt > /dev/null; then
+            printf 'Dependency boundary matcher did not detect its synthetic CLI leak.\n'
+            exit 1
+          fi
+
+          if grep -E "$cli_dependency_pattern" library-direct-dependencies.txt > leaked-cli-dependencies.txt; then
+            printf 'CLI dependencies leaked into the library-only graph:\n'
+            cat leaked-cli-dependencies.txt
+            exit 1
+          fi
+
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-22.04
