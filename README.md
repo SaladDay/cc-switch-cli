@@ -711,6 +711,16 @@ cargo clippy                         # Lint code
 cargo test                           # Run tests
 ```
 
+### Library-only Builds
+
+Embedding consumers can omit CLI/TUI dependencies:
+
+```toml
+cc-switch = { git = "https://github.com/SaladDay/cc-switch-cli.git", default-features = false }
+```
+
+The `cli` feature is enabled by default and is required for the `cc-switch` binary.
+
 ### Code Structure
 
 ```

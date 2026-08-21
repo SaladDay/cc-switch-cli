@@ -48,8 +48,15 @@ jobs:
         run: cargo fmt --check
 
   library-only:
-    name: Library without CLI
-    runs-on: ubuntu-22.04
+    name: Library without CLI (${{ matrix.os }})
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            rustflags: -D warnings
+          - os: windows-2022
+            rustflags: ""
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,12 +75,20 @@ jobs:
           key: library-without-cli
 
       - name: Check and compile-test library without CLI dependencies
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         working-directory: src-tauri
         run: |
           cargo check --lib --no-default-features
           cargo test --lib --no-default-features --no-run
 
+      - name: Check default Windows CLI build
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo check --bin cc-switch
+
       - name: Assert CLI dependencies are absent from the direct library graph
+        if: runner.os == 'Linux'
         working-directory: src-tauri
         run: |
           # This guard is deliberately limited to direct dependencies. A full-graph

@@ -713,6 +713,16 @@ cargo clippy                         # 代码检查
 cargo test                           # 运行测试
 ```
 
+### 仅构建核心库
+
+嵌入式调用方可以排除 CLI/TUI 依赖：
+
+```toml
+cc-switch = { git = "https://github.com/SaladDay/cc-switch-cli.git", default-features = false }
+```
+
+`cli` 功能默认启用，并且是构建 `cc-switch` 二进制文件的必要条件。
+
 ### 代码结构
 
 ```
