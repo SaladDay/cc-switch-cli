@@ -1,7 +1,8 @@
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
-use crate::services::CodexOAuthService;
+use crate::services::{claude_oauth, CodexOAuthService};
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
+const AUTH_PROVIDER_CLAUDE_OAUTH: &str = "claude_oauth";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ManagedAuthAccount {
@@ -35,6 +36,7 @@ pub struct ManagedAuthDeviceCodeResponse {
 fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
     match auth_provider {
         AUTH_PROVIDER_CODEX_OAUTH => Ok(AUTH_PROVIDER_CODEX_OAUTH),
+        AUTH_PROVIDER_CLAUDE_OAUTH => Ok(AUTH_PROVIDER_CLAUDE_OAUTH),
         _ => Err(format!("Unsupported auth provider: {auth_provider}")),
     }
 }
@@ -71,6 +73,21 @@ fn map_device_code_response(
 pub struct AuthService;
 
 impl AuthService {
+    pub async fn start_claude_login(
+        redirect_uri: Option<&str>,
+    ) -> Result<crate::services::ClaudeOAuthStart, String> {
+        claude_oauth::manager(crate::config::get_app_config_dir())
+            .start_login(redirect_uri)
+            .await
+    }
+
+    pub async fn complete_claude_login(
+        callback_url: &str,
+    ) -> Result<crate::services::ClaudeOAuthAccount, String> {
+        claude_oauth::manager(crate::config::get_app_config_dir())
+            .complete_login(callback_url)
+            .await
+    }
     pub async fn start_login(auth_provider: &str) -> Result<ManagedAuthDeviceCodeResponse, String> {
         let auth_provider = ensure_auth_provider(auth_provider)?;
         match auth_provider {

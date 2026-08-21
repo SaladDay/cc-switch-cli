@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod balance;
+pub mod claude_oauth;
 pub mod codex_history;
 pub mod codex_oauth;
 pub mod codex_oauth_models;
@@ -40,6 +41,7 @@ pub mod webdav;
 pub mod webdav_sync;
 
 pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus};
+pub use claude_oauth::{ClaudeOAuthAccount, ClaudeOAuthStart};
 pub use codex_oauth::CodexOAuthService;
 pub use config::ConfigService;
 pub use copilot_auth::CopilotAuthService;
