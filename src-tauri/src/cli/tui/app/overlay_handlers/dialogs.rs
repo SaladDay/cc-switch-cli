@@ -519,6 +519,36 @@ impl App {
         raw: String,
         config: crate::services::GlobalOutboundProxyConfig,
     ) -> Action {
+        let credential_without_url = config.url.trim().is_empty()
+            && matches!(
+                submit,
+                TextSubmit::SettingsOutboundProxyUsername
+                    | TextSubmit::SettingsOutboundProxyPassword
+            );
+        let password_awaiting_username = !config.url.trim().is_empty()
+            && config.username.trim().is_empty()
+            && !config.password.is_empty();
+        let socks_password_awaiting = !config.username.trim().is_empty()
+            && config.password.is_empty()
+            && url::Url::parse(config.url.trim())
+                .is_ok_and(|url| matches!(url.scheme(), "socks5" | "socks5h"));
+        if credential_without_url || password_awaiting_username || socks_password_awaiting {
+            if !config.url.trim().is_empty() {
+                let url_only = crate::services::GlobalOutboundProxyConfig {
+                    url: config.url.clone(),
+                    ..Default::default()
+                };
+                if let Err(error) = url_only.to_full_url() {
+                    self.overlay =
+                        Overlay::TextInput(global_outbound_proxy_text_input(submit, raw));
+                    self.push_toast(global_outbound_proxy_error_message(error), ToastKind::Error);
+                    return Action::None;
+                }
+            }
+            self.global_outbound_proxy_draft = Some(config);
+            return Action::None;
+        }
+
         if let Err(error) = config.to_full_url() {
             self.overlay = Overlay::TextInput(global_outbound_proxy_text_input(submit, raw));
             self.push_toast(global_outbound_proxy_error_message(error), ToastKind::Error);

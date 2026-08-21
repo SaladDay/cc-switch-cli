@@ -71,19 +71,43 @@ impl GlobalOutboundProxyConfig {
     pub fn to_full_url(&self) -> Result<String, AppError> {
         let raw_url = self.url.trim();
         if raw_url.is_empty() {
-            if self.username.trim().is_empty() && self.password.is_empty() {
-                return Ok(String::new());
-            }
+            return Ok(String::new());
+        }
+
+        let mut parsed = parse_proxy_url(raw_url)?;
+        if matches!(parsed.scheme(), "socks5" | "socks5h")
+            && !self.username.trim().is_empty()
+            && self.password.is_empty()
+        {
             return Err(AppError::InvalidInput(
                 crate::t!(
-                    "Enter a proxy URL before setting credentials.",
-                    "设置用户名或密码前，请先填写代理 URL。"
+                    "SOCKS proxy authentication requires a password.",
+                    "SOCKS 代理认证需要填写密码。"
                 )
                 .to_string(),
             ));
         }
-
-        let mut parsed = parse_proxy_url(raw_url)?;
+        if matches!(parsed.scheme(), "socks5" | "socks5h")
+            && self.username.trim().len() > u8::MAX as usize
+        {
+            return Err(AppError::InvalidInput(
+                crate::t!(
+                    "SOCKS proxy usernames must be at most 255 bytes.",
+                    "SOCKS 代理用户名不能超过 255 字节。"
+                )
+                .to_string(),
+            ));
+        }
+        if matches!(parsed.scheme(), "socks5" | "socks5h") && self.password.len() > u8::MAX as usize
+        {
+            return Err(AppError::InvalidInput(
+                crate::t!(
+                    "SOCKS proxy passwords must be at most 255 bytes.",
+                    "SOCKS 代理密码不能超过 255 字节。"
+                )
+                .to_string(),
+            ));
+        }
         if self.username.trim().is_empty() {
             if !self.password.is_empty() {
                 return Err(AppError::InvalidInput(
@@ -219,13 +243,13 @@ pub fn initialize_http_client_from_disk_best_effort() {
 
 pub async fn test(config: &GlobalOutboundProxyConfig) -> Result<GlobalProxyTestResult, AppError> {
     let full_url = config.to_full_url()?;
-    if full_url.is_empty() {
-        return Err(AppError::InvalidInput("Proxy URL is empty".to_string()));
-    }
-
-    let proxy = http_client::explicit_proxy(&full_url).map_err(AppError::InvalidInput)?;
-    let client = reqwest::Client::builder()
-        .proxy(proxy)
+    let builder = if full_url.is_empty() {
+        http_client::builder().map_err(AppError::InvalidInput)?
+    } else {
+        reqwest::Client::builder()
+            .proxy(http_client::explicit_proxy(&full_url).map_err(AppError::InvalidInput)?)
+    };
+    let client = builder
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(5))
         .build()
@@ -303,7 +327,7 @@ fn parse_proxy_url(raw: &str) -> Result<url::Url, AppError> {
         )
     })?;
     if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h") {
-        return Err(AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
+        return Err(AppError::InvalidInput(if crate::i18n::is_chinese() {
             format!(
                 "不支持代理协议“{}”。请使用 http、https、socks5 或 socks5h。",
                 parsed.scheme()
@@ -385,6 +409,17 @@ mod tests {
     }
 
     #[test]
+    fn credentials_without_url_leave_proxy_unconfigured() {
+        let config = GlobalOutboundProxyConfig {
+            url: String::new(),
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+        };
+
+        assert_eq!(config.to_full_url().expect("empty URL is unconfigured"), "");
+    }
+
+    #[test]
     fn username_with_empty_password_keeps_explicit_basic_auth() {
         let config = GlobalOutboundProxyConfig {
             url: "http://127.0.0.1:7890".to_string(),
@@ -398,6 +433,50 @@ mod tests {
         );
         http_client::explicit_proxy(&config.to_full_url().expect("build proxy URL"))
             .expect("build authenticated proxy");
+    }
+
+    #[test]
+    fn socks_username_requires_a_password() {
+        let config = GlobalOutboundProxyConfig {
+            url: "socks5://127.0.0.1:1080".to_string(),
+            username: "alice".to_string(),
+            password: String::new(),
+        };
+
+        let AppError::InvalidInput(message) = config
+            .to_full_url()
+            .expect_err("SOCKS password is required")
+        else {
+            panic!("expected invalid input");
+        };
+        assert_eq!(
+            message,
+            crate::t!(
+                "SOCKS proxy authentication requires a password.",
+                "SOCKS 代理认证需要填写密码。"
+            )
+        );
+    }
+
+    #[test]
+    fn socks_credentials_enforce_protocol_byte_limits() {
+        for config in [
+            GlobalOutboundProxyConfig {
+                url: "socks5://127.0.0.1:1080".to_string(),
+                username: "用".repeat(86),
+                password: "secret".to_string(),
+            },
+            GlobalOutboundProxyConfig {
+                url: "socks5h://127.0.0.1:1080".to_string(),
+                username: "alice".to_string(),
+                password: "密".repeat(86),
+            },
+        ] {
+            assert!(matches!(
+                config.to_full_url(),
+                Err(AppError::InvalidInput(_))
+            ));
+        }
     }
 
     #[test]

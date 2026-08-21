@@ -122,6 +122,7 @@ pub async fn run(binary_path: PathBuf, pidfile: &PidFile) -> Result<(), String> 
         Database::init_for_daemon(pidfile)
             .map_err(|err| format!("daemon: open database failed: {err}"))?,
     );
+    crate::services::global_proxy::initialize_http_client(&db);
     crate::services::session_usage::spawn_periodic_session_usage_sync(db.clone(), "daemon");
     Database::spawn_periodic_usage_maintenance(db.clone(), "daemon");
     let supervisor = Supervisor::new(db, socket_path.clone(), binary_path);

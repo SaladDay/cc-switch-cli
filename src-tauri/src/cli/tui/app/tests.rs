@@ -10009,7 +10009,36 @@ mod tests {
     }
 
     #[test]
-    fn outbound_proxy_test_rejects_empty_url() {
+    fn settings_menu_reopening_outbound_proxy_preserves_in_session_draft() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::OutboundProxy))
+            .expect("OutboundProxy missing from SettingsItem::ALL");
+        let draft = crate::services::GlobalOutboundProxyConfig {
+            username: "alice".to_string(),
+            ..Default::default()
+        };
+        app.global_outbound_proxy_draft = Some(draft.clone());
+        let mut data = UiData::default();
+        data.config.global_outbound_proxy = Some(crate::services::GlobalOutboundProxyConfig {
+            url: "http://127.0.0.1:7890".to_string(),
+            ..Default::default()
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::SettingsOutboundProxy)
+        ));
+        assert_eq!(app.global_outbound_proxy_draft, Some(draft));
+    }
+
+    #[test]
+    fn outbound_proxy_test_uses_environment_fallback_when_url_is_empty() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::SettingsOutboundProxy;
         app.focus = Focus::Content;
@@ -10017,13 +10046,12 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('t')), &UiData::default());
 
-        assert!(matches!(action, Action::None));
-        let toast = app.toast.as_ref().expect("empty URL should show an error");
-        assert_eq!(toast.kind, ToastKind::Error);
-        assert_eq!(
-            toast.message,
-            crate::t!("Proxy URL is empty.", "代理 URL 为空。")
-        );
+        assert!(matches!(
+            action,
+            Action::TestGlobalOutboundProxy { config }
+                if config == crate::services::GlobalOutboundProxyConfig::default()
+        ));
+        assert!(app.toast.is_none());
     }
 
     #[test]
@@ -10119,6 +10147,104 @@ mod tests {
                     }) if config == &expected
                 ),
             "valid input should save directly or request environment-proxy confirmation"
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_credentials_can_be_entered_before_url() {
+        for (submit, value, username, password) in [
+            (
+                TextSubmit::SettingsOutboundProxyUsername,
+                "alice",
+                "alice",
+                "",
+            ),
+            (
+                TextSubmit::SettingsOutboundProxyPassword,
+                "secret",
+                "",
+                "secret",
+            ),
+        ] {
+            let mut app = App::new(Some(AppType::Claude));
+            app.route = Route::SettingsOutboundProxy;
+            app.focus = Focus::Content;
+            app.global_outbound_proxy_draft = Some(Default::default());
+            app.overlay = Overlay::TextInput(TextInputState {
+                title: "Global Outbound Proxy".to_string(),
+                prompt: "Credential".to_string(),
+                input: TextInput::new(value),
+                submit,
+            });
+
+            let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+            assert!(matches!(action, Action::None));
+            assert!(matches!(app.overlay, Overlay::None));
+            assert!(app.toast.is_none());
+            assert_eq!(
+                app.global_outbound_proxy_draft,
+                Some(crate::services::GlobalOutboundProxyConfig {
+                    url: String::new(),
+                    username: username.to_string(),
+                    password: password.to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn outbound_proxy_password_url_username_order_preserves_the_draft() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        app.global_outbound_proxy_draft = Some(crate::services::GlobalOutboundProxyConfig {
+            password: "secret".to_string(),
+            ..Default::default()
+        });
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new("http://127.0.0.1:7890"),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::None
+        ));
+        assert!(app.toast.is_none());
+        assert_eq!(
+            app.global_outbound_proxy_draft,
+            Some(crate::services::GlobalOutboundProxyConfig {
+                url: "http://127.0.0.1:7890".to_string(),
+                username: String::new(),
+                password: "secret".to_string(),
+            })
+        );
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Username".to_string(),
+            input: TextInput::new("alice"),
+            submit: TextSubmit::SettingsOutboundProxyUsername,
+        });
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        let expected = crate::services::GlobalOutboundProxyConfig {
+            url: "http://127.0.0.1:7890".to_string(),
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+        };
+
+        assert!(
+            matches!(action, Action::SetGlobalOutboundProxy { config } if config == expected)
+                || matches!(
+                    app.overlay,
+                    Overlay::Confirm(ConfirmOverlay {
+                        action: ConfirmAction::SettingsSetGlobalOutboundProxy { ref config },
+                        ..
+                    }) if config == &expected
+                )
         );
     }
 

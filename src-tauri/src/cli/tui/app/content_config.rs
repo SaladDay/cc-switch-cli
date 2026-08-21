@@ -1008,12 +1008,14 @@ impl App {
                 }
                 Some(SettingsItem::Proxy) => self.push_route_and_switch(Route::SettingsProxy),
                 Some(SettingsItem::OutboundProxy) => {
-                    self.global_outbound_proxy_draft = Some(
-                        data.config
-                            .global_outbound_proxy
-                            .clone()
-                            .unwrap_or_default(),
-                    );
+                    if self.global_outbound_proxy_draft.is_none() {
+                        self.global_outbound_proxy_draft = Some(
+                            data.config
+                                .global_outbound_proxy
+                                .clone()
+                                .unwrap_or_default(),
+                        );
+                    }
                     self.push_route_and_switch(Route::SettingsOutboundProxy)
                 }
                 Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
@@ -1143,13 +1145,6 @@ impl App {
                 })
                 .clone();
             match draft.to_full_url() {
-                Ok(url) if url.is_empty() => {
-                    self.push_toast(
-                        crate::t!("Proxy URL is empty.", "代理 URL 为空。"),
-                        ToastKind::Error,
-                    );
-                    return Action::None;
-                }
                 Ok(_) => {}
                 Err(error) => {
                     self.push_toast(global_outbound_proxy_error_message(error), ToastKind::Error);

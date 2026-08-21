@@ -231,8 +231,8 @@ pub(crate) fn explicit_proxy(url: &str) -> Result<reqwest::Proxy, String> {
     let mut parsed = url::Url::parse(url)
         .map_err(|error| format!("Invalid proxy URL '{}': {}", mask_url(url), error))?;
 
-    let scheme = parsed.scheme();
-    if !["http", "https", "socks5", "socks5h"].contains(&scheme) {
+    let scheme = parsed.scheme().to_string();
+    if !["http", "https", "socks5", "socks5h"].contains(&scheme.as_str()) {
         return Err(format!(
             "Invalid proxy scheme '{}' in URL '{}'. Supported: http, https, socks5, socks5h",
             scheme,
@@ -257,7 +257,20 @@ pub(crate) fn explicit_proxy(url: &str) -> Result<reqwest::Proxy, String> {
     let mut proxy = reqwest::Proxy::all(parsed.as_str())
         .map_err(|error| format!("Invalid proxy URL '{}': {}", mask_url(url), error))?;
     if !username.is_empty() {
-        proxy = proxy.basic_auth(&username, &password);
+        if matches!(scheme.as_str(), "socks5" | "socks5h") {
+            if password.is_empty() {
+                return Err("SOCKS proxy authentication requires a non-empty password".to_string());
+            }
+            proxy = proxy.basic_auth(&username, &password);
+        } else {
+            use base64::Engine as _;
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+            let mut header = reqwest::header::HeaderValue::from_str(&format!("Basic {encoded}"))
+                .map_err(|_| "Invalid proxy credentials".to_string())?;
+            header.set_sensitive(true);
+            proxy = proxy.custom_http_auth(header);
+        }
     }
     Ok(proxy)
 }
@@ -528,6 +541,8 @@ pub fn get_for_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -610,6 +625,62 @@ mod tests {
     #[test]
     fn test_build_client_with_http_proxy() {
         assert!(build_client(Some("http://127.0.0.1:7890")).is_ok());
+    }
+
+    #[test]
+    fn http_proxy_username_with_empty_password_is_applied() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake proxy");
+        listener
+            .set_nonblocking(true)
+            .expect("configure fake proxy");
+        let address = listener.local_addr().expect("fake proxy address");
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .expect("configure proxy connection");
+                        let mut buffer = [0_u8; 4096];
+                        let count = stream.read(&mut buffer).expect("read proxy request");
+                        stream
+                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                            .expect("write proxy response");
+                        return Some(String::from_utf8_lossy(&buffer[..count]).into_owned());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept proxy request: {error}"),
+                }
+            }
+            None
+        });
+
+        let proxy =
+            explicit_proxy(&format!("http://alice@{address}")).expect("build authenticated proxy");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let response = runtime.block_on(async move {
+            let client = Client::builder()
+                .proxy(proxy)
+                .timeout(Duration::from_secs(2))
+                .build()
+                .expect("build proxy client");
+            client.get("http://127.0.0.1:1/probe").send().await
+        });
+        let request = server
+            .join()
+            .expect("join fake proxy")
+            .expect("request should reach the proxy");
+
+        assert_eq!(response.expect("proxy response").status(), 204);
+        assert!(request
+            .lines()
+            .any(|line| { line.eq_ignore_ascii_case("proxy-authorization: Basic YWxpY2U6") }));
     }
 
     #[test]
