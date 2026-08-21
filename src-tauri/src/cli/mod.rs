@@ -7,7 +7,7 @@ mod codex_temp_launch;
 pub mod commands;
 pub mod editor;
 pub(crate) mod failover_policy;
-pub mod i18n;
+pub use crate::i18n;
 pub mod interactive;
 pub(crate) mod openclaw_form_normalization;
 pub(crate) mod provider_quota;

@@ -6,9 +6,12 @@ pub mod codex_oauth_models;
 pub mod coding_plan;
 pub mod config;
 pub mod copilot_auth;
+#[cfg(feature = "cli")]
 pub mod env_checker;
 #[allow(dead_code)]
+#[cfg(feature = "cli")]
 pub mod env_manager;
+#[cfg(feature = "cli")]
 pub mod local_env_check;
 pub mod mcp;
 pub mod model_fetch;
@@ -31,6 +34,7 @@ pub mod stream_check;
 pub mod subscription;
 pub(crate) mod sync_protocol;
 pub mod usage_stats;
+#[cfg(feature = "cli")]
 pub mod visible_apps;
 pub mod webdav;
 pub mod webdav_sync;

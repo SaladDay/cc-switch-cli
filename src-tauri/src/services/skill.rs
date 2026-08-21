@@ -108,7 +108,8 @@ impl Default for SkillStore {
 // ============================================================================
 
 /// Skill sync method (upstream-aligned).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum SyncMethod {
     /// Auto choose: prefer symlink, fallback to copy.

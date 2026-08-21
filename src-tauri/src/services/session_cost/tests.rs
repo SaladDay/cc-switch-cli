@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use rusqlite::{params, Connection};
 
 use crate::database::Database;
-use crate::services::sql_helpers::{INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL};
+use crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH;
+#[cfg(feature = "cli")]
+use crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_TOTAL;
 use crate::session_manager::SessionUsageSummary;
 
 use super::{project_main_connection, project_page, QueryControl, SessionCostIdentity};
@@ -608,6 +610,7 @@ fn duplicate_visible_source_paths_are_ambiguous_and_receive_no_overlay() {
 }
 
 #[test]
+#[cfg(feature = "cli")]
 fn session_projection_matches_usage_page_bucket_and_cost_semantics() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
