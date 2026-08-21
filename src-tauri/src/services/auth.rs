@@ -36,6 +36,31 @@ pub struct ManagedAuthDeviceCodeResponse {
     pub interval: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BrowserAuthStart {
+    pub provider: String,
+    pub authorization_url: String,
+    pub state: String,
+    pub redirect_uri: String,
+    pub expires_in: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "flow", rename_all = "snake_case")]
+pub enum AuthStartResponse {
+    DeviceCode(ManagedAuthDeviceCodeResponse),
+    Browser(BrowserAuthStart),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AuthCompletionResponse {
+    pub provider: String,
+    pub account_id: String,
+    pub login: Option<String>,
+    pub organization_id: Option<String>,
+    pub is_default: bool,
+}
+
 fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
     match auth_provider {
         AUTH_PROVIDER_CODEX_OAUTH => Ok(AUTH_PROVIDER_CODEX_OAUTH),
@@ -47,29 +72,53 @@ fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
 pub struct AuthService;
 
 impl AuthService {
-    pub async fn start_claude_login(
+    /// Start the provider's native auth strategy. Browser providers return an
+    /// authorization URL; device providers return a device-code response.
+    pub async fn start(
+        auth_provider: &str,
         redirect_uri: Option<&str>,
-    ) -> Result<crate::services::ClaudeOAuthStart, String> {
-        claude::manager(crate::config::get_app_config_dir())
-            .start_login(redirect_uri)
-            .await
-    }
-
-    pub async fn complete_claude_login(
-        callback_url: &str,
-    ) -> Result<crate::services::ClaudeOAuthAccount, String> {
-        claude::manager(crate::config::get_app_config_dir())
-            .complete_login(callback_url)
-            .await
-    }
-    pub async fn start_login(auth_provider: &str) -> Result<ManagedAuthDeviceCodeResponse, String> {
+    ) -> Result<AuthStartResponse, String> {
         let auth_provider = ensure_auth_provider(auth_provider)?;
         match auth_provider {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::start_device_flow()
                 .await
-                .map(|response| codex::map_device_code_response(auth_provider, response))
+                .map(|response| {
+                    AuthStartResponse::DeviceCode(codex::map_device_code_response(
+                        auth_provider,
+                        response,
+                    ))
+                })
                 .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_CLAUDE_OAUTH => claude::manager(crate::config::get_app_config_dir())
+                .start_login(redirect_uri)
+                .await
+                .map(AuthStartResponse::Browser),
             _ => unreachable!(),
+        }
+    }
+
+    /// Complete a browser callback for a provider that uses authorization code
+    /// OAuth. Device-code providers are completed by `poll_for_account`.
+    pub async fn complete(
+        auth_provider: &str,
+        callback_url: &str,
+    ) -> Result<AuthCompletionResponse, String> {
+        let auth_provider = ensure_auth_provider(auth_provider)?;
+        match auth_provider {
+            AUTH_PROVIDER_CLAUDE_OAUTH => {
+                claude::manager(crate::config::get_app_config_dir())
+                    .complete_login(callback_url)
+                    .await
+            }
+            AUTH_PROVIDER_CODEX_OAUTH => Err("Auth provider uses device-code polling".into()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub async fn start_login(auth_provider: &str) -> Result<ManagedAuthDeviceCodeResponse, String> {
+        match Self::start(auth_provider, None).await? {
+            AuthStartResponse::DeviceCode(response) => Ok(response),
+            AuthStartResponse::Browser(_) => Err("Auth provider uses browser callback".into()),
         }
     }
 
@@ -217,5 +266,17 @@ mod tests {
         assert_eq!(status.accounts[0].id, "acc-456");
         assert!(status.accounts[0].is_default);
         assert!(!status.accounts[1].is_default);
+    }
+
+    #[tokio::test]
+    async fn generic_start_dispatches_by_flow_type() {
+        let response = AuthService::start(AUTH_PROVIDER_CLAUDE_OAUTH, None)
+            .await
+            .expect("start browser auth");
+        let AuthStartResponse::Browser(response) = response else {
+            panic!("Claude must use the browser callback strategy");
+        };
+        assert_eq!(response.provider, AUTH_PROVIDER_CLAUDE_OAUTH);
+        assert!(response.authorization_url.starts_with("https://claude.ai/"));
     }
 }

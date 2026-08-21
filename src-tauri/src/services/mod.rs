@@ -39,8 +39,11 @@ pub mod visible_apps;
 pub mod webdav;
 pub mod webdav_sync;
 
-pub use auth::claude::{ClaudeOAuthAccount, ClaudeOAuthStart};
-pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus};
+#[allow(unused_imports)]
+pub use auth::{
+    AuthCompletionResponse, AuthService, AuthStartResponse, BrowserAuthStart, ManagedAuthAccount,
+    ManagedAuthDeviceCodeResponse, ManagedAuthStatus,
+};
 pub use codex_oauth::CodexOAuthService;
 pub use config::ConfigService;
 pub use copilot_auth::CopilotAuthService;

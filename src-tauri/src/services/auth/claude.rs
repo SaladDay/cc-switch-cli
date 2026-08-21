@@ -5,6 +5,7 @@
 //! `complete_login`; access and refresh tokens are never part of the public
 //! response types.
 
+use super::{AuthCompletionResponse, BrowserAuthStart};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,24 +22,6 @@ const SCOPE: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 pub const PROVIDER: &str = "claude_oauth";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaudeOAuthStart {
-    pub provider: String,
-    pub authorization_url: String,
-    pub state: String,
-    pub redirect_uri: String,
-    pub expires_in: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaudeOAuthAccount {
-    pub id: String,
-    pub provider: String,
-    pub email: Option<String>,
-    pub organization_id: Option<String>,
-    pub is_default: bool,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingLogin {
@@ -88,7 +71,7 @@ impl ClaudeOAuthService {
     pub async fn start_login(
         &self,
         redirect_uri: Option<&str>,
-    ) -> Result<ClaudeOAuthStart, String> {
+    ) -> Result<BrowserAuthStart, String> {
         let redirect_uri = redirect_uri.unwrap_or(DEFAULT_REDIRECT_URI).trim();
         let parsed_redirect = url::Url::parse(redirect_uri).ok();
         if redirect_uri.is_empty()
@@ -120,7 +103,7 @@ impl ClaudeOAuthService {
             redirect_uri: redirect_uri.to_string(),
             expires_at: chrono::Utc::now().timestamp() + 300,
         });
-        Ok(ClaudeOAuthStart {
+        Ok(BrowserAuthStart {
             provider: "claude_oauth".to_string(),
             authorization_url: format!("{AUTHORIZE_URL}?{}", query.finish()),
             state,
@@ -131,7 +114,10 @@ impl ClaudeOAuthService {
 
     /// Validates a callback URL and exchanges its code. Tokens are persisted
     /// below the configured native store and are never returned to callers.
-    pub async fn complete_login(&self, callback_url: &str) -> Result<ClaudeOAuthAccount, String> {
+    pub async fn complete_login(
+        &self,
+        callback_url: &str,
+    ) -> Result<AuthCompletionResponse, String> {
         let callback =
             url::Url::parse(callback_url).map_err(|e| format!("invalid callback URL: {e}"))?;
         let pending = self
@@ -229,10 +215,10 @@ impl ClaudeOAuthService {
         let bytes = serde_json::to_vec_pretty(&account).map_err(|e| e.to_string())?;
         crate::config::atomic_write(&self.config_dir.join("claude-oauth.json"), &bytes)
             .map_err(|e| e.to_string())?;
-        Ok(ClaudeOAuthAccount {
-            id: account.id,
+        Ok(AuthCompletionResponse {
+            account_id: account.id,
             provider: "claude_oauth".into(),
-            email: account.email,
+            login: account.email,
             organization_id: account.organization_id,
             is_default: true,
         })

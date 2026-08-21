@@ -6,13 +6,18 @@ existing reader for credentials created by the Claude CLI.
 
 ## Flow
 
-1. Call `AuthService::start_claude_login(None)` (or provide a localhost
+1. Call `AuthService::start("claude_oauth", None)` (or provide a localhost
    callback such as `http://localhost:54545/callback`).
 2. Open the returned `authorization_url` in a browser.
 3. Pass the complete browser callback URL to
-   `AuthService::complete_claude_login(callback_url)`.
+   `AuthService::complete("claude_oauth", callback_url)`.
 4. The native service validates the redirect origin, callback `state`, expiry,
    and authorization errors, then exchanges the code with Anthropic.
+
+`AuthService` is provider-neutral: `start(provider, redirect_uri)` dispatches
+to a provider strategy and returns either a `device_code` or `browser` tagged
+response. Adding another browser OAuth provider therefore adds an adapter and
+dispatch entry, not `start_<provider>_login` methods to the facade.
 
 The public result contains only an authorization URL or an account summary.
 Access and refresh tokens stay in the native config store and are never
