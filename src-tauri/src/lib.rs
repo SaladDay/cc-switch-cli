@@ -1,3 +1,7 @@
+// The library exposes a curated facade. Without the CLI, shared modules retain
+// private helpers that are only reached by CLI workflows.
+#![cfg_attr(not(feature = "cli"), allow(dead_code))]
+
 // Core modules
 mod app_config;
 mod claude_mcp;
