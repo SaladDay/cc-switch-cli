@@ -193,10 +193,26 @@ impl ClaudeOAuthService {
         if refresh_token.is_empty() {
             return Err("Claude OAuth response missing refresh_token".into());
         }
+        let email = token
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        let organization_id = token
+            .get("organization_id")
+            .or_else(|| token.get("organizationId"))
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        let stable_id = token
+            .get("account_id")
+            .or_else(|| token.get("user_id"))
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .or_else(|| email.clone())
+            .or_else(|| organization_id.clone());
         let account = StoredAccount {
-            id: Uuid::new_v4().to_string(),
-            email: None,
-            organization_id: None,
+            id: stable_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            email,
+            organization_id,
             access_token: access_token.to_string(),
             refresh_token: refresh_token.to_string(),
             expires_at: chrono::Utc::now().timestamp()
@@ -210,6 +226,10 @@ impl ClaudeOAuthService {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create Claude config dir: {e}"))?;
         }
+        #[cfg(any(not(target_os = "macos"), test))]
+        let lock_path = path.with_extension("credentials.lock");
+        #[cfg(any(not(target_os = "macos"), test))]
+        let _lock = CredentialLock::acquire(&lock_path)?;
         let mut credentials = match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
                 .map_err(|e| format!("invalid existing Claude credentials: {e}"))?,
@@ -236,10 +256,13 @@ impl ClaudeOAuthService {
             "expiresAt".into(),
             serde_json::json!(account.expires_at * 1000),
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(test)))]
         self.write_keychain(&credentials)?;
-        #[cfg(not(target_os = "macos"))]
-        write_secure_json(path, &credentials)?;
+        #[cfg(any(not(target_os = "macos"), test))]
+        let write_result = write_secure_json_unlocked(path, &credentials);
+        #[cfg(any(not(target_os = "macos"), test))]
+        #[cfg(any(not(target_os = "macos"), test))]
+        write_result?;
         Ok(AuthCompletionResponse {
             account_id: account.id,
             provider: "claude_oauth".into(),
@@ -273,13 +296,26 @@ impl ClaudeOAuthService {
     }
 }
 
-fn write_secure_json(path: &PathBuf, value: &serde_json::Value) -> Result<(), String> {
-    let lock = path.with_extension("credentials.lock");
-    let _guard = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock)
-        .map_err(|e| format!("Claude credentials busy or unavailable: {e}"))?;
+struct CredentialLock(PathBuf);
+
+impl CredentialLock {
+    fn acquire(path: &PathBuf) -> Result<Self, String> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| format!("Claude credentials busy or unavailable: {e}"))?;
+        Ok(Self(path.clone()))
+    }
+}
+
+impl Drop for CredentialLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn write_secure_json_unlocked(path: &PathBuf, value: &serde_json::Value) -> Result<(), String> {
     let result = (|| {
         let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
         let tmp = path.with_extension("credentials.json.tmp");
@@ -297,7 +333,6 @@ fn write_secure_json(path: &PathBuf, value: &serde_json::Value) -> Result<(), St
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())
     })();
     let _ = std::fs::remove_file(path.with_extension("credentials.json.tmp"));
-    let _ = std::fs::remove_file(lock);
     result
 }
 
