@@ -20,6 +20,8 @@ const DEFAULT_REDIRECT_URI: &str = "http://localhost:54545/callback";
 const SCOPE: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
+pub const PROVIDER: &str = "claude_oauth";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClaudeOAuthStart {
     pub provider: String,
@@ -63,7 +65,7 @@ pub struct ClaudeOAuthService {
 
 static SERVICE: OnceLock<RwLock<Option<(PathBuf, Arc<ClaudeOAuthService>)>>> = OnceLock::new();
 
-pub fn manager(config_dir: PathBuf) -> Arc<ClaudeOAuthService> {
+pub(crate) fn manager(config_dir: PathBuf) -> Arc<ClaudeOAuthService> {
     let store = SERVICE.get_or_init(|| RwLock::new(None));
     if let Some((path, service)) = store.read().expect("read Claude OAuth service").as_ref() {
         if path == &config_dir {

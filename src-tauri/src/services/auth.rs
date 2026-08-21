@@ -1,8 +1,11 @@
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
-use crate::services::{claude_oauth, CodexOAuthService};
+use crate::services::CodexOAuthService;
 
-const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
-const AUTH_PROVIDER_CLAUDE_OAUTH: &str = "claude_oauth";
+pub mod claude;
+pub mod codex;
+
+use claude::PROVIDER as AUTH_PROVIDER_CLAUDE_OAUTH;
+use codex::PROVIDER as AUTH_PROVIDER_CODEX_OAUTH;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ManagedAuthAccount {
@@ -41,42 +44,13 @@ fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
     }
 }
 
-fn map_account(
-    provider: &str,
-    account: crate::proxy::providers::codex_oauth_auth::ManagedAuthAccount,
-    default_account_id: Option<&str>,
-) -> ManagedAuthAccount {
-    ManagedAuthAccount {
-        is_default: default_account_id == Some(account.id.as_str()),
-        id: account.id,
-        provider: provider.to_string(),
-        login: account.login,
-        avatar_url: account.avatar_url,
-        authenticated_at: account.authenticated_at,
-    }
-}
-
-fn map_device_code_response(
-    provider: &str,
-    response: crate::proxy::providers::codex_oauth_auth::ManagedAuthDeviceCodeResponse,
-) -> ManagedAuthDeviceCodeResponse {
-    ManagedAuthDeviceCodeResponse {
-        provider: provider.to_string(),
-        device_code: response.device_code,
-        user_code: response.user_code,
-        verification_uri: response.verification_uri,
-        expires_in: response.expires_in,
-        interval: response.interval,
-    }
-}
-
 pub struct AuthService;
 
 impl AuthService {
     pub async fn start_claude_login(
         redirect_uri: Option<&str>,
     ) -> Result<crate::services::ClaudeOAuthStart, String> {
-        claude_oauth::manager(crate::config::get_app_config_dir())
+        claude::manager(crate::config::get_app_config_dir())
             .start_login(redirect_uri)
             .await
     }
@@ -84,7 +58,7 @@ impl AuthService {
     pub async fn complete_claude_login(
         callback_url: &str,
     ) -> Result<crate::services::ClaudeOAuthAccount, String> {
-        claude_oauth::manager(crate::config::get_app_config_dir())
+        claude::manager(crate::config::get_app_config_dir())
             .complete_login(callback_url)
             .await
     }
@@ -93,7 +67,7 @@ impl AuthService {
         match auth_provider {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::start_device_flow()
                 .await
-                .map(|response| map_device_code_response(auth_provider, response))
+                .map(|response| codex::map_device_code_response(auth_provider, response))
                 .map_err(|error| error.to_string()),
             _ => unreachable!(),
         }
@@ -111,7 +85,7 @@ impl AuthService {
                     let default_account_id =
                         CodexOAuthService::get_status().await.default_account_id;
                     Ok(account.map(|account| {
-                        map_account(auth_provider, account, default_account_id.as_deref())
+                        codex::map_account(auth_provider, account, default_account_id.as_deref())
                     }))
                 }
                 Err(CodexOAuthError::AuthorizationPending) => Ok(None),
@@ -131,7 +105,7 @@ impl AuthService {
                     .accounts
                     .into_iter()
                     .map(|account| {
-                        map_account(auth_provider, account, default_account_id.as_deref())
+                        codex::map_account(auth_provider, account, default_account_id.as_deref())
                     })
                     .collect())
             }
@@ -154,7 +128,11 @@ impl AuthService {
                         .accounts
                         .into_iter()
                         .map(|account| {
-                            map_account(auth_provider, account, default_account_id.as_deref())
+                            codex::map_account(
+                                auth_provider,
+                                account,
+                                default_account_id.as_deref(),
+                            )
                         })
                         .collect(),
                 })
