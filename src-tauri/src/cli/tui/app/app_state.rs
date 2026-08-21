@@ -1,11 +1,5 @@
 use super::*;
 
-type GlobalOutboundProxyTestReceiver = std::sync::Arc<
-    std::sync::Mutex<
-        std::sync::mpsc::Receiver<Result<crate::services::GlobalProxyTestResult, String>>,
-    >,
->;
-
 #[derive(Debug, Clone)]
 pub enum Action {
     None,
@@ -321,9 +315,6 @@ pub enum Action {
         enabled: bool,
     },
     SetGlobalOutboundProxy {
-        config: crate::services::GlobalOutboundProxyConfig,
-    },
-    TestGlobalOutboundProxy {
         config: crate::services::GlobalOutboundProxyConfig,
     },
     EnableProxyAndAutoFailover {
@@ -785,7 +776,6 @@ pub struct App {
     pub settings_proxy_idx: usize,
     pub settings_outbound_proxy_idx: usize,
     pub global_outbound_proxy_draft: Option<crate::services::GlobalOutboundProxyConfig>,
-    pub global_outbound_proxy_test_rx: Option<GlobalOutboundProxyTestReceiver>,
     pub settings_managed_accounts_idx: usize,
     pub managed_auth_status: Option<crate::services::ManagedAuthStatus>,
     pub managed_auth_loading: bool,

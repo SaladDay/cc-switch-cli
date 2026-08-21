@@ -3579,7 +3579,7 @@ fn settings_outbound_proxy_page_shows_plaintext_credentials() {
     assert!(all.contains("http://127.0.0.1:7890"), "{all}");
     assert!(all.contains("alice"), "{all}");
     assert!(all.contains("secret"), "{all}");
-    assert!(all.contains("t test"), "{all}");
+    assert!(!all.contains("t test"), "{all}");
     assert!(!all.contains("Ctrl+S"), "{all}");
     assert!(!all.contains(" save"), "{all}");
     assert!(!all.contains("Test current fields"), "{all}");

@@ -1134,26 +1134,6 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Action {
-        if matches!(key.code, KeyCode::Char('t')) {
-            let draft = self
-                .global_outbound_proxy_draft
-                .get_or_insert_with(|| {
-                    data.config
-                        .global_outbound_proxy
-                        .clone()
-                        .unwrap_or_default()
-                })
-                .clone();
-            match draft.to_full_url() {
-                Ok(_) => {}
-                Err(error) => {
-                    self.push_toast(global_outbound_proxy_error_message(error), ToastKind::Error);
-                    return Action::None;
-                }
-            }
-            return Action::TestGlobalOutboundProxy { config: draft };
-        }
-
         let items_len = GlobalOutboundProxySettingsItem::ALL.len();
         match key.code {
             KeyCode::Up => {

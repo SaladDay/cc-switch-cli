@@ -4250,10 +4250,7 @@ pub(super) fn render_settings_outbound_proxy(
         frame,
         chunks[0],
         theme,
-        &[
-            ("Enter", texts::tui_key_edit()),
-            ("t", texts::tui_key_test()),
-        ],
+        &[("Enter", texts::tui_key_edit())],
         app.focus == Focus::Content,
     );
 

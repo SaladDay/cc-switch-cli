@@ -1038,9 +1038,6 @@ pub(crate) fn handle_action(
         Action::SetGlobalOutboundProxy { config } => {
             settings::set_global_outbound_proxy(&mut ctx, config)
         }
-        Action::TestGlobalOutboundProxy { config } => {
-            settings::test_global_outbound_proxy(&mut ctx, config)
-        }
         Action::SetProxyAutoFailover { app_type, enabled } => {
             settings::set_proxy_auto_failover(&mut ctx, app_type, enabled)
         }

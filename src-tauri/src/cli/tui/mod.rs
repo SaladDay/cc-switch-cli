@@ -2257,7 +2257,6 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SetCodexUnifiedSessionHistory { .. }
         | Action::SetPreferredEditor { .. }
         | Action::SetManagedProxyForCurrentApp { .. }
-        | Action::TestGlobalOutboundProxy { .. }
         | Action::SetLanguage(_)
         | Action::CheckUpdate
         | Action::ConfirmUpdate

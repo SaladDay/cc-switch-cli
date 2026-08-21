@@ -195,20 +195,6 @@ pub enum OutboundProxyCommand {
         #[arg(long)]
         password: Option<String>,
     },
-    /// Test a proxy URL, or the saved proxy when URL is omitted
-    Test {
-        /// Proxy URL to test
-        url: Option<String>,
-        /// Optional proxy username
-        #[arg(long)]
-        username: Option<String>,
-        /// Optional proxy password
-        #[arg(long)]
-        password: Option<String>,
-        /// Print machine-readable JSON
-        #[arg(long)]
-        json: bool,
-    },
     /// Clear the saved proxy and fall back to environment proxy variables
     Clear,
 }
@@ -234,12 +220,6 @@ fn outbound_proxy_cmd(cmd: OutboundProxyCommand) -> Result<(), AppError> {
             username,
             password,
         } => set_outbound_proxy(url, username, password),
-        OutboundProxyCommand::Test {
-            url,
-            username,
-            password,
-            json,
-        } => test_outbound_proxy(url, username, password, json),
         OutboundProxyCommand::Clear => clear_outbound_proxy(),
     }
 }
@@ -319,53 +299,6 @@ fn set_outbound_proxy(
     let outcome = crate::services::global_proxy::set(&state, &config)?;
     println!("{}", success("Global outbound proxy saved"));
     print_daemon_reload_warning(outcome.daemon_warning);
-    Ok(())
-}
-
-fn test_outbound_proxy(
-    url: Option<String>,
-    username: Option<String>,
-    password: Option<String>,
-    json_output: bool,
-) -> Result<(), AppError> {
-    let state = crate::AppState::try_new()?;
-    let config = match url {
-        Some(url) => outbound_proxy_config(url, username, password)?,
-        None if username.is_some() || password.is_some() => {
-            return Err(AppError::InvalidInput(
-                "URL is required when test credentials are provided".to_string(),
-            ));
-        }
-        None => crate::services::global_proxy::load(&state.db)?.ok_or_else(|| {
-            AppError::InvalidInput("No saved global outbound proxy to test".to_string())
-        })?,
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| AppError::Message(format!("Failed to create runtime: {error}")))?;
-    let result = runtime.block_on(crate::services::global_proxy::test(&config))?;
-
-    if json_output {
-        println!(
-            "{}",
-            to_json(&result).map_err(|error| AppError::Message(error.to_string()))?
-        );
-    } else if result.success {
-        println!(
-            "{}",
-            success(&format!("Proxy test succeeded ({} ms)", result.latency_ms))
-        );
-    } else {
-        println!(
-            "{}",
-            warning(&format!(
-                "Proxy test failed after {} ms: {}",
-                result.latency_ms,
-                result.error.as_deref().unwrap_or("unknown error")
-            ))
-        );
-    }
     Ok(())
 }
 

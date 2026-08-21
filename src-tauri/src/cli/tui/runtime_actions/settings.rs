@@ -48,43 +48,6 @@ pub(super) fn set_global_outbound_proxy(
     Ok(())
 }
 
-pub(super) fn test_global_outbound_proxy(
-    ctx: &mut RuntimeActionContext<'_>,
-    config: crate::services::GlobalOutboundProxyConfig,
-) -> Result<(), AppError> {
-    if ctx.app.global_outbound_proxy_test_rx.is_some() {
-        ctx.app.push_toast(
-            crate::t!("A proxy test is already running.", "代理测试正在进行中。"),
-            ToastKind::Info,
-        );
-        return Ok(());
-    }
-
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("cc-switch-proxy-test".to_string())
-        .spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("failed to create async runtime: {error}"))
-                .and_then(|runtime| {
-                    runtime
-                        .block_on(crate::services::global_proxy::test(&config))
-                        .map_err(|error| error.to_string())
-                });
-            let _ = sender.send(result);
-        })
-        .map_err(|error| AppError::Message(format!("failed to start proxy test: {error}")))?;
-    ctx.app.global_outbound_proxy_test_rx =
-        Some(std::sync::Arc::new(std::sync::Mutex::new(receiver)));
-    ctx.app.push_toast(
-        crate::t!("Testing proxy...", "正在测试代理……"),
-        ToastKind::Info,
-    );
-    Ok(())
-}
-
 pub(super) fn set_proxy_enabled(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,

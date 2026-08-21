@@ -668,7 +668,6 @@ cc-switch
 cc-switch settings outbound-proxy set http://127.0.0.1:7890
 cc-switch settings outbound-proxy set socks5://127.0.0.1:1080 --username alice --password secret
 cc-switch settings outbound-proxy show
-cc-switch settings outbound-proxy test
 cc-switch settings outbound-proxy clear
 ```
 

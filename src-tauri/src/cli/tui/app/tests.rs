@@ -10038,23 +10038,6 @@ mod tests {
     }
 
     #[test]
-    fn outbound_proxy_test_uses_environment_fallback_when_url_is_empty() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::SettingsOutboundProxy;
-        app.focus = Focus::Content;
-        app.global_outbound_proxy_draft = Some(Default::default());
-
-        let action = app.on_key(key(KeyCode::Char('t')), &UiData::default());
-
-        assert!(matches!(
-            action,
-            Action::TestGlobalOutboundProxy { config }
-                if config == crate::services::GlobalOutboundProxyConfig::default()
-        ));
-        assert!(app.toast.is_none());
-    }
-
-    #[test]
     fn outbound_proxy_url_editor_explains_empty_environment_fallback() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::SettingsOutboundProxy;
@@ -10288,46 +10271,6 @@ mod tests {
             "Invalid proxy URL. Enter a full URL, for example http://127.0.0.1:7890 or socks5://127.0.0.1:1080."
         );
         assert!(!toast.message.contains("relative URL"));
-    }
-
-    #[test]
-    fn outbound_proxy_t_tests_current_draft() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::SettingsOutboundProxy;
-        app.focus = Focus::Content;
-        let config = crate::services::GlobalOutboundProxyConfig {
-            url: "http://127.0.0.1:7890".to_string(),
-            username: "alice".to_string(),
-            password: "secret".to_string(),
-        };
-        app.global_outbound_proxy_draft = Some(config.clone());
-
-        assert!(matches!(
-            app.on_key(key(KeyCode::Char('t')), &UiData::default()),
-            Action::TestGlobalOutboundProxy { config: tested } if tested == config
-        ));
-    }
-
-    #[test]
-    fn outbound_proxy_test_completion_is_reported_on_tick() {
-        let mut app = App::new(Some(AppType::Claude));
-        let (sender, receiver) = std::sync::mpsc::channel();
-        app.global_outbound_proxy_test_rx =
-            Some(std::sync::Arc::new(std::sync::Mutex::new(receiver)));
-        sender
-            .send(Ok(crate::services::GlobalProxyTestResult {
-                success: true,
-                latency_ms: 17,
-                error: None,
-            }))
-            .expect("queue proxy test result");
-
-        app.on_tick();
-
-        assert!(app.global_outbound_proxy_test_rx.is_none());
-        let toast = app.toast.as_ref().expect("test result should show a toast");
-        assert_eq!(toast.kind, ToastKind::Success);
-        assert!(toast.message.contains("17"), "{}", toast.message);
     }
 
     #[test]

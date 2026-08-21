@@ -1,6 +1,5 @@
 use percent_encoding::percent_decode_str;
 use serde::Serialize;
-use std::time::{Duration, Instant};
 
 use crate::database::Database;
 use crate::error::AppError;
@@ -144,14 +143,6 @@ pub struct GlobalProxyUpdateOutcome {
     pub daemon_warning: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GlobalProxyTestResult {
-    pub success: bool,
-    pub latency_ms: u64,
-    pub error: Option<String>,
-}
-
 pub fn load(db: &Database) -> Result<Option<GlobalOutboundProxyConfig>, AppError> {
     db.get_global_proxy_url()?
         .map(|url| GlobalOutboundProxyConfig::from_full_url(&url))
@@ -241,81 +232,6 @@ pub fn initialize_http_client_from_disk_best_effort() {
     }
 }
 
-pub async fn test(config: &GlobalOutboundProxyConfig) -> Result<GlobalProxyTestResult, AppError> {
-    let full_url = config.to_full_url()?;
-    let builder = if full_url.is_empty() {
-        http_client::builder().map_err(AppError::InvalidInput)?
-    } else {
-        reqwest::Client::builder()
-            .proxy(http_client::explicit_proxy(&full_url).map_err(AppError::InvalidInput)?)
-    };
-    let client = builder
-        .timeout(Duration::from_secs(5))
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|error| {
-            AppError::Message(format!("Failed to build proxy test client: {error}"))
-        })?;
-
-    let started = Instant::now();
-    let targets = [
-        "https://httpbin.org/get",
-        "https://www.google.com",
-        "https://api.anthropic.com",
-    ];
-    let mut last_error = None;
-
-    let attempts = async {
-        for target in targets {
-            match client.head(target).send().await {
-                Ok(response)
-                    if response.status().is_success()
-                        || response.status().is_redirection()
-                        || response.status().is_client_error()
-                            && response.status()
-                                != reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED =>
-                {
-                    return Some(GlobalProxyTestResult {
-                        success: true,
-                        latency_ms: started.elapsed().as_millis() as u64,
-                        error: None,
-                    });
-                }
-                Ok(response)
-                    if response.status() == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED =>
-                {
-                    last_error = Some(format!(
-                        "Proxy authentication failed: HTTP {}",
-                        response.status()
-                    ));
-                }
-                Ok(response) => {
-                    last_error = Some(format!(
-                        "Proxy test target returned HTTP {}",
-                        response.status()
-                    ));
-                }
-                Err(error) => {
-                    last_error = Some(redact_error(&error.to_string(), &full_url));
-                }
-            }
-        }
-        None
-    };
-
-    match tokio::time::timeout(Duration::from_secs(5), attempts).await {
-        Ok(Some(result)) => return Ok(result),
-        Ok(None) => {}
-        Err(_) => last_error = Some("Proxy test timed out".to_string()),
-    }
-
-    Ok(GlobalProxyTestResult {
-        success: false,
-        latency_ms: started.elapsed().as_millis() as u64,
-        error: Some(last_error.unwrap_or_else(|| "All proxy test targets failed".to_string())),
-    })
-}
-
 fn parse_proxy_url(raw: &str) -> Result<url::Url, AppError> {
     let parsed = url::Url::parse(raw).map_err(|_| {
         AppError::InvalidInput(
@@ -365,18 +281,6 @@ fn invalid_proxy_password() -> AppError {
 
 fn decode_url_component(value: &str) -> String {
     percent_decode_str(value).decode_utf8_lossy().into_owned()
-}
-
-fn redact_error(message: &str, full_url: &str) -> String {
-    let mut redacted = message.replace(full_url, &http_client::mask_url(full_url));
-    if let Ok(config) = GlobalOutboundProxyConfig::from_full_url(full_url) {
-        for secret in [&config.username, &config.password] {
-            if !secret.is_empty() {
-                redacted = redacted.replace(secret, "***");
-            }
-        }
-    }
-    redacted
 }
 
 #[cfg(test)]
@@ -477,18 +381,6 @@ mod tests {
                 Err(AppError::InvalidInput(_))
             ));
         }
-    }
-
-    #[test]
-    fn invalid_error_never_contains_credentials() {
-        let full_url = "http://alice:secret@127.0.0.1:7890";
-        let redacted = redact_error(
-            &format!("could not connect to {full_url}; user alice password secret"),
-            full_url,
-        );
-        assert!(!redacted.contains("alice"));
-        assert!(!redacted.contains("secret"));
-        assert!(redacted.contains("http://127.0.0.1:7890"));
     }
 
     #[test]

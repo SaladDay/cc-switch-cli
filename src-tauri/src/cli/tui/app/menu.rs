@@ -131,7 +131,6 @@ impl App {
             settings_proxy_idx: 0,
             settings_outbound_proxy_idx: 0,
             global_outbound_proxy_draft: None,
-            global_outbound_proxy_test_rx: None,
             settings_managed_accounts_idx: 0,
             managed_auth_status: None,
             managed_auth_loading: false,
@@ -313,7 +312,6 @@ impl App {
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         self.expire_managed_auth_login_if_needed();
-        self.poll_global_outbound_proxy_test();
 
         // Deep search debounce: count ticks since last input, fire after threshold
         const DEEP_SEARCH_DEBOUNCE_TICKS: u64 = 2; // ~2 ticks ≈ 400ms at 200ms/tick
@@ -339,54 +337,6 @@ impl App {
             if self.tick.saturating_sub(transition.started_tick) >= PROXY_HERO_TRANSITION_TICKS {
                 self.proxy_visual_transition = None;
             }
-        }
-    }
-
-    fn poll_global_outbound_proxy_test(&mut self) {
-        use std::sync::mpsc::TryRecvError;
-
-        let completion = self
-            .global_outbound_proxy_test_rx
-            .as_ref()
-            .and_then(|receiver| match receiver.lock() {
-                Ok(receiver) => match receiver.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(TryRecvError::Empty) => None,
-                    Err(TryRecvError::Disconnected) => {
-                        Some(Err("Proxy test worker stopped unexpectedly".to_string()))
-                    }
-                },
-                Err(_) => Some(Err("Proxy test result lock is unavailable".to_string())),
-            });
-        let Some(completion) = completion else {
-            return;
-        };
-        self.global_outbound_proxy_test_rx = None;
-
-        match completion {
-            Ok(result) if result.success => self.push_toast(
-                crate::t!(
-                    format!("Proxy test succeeded ({} ms).", result.latency_ms),
-                    format!("代理测试成功（{} 毫秒）。", result.latency_ms)
-                ),
-                ToastKind::Success,
-            ),
-            Ok(result) => self.push_toast(
-                crate::t!(
-                    format!(
-                        "Proxy test failed after {} ms: {}",
-                        result.latency_ms,
-                        result.error.as_deref().unwrap_or("unknown error")
-                    ),
-                    format!(
-                        "代理测试失败（{} 毫秒）：{}",
-                        result.latency_ms,
-                        result.error.as_deref().unwrap_or("未知错误")
-                    )
-                ),
-                ToastKind::Warning,
-            ),
-            Err(error) => self.push_toast(error, ToastKind::Error),
         }
     }
 
