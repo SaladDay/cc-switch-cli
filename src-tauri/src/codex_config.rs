@@ -45,45 +45,6 @@ impl CodexCatalogToolProfile {
     }
 }
 
-/// Native Responses gateways used by the migrated presets that reject Codex's
-/// hosted web-search tool.
-const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &["xiaomimimo.com", "minimaxi.com"];
-const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] = &["mimo", "minimax"];
-
-fn codex_top_level_model(config_text: &str) -> Option<String> {
-    let doc = config_text.parse::<toml::Value>().ok()?;
-    doc.get("model")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
-    if let Some(base_url) = extract_codex_base_url(config_text) {
-        let base_url = base_url.to_ascii_lowercase();
-        if CODEX_WEB_SEARCH_REJECT_HOSTS
-            .iter()
-            .any(|host| base_url.contains(host))
-        {
-            return true;
-        }
-    }
-
-    if let Some(model) = codex_top_level_model(config_text) {
-        let model = model.to_ascii_lowercase();
-        let model = model.rsplit('/').next().unwrap_or(model.as_str());
-        if CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES
-            .iter()
-            .any(|prefix| model.starts_with(prefix))
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Reserved built-in provider IDs from OpenAI Codex's config/model-provider
 /// catalog. Keep in sync with Codex `RESERVED_MODEL_PROVIDER_IDS` and legacy
 /// removed provider aliases.
@@ -940,7 +901,8 @@ const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
     "minimax.io",     // MiniMax global (api.minimax.io)
     "minimaxi.com",   // MiniMax CN (api.minimaxi.com)
 ];
-const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] = &["mimo", "longcat", "minimax"];
+const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] =
+    &["mimo", "longcat", "minimax", "qwen3-coder"];
 
 /// Top-level `model` id from a Codex `config.toml`.
 fn codex_top_level_model(config_text: &str) -> Option<String> {
@@ -1808,6 +1770,12 @@ pub fn restore_codex_settings_for_backfill(
     ) {
         settings_obj.insert("modelCatalog".to_string(), model_catalog);
     }
+    if let (Some(settings_obj), Some(option)) = (
+        settings.as_object_mut(),
+        template_settings.get(CODEX_WEB_SEARCH_DISABLE_KEY).cloned(),
+    ) {
+        settings_obj.insert(CODEX_WEB_SEARCH_DISABLE_KEY.to_string(), option);
+    }
     Ok(())
 }
 
@@ -2523,8 +2491,26 @@ base_url = "https://api.deepseek.com"
             );
         }
 
-        // NOT blacklisted → keep Codex default (relays/GPT, DouBao, Qwen, and
-        // any unknown provider incl. an aggregator serving a non-reject model).
+        // Qwen3-Coder is rejected on the model axis (百炼 marks built-in tools
+        // unsupported for the coder series), incl. on the DashScope host and
+        // behind an aggregator "vendor/" prefix (upstream 26f0d221).
+        for (model, host) in [
+            (
+                "qwen3-coder-plus",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            ("qwen3-coder-plus", "https://api.siliconflow.cn/v1"),
+            ("qwen/qwen3-coder-plus", "https://api.siliconflow.cn/v1"),
+        ] {
+            assert!(
+                codex_native_gateway_rejects_web_search(&cfg(model, host)),
+                "{model} @ {host} should be blacklisted by qwen3-coder brand"
+            );
+        }
+
+        // NOT blacklisted → keep Codex default (relays/GPT, DouBao, general
+        // Qwen models, and any unknown provider incl. an aggregator serving a
+        // non-reject model).
         for (model, host) in [
             ("gpt-5.5", "https://www.packyapi.com/v1"),
             ("gpt-5-codex", "https://aihubmix.com/v1"),
@@ -2533,7 +2519,11 @@ base_url = "https://api.deepseek.com"
                 "https://ark.cn-beijing.volces.com/api/v3",
             ),
             (
-                "qwen3-coder-plus",
+                "qwen-max",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            (
+                "qwen3-max",
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ),
             ("Pro/moonshotai/Kimi-K2.6", "https://api.siliconflow.cn/v1"),
@@ -2675,9 +2665,9 @@ base_url = "https://api.deepseek.com"
             &settings,
             captured,
             CodexCatalogToolProfile::ProxyChat,
+        )
         .expect("prepare switch");
         assert_eq!(parse_web_search_field(&switched.config_text), None);
->>>>>>> 4436c8d4 (fix(codex): align web_search with upstream blacklist and fix option lifecycle)
     }
 
     #[test]
