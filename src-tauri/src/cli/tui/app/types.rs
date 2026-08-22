@@ -4360,6 +4360,9 @@ pub enum ConfirmAction {
     SettingsSetClaudePluginIntegration {
         enabled: bool,
     },
+    SettingsSetGlobalOutboundProxy {
+        config: crate::services::GlobalOutboundProxyConfig,
+    },
     VisibleAppsAutoDetection,
     VisibleAppsSwitchToManual {
         apps: crate::settings::VisibleApps,
@@ -4453,6 +4456,9 @@ pub enum TextSubmit {
     ConfigBackupName,
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
+    SettingsOutboundProxyUrl,
+    SettingsOutboundProxyUsername,
+    SettingsOutboundProxyPassword,
     SettingsOpenClawConfigDir,
     SettingsPreferredEditor,
     #[allow(dead_code)]
@@ -4477,12 +4483,37 @@ pub enum TextSubmit {
     WebDavJianguoyunPassword,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TextInputState {
     pub title: String,
     pub prompt: String,
     pub input: TextInput,
     pub submit: TextSubmit,
+}
+
+impl std::fmt::Debug for TextInputState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut input = self.input.clone();
+        match &self.submit {
+            TextSubmit::SettingsOutboundProxyUrl => {
+                input.value = crate::proxy::http_client::mask_url(&input.value);
+            }
+            TextSubmit::SettingsOutboundProxyUsername
+            | TextSubmit::SettingsOutboundProxyPassword => {
+                if !input.value.is_empty() {
+                    input.value = "***".to_string();
+                }
+            }
+            _ => {}
+        }
+        formatter
+            .debug_struct("TextInputState")
+            .field("title", &self.title)
+            .field("prompt", &self.prompt)
+            .field("input", &input)
+            .field("submit", &self.submit)
+            .finish()
+    }
 }
 
 impl TextInputState {

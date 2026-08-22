@@ -9979,6 +9979,153 @@ mod tests {
     }
 
     #[test]
+    fn outbound_proxy_empty_url_clears_configuration() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new(""),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::SetGlobalOutboundProxy { config }
+                if config == crate::services::GlobalOutboundProxyConfig::default()
+        ));
+    }
+
+    #[test]
+    fn outbound_proxy_credentials_can_be_entered_before_url() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        app.global_outbound_proxy_draft = Some(crate::services::GlobalOutboundProxyConfig {
+            password: "secret".to_string(),
+            ..Default::default()
+        });
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new("http://127.0.0.1:7890"),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        let expected = crate::services::GlobalOutboundProxyConfig {
+            url: "http://127.0.0.1:7890".to_string(),
+            username: String::new(),
+            password: "secret".to_string(),
+        };
+
+        assert!(
+            matches!(action, Action::SetGlobalOutboundProxy { config } if config == expected)
+                || matches!(
+                    app.overlay,
+                    Overlay::Confirm(ConfirmOverlay {
+                        action: ConfirmAction::SettingsSetGlobalOutboundProxy { ref config },
+                        ..
+                    }) if config == &expected
+                )
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_url_embedded_credentials_replace_the_draft() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        app.global_outbound_proxy_draft = Some(crate::services::GlobalOutboundProxyConfig {
+            url: "http://proxy-a.example:7890".to_string(),
+            username: "alice".to_string(),
+            password: "old".to_string(),
+        });
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new("http://bob:new@proxy-b.example:7890"),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        let expected = crate::services::GlobalOutboundProxyConfig {
+            url: "http://proxy-b.example:7890/".to_string(),
+            username: "bob".to_string(),
+            password: "new".to_string(),
+        };
+
+        assert!(
+            matches!(action, Action::SetGlobalOutboundProxy { config } if config == expected)
+                || matches!(
+                    app.overlay,
+                    Overlay::Confirm(ConfirmOverlay {
+                        action: ConfirmAction::SettingsSetGlobalOutboundProxy { ref config },
+                        ..
+                    }) if config == &expected
+                )
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_invalid_url_reopens_editor_with_readable_error() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsOutboundProxy;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new("Extu^"),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsOutboundProxyUrl,
+                ..
+            })
+        ));
+        let toast = app.toast.as_ref().expect("validation error toast");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(toast.message.contains("Invalid proxy URL"));
+        assert!(!toast.message.contains("relative URL"));
+    }
+
+    #[test]
+    fn outbound_proxy_text_input_debug_redacts_credentials() {
+        let url = TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Proxy URL".to_string(),
+            input: TextInput::new("http://alice:secret@127.0.0.1:7890"),
+            submit: TextSubmit::SettingsOutboundProxyUrl,
+        };
+        let password = TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Password".to_string(),
+            input: TextInput::new("other-secret"),
+            submit: TextSubmit::SettingsOutboundProxyPassword,
+        };
+        let username = TextInputState {
+            title: "Global Outbound Proxy".to_string(),
+            prompt: "Username".to_string(),
+            input: TextInput::new("other-user"),
+            submit: TextSubmit::SettingsOutboundProxyUsername,
+        };
+
+        let debug = format!("{url:?} {username:?} {password:?}");
+        assert!(!debug.contains("alice"), "{debug}");
+        assert!(!debug.contains("secret"), "{debug}");
+        assert!(!debug.contains("other-user"), "{debug}");
+    }
+
+    #[test]
     fn settings_menu_exposes_visible_apps_item() {
         assert!(
             SettingsItem::ALL

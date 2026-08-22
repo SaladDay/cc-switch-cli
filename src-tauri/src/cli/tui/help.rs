@@ -52,6 +52,7 @@ enum HelpTarget {
     Sessions,
     FailoverQueue,
     PreferredEditor,
+    GlobalOutboundProxy,
     CodexOfficialAuthPreservation,
     CodexUnifiedSessionHistory,
     ProviderTemplate,
@@ -148,9 +149,14 @@ fn current_help_target(app: &App) -> HelpTarget {
         return HelpTarget::Sessions;
     }
 
+    if matches!(app.route, super::route::Route::SettingsOutboundProxy) {
+        return HelpTarget::GlobalOutboundProxy;
+    }
+
     if matches!(app.route, super::route::Route::Settings) && matches!(app.focus, Focus::Content) {
         match SettingsItem::ALL.get(app.settings_idx) {
             Some(SettingsItem::PreferredEditor) => return HelpTarget::PreferredEditor,
+            Some(SettingsItem::OutboundProxy) => return HelpTarget::GlobalOutboundProxy,
             Some(SettingsItem::PreserveCodexOfficialAuth) => {
                 return HelpTarget::CodexOfficialAuthPreservation;
             }
@@ -322,6 +328,13 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
             help_lines(
                 "打开设置项时，cc-switch 才会检测当前系统中可执行的常见编辑器；检测不会启动任何程序，也不影响启动速度。检测结果只作为候选，必须按 Enter 明确选择后才会保存，不会自动替你选择。有效的 VISUAL 和 EDITOR 命令也会出现在候选中。\n自定义命令会按参数直接执行，不经过 shell，临时文件路径会追加为最后一个参数。带空格的路径或参数需要加引号；自定义输入留空可清除当前选择。\n图形编辑器必须使用等待参数（例如 code --wait），否则进程提前退出后临时文件会被回收。已配置的命令如果启动失败会直接报错，不会静默换用其他编辑器。",
                 "cc-switch detects executable common editors only when you open this setting; detection launches nothing and does not affect startup time. Results are choices only: nothing is saved until you explicitly press Enter, and no editor is selected automatically. Valid VISUAL and EDITOR commands also appear in the list.\nCustom commands are executed directly without a shell, with the temporary file path appended as the final argument. Quote paths or arguments that contain spaces; leave custom input empty to clear the selection.\nGUI editors need a wait flag, such as code --wait, or the temporary file could be removed when the launcher exits early. A configured command reports launch failures instead of silently switching editors.",
+            ),
+        ),
+        HelpTarget::GlobalOutboundProxy => HelpContent::new(
+            crate::t!("Global Outbound Proxy", "全局出站代理"),
+            help_lines(
+                "为 CC Switch 自身访问外部 API、Skills 下载、WebDAV、更新等请求配置统一代理。开启本地路由时，应用经 CC Switch 转发的请求也使用它；未开启本地路由的外部应用请求不受影响。\n支持 http、https、socks5 和 socks5h。用户名与密码会明文显示，但不会写入日志、错误、daemon 状态或崩溃诊断。\n编辑字段后按 Enter 会校验并保存；代理 URL 留空会清除手动配置并重新使用环境变量。已保存的配置优先于 HTTP_PROXY、HTTPS_PROXY 和 ALL_PROXY。",
+                "Configures one proxy for CC Switch's own outbound requests, including external APIs, Skills downloads, WebDAV, and updates. With local routing enabled, app requests forwarded by CC Switch use it too; direct requests from external apps are unaffected.\nSupported schemes are http, https, socks5, and socks5h. Username and password are shown in plaintext, but are excluded from logs, errors, daemon status, and crash diagnostics.\nPress Enter after editing a field to validate and save it; leaving the proxy URL blank clears the manual configuration and falls back to environment variables. Saved configuration takes precedence over HTTP_PROXY, HTTPS_PROXY, and ALL_PROXY.",
             ),
         ),
         HelpTarget::CodexOfficialAuthPreservation => HelpContent::new(

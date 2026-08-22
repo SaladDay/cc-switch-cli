@@ -264,6 +264,7 @@ pub struct ConfigSnapshot {
     pub common_snippets: CommonConfigSnippets,
     pub webdav_sync: Option<crate::settings::WebDavSyncSettings>,
     pub s3_sync: Option<crate::settings::S3SyncSettings>,
+    pub global_outbound_proxy: Option<crate::services::GlobalOutboundProxyConfig>,
     pub openclaw_config_path: Option<PathBuf>,
     #[allow(dead_code)]
     pub openclaw_config_dir: Option<PathBuf>,
@@ -951,6 +952,7 @@ impl ConfigSnapshot {
             common_snippets: self.common_snippets.clone(),
             webdav_sync: self.webdav_sync.clone(),
             s3_sync: self.s3_sync.clone(),
+            global_outbound_proxy: self.global_outbound_proxy.clone(),
             openclaw_config_path: None,
             openclaw_config_dir: None,
             openclaw_env: None,
@@ -1873,6 +1875,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         common_snippets,
         webdav_sync: settings.webdav_sync,
         s3_sync: settings.s3_sync,
+        global_outbound_proxy: crate::services::global_proxy::load(&state.db)?,
         openclaw_config_path: openclaw_snapshot
             .as_ref()
             .map(|snapshot| snapshot.config_path.clone()),

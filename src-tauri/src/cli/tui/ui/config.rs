@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::cli::tui::app::{LocalProxySettingsItem, SettingsItem};
+use crate::cli::tui::app::{GlobalOutboundProxySettingsItem, LocalProxySettingsItem, SettingsItem};
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,9 @@ fn settings_section(item: SettingsItem) -> SettingsSection {
         | SettingsItem::ClaudePluginIntegration
         | SettingsItem::PreserveCodexOfficialAuth
         | SettingsItem::CodexUnifiedSessionHistory => SettingsSection::Integrations,
-        SettingsItem::Proxy | SettingsItem::CheckForUpdates => SettingsSection::System,
+        SettingsItem::Proxy | SettingsItem::OutboundProxy | SettingsItem::CheckForUpdates => {
+            SettingsSection::System
+        }
     }
 }
 
@@ -3526,6 +3528,22 @@ pub(super) fn render_settings(
                     data.proxy.configured_listen_address, data.proxy.configured_listen_port,
                 ),
             ),
+            super::app::SettingsItem::OutboundProxy => {
+                let value = data
+                    .config
+                    .global_outbound_proxy
+                    .as_ref()
+                    .and_then(|config| config.to_full_url().ok())
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or_else(|| {
+                        crate::t!("Uses environment variables by default", "默认使用环境变量")
+                            .to_string()
+                    });
+                (
+                    crate::t!("Global Outbound Proxy", "全局出站代理").to_string(),
+                    value,
+                )
+            }
             super::app::SettingsItem::CheckForUpdates => (
                 texts::tui_settings_check_for_updates().to_string(),
                 format!("v{}", env!("CARGO_PKG_VERSION")),
@@ -4166,4 +4184,85 @@ pub(super) fn render_settings_proxy(
             .style(Style::default().fg(theme.dim)),
         chunks[2],
     );
+}
+
+pub(super) fn render_settings_outbound_proxy(
+    frame: &mut Frame<'_>,
+    app: &App,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let draft = app
+        .global_outbound_proxy_draft
+        .as_ref()
+        .or(data.config.global_outbound_proxy.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    let rows_data = GlobalOutboundProxySettingsItem::ALL
+        .iter()
+        .map(|item| match item {
+            GlobalOutboundProxySettingsItem::Url => (
+                crate::t!("Proxy URL", "代理 URL").to_string(),
+                draft.url.clone(),
+            ),
+            GlobalOutboundProxySettingsItem::Username => (
+                crate::t!("Username (optional)", "用户名（可选）").to_string(),
+                draft.username.clone(),
+            ),
+            GlobalOutboundProxySettingsItem::Password => (
+                crate::t!("Password (optional)", "密码（可选）").to_string(),
+                draft.password.clone(),
+            ),
+        })
+        .collect::<Vec<_>>();
+
+    let label_col_width = field_label_column_width(
+        rows_data
+            .iter()
+            .map(|(label, _value)| label.as_str())
+            .chain(std::iter::once(texts::tui_settings_header_setting())),
+        0,
+    );
+    let header = Row::new(vec![
+        Cell::from(texts::tui_settings_header_setting()),
+        Cell::from(texts::tui_settings_header_value()),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+    let rows = rows_data
+        .iter()
+        .map(|(label, value)| Row::new(vec![Cell::from(label.clone()), Cell::from(value.clone())]));
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(breadcrumb_title(&[
+            texts::menu_settings(),
+            crate::t!("Global Outbound Proxy", "全局出站代理"),
+        ]));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[("Enter", texts::tui_key_edit())],
+        app.focus == Focus::Content,
+    );
+
+    let table = Table::new(
+        rows,
+        [Constraint::Length(label_col_width), Constraint::Min(10)],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+    let mut state = TableState::default();
+    state.select(Some(app.settings_outbound_proxy_idx));
+    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
 }

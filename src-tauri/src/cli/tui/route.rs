@@ -27,6 +27,7 @@ pub enum Route {
     SkillDetail { directory: String },
     Settings,
     SettingsProxy,
+    SettingsOutboundProxy,
     SettingsManagedAccounts,
 }
 

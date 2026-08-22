@@ -131,6 +131,11 @@ impl App {
                     ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
+                    ConfirmAction::SettingsSetGlobalOutboundProxy { config } => {
+                        Action::SetGlobalOutboundProxy {
+                            config: config.clone(),
+                        }
+                    }
                     ConfirmAction::VisibleAppsAutoDetection => {
                         Action::ConfirmVisibleAppsAutoDetection { use_auto: true }
                     }
@@ -357,6 +362,60 @@ impl App {
             TextSubmit::SettingsProxyListenPort => {
                 self.handle_settings_proxy_listen_port_submit(data, raw)
             }
+            TextSubmit::SettingsOutboundProxyUrl => {
+                let trimmed = raw.trim().to_string();
+                let mut config = self
+                    .global_outbound_proxy_draft
+                    .clone()
+                    .or_else(|| data.config.global_outbound_proxy.clone())
+                    .unwrap_or_default();
+                if trimmed.is_empty() {
+                    config = crate::services::GlobalOutboundProxyConfig::default();
+                } else {
+                    let submitted_auth = url::Url::parse(&trimmed)
+                        .ok()
+                        .filter(|url| !url.username().is_empty() || url.password().is_some())
+                        .and_then(|_| {
+                            crate::services::GlobalOutboundProxyConfig::from_full_url(&trimmed).ok()
+                        });
+                    if let Some(submitted) = submitted_auth {
+                        config = submitted;
+                    } else {
+                        config.url = trimmed;
+                    }
+                }
+                self.validate_and_save_global_outbound_proxy(
+                    TextSubmit::SettingsOutboundProxyUrl,
+                    raw,
+                    config,
+                )
+            }
+            TextSubmit::SettingsOutboundProxyUsername => {
+                let mut config = self
+                    .global_outbound_proxy_draft
+                    .clone()
+                    .or_else(|| data.config.global_outbound_proxy.clone())
+                    .unwrap_or_default();
+                config.username = raw.clone();
+                self.validate_and_save_global_outbound_proxy(
+                    TextSubmit::SettingsOutboundProxyUsername,
+                    raw,
+                    config,
+                )
+            }
+            TextSubmit::SettingsOutboundProxyPassword => {
+                let mut config = self
+                    .global_outbound_proxy_draft
+                    .clone()
+                    .or_else(|| data.config.global_outbound_proxy.clone())
+                    .unwrap_or_default();
+                config.password = raw.clone();
+                self.validate_and_save_global_outbound_proxy(
+                    TextSubmit::SettingsOutboundProxyPassword,
+                    raw,
+                    config,
+                )
+            }
             TextSubmit::SettingsOpenClawConfigDir => {
                 let trimmed = raw.trim().to_string();
                 let path = if trimmed.is_empty() {
@@ -462,6 +521,44 @@ impl App {
             TextSubmit::WebDavJianguoyunUsername => self.handle_webdav_username_submit(raw),
             TextSubmit::WebDavJianguoyunPassword => self.handle_webdav_password_submit(raw),
         }
+    }
+
+    fn validate_and_save_global_outbound_proxy(
+        &mut self,
+        submit: TextSubmit,
+        raw: String,
+        config: crate::services::GlobalOutboundProxyConfig,
+    ) -> Action {
+        let credential_without_url = config.url.trim().is_empty()
+            && matches!(
+                submit,
+                TextSubmit::SettingsOutboundProxyUsername
+                    | TextSubmit::SettingsOutboundProxyPassword
+            );
+        if credential_without_url {
+            if !config.url.trim().is_empty() {
+                let url_only = crate::services::GlobalOutboundProxyConfig {
+                    url: config.url.clone(),
+                    ..Default::default()
+                };
+                if let Err(error) = url_only.to_full_url() {
+                    self.overlay =
+                        Overlay::TextInput(global_outbound_proxy_text_input(submit, raw));
+                    self.push_toast(global_outbound_proxy_error_message(error), ToastKind::Error);
+                    return Action::None;
+                }
+            }
+            self.global_outbound_proxy_draft = Some(config);
+            return Action::None;
+        }
+
+        if let Err(error) = config.to_full_url() {
+            self.overlay = Overlay::TextInput(global_outbound_proxy_text_input(submit, raw));
+            self.push_toast(global_outbound_proxy_error_message(error), ToastKind::Error);
+            return Action::None;
+        }
+
+        self.save_global_outbound_proxy(config)
     }
 
     fn handle_codex_model_catalog_field_submit(

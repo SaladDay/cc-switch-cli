@@ -3561,6 +3561,78 @@ fn settings_local_proxy_row_shows_address_without_enabled_badge() {
 }
 
 #[test]
+fn settings_outbound_proxy_page_shows_plaintext_credentials() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsOutboundProxy;
+    app.focus = Focus::Content;
+    app.global_outbound_proxy_draft = Some(crate::services::GlobalOutboundProxyConfig {
+        url: "http://127.0.0.1:7890".to_string(),
+        username: "alice".to_string(),
+        password: "secret".to_string(),
+    });
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains("http://127.0.0.1:7890"), "{all}");
+    assert!(all.contains("alice"), "{all}");
+    assert!(all.contains("secret"), "{all}");
+    assert!(!all.contains("t test"), "{all}");
+    assert!(!all.contains("Ctrl+S"), "{all}");
+    assert!(!all.contains(" save"), "{all}");
+    assert!(!all.contains("Test current fields"), "{all}");
+    assert!(!all.contains("Clear fields"), "{all}");
+    assert!(!all.contains("Apply configuration"), "{all}");
+}
+
+#[test]
+fn settings_outbound_proxy_url_editor_places_environment_fallback_on_next_line() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsOutboundProxy;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+    assert!(matches!(
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &data),
+        Action::None
+    ));
+
+    let buf = render(&app, &data);
+    let protocol_row = (0..buf.area.height)
+        .find(|&y| line_at(&buf, y).contains("Proxy URL (http, https, socks5, or socks5h)"))
+        .expect("proxy scheme prompt should render");
+    let fallback_row = (0..buf.area.height)
+        .find(|&y| line_at(&buf, y).contains("Leave blank to use environment variables."))
+        .expect("environment fallback hint should render");
+
+    assert_eq!(fallback_row, protocol_row + 1);
+}
+
+#[test]
+fn settings_outbound_proxy_summary_describes_environment_default() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.config.global_outbound_proxy = None;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains("Uses environment variables by default"),
+        "{all}"
+    );
+}
+
+#[test]
 fn settings_proxy_route_hides_edit_key_when_proxy_is_running() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");

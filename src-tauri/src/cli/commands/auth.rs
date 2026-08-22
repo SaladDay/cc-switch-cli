@@ -57,6 +57,7 @@ struct LoginCompleted {
 }
 
 pub fn execute(cmd: AuthCommand) -> Result<(), AppError> {
+    crate::services::global_proxy::initialize_http_client_from_disk_best_effort();
     let runtime = create_runtime()?;
     match cmd {
         AuthCommand::Status { json } => status(&runtime, json),

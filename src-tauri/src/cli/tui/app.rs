@@ -38,9 +38,9 @@ mod tests;
 mod types;
 
 pub(crate) use app_state::{
-    Action, App, CloudSyncBackend, CloudSyncTransferIntent, ConfigItem, LocalProxySettingsItem,
-    MoveDirection, ProxyVisualTransition, S3ConfigItem, SettingsItem, WebDavConfigItem,
-    PROXY_HERO_TRANSITION_TICKS,
+    Action, App, CloudSyncBackend, CloudSyncTransferIntent, ConfigItem,
+    GlobalOutboundProxySettingsItem, LocalProxySettingsItem, MoveDirection, ProxyVisualTransition,
+    S3ConfigItem, SettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
 pub(crate) use content_config::HERMES_MEMORY_ROW_COUNT;
 pub(crate) use content_usage::usage_active_pane_len;
@@ -59,6 +59,38 @@ pub use types::{
 };
 #[cfg(test)]
 pub(crate) use types::{McpKeyValueEditorField, McpKeyValueEntryEditorState};
+
+pub(crate) fn global_outbound_proxy_text_input(
+    submit: TextSubmit,
+    value: String,
+) -> TextInputState {
+    let prompt = match submit {
+        TextSubmit::SettingsOutboundProxyUrl => crate::t!(
+            "Proxy URL (http, https, socks5, or socks5h)\nLeave blank to use environment variables.",
+            "代理 URL（http、https、socks5 或 socks5h）\n留空则使用环境变量"
+        ),
+        TextSubmit::SettingsOutboundProxyUsername => {
+            crate::t!("Username (optional)", "用户名（可选）")
+        }
+        TextSubmit::SettingsOutboundProxyPassword => {
+            crate::t!("Password (optional)", "密码（可选）")
+        }
+        _ => unreachable!("outbound proxy editor requires an outbound proxy submit target"),
+    };
+    TextInputState {
+        title: crate::t!("Global Outbound Proxy", "全局出站代理").to_string(),
+        prompt: prompt.to_string(),
+        input: TextInput::new(value),
+        submit,
+    }
+}
+
+pub(crate) fn global_outbound_proxy_error_message(error: crate::error::AppError) -> String {
+    match error {
+        crate::error::AppError::InvalidInput(message) => message,
+        other => other.to_string(),
+    }
+}
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {
     app_type.supports_failover()

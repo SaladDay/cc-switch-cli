@@ -2,9 +2,12 @@
 //!
 //! 提供键值对形式的通用设置存储。
 
-use crate::database::{lock_conn, Database};
+#[cfg(unix)]
+use crate::database::validate_existing_database_file;
+use crate::database::{database_path, lock_conn, readonly_database_open_flags, Database};
 use crate::error::AppError;
-use rusqlite::params;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::time::Duration;
 
 impl Database {
     /// 获取设置值
@@ -115,16 +118,43 @@ impl Database {
 
     /// 获取全局出站代理 URL
     ///
-    /// 返回 None 表示未配置或已清除代理（直连）
+    /// 返回 None 表示未配置或已清除代理（运行时可回退到环境变量）
     /// 返回 Some(url) 表示已配置代理
     pub fn get_global_proxy_url(&self) -> Result<Option<String>, AppError> {
         self.get_setting(Self::GLOBAL_PROXY_URL_KEY)
     }
 
+    /// Read only this backward-compatible setting without requiring the whole
+    /// database schema to match this binary. Update and OAuth commands use this
+    /// path so a future schema does not prevent them from reaching the network.
+    pub(crate) fn read_global_proxy_url_from_disk_compatible() -> Result<Option<String>, AppError> {
+        let db_path = database_path()?;
+        if !db_path.exists() {
+            return Err(AppError::Database(format!(
+                "database is not initialized: {}",
+                db_path.display()
+            )));
+        }
+        #[cfg(unix)]
+        validate_existing_database_file(&db_path)?;
+
+        let conn = Connection::open_with_flags(&db_path, readonly_database_open_flags())
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![Self::GLOBAL_PROXY_URL_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| AppError::Database(error.to_string()))
+    }
+
     /// 设置全局出站代理 URL
     ///
     /// - 传入非空字符串：启用代理
-    /// - 传入空字符串或 None：清除代理设置（直连）
+    /// - 传入空字符串或 None：清除代理设置
     pub fn set_global_proxy_url(&self, url: Option<&str>) -> Result<(), AppError> {
         match url {
             Some(u) if !u.trim().is_empty() => {

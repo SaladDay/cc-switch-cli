@@ -533,6 +533,7 @@ dependencies = [
  "minisign",
  "minisign-verify",
  "once_cell",
+ "percent-encoding",
  "ratatui",
  "regex",
  "reqwest",

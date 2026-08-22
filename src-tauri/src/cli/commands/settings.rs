@@ -41,6 +41,10 @@ pub enum SettingsCommand {
     /// Manage unified Codex session history
     #[command(name = "codex-history", subcommand)]
     CodexHistory(CodexHistoryCommand),
+
+    /// Manage the persistent global outbound proxy
+    #[command(name = "outbound-proxy", subcommand)]
+    OutboundProxy(OutboundProxyCommand),
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +176,48 @@ pub enum CodexHistoryCommand {
     Restore,
 }
 
+#[derive(Subcommand, Clone)]
+pub enum OutboundProxyCommand {
+    /// Show the saved outbound proxy and effective source
+    Show {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Save a global outbound proxy
+    Set {
+        /// Proxy URL (http, https, socks5, or socks5h)
+        url: String,
+        /// Optional proxy username
+        #[arg(long)]
+        username: Option<String>,
+        /// Optional proxy password
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Clear the saved proxy and fall back to environment proxy variables
+    Clear,
+}
+
+impl std::fmt::Debug for OutboundProxyCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Show { json } => formatter.debug_struct("Show").field("json", json).finish(),
+            Self::Set {
+                url,
+                username,
+                password,
+            } => formatter
+                .debug_struct("Set")
+                .field("url", &crate::proxy::http_client::mask_url(url))
+                .field("username", &username.as_ref().map(|_| "***"))
+                .field("password", &password.as_ref().map(|_| "***"))
+                .finish(),
+            Self::Clear => formatter.write_str("Clear"),
+        }
+    }
+}
+
 pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
     match cmd {
         SettingsCommand::Show { json } => show_settings(json),
@@ -181,6 +227,137 @@ pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
         SettingsCommand::ClaudePlugin(cmd) => claude_plugin_cmd(cmd),
         SettingsCommand::CodexAuthPreservation(cmd) => codex_auth_preservation_cmd(cmd),
         SettingsCommand::CodexHistory(cmd) => codex_history_cmd(cmd),
+        SettingsCommand::OutboundProxy(cmd) => outbound_proxy_cmd(cmd),
+    }
+}
+
+fn outbound_proxy_cmd(cmd: OutboundProxyCommand) -> Result<(), AppError> {
+    match cmd {
+        OutboundProxyCommand::Show { json } => show_outbound_proxy(json),
+        OutboundProxyCommand::Set {
+            url,
+            username,
+            password,
+        } => set_outbound_proxy(url, username, password),
+        OutboundProxyCommand::Clear => clear_outbound_proxy(),
+    }
+}
+
+fn show_outbound_proxy(json_output: bool) -> Result<(), AppError> {
+    let state = crate::AppState::try_new()?;
+    let saved = crate::services::global_proxy::load(&state.db)?;
+    let environment_variables = crate::services::global_proxy::configured_environment_variables();
+    let effective_source = if saved.is_some() {
+        "saved"
+    } else if environment_variables.is_empty() {
+        "direct"
+    } else {
+        "environment"
+    };
+
+    if json_output {
+        let payload = json!({
+            "configured": saved.is_some(),
+            "url": saved.as_ref().map(|config| config.url.as_str()),
+            "username": saved.as_ref().map(|config| config.username.as_str()),
+            "password": saved.as_ref().map(|config| config.password.as_str()),
+            "effectiveSource": effective_source,
+            "environmentVariables": environment_variables,
+        });
+        println!(
+            "{}",
+            to_json(&payload).map_err(|error| AppError::Message(error.to_string()))?
+        );
+        return Ok(());
+    }
+
+    println!("{}", highlight("Global Outbound Proxy"));
+    match saved {
+        Some(config) => {
+            println!("URL: {}", config.url);
+            println!("Username: {}", config.username);
+            println!("Password: {}", config.password);
+        }
+        None => println!("Saved proxy: (not set)"),
+    }
+    println!("Effective source: {effective_source}");
+    if !environment_variables.is_empty() {
+        println!(
+            "Environment variables: {}",
+            environment_variables.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn set_outbound_proxy(
+    url: String,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<(), AppError> {
+    let state = crate::AppState::try_new()?;
+    let config = outbound_proxy_config(url, username, password)?;
+    if config.to_full_url()?.is_empty() {
+        return clear_outbound_proxy_with_state(&state);
+    }
+    let environment_variables = crate::services::global_proxy::configured_environment_variables();
+    if !environment_variables.is_empty() {
+        println!(
+            "{}",
+            warning(&format!(
+                "Environment proxy variables are set ({}). The saved outbound proxy takes precedence.",
+                environment_variables.join(", ")
+            ))
+        );
+    }
+
+    let daemon_warning = crate::services::global_proxy::set(&state, &config)?;
+    println!("{}", success("Global outbound proxy saved"));
+    print_daemon_reload_warning(daemon_warning);
+    Ok(())
+}
+
+fn clear_outbound_proxy() -> Result<(), AppError> {
+    let state = crate::AppState::try_new()?;
+    clear_outbound_proxy_with_state(&state)
+}
+
+fn clear_outbound_proxy_with_state(state: &crate::AppState) -> Result<(), AppError> {
+    let daemon_warning = crate::services::global_proxy::clear(state)?;
+    println!("{}", success("Global outbound proxy cleared"));
+    let environment_variables = crate::services::global_proxy::configured_environment_variables();
+    if !environment_variables.is_empty() {
+        println!(
+            "{}",
+            info(&format!(
+                "Environment proxy variables remain active: {}",
+                environment_variables.join(", ")
+            ))
+        );
+    }
+    print_daemon_reload_warning(daemon_warning);
+    Ok(())
+}
+
+fn outbound_proxy_config(
+    url: String,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<crate::services::GlobalOutboundProxyConfig, AppError> {
+    let mut config = crate::services::GlobalOutboundProxyConfig::from_full_url(&url)?;
+    if let Some(username) = username {
+        config.username = username;
+    }
+    if let Some(password) = password {
+        config.password = password;
+    }
+    config.to_full_url()?;
+    Ok(config)
+}
+
+fn print_daemon_reload_warning(message: Option<String>) {
+    if let Some(message) = message {
+        println!("{}", warning(&message));
     }
 }
 
@@ -655,7 +832,7 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{save_manual_visible_apps, set_codex_auth_preservation};
+    use super::{save_manual_visible_apps, set_codex_auth_preservation, OutboundProxyCommand};
     use crate::settings::{VisibleApps, VisibleAppsMode};
     use crate::test_support::TestEnvGuard;
     use serial_test::serial;
@@ -665,6 +842,20 @@ mod tests {
     struct SettingsTestGuard {
         _env: TestEnvGuard,
         _temp: TempDir,
+    }
+
+    #[test]
+    fn outbound_proxy_command_debug_redacts_credentials() {
+        let command = OutboundProxyCommand::Set {
+            url: "http://embedded:secret@127.0.0.1:7890".to_string(),
+            username: Some("alice".to_string()),
+            password: Some("other-secret".to_string()),
+        };
+
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("embedded"), "{debug}");
+        assert!(!debug.contains("alice"), "{debug}");
+        assert!(!debug.contains("secret"), "{debug}");
     }
 
     impl SettingsTestGuard {

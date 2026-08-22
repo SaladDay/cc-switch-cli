@@ -322,6 +322,29 @@ fn init_rejects_future_schema_before_creating_tables() {
 
 #[test]
 #[serial_test::serial]
+fn compatible_global_proxy_read_allows_future_schema() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute_batch(
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO settings (key, value)
+         VALUES ('global_proxy_url', 'http://127.0.0.1:7890');",
+    )
+    .expect("create compatible setting");
+    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    drop(conn);
+
+    assert_eq!(
+        Database::read_global_proxy_url_from_disk_compatible().expect("read compatible setting"),
+        Some("http://127.0.0.1:7890".to_string())
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn init_aborts_migration_when_pre_migration_backup_fails() {
     let _lock = crate::test_support::lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");

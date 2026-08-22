@@ -29,6 +29,13 @@ pub fn set_proxy_port(port: u16) {
         let _ = CC_SWITCH_PROXY_PORT.set(RwLock::new(port));
         log::debug!("[GlobalProxy] Initialized CC Switch proxy port to {port}");
     }
+
+    if GLOBAL_CLIENT.get().is_some() {
+        let current_proxy = get_current_proxy_url();
+        if let Err(error) = apply_proxy(current_proxy.as_deref()) {
+            log::error!("[GlobalProxy] Failed to refresh client for local proxy port: {error}");
+        }
+    }
 }
 
 fn get_proxy_port() -> u16 {
@@ -256,11 +263,7 @@ pub fn mask_url(url: &str) -> String {
         };
     }
 
-    if url.len() > 20 {
-        format!("{}...", &url[..20])
-    } else {
-        url.to_string()
-    }
+    "<invalid proxy URL>".to_string()
 }
 
 fn build_proxy_url_from_config(config: &ProviderProxyConfig) -> Option<String> {
@@ -280,6 +283,9 @@ fn build_proxy_url_from_config(config: &ProviderProxyConfig) -> Option<String> {
 }
 
 pub fn build_client_for_provider(proxy_config: Option<&ProviderProxyConfig>) -> Option<Client> {
+    if is_proxy_enabled() {
+        return Some(get());
+    }
     let config = proxy_config.filter(|config| config.enabled)?;
     let proxy_url = build_proxy_url_from_config(config)?;
     build_provider_proxy_client(&proxy_url)
@@ -330,6 +336,9 @@ pub fn get_for_provider(
     provider_id: &str,
     proxy_config: Option<&ProviderProxyConfig>,
 ) -> Client {
+    if is_proxy_enabled() {
+        return get();
+    }
     let Some(config) = proxy_config.filter(|config| config.enabled) else {
         return get();
     };
@@ -395,6 +404,7 @@ mod tests {
             mask_url("https://user:pass@proxy.example.com"),
             "https://proxy.example.com"
         );
+        assert_eq!(mask_url("http://alice:secret@[@"), "<invalid proxy URL>");
     }
 
     #[test]

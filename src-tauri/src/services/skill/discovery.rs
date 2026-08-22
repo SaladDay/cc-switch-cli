@@ -74,9 +74,15 @@ impl SkillService {
         url.path_segments_mut()
             .map_err(|_| AppError::Message("Invalid GitHub API base URL".into()))?
             .extend(["repos", owner, repo]);
-        let response = self.http_client.get(url).send().await.map_err(|error| {
-            AppError::Message(format!("Failed to resolve default branch: {error}"))
-        })?;
+        let response = crate::proxy::http_client::get()
+            .get(url)
+            .header(reqwest::header::USER_AGENT, "cc-switch")
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|error| {
+                AppError::Message(format!("Failed to resolve default branch: {error}"))
+            })?;
         if !response.status().is_success() {
             return Err(AppError::Message(format!(
                 "Failed to resolve default branch for {owner}/{repo}: HTTP {}",
@@ -398,13 +404,19 @@ impl SkillService {
         url: &str,
         dest: &Path,
     ) -> Result<(), AppError> {
-        let response = self.http_client.get(url).send().await.map_err(|e| {
-            AppError::localized(
-                "skills.download_failed",
-                format!("下载失败: {e}"),
-                format!("Download failed: {e}"),
-            )
-        })?;
+        let response = crate::proxy::http_client::get()
+            .get(url)
+            .header(reqwest::header::USER_AGENT, "cc-switch")
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::localized(
+                    "skills.download_failed",
+                    format!("下载失败: {e}"),
+                    format!("Download failed: {e}"),
+                )
+            })?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16().to_string();

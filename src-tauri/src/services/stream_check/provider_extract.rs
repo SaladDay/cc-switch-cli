@@ -179,6 +179,10 @@ impl StreamCheckService {
     }
 
     pub(crate) fn build_client_for_provider(provider: &Provider) -> Result<Client, AppError> {
+        if crate::proxy::http_client::is_proxy_enabled() {
+            return Ok(crate::proxy::http_client::get());
+        }
+
         let mut builder = Client::builder().redirect(reqwest::redirect::Policy::limited(5));
 
         if let Some(proxy_config) = provider

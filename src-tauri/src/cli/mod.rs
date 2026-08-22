@@ -2076,4 +2076,50 @@ mod tests {
         assert!(rendered.contains("--activate"));
         assert!(rendered.contains("unexpected argument"));
     }
+
+    #[test]
+    fn parses_outbound_proxy_set_with_credentials() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "outbound-proxy",
+            "set",
+            "socks5://127.0.0.1:1080",
+            "--username",
+            "alice",
+            "--password",
+            "secret",
+        ]);
+
+        match cli.command {
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::OutboundProxy(
+                    super::commands::settings::OutboundProxyCommand::Set {
+                        url,
+                        username,
+                        password,
+                    },
+                ),
+            )) => {
+                assert_eq!(url, "socks5://127.0.0.1:1080");
+                assert_eq!(username.as_deref(), Some("alice"));
+                assert_eq!(password.as_deref(), Some("secret"));
+            }
+            _ => panic!("expected outbound proxy set command"),
+        }
+    }
+
+    #[test]
+    fn parses_outbound_proxy_show_json() {
+        let cli = Cli::parse_from(["cc-switch", "settings", "outbound-proxy", "show", "--json"]);
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::OutboundProxy(
+                    super::commands::settings::OutboundProxyCommand::Show { json: true },
+                ),
+            ))
+        ));
+    }
 }

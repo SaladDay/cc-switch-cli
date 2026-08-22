@@ -1,5 +1,5 @@
 use futures::future::join_all;
-use reqwest::{Client, Url};
+use reqwest::Url;
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
@@ -31,8 +31,8 @@ impl SpeedtestService {
             return Ok(vec![]);
         }
 
-        let timeout = Self::sanitize_timeout(timeout_secs);
-        let client = Self::build_client(timeout)?;
+        let timeout = Duration::from_secs(Self::sanitize_timeout(timeout_secs));
+        let client = crate::proxy::http_client::get();
 
         let tasks = urls.into_iter().map(|raw_url| {
             let client = client.clone();
@@ -60,11 +60,22 @@ impl SpeedtestService {
                 };
 
                 // 先进行一次热身请求，忽略结果，仅用于复用连接/绕过首包惩罚。
-                let _ = client.get(parsed_url.clone()).send().await;
+                let _ = client
+                    .get(parsed_url.clone())
+                    .header(reqwest::header::USER_AGENT, "cc-switch-speedtest/1.0")
+                    .timeout(timeout)
+                    .send()
+                    .await;
 
                 // 第二次请求开始计时，并将其作为结果返回。
                 let start = Instant::now();
-                match client.get(parsed_url).send().await {
+                match client
+                    .get(parsed_url)
+                    .header(reqwest::header::USER_AGENT, "cc-switch-speedtest/1.0")
+                    .timeout(timeout)
+                    .send()
+                    .await
+                {
                     Ok(resp) => EndpointLatency {
                         url: trimmed,
                         latency: Some(start.elapsed().as_millis()),
@@ -93,21 +104,6 @@ impl SpeedtestService {
         });
 
         Ok(join_all(tasks).await)
-    }
-
-    fn build_client(timeout_secs: u64) -> Result<Client, AppError> {
-        Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .user_agent("cc-switch-speedtest/1.0")
-            .build()
-            .map_err(|e| {
-                AppError::localized(
-                    "speedtest.client_create_failed",
-                    format!("创建 HTTP 客户端失败: {e}"),
-                    format!("Failed to create HTTP client: {e}"),
-                )
-            })
     }
 
     fn sanitize_timeout(timeout_secs: Option<u64>) -> u64 {

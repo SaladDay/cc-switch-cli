@@ -314,6 +314,9 @@ pub enum Action {
         app_type: AppType,
         enabled: bool,
     },
+    SetGlobalOutboundProxy {
+        config: crate::services::GlobalOutboundProxyConfig,
+    },
     EnableProxyAndAutoFailover {
         app_type: AppType,
     },
@@ -504,11 +507,12 @@ pub enum SettingsItem {
     PreserveCodexOfficialAuth,
     CodexUnifiedSessionHistory,
     Proxy,
+    OutboundProxy,
     CheckForUpdates,
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 14] = [
+    pub const ALL: [SettingsItem; 15] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::Theme,
@@ -522,7 +526,23 @@ impl SettingsItem {
         SettingsItem::PreserveCodexOfficialAuth,
         SettingsItem::CodexUnifiedSessionHistory,
         SettingsItem::Proxy,
+        SettingsItem::OutboundProxy,
         SettingsItem::CheckForUpdates,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalOutboundProxySettingsItem {
+    Url,
+    Username,
+    Password,
+}
+
+impl GlobalOutboundProxySettingsItem {
+    pub const ALL: [GlobalOutboundProxySettingsItem; 3] = [
+        GlobalOutboundProxySettingsItem::Url,
+        GlobalOutboundProxySettingsItem::Username,
+        GlobalOutboundProxySettingsItem::Password,
     ];
 }
 
@@ -754,6 +774,8 @@ pub struct App {
     pub language_idx: usize,
     pub settings_idx: usize,
     pub settings_proxy_idx: usize,
+    pub settings_outbound_proxy_idx: usize,
+    pub global_outbound_proxy_draft: Option<crate::services::GlobalOutboundProxyConfig>,
     pub settings_managed_accounts_idx: usize,
     pub managed_auth_status: Option<crate::services::ManagedAuthStatus>,
     pub managed_auth_loading: bool,

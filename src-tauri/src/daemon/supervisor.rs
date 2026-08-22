@@ -855,6 +855,49 @@ impl Supervisor {
         })
     }
 
+    async fn handle_reload_outbound_proxy(&self) -> Response {
+        let proxy_url = match self.db.get_global_proxy_url() {
+            Ok(url) => url,
+            Err(error) => {
+                return Response::Error {
+                    message: format!("read saved outbound proxy failed: {error}"),
+                };
+            }
+        };
+        if let Err(error) = crate::proxy::http_client::apply_proxy(proxy_url.as_deref()) {
+            return Response::Error {
+                message: format!("reload daemon outbound proxy failed: {error}"),
+            };
+        }
+
+        let workers = {
+            let inner = self.inner.lock().await;
+            inner.workers.values().cloned().collect::<Vec<_>>()
+        };
+        if workers.is_empty() {
+            return Response::Ok;
+        }
+
+        let mut failed_apps = Vec::new();
+        for worker in workers {
+            if send_sigwinch(Some(worker.pid)).is_err() {
+                failed_apps.push(worker.app_type.as_str().to_string());
+            }
+        }
+
+        if failed_apps.is_empty() {
+            Response::Ok
+        } else {
+            failed_apps.sort();
+            Response::Error {
+                message: format!(
+                    "saved outbound proxy, but active worker reload failed for: {}",
+                    failed_apps.join(", ")
+                ),
+            }
+        }
+    }
+
     pub async fn shutdown(&self) {
         let _spawn_guard = self.spawn_lock.lock().await;
         let stop_plan = self.plan_stop_all_workers(true).await;
@@ -1120,6 +1163,7 @@ impl Handler for Supervisor {
                     .await
             }
             Request::SetGlobalEnabled { enabled } => self.handle_set_global_enabled(enabled).await,
+            Request::ReloadOutboundProxy => self.handle_reload_outbound_proxy().await,
             Request::Shutdown => self.handle_shutdown().await,
         }
     }
@@ -1162,6 +1206,16 @@ fn send_sigterm(pid: Option<u32>) -> Result<(), String> {
         return Ok(());
     }
     send_signal(pid, libc::SIGTERM, "SIGTERM")
+}
+
+pub(crate) fn send_sigwinch(pid: Option<u32>) -> Result<(), String> {
+    let Some(pid) = pid else {
+        return Ok(());
+    };
+    if pid == 0 {
+        return Ok(());
+    }
+    send_signal(pid, libc::SIGWINCH, "SIGWINCH")
 }
 
 fn send_sigkill(pid: Option<u32>) -> Result<(), String> {

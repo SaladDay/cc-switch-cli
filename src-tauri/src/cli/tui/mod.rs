@@ -2320,6 +2320,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SetProxyEnabled { .. }
         | Action::SetProxyListenAddress { .. }
         | Action::SetProxyListenPort { .. }
+        | Action::SetGlobalOutboundProxy { .. }
         | Action::SetProxyAutoFailover { .. }
         | Action::EnableProxyAndAutoFailover { .. }
         | Action::SetOpenClawConfigDir { .. } => CacheInvalidation::DataReloaded,

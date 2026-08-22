@@ -4031,6 +4031,34 @@ impl ProxyService {
         self.load_persisted_runtime_session()
     }
 
+    #[cfg(unix)]
+    pub(crate) fn notify_foreground_outbound_proxy_reload(&self) -> Result<(), String> {
+        let mut failed_pids = Vec::new();
+        for session in self.load_persisted_runtime_sessions_with_cleanup(false) {
+            if session.kind.is_managed_external()
+                || session.pid == std::process::id()
+                || !Self::is_process_alive(session.pid)
+            {
+                continue;
+            }
+            if crate::daemon::supervisor::send_sigwinch(Some(session.pid)).is_err() {
+                failed_pids.push(session.pid);
+            }
+        }
+        if failed_pids.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "foreground proxy reload failed for pid(s): {}",
+                failed_pids
+                    .into_iter()
+                    .map(|pid| pid.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    }
+
     pub(crate) async fn load_live_managed_runtime_sessions_for_recovery(
         &self,
     ) -> Vec<LiveManagedRuntimeSession> {

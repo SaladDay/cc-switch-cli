@@ -17,6 +17,37 @@ fn visible_apps_mode_label(mode: crate::settings::VisibleAppsMode) -> &'static s
     }
 }
 
+pub(super) fn set_global_outbound_proxy(
+    ctx: &mut RuntimeActionContext<'_>,
+    config: crate::services::GlobalOutboundProxyConfig,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    let full_url = config.to_full_url()?;
+    let daemon_warning = if full_url.is_empty() {
+        crate::services::global_proxy::clear(&state)?
+    } else {
+        crate::services::global_proxy::set(&state, &config)?
+    };
+    let persisted = (!full_url.is_empty())
+        .then(|| crate::services::GlobalOutboundProxyConfig::from_full_url(&full_url))
+        .transpose()?;
+    ctx.data.config.global_outbound_proxy = persisted.clone();
+    ctx.app.global_outbound_proxy_draft = Some(persisted.unwrap_or_default());
+    ctx.data.mark_current_app_data_changed();
+    ctx.app.push_toast(
+        if full_url.is_empty() {
+            crate::t!("Global outbound proxy cleared.", "全局出站代理已清除。")
+        } else {
+            crate::t!("Global outbound proxy saved.", "全局出站代理已保存。")
+        },
+        ToastKind::Success,
+    );
+    if let Some(message) = daemon_warning {
+        ctx.app.push_toast(message, ToastKind::Warning);
+    }
+    Ok(())
+}
+
 pub(super) fn set_proxy_enabled(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,

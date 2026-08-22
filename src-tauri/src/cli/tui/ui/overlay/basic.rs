@@ -197,9 +197,14 @@ pub(super) fn render_text_input_overlay(
         ])
         .split(body);
 
+    let prompt_lines = input
+        .prompt
+        .lines()
+        .map(|line| Line::raw(line.to_string()))
+        .chain(std::iter::once(Line::raw("")))
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(vec![Line::raw(input.prompt.clone()), Line::raw("")])
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(prompt_lines).wrap(Wrap { trim: false }),
         chunks[0],
     );
 

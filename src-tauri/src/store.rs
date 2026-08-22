@@ -421,6 +421,7 @@ impl AppState {
     }
 
     fn from_parts(db: Arc<Database>, config: MultiAppConfig) -> Result<Self, AppError> {
+        crate::services::global_proxy::initialize_http_client(&db);
         let proxy_service = ProxyService::new(db.clone());
 
         Ok(Self {
