@@ -1723,6 +1723,39 @@ impl ProviderService {
         Ok(())
     }
 
+    /// Detects whether a canonicalized Claude common-config snippet sets
+    /// `env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` to a truthy value, which
+    /// silently disables Claude Code's Monitor tool. No-op for any app type
+    /// other than Claude, since the env var only affects Claude Code. Shared
+    /// by the CLI and TUI common-config save paths, so it lives here rather
+    /// than in `cli::commands` (see AGENTS.md "CLI architecture").
+    pub fn common_config_snippet_disables_monitor_traffic(
+        app_type: &AppType,
+        canonical_snippet: &str,
+    ) -> bool {
+        if *app_type != AppType::Claude {
+            return false;
+        }
+
+        let Ok(value) = serde_json::from_str::<Value>(canonical_snippet) else {
+            return false;
+        };
+
+        let Some(raw) = value
+            .get("env")
+            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+        else {
+            return false;
+        };
+
+        match raw {
+            Value::Number(n) => n.as_i64() == Some(1),
+            Value::Bool(b) => *b,
+            Value::String(s) => s == "1" || s == "true",
+            _ => false,
+        }
+    }
+
     pub fn set_common_config_snippet(
         state: &AppState,
         app_type: AppType,

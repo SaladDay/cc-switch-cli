@@ -443,6 +443,7 @@ cc-switch config validate            # 验证配置文件
 # 通用配置片段（跨所有供应商共享设置）
 # 会在适用时尝试刷新 live config（`--apply` 仅保留为兼容参数）
 cc-switch --app claude config common show
+# 警告：CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC 会禁用 Claude Code 的 Monitor 工具（见下方说明）
 cc-switch --app claude config common set --snippet '{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}'
 cc-switch --app claude config common clear
 
@@ -470,6 +471,8 @@ cc-switch config webdav migrate-v1-to-v2
 
 cc-switch config reset               # 重置为默认配置
 ```
+
+> **警告：** 上面示例中的 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` 片段会禁用 Claude Code 的 Monitor 工具（及其他“非必要流量”）。CC Switch 现在会在你设置该值时给出警告，但这不是校验错误——片段仍会被应用。仅在确实不需要 Monitor 时才设置它。
 
 ### 🌉 代理管理与模型接入
 

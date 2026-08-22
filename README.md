@@ -441,6 +441,7 @@ cc-switch config validate            # Validate config file
 # Common snippet (shared settings across providers)
 # Tries to refresh live config when applicable (`--apply` is kept only as a compatibility flag)
 cc-switch --app claude config common show
+# Warning: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables Claude Code's Monitor tool (see note below)
 cc-switch --app claude config common set --snippet '{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}'
 cc-switch --app claude config common clear
 
@@ -468,6 +469,8 @@ cc-switch config webdav migrate-v1-to-v2
 
 cc-switch config reset               # Reset to default configuration
 ```
+
+> **Warning:** The `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` snippet above disables Claude Code's Monitor tool (and other "nonessential traffic"). CC Switch now warns when you set this, but it isn't a validation error — the snippet is still applied. Only set it if you don't need Monitor.
 
 ### 🌉 Proxy Management & Model Relay
 
