@@ -786,7 +786,8 @@ const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
     "minimax.io",     // MiniMax global (api.minimax.io)
     "minimaxi.com",   // MiniMax CN (api.minimaxi.com)
 ];
-const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] = &["mimo", "longcat", "minimax"];
+const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] =
+    &["mimo", "longcat", "minimax", "qwen3-coder"];
 
 /// Top-level `model` id from a Codex `config.toml`.
 fn codex_top_level_model(config_text: &str) -> Option<String> {
@@ -1654,6 +1655,12 @@ pub fn restore_codex_settings_for_backfill(
     ) {
         settings_obj.insert("modelCatalog".to_string(), model_catalog);
     }
+    if let (Some(settings_obj), Some(option)) = (
+        settings.as_object_mut(),
+        template_settings.get(CODEX_WEB_SEARCH_DISABLE_KEY).cloned(),
+    ) {
+        settings_obj.insert(CODEX_WEB_SEARCH_DISABLE_KEY.to_string(), option);
+    }
     Ok(())
 }
 
@@ -2325,8 +2332,26 @@ mod tests {
             );
         }
 
-        // NOT blacklisted → keep Codex default (relays/GPT, DouBao, Qwen, and
-        // any unknown provider incl. an aggregator serving a non-reject model).
+        // Qwen3-Coder is rejected on the model axis (百炼 marks built-in tools
+        // unsupported for the coder series), incl. on the DashScope host and
+        // behind an aggregator "vendor/" prefix (upstream 26f0d221).
+        for (model, host) in [
+            (
+                "qwen3-coder-plus",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            ("qwen3-coder-plus", "https://api.siliconflow.cn/v1"),
+            ("qwen/qwen3-coder-plus", "https://api.siliconflow.cn/v1"),
+        ] {
+            assert!(
+                codex_native_gateway_rejects_web_search(&cfg(model, host)),
+                "{model} @ {host} should be blacklisted by qwen3-coder brand"
+            );
+        }
+
+        // NOT blacklisted → keep Codex default (relays/GPT, DouBao, general
+        // Qwen models, and any unknown provider incl. an aggregator serving a
+        // non-reject model).
         for (model, host) in [
             ("gpt-5.5", "https://www.packyapi.com/v1"),
             ("gpt-5-codex", "https://aihubmix.com/v1"),
@@ -2335,7 +2360,11 @@ mod tests {
                 "https://ark.cn-beijing.volces.com/api/v3",
             ),
             (
-                "qwen3-coder-plus",
+                "qwen-max",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            (
+                "qwen3-max",
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ),
             ("Pro/moonshotai/Kimi-K2.6", "https://api.siliconflow.cn/v1"),

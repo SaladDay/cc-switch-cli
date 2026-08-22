@@ -333,6 +333,75 @@ fn capture_codex_temp_launch_snapshot_preserves_disable_web_search_option() {
 }
 
 #[test]
+fn switch_codex_cycle_preserves_disable_web_search_option_on_active_provider() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-one" },
+                    // Non-blacklisted host: the disable must come solely from
+                    // the stored option, proving it survives the switch cycle.
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-4o\"\n\n[model_providers.custom]\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\n",
+                    crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY: true,
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Provider Two".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-two" },
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-4o\"\n\n[model_providers.custom]\nbase_url = \"https://api.two.example/v1\"\nwire_api = \"responses\"\n",
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+
+    // Seed p1 live, switch away, switch back: a real ProviderService::switch
+    // cycle that exercises backfill capture + refresh_provider_snapshot.
+    ProviderService::switch(&state, AppType::Codex, "p1").expect("seed p1 live");
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
+    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
+
+    // The refreshed snapshot of the newly active provider must keep the option.
+    let providers = ProviderService::list(&state, AppType::Codex).expect("list providers");
+    let p1 = providers.get("p1").expect("p1 exists");
+    assert_eq!(
+        p1.settings_config
+            .get(crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY),
+        Some(&json!(true)),
+        "refresh_provider_snapshot must preserve disableWebSearch"
+    );
+
+    let live_text =
+        std::fs::read_to_string(get_codex_config_path()).expect("read live config.toml");
+    assert!(
+        live_text.contains("web_search = \"disabled\""),
+        "live config must disable web_search via the preserved option"
+    );
+}
+
+#[test]
 fn backfill_codex_current_preserves_disable_web_search_option() {
     let temp = TempDir::new().expect("create temp codex home");
     let _guard = TestEnvGuard::isolated(temp.path());
