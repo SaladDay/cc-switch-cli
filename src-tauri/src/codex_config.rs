@@ -768,6 +768,100 @@ fn set_codex_model_catalog_json_field(
 
 pub(crate) const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
 pub(crate) const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
+/// Per-provider settings key (in `settingsConfig`) that forces the hosted
+/// web-search tool off for native `/responses` providers, overriding the
+/// host/model blacklist below.
+pub(crate) const CODEX_WEB_SEARCH_DISABLE_KEY: &str = "disableWebSearch";
+
+/// Native `/responses` gateways whose first-party models do NOT support the
+/// Codex `web_search` hosted tool (aligned with upstream d380b410). A BLACKLIST
+/// (default-on): everything not listed keeps Codex's default, so relays
+/// fronting real GPT and any unknown provider are never touched. Matched by
+/// `base_url` host substring and by the model id's brand prefix (after any
+/// `vendor/` segment), so an aggregator fronting a reject vendor's model is
+/// caught too.
+const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
+    "xiaomimimo.com", // Xiaomi MiMo (api.xiaomimimo.com, token-plan-cn.xiaomimimo.com)
+    "longcat.chat",   // Meituan LongCat (api.longcat.chat)
+    "minimax.io",     // MiniMax global (api.minimax.io)
+    "minimaxi.com",   // MiniMax CN (api.minimaxi.com)
+];
+const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] =
+    &["mimo", "longcat", "minimax", "qwen3-coder"];
+
+/// Top-level `model` id from a Codex `config.toml`.
+fn codex_top_level_model(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<toml::Value>().ok()?;
+    doc.get("model")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Whether a native `/responses` provider's gateway is known to reject the
+/// Codex `web_search` hosted tool — by `base_url` host OR by the active model's
+/// brand (so an aggregator fronting a reject vendor's model is caught too).
+/// Driven by the live `config.toml`, so it applies to existing providers
+/// without a re-save. Users can force-disable via `disableWebSearch` regardless.
+///
+/// Unlike `extract_codex_base_url`, the host check also falls back to the
+/// top-level `base_url` when the active provider section lacks one, mirroring
+/// upstream d380b410 so hand-written legacy flat configs still match.
+pub(crate) fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
+    if let Some(base_url) =
+        extract_codex_base_url(config_text).or_else(|| codex_top_level_base_url(config_text))
+    {
+        let base_url = base_url.to_ascii_lowercase();
+        if CODEX_WEB_SEARCH_REJECT_HOSTS
+            .iter()
+            .any(|host| base_url.contains(host))
+        {
+            return true;
+        }
+    }
+    if let Some(model) = codex_top_level_model(config_text) {
+        let model = model.to_ascii_lowercase();
+        // Strip any aggregator "vendor/" prefix, e.g. "MiniMaxAI/MiniMax-M3".
+        let model = model.rsplit('/').next().unwrap_or(model.as_str());
+        if CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Top-level `base_url` fallback for the blacklist host check (legacy flat
+/// configs that keep the URL at the root instead of the active provider
+/// section). Kept local to web-search detection: `extract_codex_base_url`
+/// deliberately does not fall back when `model_provider` is present.
+fn codex_top_level_base_url(config_text: &str) -> Option<String> {
+    config_text
+        .parse::<toml::Value>()
+        .ok()?
+        .get("base_url")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|base_url| !base_url.is_empty())
+        .map(str::to_string)
+}
+
+/// Copy provider-owned catalog-generation options (e.g. `disableWebSearch`)
+/// into a rebuilt Codex settings snapshot. Live-file rebuilds (backfill,
+/// temporary-launch capture) project only `{auth, config}`, so callers must
+/// re-apply these explicitly or the option is lost across a switch cycle.
+pub fn merge_codex_provider_catalog_options(
+    settings: &mut Value,
+    provider: &crate::provider::Provider,
+) {
+    if let Some(root) = settings.as_object_mut() {
+        if let Some(option) = provider.settings_config.get(CODEX_WEB_SEARCH_DISABLE_KEY) {
+            root.insert(CODEX_WEB_SEARCH_DISABLE_KEY.to_string(), option.clone());
+        }
+    }
+}
 
 /// Disable the hosted web-search tool for protocol paths that cannot carry it.
 /// Only remove values previously written by cc-switch, preserving user-owned
@@ -796,33 +890,113 @@ pub struct PreparedCodexConfigText {
     pub model_catalog: Option<Value>,
 }
 
-pub fn prepare_codex_config_text_with_model_catalog_payload(
+fn prepare_codex_config_text_with_model_catalog_payload_impl(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
+    manage_web_search: bool,
+    web_search_reject_override: Option<bool>,
 ) -> Result<PreparedCodexConfigText, AppError> {
     let catalog_path = get_codex_model_catalog_path();
 
+    // Anthropic gateways cannot carry the hosted web-search tool at all, so it
+    // is always disabled there. Native `/responses` providers disable it when
+    // their gateway is known to reject the tool (host/model blacklist) OR the
+    // per-provider `disableWebSearch` option forces it off. Chat profiles go
+    // through the proxy which converts the tool, so neither applies.
+    let disable_web_search = manage_web_search
+        && match profile {
+            CodexCatalogToolProfile::Anthropic => true,
+            CodexCatalogToolProfile::NativeResponses => {
+                // The caller may supply the blacklist verdict explicitly when
+                // `config_text` no longer reflects the real gateway (proxy
+                // takeover rewrites base_url to the local proxy).
+                let rejects = web_search_reject_override
+                    .unwrap_or_else(|| codex_native_gateway_rejects_web_search(config_text));
+                rejects
+                    || settings
+                        .get(CODEX_WEB_SEARCH_DISABLE_KEY)
+                        .and_then(Value::as_bool)
+                        == Some(true)
+            }
+            CodexCatalogToolProfile::ProxyChat => false,
+        };
+
     if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? {
         let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
-        let config_text = set_codex_web_search_field(
-            &config_text,
-            profile == CodexCatalogToolProfile::Anthropic,
-        )?;
+        let config_text = if manage_web_search {
+            set_codex_web_search_field(&config_text, disable_web_search)?
+        } else {
+            config_text
+        };
         Ok(PreparedCodexConfigText {
             config_text,
             model_catalog: Some(catalog),
         })
     } else {
         let config_text = set_codex_model_catalog_json_field(config_text, None)?;
+        let config_text = if manage_web_search {
+            set_codex_web_search_field(&config_text, disable_web_search)?
+        } else {
+            config_text
+        };
         Ok(PreparedCodexConfigText {
-            config_text: set_codex_web_search_field(
-                &config_text,
-                profile == CodexCatalogToolProfile::Anthropic,
-            )?,
+            config_text,
             model_catalog: None,
         })
     }
+}
+
+pub fn prepare_codex_config_text_with_model_catalog_payload(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> Result<PreparedCodexConfigText, AppError> {
+    prepare_codex_config_text_with_model_catalog_payload_impl(
+        settings,
+        config_text,
+        profile,
+        true,
+        None,
+    )
+}
+
+/// Like `prepare_codex_config_text_with_model_catalog_payload`, but the caller
+/// supplies the blacklist verdict explicitly. Used by proxy-takeover writes,
+/// where `config_text`'s base_url was rewritten to the local proxy and no
+/// longer identifies the real gateway; the verdict is evaluated against the
+/// provider's stored (pre-rewrite) config instead.
+pub fn prepare_codex_config_text_with_model_catalog_payload_with_reject_verdict(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    web_search_reject_override: bool,
+) -> Result<PreparedCodexConfigText, AppError> {
+    prepare_codex_config_text_with_model_catalog_payload_impl(
+        settings,
+        config_text,
+        profile,
+        true,
+        Some(web_search_reject_override),
+    )
+}
+
+/// Verbatim-restore variant: the captured config text's `web_search` state is
+/// authoritative, so the field is neither written nor cleaned even when the
+/// restore profile differs (e.g. a native provider's snapshot restored through
+/// the provider-less ProxyChat fallback).
+pub fn prepare_codex_verbatim_config_text_with_model_catalog_payload(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> Result<PreparedCodexConfigText, AppError> {
+    prepare_codex_config_text_with_model_catalog_payload_impl(
+        settings,
+        config_text,
+        profile,
+        false,
+        None,
+    )
 }
 
 pub fn write_prepared_codex_model_catalog(
@@ -845,17 +1019,22 @@ pub fn prepare_codex_config_text_with_model_catalog(
     Ok(prepared.config_text)
 }
 
-/// Project an inline provider model catalog when one is present.
-///
-/// Settings without `modelCatalog` may already carry a live
-/// `model_catalog_json` pointer, so their config text is preserved unchanged.
-pub fn prepare_codex_live_config_text_with_optional_catalog(
+/// Project an inline provider model catalog when one is present, preserving
+/// the captured text's `web_search` state (see
+/// `prepare_codex_verbatim_config_text_with_model_catalog_payload`).
+pub fn prepare_codex_live_config_text_with_optional_catalog_verbatim(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
     if settings.get("modelCatalog").is_some() {
-        prepare_codex_config_text_with_model_catalog(settings, config_text, profile)
+        let prepared = prepare_codex_verbatim_config_text_with_model_catalog_payload(
+            settings,
+            config_text,
+            profile,
+        )?;
+        write_prepared_codex_model_catalog(&prepared)?;
+        Ok(prepared.config_text)
     } else {
         Ok(config_text.to_string())
     }
@@ -1476,6 +1655,12 @@ pub fn restore_codex_settings_for_backfill(
     ) {
         settings_obj.insert("modelCatalog".to_string(), model_catalog);
     }
+    if let (Some(settings_obj), Some(option)) = (
+        settings.as_object_mut(),
+        template_settings.get(CODEX_WEB_SEARCH_DISABLE_KEY).cloned(),
+    ) {
+        settings_obj.insert(CODEX_WEB_SEARCH_DISABLE_KEY.to_string(), option);
+    }
     Ok(())
 }
 
@@ -2022,6 +2207,308 @@ mod tests {
         let parsed: toml::Value =
             toml::from_str(&proxy.config_text).expect("parse proxy-chat config");
         assert!(parsed.get("web_search").is_none());
+    }
+
+    fn parse_web_search_field(config_text: &str) -> Option<String> {
+        toml::from_str::<toml::Value>(config_text)
+            .ok()
+            .and_then(|parsed| {
+                parsed
+                    .get("web_search")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string)
+            })
+    }
+
+    #[test]
+    fn native_responses_disable_web_search_option_writes_disabled_field() {
+        let config = "model = \"gpt-5.6\"\n";
+        let settings = json!({ CODEX_WEB_SEARCH_DISABLE_KEY: true });
+
+        let native = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(
+            parse_web_search_field(&native.config_text).as_deref(),
+            Some(CODEX_WEB_SEARCH_DISABLED)
+        );
+    }
+
+    #[test]
+    fn native_responses_without_option_keeps_web_search_field_absent() {
+        let config = "model = \"gpt-5.6\"\n";
+        let settings = json!({});
+
+        let native = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(parse_web_search_field(&native.config_text), None);
+
+        // Explicit false behaves like absent.
+        let off = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({ CODEX_WEB_SEARCH_DISABLE_KEY: false }),
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(parse_web_search_field(&off.config_text), None);
+    }
+
+    #[test]
+    fn native_responses_option_off_removes_previous_disabled_value() {
+        let config = "model = \"gpt-5.6\"\nweb_search = \"disabled\"\n";
+        let off = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({ CODEX_WEB_SEARCH_DISABLE_KEY: false }),
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(parse_web_search_field(&off.config_text), None);
+
+        // User-owned values survive the cleanup.
+        let live = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({ CODEX_WEB_SEARCH_DISABLE_KEY: false }),
+            "model = \"gpt-5.6\"\nweb_search = \"live\"\n",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(
+            parse_web_search_field(&live.config_text).as_deref(),
+            Some("live")
+        );
+    }
+
+    #[test]
+    fn proxy_chat_profile_ignores_disable_web_search_option() {
+        let config = "model = \"gpt-5.6\"\n";
+        let settings = json!({ CODEX_WEB_SEARCH_DISABLE_KEY: true });
+
+        let proxy = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare proxy-chat config");
+        assert_eq!(parse_web_search_field(&proxy.config_text), None);
+    }
+
+    #[test]
+    fn web_search_blacklist_disables_only_known_reject_gateways() {
+        let cfg = |model: &str, base_url: &str| {
+            format!(
+                "model_provider = \"custom\"\nmodel = \"{model}\"\n\n[model_providers.custom]\nname = \"x\"\nbase_url = \"{base_url}\"\nwire_api = \"responses\"\n"
+            )
+        };
+
+        // Blacklisted by host (first-party reject gateways) → disable.
+        for (model, host) in [
+            ("mimo-v2.5-pro", "https://api.xiaomimimo.com/v1"),
+            ("mimo-v2.5", "https://token-plan-cn.xiaomimimo.com/v1"),
+            ("LongCat-2.0-Preview", "https://api.longcat.chat/openai/v1"),
+            ("MiniMax-M3", "https://api.minimax.io/v1"),
+            ("MiniMax-M3", "https://api.minimaxi.com/v1"),
+        ] {
+            assert!(
+                codex_native_gateway_rejects_web_search(&cfg(model, host)),
+                "{host} should be blacklisted"
+            );
+        }
+
+        // Blacklisted by MODEL brand even on an aggregator host → disable.
+        for (model, host) in [
+            ("MiniMax-M3", "https://api.siliconflow.cn/v1"),
+            ("MiniMaxAI/MiniMax-M3", "https://api.siliconflow.cn/v1"),
+            ("mimo-v2.5-pro", "https://some-aggregator.example/v1"),
+        ] {
+            assert!(
+                codex_native_gateway_rejects_web_search(&cfg(model, host)),
+                "{model} @ {host} should be blacklisted by model brand"
+            );
+        }
+
+        // Qwen3-Coder is rejected on the model axis (百炼 marks built-in tools
+        // unsupported for the coder series), incl. on the DashScope host and
+        // behind an aggregator "vendor/" prefix (upstream 26f0d221).
+        for (model, host) in [
+            (
+                "qwen3-coder-plus",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            ("qwen3-coder-plus", "https://api.siliconflow.cn/v1"),
+            ("qwen/qwen3-coder-plus", "https://api.siliconflow.cn/v1"),
+        ] {
+            assert!(
+                codex_native_gateway_rejects_web_search(&cfg(model, host)),
+                "{model} @ {host} should be blacklisted by qwen3-coder brand"
+            );
+        }
+
+        // NOT blacklisted → keep Codex default (relays/GPT, DouBao, general
+        // Qwen models, and any unknown provider incl. an aggregator serving a
+        // non-reject model).
+        for (model, host) in [
+            ("gpt-5.5", "https://www.packyapi.com/v1"),
+            ("gpt-5-codex", "https://aihubmix.com/v1"),
+            (
+                "doubao-seed-2-1-pro",
+                "https://ark.cn-beijing.volces.com/api/v3",
+            ),
+            (
+                "qwen-max",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            (
+                "qwen3-max",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            ("Pro/moonshotai/Kimi-K2.6", "https://api.siliconflow.cn/v1"),
+        ] {
+            assert!(
+                !codex_native_gateway_rejects_web_search(&cfg(model, host)),
+                "{model} @ {host} should NOT be blacklisted"
+            );
+        }
+    }
+
+    #[test]
+    fn blacklist_host_check_falls_back_to_top_level_base_url() {
+        // Legacy hand-written flat config: model_provider present but the
+        // active section lacks base_url; the URL lives at the top level.
+        // Upstream's extraction falls back, so the blacklist must too.
+        let config = "model_provider = \"custom\"\nmodel = \"custom-brand\"\nbase_url = \"https://api.minimaxi.com/v1\"\n";
+        assert!(
+            codex_native_gateway_rejects_web_search(config),
+            "top-level base_url must satisfy the host blacklist"
+        );
+    }
+
+    #[test]
+    fn reject_verdict_override_keeps_disabled_after_base_url_rewrite() {
+        // Simulates proxy takeover: the live text's base_url was rewritten to
+        // the local proxy, but the stored provider config names a blacklisted
+        // gateway. The explicit verdict must keep web_search = "disabled".
+        let rewritten = "model_provider = \"custom\"\nmodel = \"custom-brand\"\n\n[model_providers.custom]\nbase_url = \"http://127.0.0.1:15721/v1\"\n";
+        let stored = "model_provider = \"custom\"\nmodel = \"custom-brand\"\n\n[model_providers.custom]\nbase_url = \"https://api.minimaxi.com/v1\"\n";
+        let settings =
+            json!({ "modelCatalog": { "models": [json!({ "model": "custom-brand" })] } });
+
+        // Without the verdict, the rewritten proxy host misses the blacklist
+        // and the sentinel would be cleaned.
+        let naive = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            rewritten,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare rewritten config");
+        assert_eq!(parse_web_search_field(&naive.config_text), None);
+
+        // With the verdict from the stored config, "disabled" stays.
+        let verdict = crate::codex_config::codex_native_gateway_rejects_web_search(stored);
+        assert!(verdict);
+        let prepared = prepare_codex_config_text_with_model_catalog_payload_with_reject_verdict(
+            &settings,
+            rewritten,
+            CodexCatalogToolProfile::NativeResponses,
+            verdict,
+        )
+        .expect("prepare takeover config");
+        assert_eq!(
+            parse_web_search_field(&prepared.config_text).as_deref(),
+            Some(CODEX_WEB_SEARCH_DISABLED)
+        );
+    }
+
+    #[test]
+    fn native_reject_gateway_writes_disabled_without_user_option() {
+        // A blacklisted native gateway is disabled by default: no option key
+        // needed (aligned with upstream, unlike the toggle which is an
+        // optional force-disable override).
+        let config =
+            "model = \"mimo-v2.5-pro\"\n\n[model_providers.custom]\nbase_url = \"https://api.xiaomimimo.com/v1\"\n";
+        let native = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({}),
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(
+            parse_web_search_field(&native.config_text).as_deref(),
+            Some(CODEX_WEB_SEARCH_DISABLED)
+        );
+    }
+
+    #[test]
+    fn switch_away_and_back_cycles_web_search_field() {
+        // Switch to a blacklisted native provider → disabled written.
+        let native_cfg =
+            "model = \"mimo-v2.5-pro\"\n\n[model_providers.custom]\nbase_url = \"https://api.xiaomimimo.com/v1\"\n";
+        let native = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({}),
+            native_cfg,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config");
+        assert_eq!(
+            parse_web_search_field(&native.config_text).as_deref(),
+            Some(CODEX_WEB_SEARCH_DISABLED)
+        );
+
+        // Switch away to a chat provider → cc-switch's sentinel removed.
+        let chat = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({}),
+            &native.config_text,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare chat config");
+        assert_eq!(parse_web_search_field(&chat.config_text), None);
+
+        // Switch back → disabled written again.
+        let back = prepare_codex_config_text_with_model_catalog_payload(
+            &json!({}),
+            &chat.config_text,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare native config again");
+        assert_eq!(
+            parse_web_search_field(&back.config_text).as_deref(),
+            Some(CODEX_WEB_SEARCH_DISABLED)
+        );
+    }
+
+    #[test]
+    fn verbatim_restore_preserves_disabled_field_across_proxy_chat_profile() {
+        // A native provider's captured live config carries the sentinel; the
+        // provider-less restore path uses the ProxyChat fallback profile and
+        // must NOT strip it.
+        let captured = "model = \"mimo-v2.5-pro\"\nweb_search = \"disabled\"\n\n[model_providers.custom]\nbase_url = \"https://api.xiaomimimo.com/v1\"\n";
+        let settings =
+            json!({ "modelCatalog": { "models": [json!({ "model": "mimo-v2.5-pro" })] } });
+
+        let verbatim = prepare_codex_verbatim_config_text_with_model_catalog_payload(
+            &settings,
+            captured,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare verbatim restore");
+        assert_eq!(
+            parse_web_search_field(&verbatim.config_text).as_deref(),
+            Some(CODEX_WEB_SEARCH_DISABLED)
+        );
+
+        // The non-verbatim path keeps cleaning (switch semantics).
+        let switched = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            captured,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare switch");
+        assert_eq!(parse_web_search_field(&switched.config_text), None);
     }
 
     #[test]

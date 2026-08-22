@@ -196,6 +196,8 @@ impl ProviderAddFormState {
             codex_goal_mode_touched: false,
             codex_remote_compaction: false,
             codex_remote_compaction_touched: false,
+            codex_disable_web_search: false,
+            codex_disable_web_search_touched: false,
             codex_quick_config_idx: 0,
             codex_oauth_account_id: None,
             codex_fast_mode: false,
@@ -704,6 +706,7 @@ impl ProviderAddFormState {
             | ProviderAddField::CodexQuickConfig
             | ProviderAddField::CodexGoalMode
             | ProviderAddField::CodexRemoteCompaction
+            | ProviderAddField::CodexDisableWebSearch
             | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
@@ -772,6 +775,7 @@ impl ProviderAddFormState {
             | ProviderAddField::CodexQuickConfig
             | ProviderAddField::CodexGoalMode
             | ProviderAddField::CodexRemoteCompaction
+            | ProviderAddField::CodexDisableWebSearch
             | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
@@ -1057,14 +1061,23 @@ impl ProviderAddFormState {
         self.codex_remote_compaction_touched = true;
     }
 
+    pub fn toggle_codex_disable_web_search(&mut self) {
+        self.codex_disable_web_search = !self.codex_disable_web_search;
+        self.codex_disable_web_search_touched = true;
+    }
+
     /// The Codex quick toggles, in upstream order. They live on the Codex
     /// "快捷配置菜单" sub-page rather than the main field list. Goal mode is
     /// available for every Codex provider; remote compaction is only meaningful
-    /// for custom providers (upstream `showRemoteCompaction = category != "official"`).
+    /// for custom providers (upstream `showRemoteCompaction = category != "official"`);
+    /// disabling hosted web search applies to native Responses format only.
     pub fn codex_quick_config_fields(&self) -> Vec<ProviderAddField> {
         let mut fields = vec![ProviderAddField::CodexGoalMode];
         if !self.is_codex_official_provider() {
             fields.push(ProviderAddField::CodexRemoteCompaction);
+        }
+        if self.codex_is_native_format() {
+            fields.push(ProviderAddField::CodexDisableWebSearch);
         }
         fields
     }
@@ -1075,6 +1088,7 @@ impl ProviderAddFormState {
             .filter(|field| match field {
                 ProviderAddField::CodexGoalMode => self.codex_goal_mode,
                 ProviderAddField::CodexRemoteCompaction => self.codex_remote_compaction,
+                ProviderAddField::CodexDisableWebSearch => self.codex_disable_web_search,
                 _ => false,
             })
             .count()
@@ -2529,6 +2543,15 @@ impl ProviderAddFormState {
         matches!(self.app_type, AppType::Codex)
             && !self.is_codex_official_provider()
             && matches!(self.claude_api_format, ClaudeApiFormat::OpenAiChat)
+    }
+
+    /// Whether the Codex upstream format is native OpenAI Responses (no proxy
+    /// conversion). Hosted web-search control applies only here: Anthropic
+    /// gateways cannot carry the tool (always disabled) and Chat formats go
+    /// through the proxy which converts it.
+    pub fn codex_is_native_format(&self) -> bool {
+        matches!(self.app_type, AppType::Codex)
+            && matches!(self.claude_api_format, ClaudeApiFormat::OpenAiResponses)
     }
 
     pub fn apply_provider_json_to_fields(&mut self, provider: &Provider) {

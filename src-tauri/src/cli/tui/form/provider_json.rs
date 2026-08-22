@@ -476,6 +476,16 @@ impl ProviderAddFormState {
             AppType::Codex => {
                 let (config_toml, model_catalog) = self.codex_config_and_model_catalog_for_save();
                 settings_obj.insert("config".to_string(), Value::String(config_toml));
+                if self.codex_disable_web_search_touched {
+                    if self.codex_disable_web_search {
+                        settings_obj.insert(
+                            crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY.to_string(),
+                            json!(true),
+                        );
+                    } else {
+                        settings_obj.remove(crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY);
+                    }
+                }
                 if self.is_codex_official_provider() {
                     let auth_value = settings_obj
                         .entry("auth".to_string())

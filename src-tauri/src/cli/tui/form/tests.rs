@@ -1841,16 +1841,103 @@ fn provider_add_form_codex_collapses_quick_toggles_into_menu() {
         "the quick-config menu stays above the usage-query section"
     );
 
-    // The two toggles live on the sub-page, not the main field list.
+    // The toggles live on the sub-page, not the main field list.
     assert!(!fields.contains(&ProviderAddField::CodexGoalMode));
     assert!(!fields.contains(&ProviderAddField::CodexRemoteCompaction));
+    assert!(!fields.contains(&ProviderAddField::CodexDisableWebSearch));
+    // The default add-form format is native Responses, so the hosted
+    // web-search toggle is listed.
     assert_eq!(
         form.codex_quick_config_fields(),
         vec![
             ProviderAddField::CodexGoalMode,
             ProviderAddField::CodexRemoteCompaction,
+            ProviderAddField::CodexDisableWebSearch,
         ]
     );
+}
+
+#[test]
+fn provider_add_form_codex_disable_web_search_toggle_persists_and_removes_key() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.id.set("myco");
+    form.name.set("My Codex");
+    form.codex_base_url.set("https://api.example.com/v1");
+
+    assert_eq!(form.codex_quick_config_enabled_count(), 0);
+
+    form.toggle_codex_disable_web_search();
+    assert_eq!(form.codex_quick_config_enabled_count(), 1);
+    let provider = form.to_provider_json_value();
+    assert_eq!(
+        provider["settingsConfig"][crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY],
+        json!(true)
+    );
+
+    // Untoggling removes the key instead of persisting false.
+    form.toggle_codex_disable_web_search();
+    let provider = form.to_provider_json_value();
+    assert!(provider["settingsConfig"]
+        .get(crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY)
+        .is_none());
+}
+
+#[test]
+fn provider_add_form_codex_disable_web_search_toggle_skips_untouched_provider() {
+    // Saving without touching the toggle must not add the key.
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.id.set("myco");
+    form.name.set("My Codex");
+    let provider = form.to_provider_json_value();
+    assert!(provider["settingsConfig"]
+        .get(crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY)
+        .is_none());
+}
+
+#[test]
+fn provider_add_form_codex_disable_web_search_gated_to_native_format() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    assert!(form.codex_is_native_format());
+    assert!(form
+        .codex_quick_config_fields()
+        .contains(&ProviderAddField::CodexDisableWebSearch));
+
+    // Chat format: toggle must not be listed (the proxy converts the tool).
+    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    assert!(!form
+        .codex_quick_config_fields()
+        .contains(&ProviderAddField::CodexDisableWebSearch));
+
+    // Anthropic format: always disabled, no toggle.
+    form.claude_api_format = ClaudeApiFormat::Anthropic;
+    assert!(!form
+        .codex_quick_config_fields()
+        .contains(&ProviderAddField::CodexDisableWebSearch));
+}
+
+#[test]
+fn provider_add_form_codex_disable_web_search_loads_from_provider() {
+    let provider = Provider::with_id(
+        "myco".to_string(),
+        "My Codex".to_string(),
+        json!({
+            "config": "model = \"gpt-x\"\n",
+            crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY: true,
+        }),
+        None,
+    );
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert!(form.codex_disable_web_search);
+
+    // Absent key defaults to enabled web search.
+    let provider = Provider::with_id(
+        "myco".to_string(),
+        "My Codex".to_string(),
+        json!({ "config": "model = \"gpt-x\"\n" }),
+        None,
+    );
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert!(!form.codex_disable_web_search);
 }
 
 #[test]
@@ -2108,10 +2195,15 @@ fn provider_add_form_codex_official_offers_goal_mode_only() {
         quick_config_idx == include_common_idx + 1,
         "the quick-config menu should sit directly below the add-common-config toggle"
     );
-    // Upstream shows remote compaction only for non-official providers.
+    // Upstream shows remote compaction only for non-official providers; the
+    // hosted web-search toggle applies to native Responses, so official
+    // providers keep it.
     assert_eq!(
         form.codex_quick_config_fields(),
-        vec![ProviderAddField::CodexGoalMode]
+        vec![
+            ProviderAddField::CodexGoalMode,
+            ProviderAddField::CodexDisableWebSearch,
+        ]
     );
 
     // Goal mode is a top-level [features] setting and still persists for

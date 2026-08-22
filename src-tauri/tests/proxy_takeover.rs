@@ -1014,6 +1014,79 @@ async fn disabling_one_managed_app_restores_only_that_app_while_shared_runtime_k
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn codex_takeover_keeps_web_search_disabled_for_blacklisted_gateway() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
+
+    // A native /responses gateway on the web_search reject blacklist (host
+    // match only; the model brand is intentionally not a reject prefix).
+    let provider_config =
+        "model_provider = \"custom\"\nmodel = \"custom-brand\"\n\n[model_providers.custom]\nbase_url = \"https://api.minimaxi.com/v1\"\nwire_api = \"responses\"\n";
+    let mut provider = Provider::with_id(
+        "p1".to_string(),
+        "MiniMax".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": "sk-minimax" },
+            "config": provider_config,
+        }),
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        ..Default::default()
+    });
+
+    let seeded = AppState::try_new().expect("create app state");
+    seeded
+        .db
+        .save_provider("codex", &provider)
+        .expect("save codex provider");
+    seeded
+        .db
+        .set_current_provider("codex", "p1")
+        .expect("set current codex provider");
+
+    // The live config already carries cc-switch's web_search sentinel from a
+    // previous switch; takeover must preserve it, not clean it.
+    seed_codex_live(
+        &json!({ "OPENAI_API_KEY": "sk-minimax" }),
+        "model_provider = \"custom\"\nmodel = \"custom-brand\"\nweb_search = \"disabled\"\n\n[model_providers.custom]\nbase_url = \"https://api.minimaxi.com/v1\"\nwire_api = \"responses\"\n",
+    );
+
+    let mut codex_port = find_free_port();
+    set_app_proxy_port(&seeded.db, "codex", codex_port).await;
+    seeded
+        .proxy_service
+        .set_managed_session_for_app("codex", true)
+        .await
+        .expect("start managed proxy for codex");
+    let _cleanup = ManagedSessionCleanup::new(load_runtime_session_pid(&seeded, "codex"));
+
+    let taken_over =
+        std::fs::read_to_string(get_codex_config_path()).expect("read taken-over codex config");
+    assert!(
+        taken_over.contains("127.0.0.1") && taken_over.contains("/v1"),
+        "Codex should route through the local proxy during takeover"
+    );
+    assert!(
+        taken_over.contains("web_search = \"disabled\""),
+        "takeover must keep web_search = \"disabled\" for the blacklisted gateway: {taken_over}"
+    );
+    assert!(
+        !taken_over.contains("api.minimaxi.com"),
+        "the original gateway host is rewritten away, so only the stored-config verdict can keep the sentinel"
+    );
+
+    seeded
+        .proxy_service
+        .set_managed_session_for_app("codex", false)
+        .await
+        .expect("disable managed proxy for codex");
+}
+
 #[cfg(unix)]
 #[test]
 #[serial]

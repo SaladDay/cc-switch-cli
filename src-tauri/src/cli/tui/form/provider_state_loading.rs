@@ -308,6 +308,11 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
     // The routing/mapping toggle has no dedicated stored field: a provider that
     // already carries a catalog is treated as having local routing enabled.
     form.codex_local_routing_enabled = !form.codex_model_catalog.is_empty();
+    form.codex_disable_web_search = provider
+        .settings_config
+        .get(crate::codex_config::CODEX_WEB_SEARCH_DISABLE_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 }
 
 fn populate_gemini_form(form: &mut ProviderAddFormState, provider: &Provider) {
