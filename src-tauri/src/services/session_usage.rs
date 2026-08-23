@@ -82,10 +82,40 @@ pub(crate) struct SessionSyncGuard {
     _process: MutexGuard<'static, ()>,
 }
 
+// Rust 1.91's std file-lock implementation returns Unsupported on Android
+// without calling Bionic's available flock(2). Keep the workaround scoped to
+// Android so every other target retains the existing std behavior.
+#[cfg(target_os = "android")]
+fn android_session_sync_flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn lock_session_sync_file(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "android")]
+    return android_session_sync_flock(file, libc::LOCK_EX);
+
+    #[cfg(not(target_os = "android"))]
+    file.lock()
+}
+
+fn unlock_session_sync_file(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "android")]
+    return android_session_sync_flock(file, libc::LOCK_UN);
+
+    #[cfg(not(target_os = "android"))]
+    file.unlock()
+}
+
 impl Drop for SessionSyncGuard {
     fn drop(&mut self) {
         if let Some(file) = &self.file {
-            let _ = file.unlock();
+            let _ = unlock_session_sync_file(file);
         }
     }
 }
@@ -167,7 +197,7 @@ pub(crate) fn acquire_session_sync_guard(db: &Database) -> Result<SessionSyncGua
         .session_usage_lock_path()
         .map(|path| {
             let file = open_session_sync_lock(&path)?;
-            file.lock().map_err(|error| AppError::io(&path, error))?;
+            lock_session_sync_file(&file).map_err(|error| AppError::io(&path, error))?;
             Ok::<_, AppError>(file)
         })
         .transpose()?;
