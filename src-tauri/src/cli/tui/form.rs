@@ -46,6 +46,10 @@ pub(crate) use provider_state::resolve_provider_id_for_submit;
 pub(crate) use provider_state::{
     detect_balance_provider_for_usage_query, detect_coding_plan_provider_for_usage_query,
 };
+pub(crate) use provider_templates::{
+    provider_template_first_flat_idx, provider_template_row_for_flat_idx,
+    provider_template_step_flat_idx, ProviderTemplateRow, ProviderTemplateSection,
+};
 pub(crate) use s3::{S3Preset, S3SyncField, S3SyncFormState};
 pub(crate) use webdav::{WebDavSyncField, WebDavSyncFormState};
 
@@ -246,6 +250,10 @@ impl FormMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderAddField {
+    /// Add-mode only pseudo-field: Enter opens the provider template picker.
+    /// It leads the field list so the very first Enter still picks a template.
+    Template,
+    TemplateDivider,
     Id,
     Name,
     WebsiteUrl,

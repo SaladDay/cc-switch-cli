@@ -135,7 +135,9 @@ impl ProviderAddFormState {
             app_type,
             mode: FormMode::Add,
             copy_source_id: None,
-            focus: FormFocus::Templates,
+            // The template is a field row now, and `fields()` puts it first in
+            // Add mode, so the form opens with it selected.
+            focus: FormFocus::Fields,
             page: ProviderFormPage::Main,
             template_idx: 0,
             field_idx: 0,
@@ -334,6 +336,10 @@ impl ProviderAddFormState {
             }
         }
         form.id.set(provider_copy_id(&provider.id, existing_ids));
+        // A copy arrives pre-filled, so opening on the template row would both
+        // mislabel it as "Custom" and put a values-wiping Enter one keypress
+        // away. Start on the first real field, as this form always used to.
+        form.field_idx = form.first_field_after_template();
         form
     }
 
@@ -572,7 +578,30 @@ impl ProviderAddFormState {
         }
         fields.push(ProviderAddField::UsageQueryDivider);
         fields.push(ProviderAddField::UsageQuery);
+
+        // Add mode leads with the template picker row plus its divider, so the
+        // template reads as its own group above the real fields. Inserted last
+        // so app-specific `insert(0, ...)` rules above stay index-correct.
+        if matches!(self.mode, FormMode::Add) {
+            fields.insert(0, ProviderAddField::TemplateDivider);
+            fields.insert(0, ProviderAddField::Template);
+        }
         fields
+    }
+
+    /// Index of the first real field, i.e. the row after the template group.
+    /// Used after applying a template so the user lands ready to type.
+    pub fn first_field_after_template(&self) -> usize {
+        let fields = self.fields();
+        fields
+            .iter()
+            .position(|field| {
+                !matches!(
+                    field,
+                    ProviderAddField::Template | ProviderAddField::TemplateDivider
+                )
+            })
+            .unwrap_or(0)
     }
 
     pub fn usage_query_fields(&self) -> Vec<UsageQueryField> {
@@ -727,7 +756,9 @@ impl ProviderAddFormState {
             | ProviderAddField::CommonSnippet
             | ProviderAddField::IncludeCommonConfig
             | ProviderAddField::UsageQueryDivider
-            | ProviderAddField::UsageQuery => None,
+            | ProviderAddField::UsageQuery
+            | ProviderAddField::Template
+            | ProviderAddField::TemplateDivider => None,
         }
     }
 
@@ -795,7 +826,9 @@ impl ProviderAddFormState {
             | ProviderAddField::CommonSnippet
             | ProviderAddField::IncludeCommonConfig
             | ProviderAddField::UsageQueryDivider
-            | ProviderAddField::UsageQuery => None,
+            | ProviderAddField::UsageQuery
+            | ProviderAddField::Template
+            | ProviderAddField::TemplateDivider => None,
         }
     }
 

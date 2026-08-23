@@ -38,10 +38,6 @@ impl App {
             return Action::None;
         }
 
-        if let Some(action) = self.handle_provider_template_key(key, data) {
-            return action;
-        }
-
         if let Some(action) = self.handle_mcp_template_key(key) {
             return action;
         }

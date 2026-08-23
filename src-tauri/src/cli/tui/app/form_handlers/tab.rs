@@ -86,7 +86,10 @@ impl App {
                         provider.focus,
                         provider.codex_preview_section,
                     ) {
-                        (FormMode::Add, FormFocus::Templates, _) => {
+                        // The template is a field row now, so the provider form
+                        // never rests on `Templates`; the arm only exists to
+                        // recover if some other path sets it.
+                        (_, FormFocus::Templates, _) => {
                             provider.focus = FormFocus::Fields;
                         }
                         (FormMode::Add, FormFocus::Fields, _) => {
@@ -106,7 +109,7 @@ impl App {
                             FormFocus::JsonPreview,
                             form::CodexPreviewSection::Config,
                         ) => {
-                            provider.focus = FormFocus::Templates;
+                            provider.focus = FormFocus::Fields;
                         }
                         (FormMode::Edit { .. }, FormFocus::Fields, _) => {
                             provider.focus = FormFocus::JsonPreview;
@@ -127,23 +130,17 @@ impl App {
                         ) => {
                             provider.focus = FormFocus::Fields;
                         }
-                        (FormMode::Edit { .. }, FormFocus::Templates, _) => {
-                            provider.focus = FormFocus::Fields;
-                        }
                         (_, FormFocus::Content, _) => {
                             provider.focus = FormFocus::Fields;
                         }
                     }
                 } else {
-                    provider.focus = match (&provider.mode, provider.focus) {
-                        (FormMode::Add, FormFocus::Templates) => FormFocus::Fields,
-                        (FormMode::Add, FormFocus::Fields) => FormFocus::JsonPreview,
-                        (FormMode::Add, FormFocus::JsonPreview) => FormFocus::Templates,
-                        (FormMode::Add, FormFocus::Content) => FormFocus::Fields,
-                        (FormMode::Edit { .. }, FormFocus::Fields) => FormFocus::JsonPreview,
-                        (FormMode::Edit { .. }, FormFocus::JsonPreview) => FormFocus::Fields,
-                        (FormMode::Edit { .. }, FormFocus::Templates) => FormFocus::Fields,
-                        (FormMode::Edit { .. }, FormFocus::Content) => FormFocus::Fields,
+                    // Add and Edit now share the same two-stop cycle: the
+                    // template lives in the field table, not its own pane.
+                    provider.focus = match provider.focus {
+                        FormFocus::Fields => FormFocus::JsonPreview,
+                        FormFocus::JsonPreview => FormFocus::Fields,
+                        FormFocus::Templates | FormFocus::Content => FormFocus::Fields,
                     };
                 }
             }
