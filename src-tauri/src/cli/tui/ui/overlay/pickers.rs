@@ -390,6 +390,97 @@ pub(super) fn render_usage_query_template_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+const PROVIDER_TEMPLATE_PICKER_WIDTH: u16 = 40;
+
+pub(super) fn render_provider_template_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    // Resolve everything before drawing: if the form is gone the handler will
+    // close this overlay on the next key, and painting an empty titled frame
+    // for that one tick just flashes chrome at the user.
+    let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
+        return;
+    };
+    let rows = provider.template_picker_rows();
+    if rows.is_empty() {
+        return;
+    }
+    let current = provider.template_idx;
+
+    let body_area = overlay_frame(
+        frame,
+        content_area,
+        theme,
+        texts::tui_provider_template_picker_title(),
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+        OverlaySize::FitRows {
+            width: PROVIDER_TEMPLATE_PICKER_WIDTH,
+            body_rows: rows.len() as u16,
+        },
+        overlay_border_style(theme, false),
+    );
+
+    // A stale flat index must not park the highlight on a section header, so
+    // fall back to the first selectable row rather than display row 0.
+    let selected_row = form::provider_template_row_for_flat_idx(&rows, selected)
+        .or_else(|| rows.iter().position(|row| row.flat_idx().is_some()))
+        .unwrap_or(0);
+    let visible =
+        visible_selection_window(rows.len(), selected_row, body_area.height.max(1) as usize);
+    let visible_start = visible.start;
+    let items = visible
+        .filter_map(|idx| rows.get(idx))
+        .map(|row| match row {
+            form::ProviderTemplateRow::Header(section) => {
+                let title = match section {
+                    form::ProviderTemplateSection::BuiltIn => {
+                        texts::tui_provider_template_section_builtin()
+                    }
+                    form::ProviderTemplateSection::Sponsors => {
+                        texts::tui_provider_template_section_sponsors()
+                    }
+                };
+                ListItem::new(Line::styled(
+                    title.to_string(),
+                    Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
+                ))
+            }
+            form::ProviderTemplateRow::Item {
+                flat_idx,
+                label,
+                section,
+            } => {
+                let marker = if *flat_idx == current {
+                    texts::tui_marker_active()
+                } else {
+                    texts::tui_marker_inactive()
+                };
+                let style = match section {
+                    form::ProviderTemplateSection::Sponsors => Style::default().fg(theme.warn),
+                    form::ProviderTemplateSection::BuiltIn => Style::default(),
+                };
+                ListItem::new(Line::styled(format!("{marker}  {label}"), style))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state.select(Some(selected_row.saturating_sub(visible_start)));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
 pub(super) fn render_s3_preset_picker_overlay(
     frame: &mut Frame<'_>,
     app: &App,

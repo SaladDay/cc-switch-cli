@@ -448,18 +448,11 @@ pub(crate) fn render_provider_add_form(
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
-    let template_height = if matches!(provider.mode, super::form::FormMode::Add) {
-        3
-    } else {
-        0
-    };
+    // The template used to own a bordered row here; it is a field row inside
+    // the table now, so the body is just the key bar plus the fields/preview.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(template_height),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
     let fields = provider.fields();
@@ -483,18 +476,6 @@ pub(crate) fn render_provider_add_form(
         ),
     );
 
-    if matches!(provider.mode, super::form::FormMode::Add) {
-        let labels = provider.template_labels();
-        render_form_template_chips(
-            frame,
-            &labels,
-            provider.template_idx,
-            matches!(provider.focus, FormFocus::Templates),
-            chunks[1],
-            theme,
-        );
-    }
-
     let rows_data = fields
         .iter()
         .map(|field| provider_field_label_and_value(provider, *field))
@@ -510,24 +491,24 @@ pub(crate) fn render_provider_add_form(
         1,
     );
 
-    let split = form_can_split(chunks[2].width, label_col_width, theme);
+    let split = form_can_split(chunks[1].width, label_col_width, theme);
     let panes = split.then(|| {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(chunks[2])
+            .split(chunks[1])
     });
     let fields_area = if split {
         Some(panes.as_ref().expect("split panes")[0])
     } else if !matches!(provider.focus, FormFocus::JsonPreview) {
-        Some(chunks[2])
+        Some(chunks[1])
     } else {
         None
     };
     let preview_area = if split {
         Some(panes.as_ref().expect("split panes")[1])
     } else if matches!(provider.focus, FormFocus::JsonPreview) {
-        Some(chunks[2])
+        Some(chunks[1])
     } else {
         None
     };
@@ -598,6 +579,23 @@ fn render_provider_inline_fields(
                 ])
                 .style(Style::default().fg(theme.dim)),
             );
+            continue;
+        }
+
+        if matches!(*field, ProviderAddField::Template) {
+            let labels = provider.template_labels();
+            let spans = template_field_value_spans(
+                &labels,
+                provider.template_idx,
+                editor_active && idx == selected_idx,
+                value_width,
+                theme,
+            );
+            row_heights.push(1);
+            rows.push(Row::new(vec![
+                Cell::from(cell_pad(label)),
+                Cell::from(Line::from(spans)),
+            ]));
             continue;
         }
 
@@ -1962,6 +1960,8 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::IncludeCommonConfig => texts::tui_form_attach_common_config().to_string(),
         ProviderAddField::UsageQueryDivider => "- - - - - - - - -".to_string(),
         ProviderAddField::UsageQuery => texts::tui_config_item_usage_query().to_string(),
+        ProviderAddField::Template => texts::tui_label_provider_template().to_string(),
+        ProviderAddField::TemplateDivider => "- - - - - - - - -".to_string(),
     };
 
     let value = match field {
@@ -2101,6 +2101,15 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::CommonConfigDivider => "- - - - - - - - - -".to_string(),
         ProviderAddField::CommonSnippet => format!("{} ›", texts::tui_key_open()),
         ProviderAddField::UsageQueryDivider => String::new(),
+        ProviderAddField::TemplateDivider => String::new(),
+        // Plain-text fallback; the row itself renders chip-styled spans and
+        // this value only feeds column sizing and non-styled consumers.
+        ProviderAddField::Template => provider
+            .template_labels()
+            .get(provider.template_idx)
+            .copied()
+            .unwrap_or_default()
+            .to_string(),
         ProviderAddField::UsageQuery => {
             if provider.usage_query_enabled {
                 format!(
@@ -2190,7 +2199,8 @@ pub(crate) fn codex_local_routing_field_label_and_value(
 fn provider_field_is_divider(field: ProviderAddField) -> bool {
     matches!(
         field,
-        ProviderAddField::ClaudeAdvancedDivider
+        ProviderAddField::TemplateDivider
+            | ProviderAddField::ClaudeAdvancedDivider
             | ProviderAddField::CodexAdvancedDivider
             | ProviderAddField::HermesAdvancedDivider
             | ProviderAddField::CommonConfigDivider

@@ -97,6 +97,9 @@ impl App {
         if let Some(action) = self.handle_usage_query_template_picker_key(key) {
             return Some(action);
         }
+        if let Some(action) = self.handle_provider_template_picker_key(key, data) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_s3_preset_picker_key(key) {
             return Some(action);
         }
@@ -390,6 +393,74 @@ impl App {
                 provider.set_usage_query_template(template);
                 provider.touch_usage_query();
                 self.overlay = Overlay::None;
+                Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_provider_template_picker_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
+        let Overlay::ProviderTemplatePicker { selected } = &mut self.overlay else {
+            return None;
+        };
+        let requested = *selected;
+
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            self.overlay = Overlay::None;
+            return Some(Action::None);
+        };
+
+        let rows = provider.template_picker_rows();
+        // A stale selection (e.g. an index that no longer maps to a template)
+        // falls back to the first selectable row instead of applying nothing.
+        let current = match form::provider_template_row_for_flat_idx(&rows, requested) {
+            Some(_) => requested,
+            None => match form::provider_template_first_flat_idx(&rows) {
+                Some(first) => {
+                    *selected = first;
+                    first
+                }
+                None => {
+                    self.overlay = Overlay::None;
+                    return Some(Action::None);
+                }
+            },
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                if let Some(next) = form::provider_template_step_flat_idx(&rows, current, false) {
+                    *selected = next;
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                if let Some(next) = form::provider_template_step_flat_idx(&rows, current, true) {
+                    *selected = next;
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                let existing_ids = data.existing_provider_ids();
+                provider.apply_template(current, &existing_ids);
+                let refresh_result =
+                    provider.refresh_quick_config_from_common_snippet(&data.config.common_snippet);
+                // Land on the first real field so the user can start typing;
+                // the template row itself stays one Up away.
+                provider.focus = FormFocus::Fields;
+                provider.field_idx = provider.first_field_after_template();
+                self.overlay = Overlay::None;
+                if let Err(err) = refresh_result {
+                    self.push_toast(err, ToastKind::Warning);
+                }
                 Action::None
             }
             _ => Action::None,

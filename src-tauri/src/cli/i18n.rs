@@ -3188,6 +3188,41 @@ pub mod texts {
         }
     }
 
+    /// Singular label for the provider form's Template field row, which holds
+    /// one selection. The plural `tui_form_templates_title` still titles the
+    /// MCP chips box, which shows the whole list at once.
+    pub fn tui_label_provider_template() -> &'static str {
+        if is_chinese() {
+            "模板"
+        } else {
+            "Template"
+        }
+    }
+
+    pub fn tui_provider_template_picker_title() -> &'static str {
+        if is_chinese() {
+            "供应商模板"
+        } else {
+            "Provider templates"
+        }
+    }
+
+    pub fn tui_provider_template_section_builtin() -> &'static str {
+        if is_chinese() {
+            "内置"
+        } else {
+            "Built-in"
+        }
+    }
+
+    pub fn tui_provider_template_section_sponsors() -> &'static str {
+        if is_chinese() {
+            "赞助商"
+        } else {
+            "Sponsors"
+        }
+    }
+
     pub fn tui_form_common_config_button() -> &'static str {
         if is_chinese() {
             "通用配置"

@@ -12,27 +12,27 @@ fn template_index_by_label(app_type: AppType, label: &str) -> usize {
 }
 
 fn claudeapi_template_index(app_type: AppType) -> usize {
-    template_index_by_label(app_type, "* ClaudeAPI")
+    template_index_by_label(app_type, "ClaudeAPI")
 }
 
 fn packycode_template_index(app_type: AppType) -> usize {
-    template_index_by_label(app_type, "* PackyCode")
+    template_index_by_label(app_type, "PackyCode")
 }
 
 fn aicodemirror_template_index(app_type: AppType) -> usize {
-    template_index_by_label(app_type, "* AICodeMirror")
+    template_index_by_label(app_type, "AICodeMirror")
 }
 
 fn cubence_template_index(app_type: AppType) -> usize {
-    template_index_by_label(app_type, "* Cubence")
+    template_index_by_label(app_type, "Cubence")
 }
 
 fn runapi_template_index(app_type: AppType) -> usize {
-    template_index_by_label(app_type, "* RunAPI")
+    template_index_by_label(app_type, "RunAPI")
 }
 
 fn dds_template_index(app_type: AppType) -> usize {
-    template_index_by_label(app_type, "* DDS")
+    template_index_by_label(app_type, "DDS")
 }
 
 fn deepseek_template_index(app_type: AppType) -> usize {
@@ -79,18 +79,33 @@ fn assert_cli_template_matches_tui_serializer(
     );
 }
 
+/// Chip labels keep the ASCII `"* "` marker for the chip-row consumers (the
+/// MCP form and the CLI template chooser); the provider form's flat labels
+/// strip it, because its collapsed row and picker show sponsors under an
+/// explicit Sponsors header instead.
 #[test]
 fn provider_add_form_template_labels_use_ascii_prefix_for_packycode() {
-    let form = ProviderAddFormState::new(AppType::Claude);
-    let labels = form.template_labels();
+    let chip_labels =
+        crate::provider_preset_sponsors::sponsor_provider_presets_for_app(&AppType::Claude)
+            .iter()
+            .map(|preset| preset.chip_label)
+            .collect::<Vec<_>>();
 
     assert!(
-        labels.contains(&"* PackyCode"),
+        chip_labels.contains(&"* PackyCode"),
         "expected PackyCode chip label to use ASCII prefix for alignment stability"
     );
     assert!(
-        labels.contains(&"* ClaudeAPI"),
+        chip_labels.contains(&"* ClaudeAPI"),
         "expected ClaudeAPI chip label to use ASCII prefix for alignment stability"
+    );
+
+    let labels = ProviderAddFormState::new(AppType::Claude).template_labels();
+    assert!(labels.contains(&"PackyCode"), "{labels:?}");
+    assert!(labels.contains(&"ClaudeAPI"), "{labels:?}");
+    assert!(
+        labels.iter().all(|label| !label.starts_with("* ")),
+        "provider template labels must drop the chip marker: {labels:?}"
     );
 }
 
@@ -103,15 +118,15 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Claude Official",
             "Codex",
-            "* AICodeMirror",
-            "* ClaudeAPI",
-            "* Cubence",
-            "* OpenModel",
-            "* RunAPI",
-            "* Qiniu",
-            "* FennoAI",
-            "* PackyCode",
-            "* DDS",
+            "AICodeMirror",
+            "ClaudeAPI",
+            "Cubence",
+            "OpenModel",
+            "RunAPI",
+            "Qiniu",
+            "FennoAI",
+            "PackyCode",
+            "DDS",
         ]
     );
 
@@ -121,14 +136,14 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "OpenAI Official",
-            "* AICodeMirror",
-            "* Cubence",
-            "* OpenModel",
-            "* RunAPI",
-            "* Qiniu",
-            "* FennoAI",
-            "* PackyCode",
-            "* DDS",
+            "AICodeMirror",
+            "Cubence",
+            "OpenModel",
+            "RunAPI",
+            "Qiniu",
+            "FennoAI",
+            "PackyCode",
+            "DDS",
             "DeepSeek",
         ]
     );
@@ -139,11 +154,11 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "Google OAuth",
-            "* AICodeMirror",
-            "* Cubence",
-            "* OpenModel",
-            "* Qiniu",
-            "* PackyCode",
+            "AICodeMirror",
+            "Cubence",
+            "OpenModel",
+            "Qiniu",
+            "PackyCode",
         ]
     );
 
@@ -152,17 +167,17 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         opencode_labels,
         vec![
             "Custom",
-            "* AICodeMirror",
-            "* Cubence",
-            "* OpenModel",
-            "* RunAPI",
-            "* Qiniu",
-            "* FennoAI",
-            "* PackyCode"
+            "AICodeMirror",
+            "Cubence",
+            "OpenModel",
+            "RunAPI",
+            "Qiniu",
+            "FennoAI",
+            "PackyCode"
         ]
     );
     assert!(
-        !opencode_labels.contains(&"* ClaudeAPI"),
+        !opencode_labels.contains(&"ClaudeAPI"),
         "OpenCode should not expose Claude-only sponsor presets"
     );
 
@@ -171,13 +186,13 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         hermes_labels,
         vec![
             "Custom",
-            "* AICodeMirror",
-            "* Cubence",
-            "* OpenModel",
-            "* RunAPI",
-            "* Qiniu",
-            "* FennoAI",
-            "* PackyCode"
+            "AICodeMirror",
+            "Cubence",
+            "OpenModel",
+            "RunAPI",
+            "Qiniu",
+            "FennoAI",
+            "PackyCode"
         ]
     );
 
@@ -186,17 +201,17 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         openclaw_labels,
         vec![
             "Custom",
-            "* AICodeMirror",
-            "* Cubence",
-            "* OpenModel",
-            "* RunAPI",
-            "* Qiniu",
-            "* FennoAI",
-            "* PackyCode"
+            "AICodeMirror",
+            "Cubence",
+            "OpenModel",
+            "RunAPI",
+            "Qiniu",
+            "FennoAI",
+            "PackyCode"
         ]
     );
     assert!(
-        !openclaw_labels.contains(&"* ClaudeAPI"),
+        !openclaw_labels.contains(&"ClaudeAPI"),
         "OpenClaw should not expose Claude-only sponsor presets"
     );
 }
@@ -220,97 +235,69 @@ fn cli_provider_templates_match_tui_serializer_output() {
             ProviderAddTemplate::GoogleOauth,
             "Google OAuth",
         ),
-        (
-            AppType::Claude,
-            ProviderAddTemplate::Claudeapi,
-            "* ClaudeAPI",
-        ),
-        (
-            AppType::Claude,
-            ProviderAddTemplate::Packycode,
-            "* PackyCode",
-        ),
-        (
-            AppType::Claude,
-            ProviderAddTemplate::Openmodel,
-            "* OpenModel",
-        ),
-        (
-            AppType::Codex,
-            ProviderAddTemplate::Openmodel,
-            "* OpenModel",
-        ),
-        (
-            AppType::Gemini,
-            ProviderAddTemplate::Openmodel,
-            "* OpenModel",
-        ),
+        (AppType::Claude, ProviderAddTemplate::Claudeapi, "ClaudeAPI"),
+        (AppType::Claude, ProviderAddTemplate::Packycode, "PackyCode"),
+        (AppType::Claude, ProviderAddTemplate::Openmodel, "OpenModel"),
+        (AppType::Codex, ProviderAddTemplate::Openmodel, "OpenModel"),
+        (AppType::Gemini, ProviderAddTemplate::Openmodel, "OpenModel"),
         (
             AppType::OpenCode,
             ProviderAddTemplate::Openmodel,
-            "* OpenModel",
+            "OpenModel",
         ),
-        (
-            AppType::Hermes,
-            ProviderAddTemplate::Openmodel,
-            "* OpenModel",
-        ),
+        (AppType::Hermes, ProviderAddTemplate::Openmodel, "OpenModel"),
         (
             AppType::OpenClaw,
             ProviderAddTemplate::Openmodel,
-            "* OpenModel",
+            "OpenModel",
         ),
         (
             AppType::Codex,
             ProviderAddTemplate::Aicodemirror,
-            "* AICodeMirror",
+            "AICodeMirror",
         ),
-        (AppType::Codex, ProviderAddTemplate::Runapi, "* RunAPI"),
+        (AppType::Codex, ProviderAddTemplate::Runapi, "RunAPI"),
         (AppType::Codex, ProviderAddTemplate::Deepseek, "DeepSeek"),
-        (AppType::Gemini, ProviderAddTemplate::Cubence, "* Cubence"),
-        (AppType::Claude, ProviderAddTemplate::Dds, "* DDS"),
+        (AppType::Gemini, ProviderAddTemplate::Cubence, "Cubence"),
+        (AppType::Claude, ProviderAddTemplate::Dds, "DDS"),
         (
             AppType::OpenCode,
             ProviderAddTemplate::Aicodemirror,
-            "* AICodeMirror",
+            "AICodeMirror",
         ),
-        (AppType::OpenCode, ProviderAddTemplate::Cubence, "* Cubence"),
-        (AppType::OpenCode, ProviderAddTemplate::Runapi, "* RunAPI"),
+        (AppType::OpenCode, ProviderAddTemplate::Cubence, "Cubence"),
+        (AppType::OpenCode, ProviderAddTemplate::Runapi, "RunAPI"),
         (
             AppType::OpenCode,
             ProviderAddTemplate::Packycode,
-            "* PackyCode",
+            "PackyCode",
         ),
-        (AppType::Hermes, ProviderAddTemplate::Cubence, "* Cubence"),
-        (AppType::Hermes, ProviderAddTemplate::Runapi, "* RunAPI"),
-        (
-            AppType::Hermes,
-            ProviderAddTemplate::Packycode,
-            "* PackyCode",
-        ),
+        (AppType::Hermes, ProviderAddTemplate::Cubence, "Cubence"),
+        (AppType::Hermes, ProviderAddTemplate::Runapi, "RunAPI"),
+        (AppType::Hermes, ProviderAddTemplate::Packycode, "PackyCode"),
         (
             AppType::OpenClaw,
             ProviderAddTemplate::Aicodemirror,
-            "* AICodeMirror",
+            "AICodeMirror",
         ),
-        (AppType::OpenClaw, ProviderAddTemplate::Cubence, "* Cubence"),
-        (AppType::OpenClaw, ProviderAddTemplate::Runapi, "* RunAPI"),
+        (AppType::OpenClaw, ProviderAddTemplate::Cubence, "Cubence"),
+        (AppType::OpenClaw, ProviderAddTemplate::Runapi, "RunAPI"),
         (
             AppType::OpenClaw,
             ProviderAddTemplate::Packycode,
-            "* PackyCode",
+            "PackyCode",
         ),
-        (AppType::Claude, ProviderAddTemplate::Qiniu, "* Qiniu"),
-        (AppType::Codex, ProviderAddTemplate::Qiniu, "* Qiniu"),
-        (AppType::Gemini, ProviderAddTemplate::Qiniu, "* Qiniu"),
-        (AppType::OpenCode, ProviderAddTemplate::Qiniu, "* Qiniu"),
-        (AppType::Hermes, ProviderAddTemplate::Qiniu, "* Qiniu"),
-        (AppType::OpenClaw, ProviderAddTemplate::Qiniu, "* Qiniu"),
-        (AppType::Claude, ProviderAddTemplate::Fenno, "* FennoAI"),
-        (AppType::Codex, ProviderAddTemplate::Fenno, "* FennoAI"),
-        (AppType::OpenCode, ProviderAddTemplate::Fenno, "* FennoAI"),
-        (AppType::Hermes, ProviderAddTemplate::Fenno, "* FennoAI"),
-        (AppType::OpenClaw, ProviderAddTemplate::Fenno, "* FennoAI"),
+        (AppType::Claude, ProviderAddTemplate::Qiniu, "Qiniu"),
+        (AppType::Codex, ProviderAddTemplate::Qiniu, "Qiniu"),
+        (AppType::Gemini, ProviderAddTemplate::Qiniu, "Qiniu"),
+        (AppType::OpenCode, ProviderAddTemplate::Qiniu, "Qiniu"),
+        (AppType::Hermes, ProviderAddTemplate::Qiniu, "Qiniu"),
+        (AppType::OpenClaw, ProviderAddTemplate::Qiniu, "Qiniu"),
+        (AppType::Claude, ProviderAddTemplate::Fenno, "FennoAI"),
+        (AppType::Codex, ProviderAddTemplate::Fenno, "FennoAI"),
+        (AppType::OpenCode, ProviderAddTemplate::Fenno, "FennoAI"),
+        (AppType::Hermes, ProviderAddTemplate::Fenno, "FennoAI"),
+        (AppType::OpenClaw, ProviderAddTemplate::Fenno, "FennoAI"),
     ] {
         assert_cli_template_matches_tui_serializer(app_type, template, label);
     }
@@ -5707,13 +5694,13 @@ fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
         labels,
         vec![
             "Custom",
-            "* AICodeMirror",
-            "* Cubence",
-            "* OpenModel",
-            "* RunAPI",
-            "* Qiniu",
-            "* FennoAI",
-            "* PackyCode"
+            "AICodeMirror",
+            "Cubence",
+            "OpenModel",
+            "RunAPI",
+            "Qiniu",
+            "FennoAI",
+            "PackyCode"
         ]
     );
 }
@@ -5730,13 +5717,13 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         openclaw_labels,
         vec![
             "Custom",
-            "* AICodeMirror",
-            "* Cubence",
-            "* OpenModel",
-            "* RunAPI",
-            "* Qiniu",
-            "* FennoAI",
-            "* PackyCode"
+            "AICodeMirror",
+            "Cubence",
+            "OpenModel",
+            "RunAPI",
+            "Qiniu",
+            "FennoAI",
+            "PackyCode"
         ]
     );
     assert!(
@@ -5753,6 +5740,8 @@ fn provider_add_form_hermes_exposes_upstream_provider_fields_only() {
     assert_eq!(
         fields,
         vec![
+            ProviderAddField::Template,
+            ProviderAddField::TemplateDivider,
             ProviderAddField::Id,
             ProviderAddField::Name,
             ProviderAddField::WebsiteUrl,
@@ -6110,7 +6099,15 @@ fn provider_add_form_openclaw_exposes_minimal_dedicated_fields() {
     let form = ProviderAddFormState::new(AppType::OpenClaw);
     let fields = form.fields();
 
-    assert_eq!(fields.first(), Some(&ProviderAddField::Id));
+    // Add mode leads with the template group, then the app-specific key field.
+    assert_eq!(
+        &fields[..3],
+        &[
+            ProviderAddField::Template,
+            ProviderAddField::TemplateDivider,
+            ProviderAddField::Id,
+        ]
+    );
     assert!(fields.contains(&ProviderAddField::OpenClawApiProtocol));
     assert!(fields.contains(&ProviderAddField::OpenCodeApiKey));
     assert!(fields.contains(&ProviderAddField::OpenCodeBaseUrl));
@@ -6873,6 +6870,49 @@ fn provider_edit_form_roundtrip_no_duplicate_common_config_key() {
         .expect("roundtrip deserialization should succeed without duplicate field error");
     assert_eq!(roundtrip.id, "test-provider");
     assert_eq!(roundtrip.name, "Test Provider");
+}
+
+/// A copy form is Add mode, so it grows a Template row — but it arrives
+/// pre-filled, so it must not open on that row: "Custom" would mislabel the
+/// copied values and Enter-Enter would wipe them.
+#[test]
+fn provider_copy_form_opens_on_the_first_real_field() {
+    let provider = Provider::with_id(
+        "test-provider".to_string(),
+        "Test Provider".to_string(),
+        json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "sk-copied" } }),
+        Some("https://example.com".to_string()),
+    );
+
+    let form = ProviderAddFormState::copy_from_provider_with_common_snippet(
+        AppType::Claude,
+        &provider,
+        "",
+        &["test-provider".to_string()],
+    );
+
+    assert!(matches!(form.mode, FormMode::Add));
+    assert_eq!(form.focus, FormFocus::Fields);
+
+    let fields = form.fields();
+    assert!(
+        fields.contains(&ProviderAddField::Template),
+        "add-mode copy forms still expose the template row"
+    );
+    let selected = fields.get(form.field_idx).copied();
+    assert!(
+        !matches!(
+            selected,
+            Some(ProviderAddField::Template) | Some(ProviderAddField::TemplateDivider)
+        ),
+        "copy form must not open on the template group, got: {selected:?}"
+    );
+    assert_eq!(selected, Some(ProviderAddField::Name));
+
+    // The copied values are intact and one Enter away from being edited.
+    assert_eq!(form.name.value, "Test Provider copy");
+    assert_eq!(form.claude_api_key.value, "sk-copied");
+    assert_eq!(form.website_url.value, "https://example.com");
 }
 
 #[test]

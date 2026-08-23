@@ -109,6 +109,15 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::ProviderTemplatePicker { selected } => {
+            super::pickers::render_provider_template_picker_overlay(
+                frame,
+                app,
+                content_area,
+                theme,
+                *selected,
+            )
+        }
         Overlay::S3PresetPicker { selected } => super::pickers::render_s3_preset_picker_overlay(
             frame,
             app,

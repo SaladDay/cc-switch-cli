@@ -4647,6 +4647,12 @@ pub enum Overlay {
     UsageQueryTemplatePicker {
         selected: usize,
     },
+    /// Provider Add form template picker. `selected` is the flat template
+    /// index shared with `ProviderAddFormState::apply_template`, not the
+    /// picker's display row, because the picker regroups templates.
+    ProviderTemplatePicker {
+        selected: usize,
+    },
     S3PresetPicker {
         selected: usize,
     },
@@ -4876,6 +4882,7 @@ impl Overlay {
                 | Overlay::UserAgentPicker { .. }
                 | Overlay::ExternalEditorPicker { .. }
                 | Overlay::UsageQueryTemplatePicker { .. }
+                | Overlay::ProviderTemplatePicker { .. }
                 | Overlay::S3PresetPicker { .. }
                 | Overlay::ManagedAccountPicker { .. }
                 | Overlay::ManagedAccountActionPicker { .. }
@@ -4921,6 +4928,7 @@ impl Overlay {
             | Overlay::UserAgentPicker { .. }
             | Overlay::ExternalEditorPicker { .. }
             | Overlay::UsageQueryTemplatePicker { .. }
+            | Overlay::ProviderTemplatePicker { .. }
             | Overlay::S3PresetPicker { .. }
             | Overlay::ManagedAccountPicker { .. }
             | Overlay::ManagedAccountActionPicker { .. }

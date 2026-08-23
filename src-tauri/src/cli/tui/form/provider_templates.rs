@@ -41,6 +41,77 @@ pub(super) struct ProviderTemplateDef {
     label: &'static str,
 }
 
+/// Section grouping used by the provider template picker overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTemplateSection {
+    BuiltIn,
+    Sponsors,
+}
+
+/// One display row of the provider template picker.
+///
+/// Headers are never selectable. Every item carries the flat template index,
+/// so `apply_template` stays correct even though the picker groups templates
+/// in a different order than [`ProviderAddFormState::template_labels`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTemplateRow {
+    Header(ProviderTemplateSection),
+    Item {
+        flat_idx: usize,
+        label: &'static str,
+        section: ProviderTemplateSection,
+    },
+}
+
+impl ProviderTemplateRow {
+    pub fn flat_idx(&self) -> Option<usize> {
+        match self {
+            ProviderTemplateRow::Item { flat_idx, .. } => Some(*flat_idx),
+            ProviderTemplateRow::Header(_) => None,
+        }
+    }
+}
+
+/// Sponsor chip labels carry a leading `"* "` marker so they stand out in the
+/// flat chip row. The picker renders them under an explicit Sponsors header,
+/// so the marker is redundant there.
+fn strip_sponsor_chip_marker(label: &'static str) -> &'static str {
+    label.strip_prefix("* ").unwrap_or(label)
+}
+
+/// Display-row index of `flat_idx`, when the picker still contains it.
+pub fn provider_template_row_for_flat_idx(
+    rows: &[ProviderTemplateRow],
+    flat_idx: usize,
+) -> Option<usize> {
+    rows.iter().position(|row| row.flat_idx() == Some(flat_idx))
+}
+
+/// First selectable flat index; used to recover from a stale selection.
+pub fn provider_template_first_flat_idx(rows: &[ProviderTemplateRow]) -> Option<usize> {
+    rows.iter().find_map(ProviderTemplateRow::flat_idx)
+}
+
+/// Neighbouring selectable flat index, skipping non-selectable section
+/// headers. Returns `None` at either end so callers keep the current row.
+pub fn provider_template_step_flat_idx(
+    rows: &[ProviderTemplateRow],
+    flat_idx: usize,
+    forward: bool,
+) -> Option<usize> {
+    let current = provider_template_row_for_flat_idx(rows, flat_idx)?;
+    if forward {
+        rows.get(current.saturating_add(1)..)?
+            .iter()
+            .find_map(ProviderTemplateRow::flat_idx)
+    } else {
+        rows.get(..current)?
+            .iter()
+            .rev()
+            .find_map(ProviderTemplateRow::flat_idx)
+    }
+}
+
 #[cfg(test)]
 impl SponsorProviderPreset {
     pub(super) fn id(&self) -> &'static str {
@@ -192,6 +263,12 @@ impl ProviderAddFormState {
             + provider_after_sponsor_template_defs(&self.app_type).len()
     }
 
+    /// Flat template labels, indexed the same way as [`Self::apply_template`].
+    ///
+    /// Sponsor labels drop the `"* "` chip marker here, matching the picker
+    /// overlay: the collapsed template row shows one label at a time, so the
+    /// marker no longer separates sponsors from built-ins the way it did in
+    /// the old chip row (which the MCP form and the CLI chooser still use).
     pub fn template_labels(&self) -> Vec<&'static str> {
         let mut labels = provider_builtin_template_defs(&self.app_type)
             .iter()
@@ -200,7 +277,7 @@ impl ProviderAddFormState {
         labels.extend(
             provider_sponsor_presets(&self.app_type)
                 .iter()
-                .map(|preset| preset.chip_label),
+                .map(|preset| strip_sponsor_chip_marker(preset.chip_label)),
         );
         labels.extend(
             provider_after_sponsor_template_defs(&self.app_type)
@@ -208,6 +285,57 @@ impl ProviderAddFormState {
                 .map(|def| def.label),
         );
         labels
+    }
+
+    /// Display rows for the template picker overlay.
+    ///
+    /// Built-in templates and the after-sponsor built-ins (e.g. Codex's
+    /// DeepSeek) share one section; sponsor presets get their own. Section
+    /// headers are only emitted when the app actually has sponsor presets,
+    /// so single-section apps stay a plain list.
+    pub fn template_picker_rows(&self) -> Vec<ProviderTemplateRow> {
+        let builtin_defs = provider_builtin_template_defs(&self.app_type);
+        let sponsor_presets = provider_sponsor_presets(&self.app_type);
+        let after_sponsor_defs = provider_after_sponsor_template_defs(&self.app_type);
+
+        let grouped = !sponsor_presets.is_empty();
+        // Every template plus the two section headers.
+        let mut rows = Vec::with_capacity(self.template_count().saturating_add(2));
+
+        if grouped {
+            rows.push(ProviderTemplateRow::Header(
+                ProviderTemplateSection::BuiltIn,
+            ));
+        }
+        for (idx, def) in builtin_defs.iter().enumerate() {
+            rows.push(ProviderTemplateRow::Item {
+                flat_idx: idx,
+                label: def.label,
+                section: ProviderTemplateSection::BuiltIn,
+            });
+        }
+        for (offset, def) in after_sponsor_defs.iter().enumerate() {
+            rows.push(ProviderTemplateRow::Item {
+                flat_idx: builtin_defs.len() + sponsor_presets.len() + offset,
+                label: def.label,
+                section: ProviderTemplateSection::BuiltIn,
+            });
+        }
+
+        if grouped {
+            rows.push(ProviderTemplateRow::Header(
+                ProviderTemplateSection::Sponsors,
+            ));
+            for (offset, preset) in sponsor_presets.iter().enumerate() {
+                rows.push(ProviderTemplateRow::Item {
+                    flat_idx: builtin_defs.len() + offset,
+                    label: strip_sponsor_chip_marker(preset.chip_label),
+                    section: ProviderTemplateSection::Sponsors,
+                });
+            }
+        }
+
+        rows
     }
 
     pub fn apply_template(&mut self, idx: usize, existing_ids: &[String]) {

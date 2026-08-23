@@ -9,48 +9,6 @@ enum ProviderValidationTarget {
 }
 
 impl App {
-    pub(super) fn handle_provider_template_key(
-        &mut self,
-        key: KeyEvent,
-        data: &UiData,
-    ) -> Option<Action> {
-        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
-            return None;
-        };
-
-        if !matches!(provider.page, form::ProviderFormPage::Main) {
-            return None;
-        }
-
-        if provider.focus != FormFocus::Templates || !matches!(provider.mode, FormMode::Add) {
-            return None;
-        }
-
-        match key.code {
-            KeyCode::Left => {
-                provider.template_idx = provider.template_idx.saturating_sub(1);
-                Some(Action::None)
-            }
-            KeyCode::Right => {
-                let max = provider.template_count().saturating_sub(1);
-                provider.template_idx = (provider.template_idx + 1).min(max);
-                Some(Action::None)
-            }
-            KeyCode::Enter => {
-                let existing_ids = data.existing_provider_ids();
-                provider.apply_template(provider.template_idx, &existing_ids);
-                let refresh_result =
-                    provider.refresh_quick_config_from_common_snippet(&data.config.common_snippet);
-                provider.focus = FormFocus::Fields;
-                if let Err(err) = refresh_result {
-                    self.push_toast(err, ToastKind::Warning);
-                }
-                Some(Action::None)
-            }
-            _ => None,
-        }
-    }
-
     pub(super) fn handle_provider_focus_key(
         &mut self,
         key: KeyEvent,
@@ -374,6 +332,23 @@ impl App {
         data: &UiData,
     ) -> Action {
         match selected {
+            // Enter only: Space and the arrow keys keep their field-level
+            // meanings while the Fields pane has focus.
+            ProviderAddField::Template => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+                    return Action::None;
+                };
+                if !matches!(provider.mode, FormMode::Add) {
+                    return Action::None;
+                }
+                self.overlay = Overlay::ProviderTemplatePicker {
+                    selected: provider.template_idx,
+                };
+                Action::None
+            }
             ProviderAddField::ClaudeApiFormat => {
                 if !matches!(key.code, KeyCode::Enter) {
                     return Action::None;
@@ -1986,7 +1961,8 @@ fn is_provider_divider_field(field: Option<&ProviderAddField>) -> bool {
     matches!(
         field,
         Some(
-            ProviderAddField::ClaudeAdvancedDivider
+            ProviderAddField::TemplateDivider
+                | ProviderAddField::ClaudeAdvancedDivider
                 | ProviderAddField::CodexAdvancedDivider
                 | ProviderAddField::HermesAdvancedDivider
                 | ProviderAddField::CommonConfigDivider

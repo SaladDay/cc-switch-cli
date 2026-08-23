@@ -104,6 +104,7 @@ fn current_help_target(app: &App) -> HelpTarget {
             Overlay::UsageQueryTemplatePicker { .. } => {
                 provider_usage_query_overlay_target(app, UsageQueryField::Template)
             }
+            Overlay::ProviderTemplatePicker { .. } => HelpTarget::ProviderTemplate,
             Overlay::ClaudeApiFormatPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeApiFormat)
             }
@@ -289,9 +290,14 @@ fn current_help_target(app: &App) -> HelpTarget {
                 .get(provider.field_idx.min(fields.len().saturating_sub(1)))
                 .copied()
                 .filter(|field| !provider_field_is_divider(*field))
-                .map_or(HelpTarget::Empty, |field| HelpTarget::ProviderField {
-                    app_type: provider.app_type.clone(),
-                    field,
+                .map_or(HelpTarget::Empty, |field| match field {
+                    // The template row is a field now, but it keeps its own
+                    // dedicated help instead of a per-field description.
+                    ProviderAddField::Template => HelpTarget::ProviderTemplate,
+                    field => HelpTarget::ProviderField {
+                        app_type: provider.app_type.clone(),
+                        field,
+                    },
                 })
         }
         FormFocus::JsonPreview => HelpTarget::ProviderPreview {
@@ -349,10 +355,10 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
             vec![texts::codex_unified_session_history_description().to_string()],
         ),
         HelpTarget::ProviderTemplate => HelpContent::new(
-            tr("供应商模板", "Provider templates"),
+            texts::tui_provider_template_picker_title(),
             help_lines(
-                "选择一个预设模板后按 Enter 应用。模板会填入供应商常用的地址、模型和元数据。\n如果没有合适模板，保留自定义后直接填写字段。",
-                "Choose a preset and press Enter to apply it. Templates fill common provider URLs, models, and metadata.\nKeep Custom selected when no preset fits.",
+                "模板列表包含全部可选模板：↑/↓ 移动，Enter 应用，Esc 关闭且不改动表单。表单字段里的“模板”行只显示当前选择，在该行按 Enter 即可打开列表。\n列表分为“内置”和“赞助商”两组；赞助商条目由社区赞助，选择前请自行确认服务条款。Codex 的 DeepSeek 属于内置分组。\n应用模板会按模板改写表单，并按模板名称重新生成供应商 ID；选择 Custom 则恢复为空白默认值。手动填写的 ID 一律不保留。其余已填内容有的会被重置（如备注、本地代理设置），有的会被保留（如其他鉴权方式下填过的 API Key、用量查询设置）——切换模板后请逐项检查，不要指望靠它清除密钥。\n如果没有合适模板，保留 Custom 后直接填写字段。",
+                "The list holds every available template: ↑/↓ to move, Enter to apply, Esc to close without changing anything. The Template field row shows only the current selection; press Enter on that row to open this list.\nThe list is grouped into Built-in and Sponsors; sponsor entries are community-sponsored presets, so review their terms yourself. Codex's DeepSeek belongs to the Built-in group.\nApplying a template rewrites the form for that template and regenerates the provider ID from its name; Custom instead restores the blank defaults. An ID you typed by hand never survives. Of everything else you already entered, some is reset (e.g. notes, local proxy settings) and some is kept (e.g. an API key typed under a different auth type, usage-query settings) — recheck the fields after switching, and do not rely on it to clear a secret.\nKeep Custom selected when no preset fits.",
             ),
         ),
         HelpTarget::ProviderField { app_type, field } => provider_field_help(app_type, field),
@@ -883,7 +889,10 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         | ProviderAddField::CodexAdvancedDivider
         | ProviderAddField::HermesAdvancedDivider
         | ProviderAddField::CommonConfigDivider
-        | ProviderAddField::UsageQueryDivider => HelpContent::empty(),
+        | ProviderAddField::UsageQueryDivider
+        // Routed to `HelpTarget::ProviderTemplate` before reaching here.
+        | ProviderAddField::Template
+        | ProviderAddField::TemplateDivider => HelpContent::empty(),
     }
 }
 

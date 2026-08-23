@@ -31,13 +31,12 @@ pub(crate) fn add_form_key_items(
     ];
 
     match focus {
-        FormFocus::Templates => keys.extend([
-            ("←→", texts::tui_key_select()),
-            ("Enter", texts::tui_key_apply()),
-        ]),
+        // The provider form never rests here; MCP owns the chip row.
+        FormFocus::Templates => {}
         FormFocus::Fields => {
             if !editing {
                 let enter_action = match selected_field {
+                    Some(ProviderAddField::Template) => texts::tui_key_select(),
                     Some(
                         ProviderAddField::ClaudeModelConfig
                         | ProviderAddField::ClaudeQuickConfig
@@ -233,6 +232,70 @@ pub(crate) fn usage_query_form_key_items(
     }
 
     keys
+}
+
+/// Chip-styled value spans for the provider form's Template field row.
+///
+/// The provider template list outgrew a flat chip row (built-ins plus ten
+/// sponsor presets overflow the terminal width and clip silently), so the row
+/// shows only the current selection and defers the list to the picker overlay.
+/// The label carries the meaning, so it wins the available width: the count
+/// hint is dropped first, then the `▾` indicator, and only then is the label
+/// truncated.
+pub(crate) fn template_field_value_spans(
+    labels: &[&str],
+    selected_idx: usize,
+    active: bool,
+    width: u16,
+    theme: &super::theme::Theme,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let label = labels
+        .get(selected_idx.min(labels.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or("");
+    let indicator = " ▾";
+    let count_hint = format!("  ({})", labels.len());
+
+    const CHIP_PADDING: usize = 2;
+    let width = width as usize;
+    let indicator_width = UnicodeWidthStr::width(indicator);
+    let count_width = UnicodeWidthStr::width(count_hint.as_str());
+    let chip_width = CHIP_PADDING.saturating_add(UnicodeWidthStr::width(label));
+
+    let show_count = chip_width
+        .saturating_add(indicator_width)
+        .saturating_add(count_width)
+        <= width;
+    let show_indicator = show_count || chip_width.saturating_add(indicator_width) <= width;
+
+    let mut label_budget = width.saturating_sub(CHIP_PADDING);
+    if show_indicator {
+        label_budget = label_budget.saturating_sub(indicator_width);
+    }
+    if show_count {
+        label_budget = label_budget.saturating_sub(count_width);
+    }
+    let label = truncate_to_display_width(label, label_budget.max(1) as u16);
+
+    let chip_style = if active {
+        active_chip_style(theme)
+    } else {
+        inactive_chip_style(theme)
+    };
+    let dim = Style::default().fg(theme.dim);
+    let mut spans = vec![Span::styled(format!(" {label} "), chip_style)];
+    if show_indicator {
+        spans.push(Span::styled(indicator.to_string(), dim));
+    }
+    if show_count {
+        spans.push(Span::styled(count_hint, dim));
+    }
+
+    truncate_spans_to_width(spans, width as u16)
 }
 
 pub(crate) fn render_form_template_chips(
