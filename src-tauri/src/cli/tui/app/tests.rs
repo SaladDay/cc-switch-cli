@@ -10949,6 +10949,71 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
+    fn settings_skills_sync_method_uses_the_upstream_two_choice_picker() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::SkillsSyncMethod))
+            .expect("SkillsSyncMethod missing from SettingsItem::ALL");
+
+        let mut data = UiData::default();
+        data.skills.sync_method = crate::services::skill::SyncMethod::Auto;
+
+        {
+            let _lang = use_test_language(Language::Chinese);
+            let help = crate::cli::tui::help::context_help_for_app(&app, &data);
+            let body = help.lines.join("\n");
+            assert_eq!(help.title, "Skills 同步方式");
+            assert!(body.contains("选择 Skills 的文件同步策略"), "{body}");
+            assert!(body.contains("软连接节省磁盘空间并支持实时同步"), "{body}");
+        }
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::SkillsSyncMethodPicker { selected: 0 }
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::SkillsSetSyncMethod {
+                method: crate::services::skill::SyncMethod::Symlink
+            }
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+
+        data.skills.sync_method = crate::services::skill::SyncMethod::Symlink;
+        app.overlay = Overlay::SkillsSyncMethodPicker { selected: 0 };
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::SkillsSyncMethodPicker { selected: 1 }
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::SkillsSetSyncMethod {
+                method: crate::services::skill::SyncMethod::Copy
+            }
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn visible_apps_picker_rejects_zero_selection_without_closing() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestEnvGuard::isolated(temp_home.path());

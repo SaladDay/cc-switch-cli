@@ -504,6 +504,7 @@ pub enum SettingsItem {
     VisibleAppsMode,
     VisibleApps,
     SkillsStorageLocation,
+    SkillsSyncMethod,
     OpenClawConfigDir,
     ManagedAccounts,
     SkipClaudeOnboarding,
@@ -516,7 +517,7 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 16] = [
+    pub const ALL: [SettingsItem; 17] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::Theme,
@@ -525,6 +526,7 @@ impl SettingsItem {
         SettingsItem::VisibleAppsMode,
         SettingsItem::VisibleApps,
         SettingsItem::SkillsStorageLocation,
+        SettingsItem::SkillsSyncMethod,
         SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,

@@ -4966,6 +4966,7 @@ fn settings_page_groups_items_with_unlabeled_dividers() {
         &content,
         texts::tui_settings_skills_storage_location_label(),
     );
+    let skill_sync = line_index(&content, texts::tui_settings_skills_sync_method_label());
     let openclaw_dir = line_index(&content, texts::tui_settings_openclaw_config_dir_label());
     let claude_integration = line_index(&content, texts::enable_claude_plugin_integration_label());
     let codex_login = line_index(&content, texts::codex_preserve_official_auth_label());
@@ -4980,7 +4981,8 @@ fn settings_page_groups_items_with_unlabeled_dividers() {
     assert!(
         dividers[0] < visible_apps
             && visible_apps < skill_storage
-            && skill_storage < openclaw_dir
+            && skill_storage < skill_sync
+            && skill_sync < openclaw_dir
             && openclaw_dir < dividers[1],
         "{content}"
     );
@@ -5002,6 +5004,30 @@ fn settings_page_groups_items_with_unlabeled_dividers() {
     for label in ["General", "Applications", "Integrations", "System"] {
         assert!(!content.contains(label), "unexpected {label}:\n{content}");
     }
+}
+
+#[test]
+fn settings_skill_sync_method_matches_upstream_labels_and_choices() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.skills.sync_method = SyncMethod::Auto;
+    let buf = render_with_size(&app, &data, 100, 32);
+    let content = content_text(&app, &buf);
+    assert!(content.contains("Skill Sync Method"), "{content}");
+    assert!(content.contains("Symlink"), "{content}");
+
+    app.overlay = Overlay::SkillsSyncMethodPicker { selected: 0 };
+    let overlay = all_text(&render_with_size(&app, &data, 100, 32));
+    assert!(overlay.contains("Symlink"), "{overlay}");
+    assert!(overlay.contains("Copy Files"), "{overlay}");
+    assert!(!overlay.contains("Automatic"), "{overlay}");
 }
 
 #[test]
