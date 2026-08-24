@@ -929,6 +929,14 @@ impl App {
                     };
                     Action::None
                 }
+                Some(SettingsItem::SkillsStorageLocation) => {
+                    self.overlay = Overlay::SkillsStorageLocationPicker {
+                        selected: storage_location_picker_index(
+                            crate::settings::get_skill_storage_location(),
+                        ),
+                    };
+                    Action::None
+                }
                 Some(SettingsItem::OpenClawConfigDir) => {
                     let buffer = crate::settings::get_settings()
                         .openclaw_config_dir

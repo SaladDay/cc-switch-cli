@@ -1426,6 +1426,39 @@ pub(crate) fn handle_skills_msg(
                 );
             }
         },
+        SkillsMsg::StorageMigrated { target, result } => match result {
+            Ok(result) => {
+                app.overlay = Overlay::None;
+                *data = UiData::load(&app.app_type)?;
+                invalidation = CacheInvalidation::DataReloaded;
+                let location = texts::tui_skills_storage_location_name(target);
+                if result.errors.is_empty() {
+                    app.push_toast(
+                        texts::tui_toast_skills_storage_location_set(
+                            location,
+                            result.migrated_count,
+                            result.skipped_count,
+                        ),
+                        ToastKind::Success,
+                    );
+                } else {
+                    app.push_copyable_toast(
+                        texts::tui_toast_skills_storage_location_partial(
+                            location,
+                            result.migrated_count,
+                            result.skipped_count,
+                            result.errors.len(),
+                        ),
+                        ToastKind::Warning,
+                        result.errors.join("\n"),
+                    );
+                }
+            }
+            Err(err) => {
+                app.overlay = Overlay::None;
+                app.push_toast(err, ToastKind::Error);
+            }
+        },
     }
 
     Ok(invalidation)
@@ -2052,6 +2085,43 @@ mod tests {
         assert_eq!(
             app.toast.as_ref().and_then(|toast| toast.copy_text()),
             Some("owner/repo:demo: deployment failed")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn skill_storage_migration_feedback_preserves_partial_error_details() {
+        let temp = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let mut settings = crate::settings::AppSettings::default();
+        settings.skill_storage_location = crate::services::skill::SkillStorageLocation::Unified;
+        crate::settings::update_settings(settings).expect("set unified storage");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::Loading {
+            kind: LoadingKind::SkillOperation,
+            title: "Migrating".to_string(),
+            message: "Working".to_string(),
+        };
+        let mut data = UiData::default();
+        handle_skills_msg(
+            &mut app,
+            &mut data,
+            SkillsMsg::StorageMigrated {
+                target: crate::services::skill::SkillStorageLocation::Unified,
+                result: Ok(crate::services::skill::MigrationResult {
+                    migrated_count: 1,
+                    skipped_count: 0,
+                    errors: vec!["claude/managed: deployment preserved".to_string()],
+                }),
+            },
+        )
+        .expect("handle partial migration");
+
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(
+            app.toast.as_ref().and_then(|toast| toast.copy_text()),
+            Some("claude/managed: deployment preserved")
         );
     }
 

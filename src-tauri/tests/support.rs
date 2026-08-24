@@ -23,6 +23,7 @@ pub fn ensure_test_home() -> &'static Path {
     std::env::set_var("HOME", home);
     #[cfg(windows)]
     std::env::set_var("USERPROFILE", home);
+    std::env::set_var("CC_SWITCH_TEST_HOME", home);
     std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
     std::env::set_var("XDG_RUNTIME_DIR", home.join(".runtime"));
     std::env::set_var("XDG_STATE_HOME", home.join(".state"));
@@ -40,6 +41,7 @@ pub fn reset_test_fs() {
         ".claude",
         ".codex",
         ".cc-switch",
+        ".agents",
         ".gemini",
         ".openclaw",
         ".config",

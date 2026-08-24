@@ -2226,6 +2226,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SkillsDiscover { .. }
         | Action::SkillsCheckUpdates
         | Action::SkillsUpdate { .. }
+        | Action::SkillsSetStorageLocation { .. }
         | Action::SkillsOpenImport
         | Action::SkillsScanUnmanaged
         | Action::EditorDiscard

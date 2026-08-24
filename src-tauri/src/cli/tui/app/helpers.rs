@@ -1803,6 +1803,20 @@ pub(crate) fn sync_method_for_picker_index(index: usize) -> SyncMethod {
     }
 }
 
+pub(crate) fn storage_location_picker_index(location: SkillStorageLocation) -> usize {
+    match location {
+        SkillStorageLocation::CcSwitch => 0,
+        SkillStorageLocation::Unified => 1,
+    }
+}
+
+pub(crate) fn storage_location_for_picker_index(index: usize) -> SkillStorageLocation {
+    match index {
+        1 => SkillStorageLocation::Unified,
+        _ => SkillStorageLocation::CcSwitch,
+    }
+}
+
 pub(crate) fn openclaw_tools_profile_picker_index(profile: Option<&str>) -> Option<usize> {
     OPENCLAW_TOOLS_PROFILE_PICKER_VALUES
         .iter()

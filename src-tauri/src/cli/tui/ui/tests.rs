@@ -4962,6 +4962,10 @@ fn settings_page_groups_items_with_unlabeled_dividers() {
     let managed_accounts = line_index(&content, texts::tui_settings_managed_accounts_title());
     let editor = line_index(&content, texts::tui_settings_preferred_editor_label());
     let visible_apps = line_index(&content, texts::tui_settings_visible_apps_mode_label());
+    let skill_storage = line_index(
+        &content,
+        texts::tui_settings_skills_storage_location_label(),
+    );
     let openclaw_dir = line_index(&content, texts::tui_settings_openclaw_config_dir_label());
     let claude_integration = line_index(&content, texts::enable_claude_plugin_integration_label());
     let codex_login = line_index(&content, texts::codex_preserve_official_auth_label());
@@ -4974,7 +4978,10 @@ fn settings_page_groups_items_with_unlabeled_dividers() {
         "{content}"
     );
     assert!(
-        dividers[0] < visible_apps && openclaw_dir < dividers[1],
+        dividers[0] < visible_apps
+            && visible_apps < skill_storage
+            && skill_storage < openclaw_dir
+            && openclaw_dir < dividers[1],
         "{content}"
     );
     assert!(

@@ -10,13 +10,15 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use tokio::time::timeout;
 
 use crate::app_config::AppType;
 pub use crate::app_config::{InstalledSkill, SkillApps, UnmanagedSkill};
-use crate::config::{create_managed_config_dir_all, get_app_config_dir};
+use crate::config::{create_managed_config_dir_all, get_app_config_dir, write_json_file};
 use crate::database::Database;
 use crate::error::{format_skill_error, AppError};
 
@@ -26,6 +28,7 @@ const MAX_SKILL_ARCHIVE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SKILL_ARCHIVE_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_SKILL_ARCHIVE_PATH_DEPTH: usize = 64;
 const SKILL_ARCHIVE_ENTRY_COST: u64 = 4096;
+const STORAGE_MIGRATION_JOURNAL_FILE: &str = "skill-storage-migration.json";
 
 fn default_skills_index_version() -> u32 {
     SKILLS_INDEX_VERSION
@@ -118,6 +121,43 @@ pub enum SyncMethod {
     Symlink,
     /// Always use directory copy.
     Copy,
+}
+
+/// Location of the managed Skills single source of truth (SSOT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[serde(rename_all = "snake_case")]
+pub enum SkillStorageLocation {
+    /// CC Switch managed directory (`~/.cc-switch/skills/`).
+    #[default]
+    #[cfg_attr(feature = "cli", value(alias = "cc_switch"))]
+    CcSwitch,
+    /// Shared Agent Skills directory (`~/.agents/skills/`).
+    Unified,
+}
+
+/// Result of moving managed Skills between SSOT locations.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationResult {
+    pub migrated_count: usize,
+    pub skipped_count: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageMigrationJournal {
+    source: SkillStorageLocation,
+    target: SkillStorageLocation,
+    token: String,
+    hashes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationDeploymentAction {
+    Refresh,
+    AlreadyCurrent,
 }
 
 /// Explicit app matrix submitted when importing unmanaged skills.
@@ -585,63 +625,155 @@ impl SkillService {
     // Paths
     // ---------------------------------------------------------------------
 
+    fn ssot_dir_for(location: SkillStorageLocation) -> Result<PathBuf, AppError> {
+        match location {
+            SkillStorageLocation::CcSwitch => Ok(get_app_config_dir().join("skills")),
+            SkillStorageLocation::Unified => crate::config::home_dir()
+                .map(|home| home.join(".agents").join("skills"))
+                .ok_or_else(|| {
+                    AppError::Message(format_skill_error(
+                        "GET_HOME_DIR_FAILED",
+                        &[],
+                        Some("checkPermission"),
+                    ))
+                }),
+        }
+    }
+
+    fn validate_storage_root(location: SkillStorageLocation, root: &Path) -> Result<(), AppError> {
+        if location != SkillStorageLocation::Unified {
+            return Ok(());
+        }
+
+        let agents_dir = root.parent().ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "Invalid Unified Skill storage path: {}",
+                root.display()
+            ))
+        })?;
+        for path in [agents_dir, root] {
+            match fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(AppError::InvalidInput(format!(
+                        "Unified Skill storage cannot use a symbolic link: {}",
+                        path.display()
+                    )));
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(AppError::InvalidInput(format!(
+                        "Unified Skill storage requires a directory: {}",
+                        path.display()
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AppError::io(path, error)),
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_ssot_dir() -> Result<PathBuf, AppError> {
-        let dir = get_app_config_dir().join("skills");
+        let location = crate::settings::get_skill_storage_location();
+        let dir = Self::ssot_dir_for(location)?;
+        Self::validate_storage_root(location, &dir)?;
         create_managed_config_dir_all(&dir)?;
+        Self::validate_storage_root(location, &dir)?;
         Ok(dir)
     }
 
     pub fn get_app_skills_dir(app: &AppType) -> Result<PathBuf, AppError> {
-        // Override directories follow the same pattern as upstream: <override>/skills
-        match app {
-            AppType::Claude => {
-                if let Some(custom) = crate::settings::get_claude_override_dir() {
-                    return Ok(custom.join("skills"));
+        // Reuse each app's authoritative config-dir resolver so settings and
+        // environment overrides (notably CLAUDE_CONFIG_DIR/CODEX_HOME) agree.
+        Ok(match app {
+            AppType::Claude => crate::config::get_claude_config_dir().join("skills"),
+            AppType::Codex => crate::codex_config::get_codex_config_dir().join("skills"),
+            AppType::Gemini => crate::gemini_config::get_gemini_dir().join("skills"),
+            AppType::OpenCode => crate::opencode_config::get_opencode_dir().join("skills"),
+            AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
+            AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir().join("skills"),
+        })
+    }
+
+    fn comparable_path(path: &Path) -> PathBuf {
+        fn normalize(path: &Path) -> PathBuf {
+            let mut normalized = PathBuf::new();
+            for component in path.components() {
+                match component {
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        let _ = normalized.pop();
+                    }
+                    Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                        normalized.push(component.as_os_str());
+                    }
                 }
             }
-            AppType::Codex => {
-                if let Some(custom) = crate::settings::get_codex_override_dir() {
-                    return Ok(custom.join("skills"));
+            normalized
+        }
+
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(path)
+        };
+
+        // Resolve the longest existing prefix before applying a remaining
+        // suffix. In particular, `link/..` must follow `link` first instead of
+        // being collapsed lexically, matching filesystem path resolution.
+        for ancestor in path.ancestors() {
+            if let Ok(mut resolved) = ancestor.canonicalize() {
+                let suffix = path
+                    .strip_prefix(ancestor)
+                    .unwrap_or_else(|_| Path::new(""));
+                for component in suffix.components() {
+                    match component {
+                        Component::CurDir => {}
+                        Component::ParentDir => {
+                            let _ = resolved.pop();
+                        }
+                        Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                            resolved.push(component.as_os_str());
+                        }
+                    }
                 }
-            }
-            AppType::Gemini => {
-                if let Some(custom) = crate::settings::get_gemini_override_dir() {
-                    return Ok(custom.join("skills"));
-                }
-            }
-            AppType::OpenCode => {
-                if let Some(custom) = crate::settings::get_opencode_override_dir() {
-                    return Ok(custom.join("skills"));
-                }
-            }
-            AppType::Hermes => {
-                if let Some(custom) = crate::settings::get_hermes_override_dir() {
-                    return Ok(custom.join("skills"));
-                }
-            }
-            AppType::OpenClaw => {
-                if let Some(custom) = crate::settings::get_openclaw_override_dir() {
-                    return Ok(custom.join("skills"));
-                }
+                return normalize(&resolved);
             }
         }
 
-        let home = dirs::home_dir().ok_or_else(|| {
-            AppError::Message(format_skill_error(
-                "GET_HOME_DIR_FAILED",
-                &[],
-                Some("checkPermission"),
-            ))
-        })?;
+        normalize(&path)
+    }
 
-        Ok(match app {
-            AppType::Claude => home.join(".claude").join("skills"),
-            AppType::Codex => home.join(".codex").join("skills"),
-            AppType::Gemini => home.join(".gemini").join("skills"),
-            AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
-            AppType::Hermes => home.join(".hermes").join("skills"),
-            AppType::OpenClaw => home.join(".openclaw").join("skills"),
-        })
+    fn paths_equal(left: &Path, right: &Path) -> bool {
+        Self::comparable_path(left) == Self::comparable_path(right)
+    }
+
+    fn paths_overlap(left: &Path, right: &Path) -> bool {
+        let left = Self::comparable_path(left);
+        let right = Self::comparable_path(right);
+        left.starts_with(&right) || right.starts_with(&left)
+    }
+
+    fn get_distinct_app_skills_dir(ssot_dir: &Path, app: &AppType) -> Result<PathBuf, AppError> {
+        let app_dir = Self::get_app_skills_dir(app)?;
+        if Self::paths_overlap(ssot_dir, &app_dir) {
+            return Err(AppError::InvalidInput(format!(
+                "Skill storage directory cannot overlap the {} Skills directory: {} and {}",
+                app.as_str(),
+                ssot_dir.display(),
+                app_dir.display()
+            )));
+        }
+        Ok(app_dir)
+    }
+
+    fn validate_skill_storage_destination(ssot_dir: &Path) -> Result<(), AppError> {
+        for app in Self::supported_skill_apps() {
+            Self::get_distinct_app_skills_dir(ssot_dir, &app)?;
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------------
@@ -923,7 +1055,7 @@ impl SkillService {
             )));
         }
 
-        let app_dir = Self::get_app_skills_dir(app)?;
+        let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         // D5: allow creating target app dirs during skills sync.
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
 
@@ -958,13 +1090,14 @@ impl SkillService {
             return Ok(());
         }
 
-        let source = Self::get_ssot_dir()?.join(directory);
+        let ssot_dir = Self::get_ssot_dir()?;
+        let source = ssot_dir.join(directory);
         if !source.is_dir() {
             return Err(AppError::Message(format!(
                 "Skill does not exist in SSOT: {directory}"
             )));
         }
-        let app_dir = Self::get_app_skills_dir(app)?;
+        let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
         let dest = app_dir.join(directory);
         if source == dest {
@@ -1018,7 +1151,8 @@ impl SkillService {
             return Ok(());
         }
 
-        let app_dir = Self::get_app_skills_dir(app)?;
+        let ssot_dir = Self::get_ssot_dir()?;
+        let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         let path = app_dir.join(directory);
         if path.exists() || Self::is_symlink(&path) {
             Self::remove_path(&path)?;
@@ -1065,6 +1199,628 @@ impl SkillService {
         }
 
         Ok(())
+    }
+
+    fn migration_tree_hash_with_ignored_root_file(
+        dir: &Path,
+        ignored_root_file: Option<&OsStr>,
+    ) -> Result<String, AppError> {
+        use sha2::{Digest, Sha256};
+
+        fn update_framed(hasher: &mut Sha256, bytes: &[u8]) {
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+
+        fn visit(
+            root: &Path,
+            current: &Path,
+            ignored_root_file: Option<&OsStr>,
+            hasher: &mut Sha256,
+        ) -> Result<(), AppError> {
+            let mut entries = fs::read_dir(current)
+                .map_err(|error| AppError::io(current, error))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| AppError::io(current, error))?;
+            entries.sort_by_key(|entry| entry.file_name());
+
+            for entry in entries {
+                let path = entry.path();
+                if current == root
+                    && ignored_root_file.is_some_and(|ignored| entry.file_name() == ignored)
+                {
+                    continue;
+                }
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                let file_type = entry
+                    .file_type()
+                    .map_err(|error| AppError::io(&path, error))?;
+                if file_type.is_symlink() {
+                    return Err(AppError::InvalidInput(format!(
+                        "Skill storage migration does not follow symbolic links: {}",
+                        path.display()
+                    )));
+                }
+                if file_type.is_dir() {
+                    hasher.update(b"D");
+                    update_framed(hasher, relative.as_os_str().as_encoded_bytes());
+                    visit(root, &path, ignored_root_file, hasher)?;
+                } else if file_type.is_file() {
+                    hasher.update(b"F");
+                    update_framed(hasher, relative.as_os_str().as_encoded_bytes());
+                    let mut file =
+                        fs::File::open(&path).map_err(|error| AppError::io(&path, error))?;
+                    let mut content_hasher = Sha256::new();
+                    let mut content_len = 0u64;
+                    let mut buffer = [0u8; 16 * 1024];
+                    loop {
+                        let read = file
+                            .read(&mut buffer)
+                            .map_err(|error| AppError::io(&path, error))?;
+                        if read == 0 {
+                            break;
+                        }
+                        content_len = content_len.saturating_add(read as u64);
+                        content_hasher.update(&buffer[..read]);
+                    }
+                    hasher.update(content_len.to_le_bytes());
+                    hasher.update(content_hasher.finalize());
+                } else {
+                    return Err(AppError::InvalidInput(format!(
+                        "Unsupported file type in Skill storage migration: {}",
+                        path.display()
+                    )));
+                }
+            }
+            Ok(())
+        }
+
+        let metadata = fs::symlink_metadata(dir).map_err(|error| AppError::io(dir, error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(AppError::InvalidInput(format!(
+                "Skill storage migration requires a real directory: {}",
+                dir.display()
+            )));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"cc-switch-skill-tree-v2\0");
+        visit(dir, dir, ignored_root_file, &mut hasher)?;
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn migration_tree_hash(dir: &Path) -> Result<String, AppError> {
+        Self::migration_tree_hash_with_ignored_root_file(dir, None)
+    }
+
+    pub(crate) fn validate_managed_skill_tree(dir: &Path) -> Result<(), AppError> {
+        Self::migration_tree_hash(dir).map(|_| ())
+    }
+
+    fn migration_tree_hash_if_present(path: &Path) -> Result<Option<String>, AppError> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Self::migration_tree_hash(path).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(AppError::io(path, error)),
+        }
+    }
+
+    fn copy_migration_tree(src: &Path, dest: &Path) -> Result<(), AppError> {
+        let metadata = fs::symlink_metadata(src).map_err(|error| AppError::io(src, error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(AppError::InvalidInput(format!(
+                "Skill storage migration requires a real directory: {}",
+                src.display()
+            )));
+        }
+
+        fs::create_dir(dest).map_err(|error| AppError::io(dest, error))?;
+        let mut entries = fs::read_dir(src)
+            .map_err(|error| AppError::io(src, error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AppError::io(src, error))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let source = entry.path();
+            let target = dest.join(entry.file_name());
+            let file_type = entry
+                .file_type()
+                .map_err(|error| AppError::io(&source, error))?;
+            if file_type.is_symlink() {
+                return Err(AppError::InvalidInput(format!(
+                    "Skill storage migration does not follow symbolic links: {}",
+                    source.display()
+                )));
+            }
+            if file_type.is_dir() {
+                Self::copy_migration_tree(&source, &target)?;
+            } else if file_type.is_file() {
+                fs::copy(&source, &target).map_err(|error| AppError::io(&target, error))?;
+            } else {
+                return Err(AppError::InvalidInput(format!(
+                    "Unsupported file type in Skill storage migration: {}",
+                    source.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn migration_marker_name(journal: &StorageMigrationJournal) -> String {
+        format!(".cc-switch-migration-{}", journal.token)
+    }
+
+    fn migration_marker_matches(
+        target: &Path,
+        journal: &StorageMigrationJournal,
+    ) -> Result<bool, AppError> {
+        let marker = target.join(Self::migration_marker_name(journal));
+        match fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                let token =
+                    fs::read_to_string(&marker).map_err(|error| AppError::io(&marker, error))?;
+                if token == journal.token {
+                    Ok(true)
+                } else {
+                    Err(AppError::InvalidInput(format!(
+                        "Skill migration marker does not match the active migration: {}",
+                        marker.display()
+                    )))
+                }
+            }
+            Ok(_) => Err(AppError::InvalidInput(format!(
+                "Invalid Skill migration marker: {}",
+                marker.display()
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(AppError::io(&marker, error)),
+        }
+    }
+
+    fn migration_target_hash(
+        target: &Path,
+        journal: &StorageMigrationJournal,
+    ) -> Result<String, AppError> {
+        if Self::migration_marker_matches(target, journal)? {
+            let marker_name = Self::migration_marker_name(journal);
+            Self::migration_tree_hash_with_ignored_root_file(target, Some(OsStr::new(&marker_name)))
+        } else {
+            Self::migration_tree_hash(target)
+        }
+    }
+
+    fn stage_migration_copy(
+        src: &Path,
+        dest: &Path,
+        target_root: &Path,
+        journal: &StorageMigrationJournal,
+    ) -> Result<(), AppError> {
+        let staging = tempfile::Builder::new()
+            .prefix(".cc-switch-skill-migration-")
+            .tempdir_in(target_root)
+            .map_err(|error| AppError::io(target_root, error))?;
+        let next = staging.path().join("next");
+        Self::copy_migration_tree(src, &next)?;
+        if Self::migration_tree_hash(src)? != Self::migration_tree_hash(&next)? {
+            return Err(AppError::Message(format!(
+                "Skill changed while it was being copied: {}",
+                src.display()
+            )));
+        }
+        let marker = next.join(Self::migration_marker_name(journal));
+        let mut marker_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+            .map_err(|error| AppError::io(&marker, error))?;
+        marker_file
+            .write_all(journal.token.as_bytes())
+            .map_err(|error| AppError::io(&marker, error))?;
+        marker_file
+            .flush()
+            .map_err(|error| AppError::io(&marker, error))?;
+        fs::rename(&next, dest).map_err(|error| AppError::io(dest, error))?;
+        Ok(())
+    }
+
+    fn migration_deployment_action(
+        destination: &Path,
+        old_source: &Path,
+        new_source: &Path,
+        expected_hash: &str,
+    ) -> Result<MigrationDeploymentAction, AppError> {
+        let metadata = match fs::symlink_metadata(destination) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(MigrationDeploymentAction::Refresh);
+            }
+            Err(error) => return Err(AppError::io(destination, error)),
+        };
+        if metadata.file_type().is_symlink() {
+            let target =
+                fs::read_link(destination).map_err(|error| AppError::io(destination, error))?;
+            let target = if target.is_absolute() {
+                target
+            } else {
+                destination
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(target)
+            };
+            if Self::paths_equal(&target, old_source) || Self::paths_equal(&target, new_source) {
+                return Ok(MigrationDeploymentAction::Refresh);
+            }
+            return Err(AppError::InvalidInput(format!(
+                "Refusing to replace an unmanaged Skill deployment: {}",
+                destination.display()
+            )));
+        }
+        if metadata.is_dir() && Self::migration_tree_hash(destination)? == expected_hash {
+            // An ordinary directory has no ownership proof. If it already has
+            // the current content, leave it byte-for-byte untouched.
+            return Ok(MigrationDeploymentAction::AlreadyCurrent);
+        }
+        Err(AppError::InvalidInput(format!(
+            "Refusing to replace an unmanaged Skill deployment: {}",
+            destination.display()
+        )))
+    }
+
+    fn sync_migrated_skill_to_app(
+        directory: &str,
+        app: &AppType,
+        method: SyncMethod,
+        old_root: &Path,
+        new_root: &Path,
+    ) -> Result<(), AppError> {
+        let source = new_root.join(directory);
+        let expected_hash = Self::migration_tree_hash(&source)?;
+        let app_dir = Self::get_distinct_app_skills_dir(new_root, app)?;
+        let destination = app_dir.join(directory);
+        let action = Self::migration_deployment_action(
+            &destination,
+            &old_root.join(directory),
+            &source,
+            &expected_hash,
+        )?;
+        if action == MigrationDeploymentAction::AlreadyCurrent {
+            return Ok(());
+        }
+        Self::sync_updated_skill_to_app(directory, app, method)
+    }
+
+    fn storage_migration_journal_path() -> PathBuf {
+        get_app_config_dir().join(STORAGE_MIGRATION_JOURNAL_FILE)
+    }
+
+    fn load_storage_migration_journal() -> Result<Option<StorageMigrationJournal>, AppError> {
+        let path = Self::storage_migration_journal_path();
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(AppError::io(&path, error)),
+        };
+        serde_json::from_str(&raw).map(Some).map_err(|error| {
+            AppError::InvalidInput(format!(
+                "Invalid Skill storage migration journal {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    fn save_storage_migration_journal(journal: &StorageMigrationJournal) -> Result<(), AppError> {
+        write_json_file(&Self::storage_migration_journal_path(), journal)
+    }
+
+    fn clear_storage_migration_journal() -> Result<(), AppError> {
+        let path = Self::storage_migration_journal_path();
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AppError::io(&path, error)),
+        }
+    }
+
+    fn ensure_journal_matches_index(
+        journal: &StorageMigrationJournal,
+        index: &SkillsIndex,
+    ) -> Result<(), AppError> {
+        if journal.hashes.len() == index.skills.len()
+            && index
+                .skills
+                .keys()
+                .all(|directory| journal.hashes.contains_key(directory))
+        {
+            return Ok(());
+        }
+        Err(AppError::InvalidInput(
+            "Managed Skills changed during an unfinished storage migration; finish or recover that migration before installing or removing Skills"
+                .to_string(),
+        ))
+    }
+
+    fn remove_storage_migration_markers(
+        root: &Path,
+        index: &SkillsIndex,
+        journal: &StorageMigrationJournal,
+    ) -> Result<(), AppError> {
+        let marker_name = Self::migration_marker_name(journal);
+        for skill in index.skills.values() {
+            let target = root.join(&skill.directory);
+            if Self::migration_marker_matches(&target, journal)? {
+                let marker = target.join(&marker_name);
+                fs::remove_file(&marker).map_err(|error| AppError::io(&marker, error))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Move managed Skills between the CC Switch and shared Agent Skills SSOTs.
+    /// Target copies are verified before the setting changes. Old copies remain
+    /// available until every enabled app deployment has been refreshed.
+    pub fn migrate_storage(target: SkillStorageLocation) -> Result<MigrationResult, AppError> {
+        let current = crate::settings::get_skill_storage_location();
+        let mut journal = Self::load_storage_migration_journal()?;
+        if current == target && journal.is_none() {
+            return Ok(MigrationResult::default());
+        }
+
+        let new_dir = Self::ssot_dir_for(target)?;
+        let old_location = match target {
+            SkillStorageLocation::CcSwitch => SkillStorageLocation::Unified,
+            SkillStorageLocation::Unified => SkillStorageLocation::CcSwitch,
+        };
+        let old_dir = Self::ssot_dir_for(old_location)?;
+        Self::validate_storage_root(old_location, &old_dir)?;
+        Self::validate_storage_root(target, &new_dir)?;
+        if Self::paths_overlap(&old_dir, &new_dir) {
+            return Err(AppError::InvalidInput(format!(
+                "Skill storage directories cannot be equal or overlap: {} and {}",
+                old_dir.display(),
+                new_dir.display()
+            )));
+        }
+        Self::validate_skill_storage_destination(&old_dir)?;
+        Self::validate_skill_storage_destination(&new_dir)?;
+        create_managed_config_dir_all(&new_dir)?;
+        Self::validate_storage_root(target, &new_dir)?;
+
+        let index = Self::load_index()?;
+        if let Some(active) = &journal {
+            if active.source != old_location
+                || active.target != target
+                || (current != active.source && current != active.target)
+            {
+                return Err(AppError::InvalidInput(format!(
+                    "An unfinished Skill storage migration from {:?} to {:?} must be reconciled before starting another migration",
+                    active.source, active.target
+                )));
+            }
+            if current == active.source {
+                Self::ensure_journal_matches_index(active, &index)?;
+            }
+        }
+
+        let mut copies = Vec::new();
+        let mut result = MigrationResult::default();
+
+        // A first switch never infers ownership from content equality. Persist
+        // an intent before copying; an embedded token then proves which target
+        // directories were created by an interrupted attempt.
+        if journal.is_none() && current != target {
+            let mut hashes = HashMap::new();
+            for skill in index.skills.values() {
+                Self::validate_update_directory(&skill.directory)?;
+                let src = old_dir.join(&skill.directory);
+                let dst = new_dir.join(&skill.directory);
+                let source_hash = Self::migration_tree_hash_if_present(&src)?.ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "Managed Skill is missing from the current storage: {}",
+                        skill.directory
+                    ))
+                })?;
+                match fs::symlink_metadata(&dst) {
+                    Ok(_) => {
+                        return Err(AppError::InvalidInput(format!(
+                            "Refusing to claim a pre-existing Skill migration target: {}",
+                            dst.display()
+                        )));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(AppError::io(&dst, error)),
+                }
+                hashes.insert(skill.directory.clone(), source_hash);
+            }
+            let next = StorageMigrationJournal {
+                source: old_location,
+                target,
+                token: uuid::Uuid::new_v4().to_string(),
+                hashes,
+            };
+            Self::save_storage_migration_journal(&next)?;
+            journal = Some(next);
+        }
+
+        // Preflight the complete managed set before writing a target directory.
+        for skill in index.skills.values() {
+            Self::validate_update_directory(&skill.directory)?;
+            let src = old_dir.join(&skill.directory);
+            let dst = new_dir.join(&skill.directory);
+            match Self::migration_tree_hash_if_present(&dst)? {
+                Some(_) if current == target => {
+                    if let Some(active) = &journal {
+                        if Self::migration_marker_matches(&dst, active)? {
+                            let expected =
+                                active.hashes.get(&skill.directory).ok_or_else(|| {
+                                    AppError::InvalidInput(format!(
+                                        "Skill is missing from the active migration journal: {}",
+                                        skill.directory
+                                    ))
+                                })?;
+                            if &Self::migration_target_hash(&dst, active)? != expected {
+                                return Err(AppError::InvalidInput(format!(
+                                    "Interrupted Skill migration target changed: {}",
+                                    dst.display()
+                                )));
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    let active = journal.as_ref().ok_or_else(|| {
+                        AppError::InvalidInput(format!(
+                            "Refusing to claim a pre-existing Skill migration target: {}",
+                            dst.display()
+                        ))
+                    })?;
+                    if !Self::migration_marker_matches(&dst, active)? {
+                        return Err(AppError::InvalidInput(format!(
+                            "Refusing to claim a pre-existing Skill migration target: {}",
+                            dst.display()
+                        )));
+                    }
+                    let expected = active.hashes.get(&skill.directory).ok_or_else(|| {
+                        AppError::InvalidInput(format!(
+                            "Skill is missing from the active migration journal: {}",
+                            skill.directory
+                        ))
+                    })?;
+                    if &Self::migration_target_hash(&dst, active)? != expected {
+                        return Err(AppError::InvalidInput(format!(
+                            "Interrupted Skill migration target changed: {}",
+                            dst.display()
+                        )));
+                    }
+                    if Self::migration_tree_hash(&src)? != *expected {
+                        return Err(AppError::InvalidInput(format!(
+                            "Skill changed during an unfinished storage migration: {}",
+                            skill.directory
+                        )));
+                    }
+                    result.skipped_count += 1;
+                }
+                None => {
+                    let active = journal.as_ref().ok_or_else(|| {
+                        AppError::InvalidInput(format!(
+                            "Managed Skill is missing from both storage locations: {}",
+                            skill.directory
+                        ))
+                    })?;
+                    let expected = active.hashes.get(&skill.directory).ok_or_else(|| {
+                        AppError::InvalidInput(format!(
+                            "Skill is missing from the active migration journal: {}",
+                            skill.directory
+                        ))
+                    })?;
+                    if Self::migration_tree_hash(&src)? != *expected {
+                        return Err(AppError::InvalidInput(format!(
+                            "Skill changed during an unfinished storage migration: {}",
+                            skill.directory
+                        )));
+                    }
+                    copies.push((src, dst));
+                }
+            }
+        }
+
+        for (src, dst) in copies {
+            let active = journal
+                .as_ref()
+                .expect("copies require a migration journal");
+            Self::stage_migration_copy(&src, &dst, &new_dir, active)?;
+            result.migrated_count += 1;
+        }
+
+        if current != target {
+            crate::settings::set_skill_storage_location(target)?;
+        }
+        if let Some(active) = &journal {
+            Self::remove_storage_migration_markers(&new_dir, &index, active)?;
+        }
+
+        // Reconcile per Skill/app through the existing staged deployment path.
+        // Unknown destinations are preserved and reported instead of overwritten.
+        for skill in index.skills.values() {
+            for app in Self::supported_skill_apps() {
+                if skill.apps.is_enabled_for(&app) {
+                    if let Err(error) = Self::sync_migrated_skill_to_app(
+                        &skill.directory,
+                        &app,
+                        index.sync_method,
+                        &old_dir,
+                        &new_dir,
+                    ) {
+                        result.errors.push(format!(
+                            "{}/{}: {error}",
+                            app.as_str(),
+                            skill.directory
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Keep the old SSOT as a working fallback whenever deployment is partial.
+        // A same-target retry re-enters this path, repairs deployment, then cleans it.
+        if result.errors.is_empty() {
+            if let Some(active) = journal.as_ref() {
+                for skill in index.skills.values() {
+                    let Some(expected_source_hash) = active.hashes.get(&skill.directory) else {
+                        // This Skill was added after settings moved to the target;
+                        // it has no old migration-owned copy to clean up.
+                        continue;
+                    };
+                    let source = old_dir.join(&skill.directory);
+                    let target_path = new_dir.join(&skill.directory);
+                    let source_hash = match Self::migration_tree_hash_if_present(&source) {
+                        Ok(Some(hash)) => hash,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            result.errors.push(format!(
+                                "{}: could not verify the old copy; it was preserved: {error}",
+                                skill.directory
+                            ));
+                            continue;
+                        }
+                    };
+                    let target_hash = match Self::migration_tree_hash(&target_path) {
+                        Ok(hash) => hash,
+                        Err(error) => {
+                            result.errors.push(format!(
+                            "{}: could not verify the new copy; the old copy was preserved: {error}",
+                            skill.directory
+                        ));
+                            continue;
+                        }
+                    };
+                    let source_is_original = source_hash == *expected_source_hash;
+                    if (current == active.target && !source_is_original)
+                        || (current != active.target && source_hash != target_hash)
+                    {
+                        result.errors.push(format!(
+                            "{}: old and new copies differ; the old copy was preserved",
+                            skill.directory
+                        ));
+                        continue;
+                    }
+                    if let Err(error) = Self::remove_path(&source) {
+                        result.errors.push(format!(
+                            "{}: failed to remove the old copy: {error}",
+                            skill.directory
+                        ));
+                    }
+                }
+            }
+        }
+
+        if result.errors.is_empty() && journal.is_some() {
+            if let Err(error) = Self::clear_storage_migration_journal() {
+                result.errors.push(format!(
+                    "failed to clear the completed Skill storage migration journal: {error}"
+                ));
+            }
+        }
+
+        Ok(result)
     }
 
     pub fn list_installed() -> Result<Vec<InstalledSkill>, AppError> {
@@ -1135,6 +1891,27 @@ impl SkillService {
         Err(AppError::InvalidInput(format!(
             "Invalid Skill directory: {directory}"
         )))
+    }
+
+    fn reject_unmanaged_install_collision(
+        destination: &Path,
+        directory: &str,
+        new_repo: &str,
+    ) -> Result<(), AppError> {
+        if crate::settings::get_skill_storage_location() == SkillStorageLocation::Unified
+            && fs::symlink_metadata(destination).is_ok()
+        {
+            return Err(AppError::Message(format_skill_error(
+                "SKILL_DIRECTORY_CONFLICT",
+                &[
+                    ("directory", directory),
+                    ("existing_repo", "unmanaged local directory"),
+                    ("new_repo", new_repo),
+                ],
+                Some("importOrUninstallFirst"),
+            )));
+        }
+        Ok(())
     }
 
     fn source_path_from_readme(
@@ -1759,6 +2536,8 @@ impl SkillService {
         // Ensure SSOT dir and install files.
         let ssot_dir = Self::get_ssot_dir()?;
         let dest = ssot_dir.join(&install_name);
+        let new_repo = format!("{}/{}", discoverable.repo_owner, discoverable.repo_name);
+        Self::reject_unmanaged_install_collision(&dest, &install_name, &new_repo)?;
         let mut installed_branch = discoverable.repo_branch.clone();
         let mut installed_readme_url = discoverable.readme_url.clone();
         if !dest.exists() {
@@ -2549,6 +3328,137 @@ mod tests {
         assert!(SkillService::validate_update_directory("../outside").is_err());
         assert!(SkillService::validate_update_directory("nested/skill").is_err());
         assert!(SkillService::validate_update_directory("").is_err());
+    }
+
+    #[test]
+    fn migration_tree_hash_has_unambiguous_entry_framing() {
+        let temp = tempfile::tempdir().expect("create hash fixtures");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir_all(&first).expect("create first tree");
+        fs::create_dir_all(&second).expect("create second tree");
+        fs::write(first.join("a"), b"X").expect("write first a");
+        fs::write(first.join("b"), b"Y").expect("write first b");
+        fs::write(second.join("a"), b"X\0b\0file\0Y").expect("write framed collision fixture");
+
+        assert_ne!(
+            SkillService::migration_tree_hash(&first).expect("hash first tree"),
+            SkillService::migration_tree_hash(&second).expect("hash second tree")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_tree_hash_preserves_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().expect("create hash fixtures");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir_all(&first).expect("create first tree");
+        fs::create_dir_all(&second).expect("create second tree");
+        fs::write(
+            first.join(std::ffi::OsString::from_vec(vec![b'a', 0x80])),
+            b"same",
+        )
+        .expect("write first non-UTF8 file");
+        fs::write(
+            second.join(std::ffi::OsString::from_vec(vec![b'a', 0x81])),
+            b"same",
+        )
+        .expect("write second non-UTF8 file");
+
+        assert_ne!(
+            SkillService::migration_tree_hash(&first).expect("hash first tree"),
+            SkillService::migration_tree_hash(&second).expect("hash second tree")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn storage_migration_rejects_physically_identical_roots() {
+        let temp = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", temp.path().join(".agents"));
+        crate::settings::reload_test_settings();
+
+        SkillService::migrate_storage(SkillStorageLocation::Unified)
+            .expect_err("the two storage choices resolve to the same root");
+
+        assert!(!temp.path().join(".agents").join("skills").exists());
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn interrupted_storage_copy_resumes_only_with_its_persisted_marker() {
+        let temp = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let old_root = SkillService::get_ssot_dir().expect("resolve old SSOT");
+        let old_skill = old_root.join("managed");
+        fs::create_dir_all(&old_skill).expect("create old Skill");
+        fs::write(old_skill.join("SKILL.md"), "managed").expect("write old Skill");
+
+        let db = Database::init().expect("initialize database");
+        let mut skill = repository_skill(None);
+        skill.id = "local:managed".to_string();
+        skill.name = "Managed".to_string();
+        skill.directory = "managed".to_string();
+        skill.repo_owner = None;
+        skill.repo_name = None;
+        skill.repo_branch = None;
+        db.save_skill(&skill).expect("save managed Skill");
+
+        let new_root =
+            SkillService::ssot_dir_for(SkillStorageLocation::Unified).expect("resolve target SSOT");
+        fs::create_dir_all(&new_root).expect("create target root");
+        let new_skill = new_root.join("managed");
+        SkillService::copy_migration_tree(&old_skill, &new_skill)
+            .expect("simulate completed copy before interruption");
+        let journal = StorageMigrationJournal {
+            source: SkillStorageLocation::CcSwitch,
+            target: SkillStorageLocation::Unified,
+            token: "interrupted-test-token".to_string(),
+            hashes: HashMap::from([(
+                "managed".to_string(),
+                SkillService::migration_tree_hash(&old_skill).expect("hash source"),
+            )]),
+        };
+        fs::write(
+            new_skill.join(SkillService::migration_marker_name(&journal)),
+            &journal.token,
+        )
+        .expect("write migration marker");
+        SkillService::save_storage_migration_journal(&journal).expect("save migration journal");
+
+        let result = SkillService::migrate_storage(SkillStorageLocation::Unified)
+            .expect("resume interrupted migration");
+
+        assert!(result.errors.is_empty());
+        assert!(!old_skill.exists());
+        assert!(new_skill.join("SKILL.md").is_file());
+        assert!(!new_skill
+            .join(SkillService::migration_marker_name(&journal))
+            .exists());
+        assert!(SkillService::load_storage_migration_journal()
+            .expect("read cleared journal")
+            .is_none());
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn unified_install_rejects_an_existing_unmanaged_directory() {
+        let temp = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let mut settings = crate::settings::AppSettings::default();
+        settings.skill_storage_location = SkillStorageLocation::Unified;
+        crate::settings::update_settings(settings).expect("enable unified storage");
+        let destination = SkillService::get_ssot_dir()
+            .expect("resolve unified storage")
+            .join("personal");
+        fs::create_dir_all(&destination).expect("create unmanaged directory");
+
+        SkillService::reject_unmanaged_install_collision(&destination, "personal", "owner/repo")
+            .expect_err("install must not silently claim an unmanaged directory");
     }
 
     #[test]

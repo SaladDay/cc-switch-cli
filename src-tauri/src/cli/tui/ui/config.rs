@@ -20,6 +20,7 @@ fn settings_section(item: SettingsItem) -> SettingsSection {
         | SettingsItem::PreferredEditor => SettingsSection::General,
         SettingsItem::VisibleAppsMode
         | SettingsItem::VisibleApps
+        | SettingsItem::SkillsStorageLocation
         | SettingsItem::OpenClawConfigDir => SettingsSection::Applications,
         SettingsItem::SkipClaudeOnboarding
         | SettingsItem::ClaudePluginIntegration
@@ -3478,6 +3479,13 @@ pub(super) fn render_settings(
             super::app::SettingsItem::VisibleApps => (
                 texts::tui_settings_visible_apps_label().to_string(),
                 visible_apps_summary(&visible_apps),
+            ),
+            super::app::SettingsItem::SkillsStorageLocation => (
+                texts::tui_settings_skills_storage_location_label().to_string(),
+                texts::tui_skills_storage_location_name(
+                    crate::settings::get_skill_storage_location(),
+                )
+                .to_string(),
             ),
             super::app::SettingsItem::OpenClawConfigDir => (
                 texts::tui_settings_openclaw_config_dir_label().to_string(),

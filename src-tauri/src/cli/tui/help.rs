@@ -52,6 +52,7 @@ enum HelpTarget {
     Sessions,
     FailoverQueue,
     PreferredEditor,
+    SkillStorageLocation,
     GlobalOutboundProxy,
     CodexOfficialAuthPreservation,
     CodexUnifiedSessionHistory,
@@ -112,6 +113,7 @@ fn current_help_target(app: &App) -> HelpTarget {
                 provider_local_proxy_overlay_target(app, LocalProxySettingsField::UserAgent)
             }
             Overlay::ExternalEditorPicker { .. } => HelpTarget::PreferredEditor,
+            Overlay::SkillsStorageLocationPicker { .. } => HelpTarget::SkillStorageLocation,
             Overlay::ClaudeModelPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeModelConfig)
             }
@@ -157,6 +159,7 @@ fn current_help_target(app: &App) -> HelpTarget {
     if matches!(app.route, super::route::Route::Settings) && matches!(app.focus, Focus::Content) {
         match SettingsItem::ALL.get(app.settings_idx) {
             Some(SettingsItem::PreferredEditor) => return HelpTarget::PreferredEditor,
+            Some(SettingsItem::SkillsStorageLocation) => return HelpTarget::SkillStorageLocation,
             Some(SettingsItem::OutboundProxy) => return HelpTarget::GlobalOutboundProxy,
             Some(SettingsItem::PreserveCodexOfficialAuth) => {
                 return HelpTarget::CodexOfficialAuthPreservation;
@@ -334,6 +337,13 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
             help_lines(
                 "打开设置项时，cc-switch 才会检测当前系统中可执行的常见编辑器；检测不会启动任何程序，也不影响启动速度。检测结果只作为候选，必须按 Enter 明确选择后才会保存，不会自动替你选择。有效的 VISUAL 和 EDITOR 命令也会出现在候选中。\n自定义命令会按参数直接执行，不经过 shell，临时文件路径会追加为最后一个参数。带空格的路径或参数需要加引号；自定义输入留空可清除当前选择。\n图形编辑器必须使用等待参数（例如 code --wait），否则进程提前退出后临时文件会被回收。已配置的命令如果启动失败会直接报错，不会静默换用其他编辑器。",
                 "cc-switch detects executable common editors only when you open this setting; detection launches nothing and does not affect startup time. Results are choices only: nothing is saved until you explicitly press Enter, and no editor is selected automatically. Valid VISUAL and EDITOR commands also appear in the list.\nCustom commands are executed directly without a shell, with the temporary file path appended as the final argument. Quote paths or arguments that contain spaces; leave custom input empty to clear the selection.\nGUI editors need a wait flag, such as code --wait, or the temporary file could be removed when the launcher exits early. A configured command reports launch failures instead of silently switching editors.",
+            ),
+        ),
+        HelpTarget::SkillStorageLocation => HelpContent::new(
+            texts::tui_settings_skills_storage_location_label(),
+            help_lines(
+                "选择 CC Switch 管理目录或通用的 ~/.agents/skills 目录作为已管理技能的唯一主存储。切换时只迁移数据库中记录的技能，并刷新已启用应用的链接或副本；不会导入、认领或移动未管理目录。Unified 中存在未管理目录时，云同步会拒绝替换整个目录，请先显式导入或切回 CC Switch 存储。\n如果目标位置已有同名目录（即使内容相同），迁移也会停止并保留当前设置；只有带有本次迁移凭据的中断副本可以自动续跑。应用刷新失败时会保留旧副本；再次选择当前存储位置可重试修复。迁移期间请勿同时运行其他技能安装或更新命令。",
+                "Choose either CC Switch's managed directory or the shared ~/.agents/skills directory as the single source of truth for managed Skills. Switching moves only Skills recorded in the database and refreshes links or copies for enabled apps; unmanaged directories are not imported, claimed, or moved. If Unified contains unmanaged directories, cloud sync refuses to replace the root; import them explicitly or switch back to CC Switch storage first.\nMigration stops and keeps the current setting when the target already has a same-named directory, even with identical content; only an interrupted copy carrying this migration's receipt can resume automatically. If app refresh is partial, the old copy is retained; select the current location again to retry reconciliation. Do not run another Skill install or update command while migration is active.",
             ),
         ),
         HelpTarget::GlobalOutboundProxy => HelpContent::new(
