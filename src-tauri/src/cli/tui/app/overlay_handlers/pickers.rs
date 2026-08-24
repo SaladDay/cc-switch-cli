@@ -271,7 +271,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(4);
+                *selected = (*selected + 1).min(1);
                 Action::None
             }
             KeyCode::Enter => {

@@ -21,6 +21,7 @@ fn settings_section(item: SettingsItem) -> SettingsSection {
         SettingsItem::VisibleAppsMode
         | SettingsItem::VisibleApps
         | SettingsItem::SkillsStorageLocation
+        | SettingsItem::SkillsSyncMethod
         | SettingsItem::OpenClawConfigDir => SettingsSection::Applications,
         SettingsItem::SkipClaudeOnboarding
         | SettingsItem::ClaudePluginIntegration
@@ -3486,6 +3487,10 @@ pub(super) fn render_settings(
                     crate::settings::get_skill_storage_location(),
                 )
                 .to_string(),
+            ),
+            super::app::SettingsItem::SkillsSyncMethod => (
+                texts::tui_settings_skills_sync_method_label().to_string(),
+                texts::tui_skills_sync_method_name(data.skills.sync_method).to_string(),
             ),
             super::app::SettingsItem::OpenClawConfigDir => (
                 texts::tui_settings_openclaw_config_dir_label().to_string(),

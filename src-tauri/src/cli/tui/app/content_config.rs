@@ -937,6 +937,12 @@ impl App {
                     };
                     Action::None
                 }
+                Some(SettingsItem::SkillsSyncMethod) => {
+                    self.overlay = Overlay::SkillsSyncMethodPicker {
+                        selected: sync_method_picker_index(data.skills.sync_method),
+                    };
+                    Action::None
+                }
                 Some(SettingsItem::OpenClawConfigDir) => {
                     let buffer = crate::settings::get_settings()
                         .openclaw_config_dir

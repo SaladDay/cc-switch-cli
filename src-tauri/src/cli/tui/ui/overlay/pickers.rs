@@ -1,6 +1,7 @@
 use super::super::theme;
 use super::super::*;
 use super::frame::{overlay_frame, overlay_frame_at, OverlaySize};
+use crate::cli::tui::app::sync_method_picker_index;
 use crate::cli::tui::form;
 use crate::cli::tui::form::{ClaudeModelRole, HermesModelField, ProviderAddFormState};
 use crate::cli::tui::text_edit::TextInput;
@@ -2464,7 +2465,6 @@ pub(super) fn render_skills_sync_method_picker_overlay(
     selected: usize,
 ) {
     let methods = [
-        crate::services::skill::SyncMethod::Auto,
         crate::services::skill::SyncMethod::Symlink,
         crate::services::skill::SyncMethod::Copy,
     ];
@@ -2475,7 +2475,7 @@ pub(super) fn render_skills_sync_method_picker_overlay(
         theme,
         texts::tui_skills_sync_method_title(),
         &[
-            ("←→", texts::tui_key_select()),
+            ("↑↓", texts::tui_key_select()),
             ("Enter", texts::tui_key_apply()),
             ("Esc", texts::tui_key_cancel()),
         ],
@@ -2486,10 +2486,10 @@ pub(super) fn render_skills_sync_method_picker_overlay(
         overlay_border_style(theme, false),
     );
 
-    let current = data.skills.sync_method;
+    let current = sync_method_picker_index(data.skills.sync_method);
 
-    let items = methods.into_iter().map(|method| {
-        let marker = if method == current {
+    let items = methods.into_iter().enumerate().map(|(index, method)| {
+        let marker = if index == current {
             texts::tui_marker_active()
         } else {
             texts::tui_marker_inactive()

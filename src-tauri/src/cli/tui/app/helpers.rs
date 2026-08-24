@@ -1785,21 +1785,17 @@ pub(crate) fn snippet_picker_app_type(index: usize) -> AppType {
     app_type_for_picker_index(index)
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn sync_method_picker_index(method: SyncMethod) -> usize {
     match method {
-        SyncMethod::Auto => 0,
-        SyncMethod::Symlink => 1,
-        SyncMethod::Copy => 2,
+        SyncMethod::Auto | SyncMethod::Symlink => 0,
+        SyncMethod::Copy => 1,
     }
 }
 
 pub(crate) fn sync_method_for_picker_index(index: usize) -> SyncMethod {
     match index {
-        1 => SyncMethod::Symlink,
-        2 => SyncMethod::Copy,
-        _ => SyncMethod::Auto,
+        1 => SyncMethod::Copy,
+        _ => SyncMethod::Symlink,
     }
 }
 

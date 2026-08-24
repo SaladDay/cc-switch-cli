@@ -5647,9 +5647,17 @@ pub mod texts {
 
     pub fn tui_skills_sync_method_title() -> &'static str {
         if is_chinese() {
-            "选择同步方式"
+            "选择 Skills 同步方式"
         } else {
-            "Select Sync Method"
+            "Select Skill Sync Method"
+        }
+    }
+
+    pub fn tui_settings_skills_sync_method_label() -> &'static str {
+        if is_chinese() {
+            "Skills 同步方式"
+        } else {
+            "Skill Sync Method"
         }
     }
 
@@ -5702,25 +5710,19 @@ pub mod texts {
 
     pub fn tui_skills_sync_method_name(method: crate::services::skill::SyncMethod) -> &'static str {
         match method {
-            crate::services::skill::SyncMethod::Auto => {
+            crate::services::skill::SyncMethod::Auto
+            | crate::services::skill::SyncMethod::Symlink => {
                 if is_chinese() {
-                    "自动（优先使用链接，失败时复制）"
+                    "软连接"
                 } else {
-                    "Automatic (prefer links, fall back to copy)"
-                }
-            }
-            crate::services::skill::SyncMethod::Symlink => {
-                if is_chinese() {
-                    "仅链接"
-                } else {
-                    "Links only"
+                    "Symlink"
                 }
             }
             crate::services::skill::SyncMethod::Copy => {
                 if is_chinese() {
-                    "仅复制"
+                    "文件复制"
                 } else {
-                    "Copy only"
+                    "Copy Files"
                 }
             }
         }

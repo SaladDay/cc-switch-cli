@@ -53,6 +53,7 @@ enum HelpTarget {
     FailoverQueue,
     PreferredEditor,
     SkillStorageLocation,
+    SkillSyncMethod,
     GlobalOutboundProxy,
     CodexOfficialAuthPreservation,
     CodexUnifiedSessionHistory,
@@ -113,6 +114,7 @@ fn current_help_target(app: &App) -> HelpTarget {
                 provider_local_proxy_overlay_target(app, LocalProxySettingsField::UserAgent)
             }
             Overlay::ExternalEditorPicker { .. } => HelpTarget::PreferredEditor,
+            Overlay::SkillsSyncMethodPicker { .. } => HelpTarget::SkillSyncMethod,
             Overlay::SkillsStorageLocationPicker { .. } => HelpTarget::SkillStorageLocation,
             Overlay::ClaudeModelPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeModelConfig)
@@ -160,6 +162,7 @@ fn current_help_target(app: &App) -> HelpTarget {
         match SettingsItem::ALL.get(app.settings_idx) {
             Some(SettingsItem::PreferredEditor) => return HelpTarget::PreferredEditor,
             Some(SettingsItem::SkillsStorageLocation) => return HelpTarget::SkillStorageLocation,
+            Some(SettingsItem::SkillsSyncMethod) => return HelpTarget::SkillSyncMethod,
             Some(SettingsItem::OutboundProxy) => return HelpTarget::GlobalOutboundProxy,
             Some(SettingsItem::PreserveCodexOfficialAuth) => {
                 return HelpTarget::CodexOfficialAuthPreservation;
@@ -344,6 +347,13 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
             help_lines(
                 "选择 CC Switch 管理目录或通用的 ~/.agents/skills 目录作为已管理技能的唯一主存储。切换时只迁移数据库中记录的技能，并刷新已启用应用的链接或副本；不会导入、认领或移动未管理目录。Unified 中存在未管理目录时，云同步会拒绝替换整个目录，请先显式导入或切回 CC Switch 存储。\n如果目标位置已有同名目录（即使内容相同），迁移也会停止并保留当前设置；只有带有本次迁移凭据的中断副本可以自动续跑。应用刷新失败时会保留旧副本；再次选择当前存储位置可重试修复。迁移期间请勿同时运行其他技能安装或更新命令。",
                 "Choose either CC Switch's managed directory or the shared ~/.agents/skills directory as the single source of truth for managed Skills. Switching moves only Skills recorded in the database and refreshes links or copies for enabled apps; unmanaged directories are not imported, claimed, or moved. If Unified contains unmanaged directories, cloud sync refuses to replace the root; import them explicitly or switch back to CC Switch storage first.\nMigration stops and keeps the current setting when the target already has a same-named directory, even with identical content; only an interrupted copy carrying this migration's receipt can resume automatically. If app refresh is partial, the old copy is retained; select the current location again to retry reconciliation. Do not run another Skill install or update command while migration is active.",
+            ),
+        ),
+        HelpTarget::SkillSyncMethod => HelpContent::new(
+            texts::tui_settings_skills_sync_method_label(),
+            help_lines(
+                "选择 Skills 的文件同步策略。软连接节省磁盘空间并支持实时同步；文件复制适用于不支持软连接的环境。Windows 使用软连接时可能需要管理员权限或开启开发者模式。\n此设置只影响之后的 Skills 部署或同步，不会迁移主存储位置，也不会立即重建现有应用目录。如需立即应用，请在 Skills 页面执行同步。",
+                "Choose how to sync Skills files. Symlinks save disk space and enable real-time sync; copying files supports environments where symlinks are unavailable. On Windows, symlinks may require administrator privileges or Developer Mode.\nThis setting affects future Skill deployments or syncs only. It does not move the managed storage location or immediately rebuild existing app directories. Run Sync from the Skills page to apply it now.",
             ),
         ),
         HelpTarget::GlobalOutboundProxy => HelpContent::new(
