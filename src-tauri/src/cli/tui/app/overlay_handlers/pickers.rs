@@ -85,6 +85,9 @@ impl App {
         if let Some(action) = self.handle_sync_method_picker_key(key, data) {
             return Some(action);
         }
+        if let Some(action) = self.handle_storage_location_picker_key(key, data) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
             return Some(action);
         }
@@ -279,6 +282,52 @@ impl App {
                     Action::None
                 } else {
                     Action::SkillsSetSyncMethod { method }
+                }
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_storage_location_picker_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
+        let Overlay::SkillsStorageLocationPicker { selected } = &mut self.overlay else {
+            return None;
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.close_overlay();
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(1);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let location = storage_location_for_picker_index(*selected);
+                if location == crate::settings::get_skill_storage_location() {
+                    self.overlay = Overlay::None;
+                    Action::SkillsSetStorageLocation { location }
+                } else if data.skills.installed.is_empty() {
+                    self.overlay = Overlay::None;
+                    Action::SkillsSetStorageLocation { location }
+                } else {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_confirm_title().to_string(),
+                        message: texts::tui_confirm_skills_storage_location(
+                            location,
+                            data.skills.installed.len(),
+                        ),
+                        action: ConfirmAction::SkillsMigrateStorage { location },
+                    });
+                    Action::None
                 }
             }
             _ => Action::None,

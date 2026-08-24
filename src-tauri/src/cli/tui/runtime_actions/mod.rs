@@ -850,6 +850,9 @@ pub(crate) fn handle_action(
         Action::SkillsUninstall { directory } => skills::uninstall(&mut ctx, directory),
         Action::SkillsSync { app: scope } => skills::sync(&mut ctx, scope),
         Action::SkillsSetSyncMethod { method } => skills::set_sync_method(&mut ctx, method),
+        Action::SkillsSetStorageLocation { location } => {
+            skills::set_storage_location(&mut ctx, location)
+        }
         Action::SkillsDiscover {
             query,
             source,
@@ -1235,6 +1238,38 @@ mod tests {
         )
     }
 
+    fn run_action_with_skills(
+        app: &mut App,
+        data: &mut UiData,
+        skills_req_tx: &mpsc::Sender<SkillsReq>,
+        action: Action,
+    ) -> Result<(), AppError> {
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+
+        handle_action(
+            &mut terminal,
+            app,
+            data,
+            None,
+            None,
+            Some(skills_req_tx),
+            None,
+            &mut proxy_loading,
+            None,
+            None,
+            None,
+            &mut webdav_loading,
+            None,
+            &mut update_check,
+            None,
+            None,
+            action,
+        )
+    }
+
     fn app_with_base_session_manifest() -> (App, TempDir) {
         let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
         let store = crate::session_manager::paged_manifest::PagedManifestStore::open_at(
@@ -1289,6 +1324,41 @@ mod tests {
             app.sessions.take_cost_overlay_request(),
             "route re-entry must recover discarded or stale background cost results"
         );
+    }
+
+    #[test]
+    fn storage_migration_retires_a_pending_discovery_result() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.skills_discover_active_request_id = Some(7);
+        app.skills_discover_loading = true;
+        let mut data = UiData::default();
+        let (tx, rx) = mpsc::channel();
+
+        run_action_with_skills(
+            &mut app,
+            &mut data,
+            &tx,
+            Action::SkillsSetStorageLocation {
+                location: crate::services::skill::SkillStorageLocation::Unified,
+            },
+        )
+        .expect("queue storage migration");
+
+        assert!(app.skills_discover_active_request_id.is_none());
+        assert!(!app.skills_discover_loading);
+        assert!(matches!(
+            rx.recv().expect("migration request"),
+            SkillsReq::MigrateStorage {
+                target: crate::services::skill::SkillStorageLocation::Unified
+            }
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Loading {
+                kind: super::super::app::LoadingKind::SkillOperation,
+                ..
+            }
+        ));
     }
 
     #[test]

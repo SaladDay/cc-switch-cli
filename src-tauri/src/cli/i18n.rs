@@ -5653,6 +5653,53 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_skills_storage_location_label() -> &'static str {
+        if is_chinese() {
+            "技能存储位置"
+        } else {
+            "Skill storage location"
+        }
+    }
+
+    pub fn tui_skills_storage_location_title() -> &'static str {
+        if is_chinese() {
+            "选择技能存储位置"
+        } else {
+            "Select Skill Storage Location"
+        }
+    }
+
+    pub fn tui_skills_storage_location_name(
+        location: crate::services::skill::SkillStorageLocation,
+    ) -> &'static str {
+        match location {
+            crate::services::skill::SkillStorageLocation::CcSwitch => {
+                "CC Switch (~/.cc-switch/skills)"
+            }
+            crate::services::skill::SkillStorageLocation::Unified => "Unified (~/.agents/skills)",
+        }
+    }
+
+    pub fn tui_confirm_skills_storage_location(
+        location: crate::services::skill::SkillStorageLocation,
+        count: usize,
+    ) -> String {
+        let target = tui_skills_storage_location_name(location);
+        if is_chinese() {
+            format!("将把 {count} 个已管理技能迁移到 {target}，并刷新各应用的技能部署。继续吗？")
+        } else {
+            format!("Move {count} managed Skill(s) to {target} and refresh their app deployments?")
+        }
+    }
+
+    pub fn tui_skills_storage_location_loading() -> &'static str {
+        if is_chinese() {
+            "正在迁移技能并刷新应用部署..."
+        } else {
+            "Moving Skills and refreshing app deployments..."
+        }
+    }
+
     pub fn tui_skills_sync_method_name(method: crate::services::skill::SyncMethod) -> &'static str {
         match method {
             crate::services::skill::SyncMethod::Auto => {
@@ -8598,6 +8645,35 @@ pub mod texts {
             format!("同步方式已设置为: {method}")
         } else {
             format!("Sync method set to: {method}")
+        }
+    }
+
+    pub fn tui_toast_skills_storage_location_set(
+        location: &str,
+        migrated: usize,
+        skipped: usize,
+    ) -> String {
+        if is_chinese() {
+            format!("技能存储位置已切换为 {location}：迁移 {migrated} 个，跳过 {skipped} 个。")
+        } else {
+            format!("Skill storage set to {location}: {migrated} moved, {skipped} skipped.")
+        }
+    }
+
+    pub fn tui_toast_skills_storage_location_partial(
+        location: &str,
+        migrated: usize,
+        skipped: usize,
+        failed: usize,
+    ) -> String {
+        if is_chinese() {
+            format!(
+                "技能存储已切换为 {location}：迁移 {migrated} 个，跳过 {skipped} 个，失败 {failed} 个。"
+            )
+        } else {
+            format!(
+                "Skill storage set to {location}: {migrated} moved, {skipped} skipped, {failed} failed."
+            )
         }
     }
 

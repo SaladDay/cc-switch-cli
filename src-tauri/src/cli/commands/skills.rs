@@ -5,9 +5,10 @@ use crate::app_config::{AppType, SkillApps};
 use crate::cli::commands::app_targets::{
     app_target_names, app_targets_or_default, parse_app_targets, supported_app_target_labels,
 };
+use crate::cli::i18n::texts;
 use crate::cli::ui::{create_table, highlight, info, success};
 use crate::error::AppError;
-use crate::services::skill::{ImportSkillSelection, SkillRepo, SyncMethod};
+use crate::services::skill::{ImportSkillSelection, SkillRepo, SkillStorageLocation, SyncMethod};
 use crate::services::SkillService;
 
 #[derive(Subcommand)]
@@ -110,6 +111,12 @@ pub enum SkillsCommand {
         #[arg(value_enum)]
         method: Option<SyncMethod>,
     },
+    /// Get or change the managed Skills storage location
+    StorageLocation {
+        /// Optional location to set (omit to show current)
+        #[arg(value_enum)]
+        location: Option<SkillStorageLocation>,
+    },
     /// Manage skill repositories
     #[command(subcommand)]
     Repos(SkillReposCommand),
@@ -164,6 +171,7 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
         SkillsCommand::ImportFromApps { apps, directories } => import_from_apps(apps, directories),
         SkillsCommand::Info { spec } => show_skill_info(&spec),
         SkillsCommand::SyncMethod { method } => sync_method(method),
+        SkillsCommand::StorageLocation { location } => storage_location(location),
         SkillsCommand::Repos(repos_cmd) => execute_repos(repos_cmd),
     }
 }
@@ -617,6 +625,46 @@ fn sync_method(method: Option<SyncMethod>) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+fn storage_location(location: Option<SkillStorageLocation>) -> Result<(), AppError> {
+    let Some(target) = location else {
+        println!(
+            "{}",
+            match crate::settings::get_skill_storage_location() {
+                SkillStorageLocation::CcSwitch => "cc-switch",
+                SkillStorageLocation::Unified => "unified",
+            }
+        );
+        return Ok(());
+    };
+
+    let result = SkillService::migrate_storage(target)?;
+    let location = texts::tui_skills_storage_location_name(target);
+    let summary = if result.errors.is_empty() {
+        texts::tui_toast_skills_storage_location_set(
+            location,
+            result.migrated_count,
+            result.skipped_count,
+        )
+    } else {
+        texts::tui_toast_skills_storage_location_partial(
+            location,
+            result.migrated_count,
+            result.skipped_count,
+            result.errors.len(),
+        )
+    };
+
+    if result.errors.is_empty() {
+        println!("{}", success(&summary));
+        Ok(())
+    } else {
+        Err(AppError::Message(format!(
+            "{summary}\n{}",
+            result.errors.join("\n")
+        )))
+    }
 }
 
 fn parse_repo_spec(raw: &str) -> Result<SkillRepo, AppError> {

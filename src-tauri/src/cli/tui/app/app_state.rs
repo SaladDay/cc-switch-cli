@@ -66,6 +66,9 @@ pub enum Action {
     SkillsSetSyncMethod {
         method: SyncMethod,
     },
+    SkillsSetStorageLocation {
+        location: SkillStorageLocation,
+    },
     SkillsDiscover {
         query: String,
         source: SkillsDiscoverSource,
@@ -500,6 +503,7 @@ pub enum SettingsItem {
     PreferredEditor,
     VisibleAppsMode,
     VisibleApps,
+    SkillsStorageLocation,
     OpenClawConfigDir,
     ManagedAccounts,
     SkipClaudeOnboarding,
@@ -512,7 +516,7 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 15] = [
+    pub const ALL: [SettingsItem; 16] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::Theme,
@@ -520,6 +524,7 @@ impl SettingsItem {
         SettingsItem::PreferredEditor,
         SettingsItem::VisibleAppsMode,
         SettingsItem::VisibleApps,
+        SettingsItem::SkillsStorageLocation,
         SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,

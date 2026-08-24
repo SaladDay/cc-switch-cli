@@ -51,7 +51,7 @@ pub use prompt::PromptService;
 pub use provider::{reapply_current_codex_official_live, ProviderService};
 pub use proxy::ProxyService;
 pub use s3_sync::{S3RemoteInfo, S3SyncService, S3SyncSummary};
-pub use skill::{ImportSkillSelection, SkillService};
+pub use skill::{ImportSkillSelection, MigrationResult, SkillService, SkillStorageLocation};
 pub use speedtest::{EndpointLatency, SpeedtestService};
 pub use stream_check::{HealthStatus, StreamCheckConfig, StreamCheckResult, StreamCheckService};
 pub use subscription::{CredentialStatus, ExtraUsage, QuotaTier, SubscriptionQuota};

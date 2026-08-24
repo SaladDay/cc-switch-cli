@@ -13,6 +13,13 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
         return Some(home);
     }
 
+    if let Some(home) = env::var_os("CC_SWITCH_TEST_HOME") {
+        let home = PathBuf::from(home);
+        if !home.as_os_str().is_empty() && !home.to_string_lossy().trim().is_empty() {
+            return Some(home);
+        }
+    }
+
     dirs::home_dir()
 }
 

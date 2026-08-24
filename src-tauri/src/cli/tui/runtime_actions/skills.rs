@@ -2,7 +2,7 @@ use crate::app_config::{AppType, SkillApps};
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 use crate::services::{
-    skill::{ImportSkillSelection, SyncMethod},
+    skill::{ImportSkillSelection, SkillStorageLocation, SyncMethod},
     SkillService,
 };
 
@@ -161,6 +161,29 @@ pub(super) fn set_sync_method(
         texts::tui_toast_skills_sync_method_set(texts::tui_skills_sync_method_name(method)),
         ToastKind::Success,
     );
+    Ok(())
+}
+
+pub(super) fn set_storage_location(
+    ctx: &mut RuntimeActionContext<'_>,
+    target: SkillStorageLocation,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.skills_req_tx else {
+        return Err(AppError::Message(
+            texts::tui_error_skills_worker_unavailable().to_string(),
+        ));
+    };
+    tx.send(super::super::runtime_systems::SkillsReq::MigrateStorage { target })
+        .map_err(|e| AppError::Message(e.to_string()))?;
+    // Discovery shares this worker but has no blocking overlay. Invalidate a
+    // queued result so it cannot dismiss the migration overlay when it lands.
+    ctx.app.skills_discover_active_request_id = None;
+    ctx.app.skills_discover_loading = false;
+    ctx.app.overlay = Overlay::Loading {
+        kind: LoadingKind::SkillOperation,
+        title: texts::tui_skills_storage_location_title().to_string(),
+        message: texts::tui_skills_storage_location_loading().to_string(),
+    };
     Ok(())
 }
 

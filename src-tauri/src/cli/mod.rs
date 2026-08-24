@@ -1856,6 +1856,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_skills_storage_location_query_and_values() {
+        let query = Cli::parse_from(["cc-switch", "skills", "storage-location"]);
+        assert!(matches!(
+            query.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::StorageLocation { location: None }
+            ))
+        ));
+
+        let unified = Cli::parse_from(["cc-switch", "skills", "storage-location", "unified"]);
+        assert!(matches!(
+            unified.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::StorageLocation {
+                    location: Some(crate::services::skill::SkillStorageLocation::Unified)
+                }
+            ))
+        ));
+
+        let cc_switch = Cli::parse_from(["cc-switch", "skills", "storage-location", "cc_switch"]);
+        assert!(matches!(
+            cc_switch.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::StorageLocation {
+                    location: Some(crate::services::skill::SkillStorageLocation::CcSwitch)
+                }
+            ))
+        ));
+    }
+
+    #[test]
     fn parses_manual_skill_update_commands() {
         let check = Cli::parse_from(["cc-switch", "skills", "check-updates"]);
         assert!(matches!(
