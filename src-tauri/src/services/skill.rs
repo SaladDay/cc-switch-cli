@@ -842,8 +842,18 @@ impl SkillService {
         // - Instead, only try to populate SSOT for the already-managed skills (best effort),
         //   then clear the pending flag.
         if !index.skills.is_empty() {
-            for (directory, record) in index.skills.iter_mut() {
-                let dest = ssot_dir.join(directory);
+            for record in index.skills.values_mut() {
+                let directory = match Self::require_valid_directory(&record.directory) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        log::warn!(
+                            "SSOT 迁移: 跳过非法 Skill directory {:?}: {error}",
+                            record.directory
+                        );
+                        continue;
+                    }
+                };
+                let dest = ssot_dir.join(&directory);
                 if dest.exists() {
                     continue;
                 }
@@ -862,7 +872,7 @@ impl SkillService {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
-                    let skill_path = app_dir.join(directory);
+                    let skill_path = app_dir.join(&directory);
                     if skill_path.exists() {
                         source = Some(skill_path);
                         break;
@@ -923,7 +933,7 @@ impl SkillService {
                 }
 
                 let dir_name = entry.file_name().to_string_lossy().to_string();
-                if dir_name.starts_with('.') {
+                if Self::require_valid_directory(&dir_name).is_err() {
                     continue;
                 }
 
@@ -1047,8 +1057,9 @@ impl SkillService {
             return Ok(());
         }
 
+        let directory = Self::require_valid_directory(directory)?;
         let ssot_dir = Self::get_ssot_dir()?;
-        let source = ssot_dir.join(directory);
+        let source = ssot_dir.join(&directory);
         if !source.exists() {
             return Err(AppError::Message(format!(
                 "Skill 不存在于 SSOT: {directory}"
@@ -1059,7 +1070,7 @@ impl SkillService {
         // D5: allow creating target app dirs during skills sync.
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
 
-        let dest = app_dir.join(directory);
+        let dest = app_dir.join(&directory);
         if dest.exists() || Self::is_symlink(&dest) {
             Self::remove_path(&dest)?;
         }
@@ -1090,8 +1101,9 @@ impl SkillService {
             return Ok(());
         }
 
+        let directory = Self::require_valid_directory(directory)?;
         let ssot_dir = Self::get_ssot_dir()?;
-        let source = ssot_dir.join(directory);
+        let source = ssot_dir.join(&directory);
         if !source.is_dir() {
             return Err(AppError::Message(format!(
                 "Skill does not exist in SSOT: {directory}"
@@ -1099,7 +1111,7 @@ impl SkillService {
         }
         let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
-        let dest = app_dir.join(directory);
+        let dest = app_dir.join(&directory);
         if source == dest {
             return Ok(());
         }
@@ -1151,9 +1163,10 @@ impl SkillService {
             return Ok(());
         }
 
+        let directory = Self::require_valid_directory(directory)?;
         let ssot_dir = Self::get_ssot_dir()?;
         let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
-        let path = app_dir.join(directory);
+        let path = app_dir.join(&directory);
         if path.exists() || Self::is_symlink(&path) {
             Self::remove_path(&path)?;
         }
@@ -1165,9 +1178,20 @@ impl SkillService {
             return Ok(());
         }
 
+        // Resolve root overlap once so configuration errors still fail the whole
+        // operation; only individual poisoned Skill rows are skipped below.
+        let ssot_dir = Self::get_ssot_dir()?;
+        Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
+
         for skill in index.skills.values() {
             if skill.apps.is_enabled_for(app) {
-                Self::sync_to_app_dir(&skill.directory, app, index.sync_method)?;
+                if let Err(error) = Self::sync_to_app_dir(&skill.directory, app, index.sync_method)
+                {
+                    log::warn!(
+                        "同步 Skill {} 到 {app:?} 失败，已跳过该条: {error}",
+                        skill.directory
+                    );
+                }
             }
         }
         Ok(())
@@ -1472,20 +1496,21 @@ impl SkillService {
         old_root: &Path,
         new_root: &Path,
     ) -> Result<(), AppError> {
-        let source = new_root.join(directory);
+        let directory = Self::require_valid_directory(directory)?;
+        let source = new_root.join(&directory);
         let expected_hash = Self::migration_tree_hash(&source)?;
         let app_dir = Self::get_distinct_app_skills_dir(new_root, app)?;
-        let destination = app_dir.join(directory);
+        let destination = app_dir.join(&directory);
         let action = Self::migration_deployment_action(
             &destination,
-            &old_root.join(directory),
+            &old_root.join(&directory),
             &source,
             &expected_hash,
         )?;
         if action == MigrationDeploymentAction::AlreadyCurrent {
             return Ok(());
         }
-        Self::sync_updated_skill_to_app(directory, app, method)
+        Self::sync_updated_skill_to_app(&directory, app, method)
     }
 
     fn storage_migration_journal_path() -> PathBuf {
@@ -1545,7 +1570,8 @@ impl SkillService {
     ) -> Result<(), AppError> {
         let marker_name = Self::migration_marker_name(journal);
         for skill in index.skills.values() {
-            let target = root.join(&skill.directory);
+            let directory = Self::require_valid_directory(&skill.directory)?;
+            let target = root.join(&directory);
             if Self::migration_marker_matches(&target, journal)? {
                 let marker = target.join(&marker_name);
                 fs::remove_file(&marker).map_err(|error| AppError::io(&marker, error))?;
@@ -1581,10 +1607,16 @@ impl SkillService {
         }
         Self::validate_skill_storage_destination(&old_dir)?;
         Self::validate_skill_storage_destination(&new_dir)?;
-        create_managed_config_dir_all(&new_dir)?;
-        Self::validate_storage_root(target, &new_dir)?;
 
         let index = Self::load_index()?;
+        // The migration journal and every filesystem sink below use the installed
+        // directory as a path segment. Reject a poisoned row before creating the
+        // destination or performing any per-Skill write.
+        for skill in index.skills.values() {
+            Self::require_valid_directory(&skill.directory)?;
+        }
+        create_managed_config_dir_all(&new_dir)?;
+        Self::validate_storage_root(target, &new_dir)?;
         if let Some(active) = &journal {
             if active.source != old_location
                 || active.target != target
@@ -1609,9 +1641,9 @@ impl SkillService {
         if journal.is_none() && current != target {
             let mut hashes = HashMap::new();
             for skill in index.skills.values() {
-                Self::validate_update_directory(&skill.directory)?;
-                let src = old_dir.join(&skill.directory);
-                let dst = new_dir.join(&skill.directory);
+                let directory = Self::require_valid_directory(&skill.directory)?;
+                let src = old_dir.join(&directory);
+                let dst = new_dir.join(&directory);
                 let source_hash = Self::migration_tree_hash_if_present(&src)?.ok_or_else(|| {
                     AppError::InvalidInput(format!(
                         "Managed Skill is missing from the current storage: {}",
@@ -1628,7 +1660,7 @@ impl SkillService {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(AppError::io(&dst, error)),
                 }
-                hashes.insert(skill.directory.clone(), source_hash);
+                hashes.insert(directory, source_hash);
             }
             let next = StorageMigrationJournal {
                 source: old_location,
@@ -1642,20 +1674,19 @@ impl SkillService {
 
         // Preflight the complete managed set before writing a target directory.
         for skill in index.skills.values() {
-            Self::validate_update_directory(&skill.directory)?;
-            let src = old_dir.join(&skill.directory);
-            let dst = new_dir.join(&skill.directory);
+            let directory = Self::require_valid_directory(&skill.directory)?;
+            let src = old_dir.join(&directory);
+            let dst = new_dir.join(&directory);
             match Self::migration_tree_hash_if_present(&dst)? {
                 Some(_) if current == target => {
                     if let Some(active) = &journal {
                         if Self::migration_marker_matches(&dst, active)? {
-                            let expected =
-                                active.hashes.get(&skill.directory).ok_or_else(|| {
-                                    AppError::InvalidInput(format!(
-                                        "Skill is missing from the active migration journal: {}",
-                                        skill.directory
-                                    ))
-                                })?;
+                            let expected = active.hashes.get(&directory).ok_or_else(|| {
+                                AppError::InvalidInput(format!(
+                                    "Skill is missing from the active migration journal: {}",
+                                    skill.directory
+                                ))
+                            })?;
                             if &Self::migration_target_hash(&dst, active)? != expected {
                                 return Err(AppError::InvalidInput(format!(
                                     "Interrupted Skill migration target changed: {}",
@@ -1678,7 +1709,7 @@ impl SkillService {
                             dst.display()
                         )));
                     }
-                    let expected = active.hashes.get(&skill.directory).ok_or_else(|| {
+                    let expected = active.hashes.get(&directory).ok_or_else(|| {
                         AppError::InvalidInput(format!(
                             "Skill is missing from the active migration journal: {}",
                             skill.directory
@@ -1705,7 +1736,7 @@ impl SkillService {
                             skill.directory
                         ))
                     })?;
-                    let expected = active.hashes.get(&skill.directory).ok_or_else(|| {
+                    let expected = active.hashes.get(&directory).ok_or_else(|| {
                         AppError::InvalidInput(format!(
                             "Skill is missing from the active migration journal: {}",
                             skill.directory
@@ -1764,13 +1795,14 @@ impl SkillService {
         if result.errors.is_empty() {
             if let Some(active) = journal.as_ref() {
                 for skill in index.skills.values() {
-                    let Some(expected_source_hash) = active.hashes.get(&skill.directory) else {
+                    let directory = Self::require_valid_directory(&skill.directory)?;
+                    let Some(expected_source_hash) = active.hashes.get(&directory) else {
                         // This Skill was added after settings moved to the target;
                         // it has no old migration-owned copy to clean up.
                         continue;
                     };
-                    let source = old_dir.join(&skill.directory);
-                    let target_path = new_dir.join(&skill.directory);
+                    let source = old_dir.join(&directory);
+                    let target_path = new_dir.join(&directory);
                     let source_hash = match Self::migration_tree_hash_if_present(&source) {
                         Ok(Some(hash)) => hash,
                         Ok(None) => continue,
@@ -1883,14 +1915,69 @@ impl SkillService {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    fn validate_update_directory(directory: &str) -> Result<(), AppError> {
-        let mut components = Path::new(directory).components();
-        if matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none() {
-            return Ok(());
+    /// Validate and normalize a repository-relative Skill source path.
+    fn sanitize_skill_source_path(raw: &str) -> Option<PathBuf> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
         }
-        Err(AppError::InvalidInput(format!(
-            "Invalid Skill directory: {directory}"
-        )))
+
+        let mut normalized = PathBuf::new();
+        let mut has_component = false;
+        for component in Path::new(trimmed).components() {
+            match component {
+                Component::Normal(name) => {
+                    let segment = name.to_string_lossy().trim().to_string();
+                    if segment.is_empty() || segment == "." || segment == ".." {
+                        return None;
+                    }
+                    normalized.push(segment);
+                    has_component = true;
+                }
+                Component::CurDir
+                | Component::ParentDir
+                | Component::RootDir
+                | Component::Prefix(_) => return None,
+            }
+        }
+
+        has_component.then_some(normalized)
+    }
+
+    /// Validate and normalize the single path segment used for an installed Skill.
+    fn sanitize_install_name(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('\\') {
+            return None;
+        }
+
+        let path = Path::new(trimmed);
+        let mut components = path.components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(name)), None) => {
+                let normalized = name.to_string_lossy().trim().to_string();
+                if normalized.is_empty()
+                    || normalized == "."
+                    || normalized == ".."
+                    || normalized.starts_with('.')
+                {
+                    None
+                } else {
+                    Some(normalized)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Validate an externally sourced installed-directory value without rewriting it.
+    fn require_valid_directory(directory: &str) -> Result<String, AppError> {
+        match Self::sanitize_install_name(directory) {
+            Some(normalized) if normalized == directory => Ok(normalized),
+            _ => Err(AppError::InvalidInput(format!(
+                "Invalid Skill directory (possible path traversal): {directory:?}"
+            ))),
+        }
     }
 
     fn reject_unmanaged_install_collision(
@@ -2056,10 +2143,13 @@ impl SkillService {
             };
 
             for skill in skills {
-                if let Err(error) = Self::validate_update_directory(&skill.directory) {
-                    result.failures.push(format!("{}: {error}", skill.id));
-                    continue;
-                }
+                let directory = match Self::require_valid_directory(&skill.directory) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        result.failures.push(format!("{}: {error}", skill.id));
+                        continue;
+                    }
+                };
                 let remote_dir = match Self::resolve_update_source(
                     temp_dir.path(),
                     &skill,
@@ -2079,7 +2169,7 @@ impl SkillService {
                     }
                 };
 
-                let local_dir = ssot_dir.join(&skill.directory);
+                let local_dir = ssot_dir.join(&directory);
                 let current_hash = if local_dir.is_dir() {
                     match &skill.content_hash {
                         Some(hash) => Some(hash.clone()),
@@ -2140,7 +2230,7 @@ impl SkillService {
         let skill = db
             .get_installed_skill(skill_id)?
             .ok_or_else(|| AppError::Message(format!("Skill not found: {skill_id}")))?;
-        Self::validate_update_directory(&skill.directory)?;
+        let directory = Self::require_valid_directory(&skill.directory)?;
 
         let (owner, name) = match (&skill.repo_owner, &skill.repo_name) {
             (Some(owner), Some(name)) => (owner.clone(), name.clone()),
@@ -2204,7 +2294,7 @@ impl SkillService {
                 "Skill changed during update; run the update again: {skill_id}"
             )));
         }
-        let dest = ssot_dir.join(&skill.directory);
+        let dest = ssot_dir.join(&directory);
         let had_previous = fs::symlink_metadata(&dest).is_ok();
         if had_previous {
             fs::rename(&dest, &previous).map_err(|e| AppError::IoContext {
@@ -2344,6 +2434,13 @@ impl SkillService {
     }
 
     fn resolve_directory_from_input(index: &SkillsIndex, input: &str) -> Option<String> {
+        // Keep poisoned legacy rows removable from the TUI, which submits the
+        // stored directory verbatim. Normalized matching remains available for
+        // ordinary CLI input below.
+        if index.skills.contains_key(input) {
+            return Some(input.to_string());
+        }
+
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return None;
@@ -2453,24 +2550,38 @@ impl SkillService {
             .cloned()
             .ok_or_else(|| AppError::Message(format!("未找到已安装的 Skill: {dir}")))?;
 
-        // Remove from app dirs (best effort).
-        for app in [
-            AppType::Claude,
-            AppType::Codex,
-            AppType::Gemini,
-            AppType::OpenCode,
-            AppType::Hermes,
-        ] {
-            if let Err(e) = Self::remove_from_app(&dir, &app) {
-                log::warn!("从 {app:?} 删除 Skill {dir} 失败: {e}");
-            }
-        }
+        match Self::require_valid_directory(&record.directory) {
+            Ok(directory) => {
+                // Remove from app dirs (best effort).
+                for app in [
+                    AppType::Claude,
+                    AppType::Codex,
+                    AppType::Gemini,
+                    AppType::OpenCode,
+                    AppType::Hermes,
+                ] {
+                    if let Err(error) = Self::remove_from_app(&directory, &app) {
+                        log::warn!("从 {app:?} 删除 Skill {directory} 失败: {error}");
+                    }
+                }
 
-        // Remove from SSOT.
-        let ssot_dir = Self::get_ssot_dir()?;
-        let ssot_path = ssot_dir.join(&dir);
-        if ssot_path.exists() {
-            fs::remove_dir_all(&ssot_path).map_err(|e| AppError::io(&ssot_path, e))?;
+                // Remove from SSOT.
+                let ssot_dir = Self::get_ssot_dir()?;
+                let ssot_path = ssot_dir.join(&directory);
+                if ssot_path.exists() {
+                    fs::remove_dir_all(&ssot_path)
+                        .map_err(|error| AppError::io(&ssot_path, error))?;
+                }
+            }
+            Err(error) => {
+                // A poisoned row must remain removable without touching paths outside
+                // the managed roots.
+                log::warn!(
+                    "Skill {} 的 directory 非法（{:?}），跳过文件清理，仅删除数据库记录: {error}",
+                    record.id,
+                    record.directory
+                );
+            }
         }
 
         let db = Database::init()?;
@@ -2490,22 +2601,35 @@ impl SkillService {
         // Resolve spec to a discoverable skill.
         let discoverable = self.resolve_install_spec(&index, spec).await?;
 
-        // Directory install name is always the last segment.
-        let install_name = Path::new(&discoverable.directory)
+        // Repository sources may be nested, but the installed directory is one safe segment.
+        let source_rel =
+            Self::sanitize_skill_source_path(&discoverable.directory).ok_or_else(|| {
+                AppError::InvalidInput(format!(
+                    "Invalid Skill directory: {:?}",
+                    discoverable.directory
+                ))
+            })?;
+        let install_name = source_rel
             .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| discoverable.directory.clone());
+            .and_then(|name| Self::sanitize_install_name(&name.to_string_lossy()))
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!(
+                    "Invalid Skill directory: {:?}",
+                    discoverable.directory
+                ))
+            })?;
 
         // Conflict check (directory collisions across repos).
-        if let Some(existing) = index.skills.get(&install_name) {
+        if let Some((existing_directory, existing)) = index
+            .skills
+            .iter()
+            .find(|(_, skill)| skill.directory.eq_ignore_ascii_case(&install_name))
+            .map(|(directory, skill)| (directory.clone(), skill.clone()))
+        {
             let same_repo = existing.repo_owner.as_deref()
                 == Some(discoverable.repo_owner.as_str())
                 && existing.repo_name.as_deref() == Some(discoverable.repo_name.as_str());
-            if !same_repo
-                && (existing.repo_owner.is_some()
-                    || existing.repo_name.is_some()
-                    || existing.id.starts_with("local:"))
-            {
+            if !same_repo {
                 let existing_repo = format!(
                     "{}/{}",
                     existing.repo_owner.as_deref().unwrap_or("unknown"),
@@ -2527,9 +2651,11 @@ impl SkillService {
             // Already installed: just enable current app and sync.
             let mut updated = existing.clone();
             updated.apps.set_enabled_for(app, true);
-            index.skills.insert(install_name.clone(), updated.clone());
+            index
+                .skills
+                .insert(existing_directory.clone(), updated.clone());
             Self::save_index(&index)?;
-            Self::sync_to_app_dir(&install_name, app, index.sync_method)?;
+            Self::sync_to_app_dir(&existing_directory, app, index.sync_method)?;
             return Ok(updated);
         }
 
@@ -2803,7 +2929,16 @@ impl SkillService {
         search_sources.push((ssot_dir.clone(), "cc-switch".to_string()));
 
         for selection in imports {
-            let dir_name = selection.directory;
+            let dir_name = match Self::require_valid_directory(&selection.directory) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    log::warn!(
+                        "跳过非法的 Skill 导入目录 {:?}: {error}",
+                        selection.directory
+                    );
+                    continue;
+                }
+            };
             let mut source_path: Option<PathBuf> = None;
 
             for (base, label) in &search_sources {
@@ -3120,6 +3255,23 @@ mod tests {
         }
     }
 
+    fn poisoned_skill(id: &str, directory: &str) -> InstalledSkill {
+        InstalledSkill {
+            id: id.to_string(),
+            name: "Poisoned".to_string(),
+            description: None,
+            directory: directory.to_string(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: SkillApps::default(),
+            installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
+        }
+    }
+
     #[test]
     fn skill_directory_hash_is_stable_and_ignores_hidden_files() {
         let temp = tempfile::tempdir().expect("create hash fixture");
@@ -3323,11 +3475,240 @@ mod tests {
     }
 
     #[test]
-    fn update_directory_must_be_one_safe_path_segment() {
-        assert!(SkillService::validate_update_directory("safe-skill").is_ok());
-        assert!(SkillService::validate_update_directory("../outside").is_err());
-        assert!(SkillService::validate_update_directory("nested/skill").is_err());
-        assert!(SkillService::validate_update_directory("").is_err());
+    fn installed_directory_must_be_one_safe_path_segment() {
+        assert_eq!(
+            SkillService::require_valid_directory("safe-skill").expect("valid directory"),
+            "safe-skill"
+        );
+        for invalid in [
+            "..",
+            "../outside",
+            "nested/skill",
+            "nested\\skill",
+            "",
+            ".hidden",
+            "C:\\outside",
+            "/outside",
+            " safe-skill ",
+        ] {
+            assert!(
+                SkillService::require_valid_directory(invalid).is_err(),
+                "must reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_from_app_rejects_a_traversal_directory() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let victim = home.path().join("victim-remove");
+        fs::create_dir_all(&victim).expect("create victim directory");
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Claude)
+            .expect("resolve isolated Claude Skills directory");
+        fs::create_dir_all(&app_dir).expect("create Claude Skills directory");
+
+        SkillService::remove_from_app("../../victim-remove", &AppType::Claude)
+            .expect_err("traversal directory must be rejected");
+
+        assert!(
+            victim.exists(),
+            "directory outside the app root must survive"
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_a_poisoned_row_without_touching_its_path() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let victim = home.path().join("victim-uninstall");
+        fs::create_dir_all(&victim).expect("create victim directory");
+        let db = Database::init().expect("initialize isolated database");
+        let skill = poisoned_skill("local:poisoned", "../../victim-uninstall");
+        db.save_skill(&skill).expect("save poisoned Skill row");
+
+        SkillService::uninstall(&skill.directory)
+            .expect("poisoned row must remain removable through the TUI directory input");
+
+        assert!(victim.exists(), "directory outside the SSOT must survive");
+        assert!(
+            db.get_installed_skill(&skill.id)
+                .expect("query removed Skill")
+                .is_none(),
+            "poisoned database row must be deleted"
+        );
+    }
+
+    #[test]
+    fn uninstall_accepts_exact_empty_and_whitespace_directory_inputs() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init().expect("initialize isolated database");
+
+        for (id, directory) in [("local:whitespace", " bad "), ("local:empty", "")] {
+            let skill = poisoned_skill(id, directory);
+            db.save_skill(&skill).expect("save poisoned Skill row");
+
+            SkillService::uninstall(directory)
+                .expect("the exact stored directory must remain removable");
+
+            assert!(
+                db.get_installed_skill(id)
+                    .expect("query removed Skill")
+                    .is_none(),
+                "poisoned database row {id} must be deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_to_app_skips_a_poisoned_row_and_syncs_a_healthy_skill() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let ssot_dir = SkillService::get_ssot_dir().expect("resolve isolated SSOT");
+        let healthy_dir = ssot_dir.join("healthy");
+        fs::create_dir_all(&healthy_dir).expect("create healthy Skill");
+        fs::write(healthy_dir.join("SKILL.md"), "# Healthy").expect("write healthy Skill");
+
+        let mut index = SkillsIndex::default();
+        let mut poisoned = poisoned_skill("local:poisoned", "../../escape");
+        poisoned.apps = SkillApps::only(&AppType::Claude);
+        let mut healthy = poisoned_skill("local:healthy", "healthy");
+        healthy.apps = SkillApps::only(&AppType::Claude);
+        index.skills.insert(poisoned.directory.clone(), poisoned);
+        index.skills.insert(healthy.directory.clone(), healthy);
+
+        SkillService::sync_to_app(&index, &AppType::Claude)
+            .expect("one poisoned row must not abort app sync");
+
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Claude)
+            .expect("resolve isolated Claude Skills directory");
+        assert!(
+            app_dir.join("healthy").exists(),
+            "the healthy Skill must still be deployed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn install_rejects_a_traversal_directory_before_filesystem_changes() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init().expect("initialize isolated database");
+        for mut repo in SkillStore::default().repos {
+            repo.enabled = false;
+            db.save_skill_repo(&repo)
+                .expect("disable default repository");
+        }
+        let codex_root = crate::codex_config::get_codex_config_dir();
+        fs::create_dir_all(&codex_root).expect("create isolated Codex root");
+        let sentinel = codex_root.join("sentinel");
+        fs::write(&sentinel, "preserve").expect("write Codex sentinel");
+
+        SkillService::new()
+            .expect("create Skill service")
+            .install("owner/repo:..", &AppType::Codex)
+            .await
+            .expect_err("traversal install must be rejected");
+
+        assert!(
+            sentinel.is_file(),
+            "Codex configuration must not be replaced"
+        );
+        assert!(
+            db.get_all_installed_skills()
+                .expect("list installed Skills")
+                .is_empty(),
+            "invalid install must not persist a Skill"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn install_rejects_case_insensitive_directory_collisions() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init().expect("initialize isolated database");
+        for mut repo in SkillStore::default().repos {
+            repo.enabled = false;
+            db.save_skill_repo(&repo)
+                .expect("disable default repository");
+        }
+        let mut existing = poisoned_skill("legacy-record", "Demo");
+        existing.name = "Legacy".to_string();
+        existing.directory = "Demo".to_string();
+        db.save_skill(&existing).expect("save existing Skill");
+
+        SkillService::new()
+            .expect("create Skill service")
+            .install("second/repo:demo", &AppType::Codex)
+            .await
+            .expect_err("case-insensitive directory collision must be rejected");
+
+        assert_eq!(
+            db.get_all_installed_skills()
+                .expect("list installed Skills")
+                .len(),
+            1,
+            "conflicting install must not add another record"
+        );
+    }
+
+    #[test]
+    fn storage_migration_rejects_a_poisoned_directory_before_moving_it() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let victim = home.path().join("victim-migrate");
+        fs::create_dir_all(&victim).expect("create victim directory");
+        let db = Database::init().expect("initialize isolated database");
+        let skill = poisoned_skill("local:poisoned", "../../victim-migrate");
+        db.save_skill(&skill).expect("save poisoned Skill row");
+
+        SkillService::migrate_storage(SkillStorageLocation::Unified)
+            .expect_err("storage migration must reject a poisoned directory");
+
+        assert!(
+            victim.exists(),
+            "directory outside the SSOT must not be moved"
+        );
+        assert!(
+            !home.path().join(".agents").join("skills").exists(),
+            "migration target must not be created before directory validation"
+        );
+        assert!(
+            !SkillService::storage_migration_journal_path().exists(),
+            "migration intent must not be persisted for an invalid row"
+        );
+    }
+
+    #[test]
+    fn import_skips_a_traversal_selection_without_claiming_its_source() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let victim = home.path().join("victim-import");
+        fs::create_dir_all(&victim).expect("create victim directory");
+        fs::write(victim.join("SKILL.md"), "# Victim").expect("write victim Skill file");
+
+        let imported = SkillService::import_from_apps(vec![ImportSkillSelection {
+            directory: "../../victim-import".to_string(),
+            apps: SkillApps::only(&AppType::Claude),
+        }])
+        .expect("invalid import selections should be skipped");
+
+        assert!(
+            imported.is_empty(),
+            "invalid selection must not be imported"
+        );
+        assert!(
+            victim.exists(),
+            "source outside the SSOT must remain untouched"
+        );
+        assert!(
+            Database::init()
+                .expect("open isolated database")
+                .get_all_installed_skills()
+                .expect("list installed Skills")
+                .is_empty(),
+            "invalid import must not create a database row"
+        );
     }
 
     #[test]
