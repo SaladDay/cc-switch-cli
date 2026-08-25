@@ -69,16 +69,6 @@ AICodeMirror 为 CC-Switch CLI 项目的用户提供了特别福利，通过[此
   </tr>
   <tr>
     <td width="180">
-      <a href="https://runapi.co/register?aff=kTlB">
-        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
-      </a>
-    </td>
-    <td>
-      感谢 <b>RunAPI</b> 赞助本项目！<a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> 是高效稳定的 API 平台和 OpenRouter 平替，一个 API Key 即可访问 OpenAI、Claude、Gemini、DeepSeek、Grok 等 150+ 主流模型，低至 1 折，极其稳定，可以无缝兼容 Claude Code、OpenClaw 等工具。cc-switch-cli 用户专属福利：注册联系管理员即可领取 ￥7 的免费额度。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
       <a href="https://s.qiniu.com/FVfiEb">
         <img src="assets/partners/logos/qiniuyun.png" alt="七牛云AI" width="150">
       </a>

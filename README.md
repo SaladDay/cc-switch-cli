@@ -73,16 +73,6 @@ AICodeMirror also offers an exclusive benefit to users of the CC-Switch CLI proj
   </tr>
   <tr>
     <td width="180">
-      <a href="https://runapi.co/register?aff=kTlB">
-        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>RunAPI</b> for sponsoring this project! <a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> is a fast, stable API platform and OpenRouter alternative. One API key gives access to 150+ mainstream models, including OpenAI, Claude, Gemini, DeepSeek, and Grok, with prices as low as 10% of the original cost. It works with tools such as Claude Code and OpenClaw. Exclusive benefit for cc-switch-cli users: register and contact the admin to claim CNY 7 in free credits.
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
       <a href="https://s.qiniu.com/FVfiEb">
         <img src="assets/partners/logos/qiniuyun.png" alt="Qiniu Cloud AI" width="150">
       </a>
