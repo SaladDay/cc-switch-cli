@@ -22,6 +22,8 @@ impl AppState {
 
         if db_path.exists() {
             let db = Arc::new(Database::init()?);
+            // Initialize default repos once per database.
+            let _ = db.init_default_skill_repos();
             let mut config = export_db_to_multi_app_config(&db)?;
             migrate_legacy_codex_configs(&db, &mut config);
             crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
@@ -77,7 +79,7 @@ impl AppState {
             archive_legacy_file(&skills_path, "migrated")?;
         }
 
-        // Ensure default repos exist (insert-missing only).
+        // Initialize default repos once per database.
         let _ = db.init_default_skill_repos();
 
         let mut config = export_db_to_multi_app_config(&db)?;
@@ -740,7 +742,9 @@ fn migrate_legacy_codex_configs(db: &Database, config: &mut MultiAppConfig) {
 #[cfg(test)]
 mod tests {
     use super::AppState;
+    use crate::database::Database;
     use crate::provider::Provider;
+    use crate::services::skill::{SkillService, SkillStore};
     use crate::test_support::TestEnvGuard;
     use serde_json::json;
     use serial_test::serial;
@@ -763,6 +767,32 @@ mod tests {
             serde_json::to_string_pretty(&value).expect("serialize json"),
         )
         .expect("write json file");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn existing_database_records_default_repo_initialization_before_user_deletes_repos() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let repo = SkillStore::default().repos[0].clone();
+
+        {
+            let db = Database::init().expect("create existing database");
+            db.save_skill_repo(&repo).expect("seed existing repo");
+            assert!(!db
+                .get_bool_flag("default_skill_repos_initialized")
+                .expect("read initialization flag"));
+        }
+
+        let state = AppState::try_new().expect("open existing database");
+        assert!(state
+            .db
+            .get_bool_flag("default_skill_repos_initialized")
+            .expect("read initialization flag"));
+        drop(state);
+
+        SkillService::remove_repo(&repo.owner, &repo.name).expect("delete final repo");
+        assert!(SkillService::list_repos().expect("reload repos").is_empty());
     }
 
     #[test]

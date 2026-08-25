@@ -784,7 +784,7 @@ impl SkillService {
     pub fn load_index() -> Result<SkillsIndex, AppError> {
         let db = Database::init()?;
 
-        // Ensure default repos exist (insert-missing only).
+        // Initialize default repos once per database.
         let _ = db.init_default_skill_repos();
 
         let repos = db.get_skill_repos()?;
