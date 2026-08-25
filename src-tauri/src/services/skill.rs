@@ -24,6 +24,7 @@ use crate::database::Database;
 use crate::error::{format_skill_error, AppError};
 
 const SKILLS_INDEX_VERSION: u32 = 1;
+const SKILLS_DISCOVER_CACHE_VERSION: u32 = 2;
 const MAX_SKILL_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_SKILL_ARCHIVE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SKILL_ARCHIVE_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
@@ -212,7 +213,7 @@ pub struct DiscoverableSkill {
     pub key: String,
     pub name: String,
     pub description: String,
-    /// Directory name (the final path segment)
+    /// Repository-relative source directory, or the repository name for a root Skill.
     pub directory: String,
     #[serde(rename = "readmeUrl")]
     pub readme_url: Option<String>,
@@ -2109,6 +2110,13 @@ impl SkillService {
         }
     }
 
+    fn source_install_name(directory: &str) -> String {
+        Path::new(directory)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| directory.to_string())
+    }
+
     /// Validate an externally sourced installed-directory value without rewriting it.
     fn require_valid_directory(directory: &str) -> Result<String, AppError> {
         match Self::sanitize_install_name(directory) {
@@ -2830,8 +2838,8 @@ impl SkillService {
                 ))
             })??;
 
-            let source =
-                Self::find_skill_dir_in_repo(&temp_dir, &install_name)?.ok_or_else(|| {
+            let source = Self::resolve_skill_source_dir(&temp_dir, &discoverable.directory)?
+                .ok_or_else(|| {
                     let _ = fs::remove_dir_all(&temp_dir);
                     AppError::Message(format_skill_error(
                         "SKILL_DIR_NOT_FOUND",
@@ -2853,10 +2861,12 @@ impl SkillService {
             let source_relative = source.strip_prefix(&temp_dir).map_err(|_| {
                 AppError::Message("Remote Skill source escaped its repository".into())
             })?;
-            let doc_path = format!(
-                "{}/SKILL.md",
-                source_relative.to_string_lossy().replace('\\', "/")
-            );
+            let relative_path = source_relative.to_string_lossy().replace('\\', "/");
+            let doc_path = if relative_path.is_empty() {
+                "SKILL.md".to_string()
+            } else {
+                format!("{relative_path}/SKILL.md")
+            };
             installed_readme_url = Some(Self::build_skill_doc_url(
                 &repo.owner,
                 &repo.name,
@@ -2909,7 +2919,12 @@ impl SkillService {
         // Otherwise treat as directory name (may be ambiguous).
         let matches: Vec<DiscoverableSkill> = discoverable
             .into_iter()
-            .filter(|s| s.directory.eq_ignore_ascii_case(spec))
+            .filter(|skill| {
+                skill.directory.eq_ignore_ascii_case(spec)
+                    || Path::new(&skill.directory)
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(spec))
+            })
             .collect();
 
         match matches.len() {
@@ -3229,7 +3244,8 @@ impl SkillService {
         let mut out: Vec<Skill> = discoverable
             .into_iter()
             .map(|d| {
-                let installed = installed_dirs.contains(&d.directory.to_lowercase());
+                let install_name = Self::source_install_name(&d.directory).to_lowercase();
+                let installed = installed_dirs.contains(&install_name);
                 Skill {
                     key: d.key,
                     name: d.name,
@@ -3279,7 +3295,8 @@ impl SkillService {
         let cache: SkillsDiscoverCache = serde_json::from_str(&content).map_err(|e| {
             AppError::Message(format!("Failed to parse skills discover cache: {e}"))
         })?;
-        if cache.version == SKILLS_INDEX_VERSION && cache.repos_fingerprint == fingerprint {
+        if cache.version == SKILLS_DISCOVER_CACHE_VERSION && cache.repos_fingerprint == fingerprint
+        {
             Ok(Some(cache.skills))
         } else {
             Ok(None)
@@ -3313,8 +3330,9 @@ impl SkillService {
             .collect::<HashSet<_>>();
 
         for skill in &mut skills {
+            let install_name = Self::source_install_name(&skill.directory).to_lowercase();
             let repo_key = (
-                skill.directory.to_lowercase(),
+                install_name.clone(),
                 skill
                     .repo_owner
                     .as_deref()
@@ -3326,8 +3344,8 @@ impl SkillService {
                     .unwrap_or_default()
                     .to_lowercase(),
             );
-            skill.installed = installed_keys.contains(&repo_key)
-                || installed_dirs.contains(&skill.directory.to_lowercase());
+            skill.installed =
+                installed_keys.contains(&repo_key) || installed_dirs.contains(&install_name);
         }
         skills
     }
@@ -3340,7 +3358,7 @@ impl SkillService {
             })?;
         }
         let cache = SkillsDiscoverCache {
-            version: SKILLS_INDEX_VERSION,
+            version: SKILLS_DISCOVER_CACHE_VERSION,
             repos_fingerprint: fingerprint.to_string(),
             skills: skills.to_vec(),
         };
@@ -3794,6 +3812,64 @@ mod tests {
     }
 
     #[test]
+    fn repository_scan_includes_root_level_skill() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        fs::write(temp.path().join("SKILL.md"), "root").expect("write root manifest");
+        let nested = temp.path().join("nested/other");
+        fs::create_dir_all(&nested).expect("create nested skill");
+        fs::write(nested.join("SKILL.md"), "nested").expect("write nested manifest");
+
+        let discovered = SkillService::scan_skill_dirs(temp.path()).expect("scan repository");
+
+        assert_eq!(discovered, vec![temp.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn install_source_prefers_exact_nested_path_for_duplicate_names() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        let first = temp.path().join("first/shared");
+        let expected = temp.path().join("second/shared");
+        for directory in [&first, &expected] {
+            fs::create_dir_all(directory).expect("create nested skill");
+            fs::write(directory.join("SKILL.md"), "skill").expect("write manifest");
+        }
+
+        let resolved = SkillService::resolve_skill_source_dir(temp.path(), "second/shared")
+            .expect("resolve source")
+            .expect("find exact nested source");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn install_source_accepts_root_level_skill() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        fs::write(temp.path().join("SKILL.md"), "root").expect("write root manifest");
+
+        let resolved = SkillService::resolve_skill_source_dir(temp.path(), "repository-name")
+            .expect("resolve source")
+            .expect("find root source");
+
+        assert_eq!(resolved, temp.path());
+    }
+
+    #[test]
+    fn install_source_rejects_same_name_wrapper_without_manifest() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        let wrapper = temp.path().join("shared");
+        fs::create_dir_all(wrapper.join("plugin")).expect("create wrapper");
+        let expected = wrapper.join("skills/shared");
+        fs::create_dir_all(&expected).expect("create nested skill");
+        fs::write(expected.join("SKILL.md"), "skill").expect("write manifest");
+
+        let resolved = SkillService::resolve_skill_source_dir(temp.path(), "shared")
+            .expect("resolve source")
+            .expect("find manifest-anchored source");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
     fn installed_directory_must_be_one_safe_path_segment() {
         assert_eq!(
             SkillService::require_valid_directory("safe-skill").expect("valid directory"),
@@ -4211,6 +4287,66 @@ mod tests {
             skill.readme_url.as_deref(),
             Some("https://github.com/owner/repo")
         );
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn nested_source_path_maps_to_the_installed_leaf_directory() {
+        let temp = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let mut index = SkillsIndex::default();
+        index.skills.clear();
+        index
+            .skills
+            .insert("shared".to_string(), repository_skill(None));
+        let remote = Skill {
+            key: "owner/repo:first/shared".to_string(),
+            name: "Shared".to_string(),
+            description: String::new(),
+            directory: "first/shared".to_string(),
+            readme_url: None,
+            installed: false,
+            repo_owner: Some("owner".to_string()),
+            repo_name: Some("repo".to_string()),
+            repo_branch: Some("main".to_string()),
+        };
+
+        let mut skills = SkillService::apply_installed_state(vec![remote], &index);
+        assert!(skills[0].installed);
+
+        let ssot_skill = SkillService::get_ssot_dir()
+            .expect("resolve SSOT")
+            .join("shared");
+        fs::create_dir_all(&ssot_skill).expect("create installed Skill");
+        fs::write(ssot_skill.join("SKILL.md"), "shared").expect("write manifest");
+        SkillService::merge_local_ssot_skills(&index, &mut skills).expect("merge local Skills");
+
+        assert_eq!(skills.len(), 1);
+        assert!(skills[0].installed);
+        assert_eq!(skills[0].directory, "first/shared");
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn legacy_discovery_cache_is_invalidated_after_source_identity_changes() {
+        let temp = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let path = SkillService::discover_cache_path();
+        fs::create_dir_all(path.parent().expect("cache parent")).expect("create cache directory");
+        let cache = SkillsDiscoverCache {
+            version: SKILLS_DISCOVER_CACHE_VERSION - 1,
+            repos_fingerprint: "owner/repo@main".to_string(),
+            skills: Vec::new(),
+        };
+        fs::write(
+            &path,
+            serde_json::to_vec(&cache).expect("encode legacy cache"),
+        )
+        .expect("write legacy cache");
+
+        assert!(SkillService::load_discover_cache("owner/repo@main")
+            .expect("load discovery cache")
+            .is_none());
     }
 
     #[test]

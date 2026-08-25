@@ -122,7 +122,7 @@ impl SkillService {
 
             let mut found = false;
             for skill in skills.iter_mut() {
-                if skill.directory.eq_ignore_ascii_case(&directory) {
+                if Self::source_install_name(&skill.directory).eq_ignore_ascii_case(&directory) {
                     skill.installed = true;
                     found = true;
                     break;
@@ -199,20 +199,21 @@ impl SkillService {
                 },
             };
 
-            let directory = path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
+            let relative = path.strip_prefix(&temp_dir).unwrap_or(&path);
+            let relative_path = relative.to_string_lossy().replace('\\', "/");
+            let directory = if relative_path.is_empty() {
+                repo.name.clone()
+            } else {
+                relative_path.clone()
+            };
             if directory.is_empty() {
                 continue;
             }
 
-            let relative = path.strip_prefix(&temp_dir).unwrap_or(&path);
-            let relative_path = relative.to_string_lossy().replace('\\', "/");
-            let readme_path = if relative_path.trim().is_empty() {
-                directory.clone()
+            let doc_path = if relative_path.is_empty() {
+                "SKILL.md".to_string()
             } else {
-                relative_path
+                format!("{relative_path}/SKILL.md")
             };
 
             skills.push(DiscoverableSkill {
@@ -220,9 +221,11 @@ impl SkillService {
                 name: meta.name.unwrap_or_else(|| directory.clone()),
                 description: meta.description.unwrap_or_default(),
                 directory,
-                readme_url: Some(format!(
-                    "https://github.com/{}/{}/tree/{}/{}",
-                    repo.owner, repo.name, used_branch, readme_path
+                readme_url: Some(Self::build_skill_doc_url(
+                    &repo.owner,
+                    &repo.name,
+                    &used_branch,
+                    &doc_path,
                 )),
                 repo_owner: repo.owner.clone(),
                 repo_name: repo.name.clone(),
@@ -670,9 +673,9 @@ impl SkillService {
         let mut stack = vec![root.to_path_buf()];
 
         while let Some(dir) = stack.pop() {
-            // Treat directories that contain SKILL.md as a skill root.
-            // Do not treat the repo root itself as a skill to avoid random temp dir names.
-            if dir != root && dir.join("SKILL.md").exists() {
+            // Treat directories that contain SKILL.md as a skill root, including
+            // repositories whose root directory is the Skill itself.
+            if dir.join("SKILL.md").is_file() {
                 results.push(dir);
                 continue;
             }
@@ -729,6 +732,46 @@ impl SkillService {
         }
 
         Ok(matches.into_iter().next())
+    }
+
+    /// Resolve a repository-relative source path to a directory anchored by SKILL.md.
+    pub(super) fn resolve_skill_source_dir(
+        root: &Path,
+        raw_directory: &str,
+    ) -> Result<Option<PathBuf>, AppError> {
+        let Some(source_rel) = Self::sanitize_skill_source_path(raw_directory) else {
+            return Ok(None);
+        };
+        let Some(install_name) = source_rel
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+        else {
+            return Ok(None);
+        };
+
+        let direct = root.join(&source_rel);
+        if direct.is_dir() && direct.join("SKILL.md").is_file() {
+            return Ok(Some(direct));
+        }
+
+        if let Some(found) = Self::find_skill_dir_in_repo(root, &install_name)? {
+            log::info!(
+                "Skill directory '{}' not found at direct path, using fallback: {}",
+                install_name,
+                found.display()
+            );
+            return Ok(Some(found));
+        }
+
+        if root.join("SKILL.md").is_file() {
+            log::info!(
+                "Skill directory '{}' not found, but SKILL.md exists at root, using repo root",
+                install_name
+            );
+            return Ok(Some(root.to_path_buf()));
+        }
+
+        Ok(None)
     }
 
     pub(super) fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), AppError> {
