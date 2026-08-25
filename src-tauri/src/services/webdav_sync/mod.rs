@@ -18,11 +18,11 @@ use crate::settings::{
 };
 
 use super::sync_protocol::{
-    apply_snapshot_with_restore_guard, build_local_snapshot, localized, run_with_sync_lock,
-    sha256_hex, validate_artifact_size_limit, validate_manifest_compat, verify_artifact,
-    ArtifactMeta, RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES,
-    MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_FORMAT, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST,
-    REMOTE_SKILLS_ZIP,
+    apply_snapshot_with_restore_guard, build_local_snapshot, localized,
+    project_current_restored_state_best_effort, run_with_sync_lock, sha256_hex,
+    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
+    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
+    PROTOCOL_FORMAT, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -81,11 +81,28 @@ impl WebDavSyncService {
     }
 
     pub fn download() -> Result<WebDavSyncSummary, AppError> {
-        run_http(run_with_sync_lock(download()))
+        Ok(Self::download_with_warning()?.0)
+    }
+
+    pub(crate) fn download_with_warning() -> Result<(WebDavSyncSummary, Option<String>), AppError> {
+        run_http(run_with_sync_lock(async {
+            let summary = download().await?;
+            let warning = if matches!(summary.decision, SyncDecision::V1MigrationNeeded) {
+                None
+            } else {
+                project_current_restored_state_best_effort("WebDAV restore")
+            };
+            Ok((summary, warning))
+        }))
     }
 
     /// 用户确认后调用：下载 V1 数据 → 应用 → 上传 V2 → 删除 V1
     pub fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
+        Ok(Self::migrate_v1_to_v2_with_warning()?.0)
+    }
+
+    pub(crate) fn migrate_v1_to_v2_with_warning(
+    ) -> Result<(WebDavSyncSummary, Option<String>), AppError> {
         run_http(run_with_sync_lock(migrate_v1_to_v2()))
     }
 }
@@ -511,7 +528,7 @@ async fn cleanup_v1_remote(settings: &WebDavSyncSettings, auth: &webdav::WebDavA
 }
 
 /// 迁移 V1 → V2：下载 V1 数据 → 本地应用 → 上传 V2 → 删除 V1
-async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
+async fn migrate_v1_to_v2() -> Result<(WebDavSyncSummary, Option<String>), AppError> {
     let settings = load_webdav_settings(true)?;
     let auth = webdav::auth_from_credentials(&settings.username, &settings.password);
 
@@ -542,14 +559,18 @@ async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
 
     // 3. 应用到本地
     apply_snapshot_with_restore_guard(&db_sql, &skills_zip).await?;
+    let warning = project_current_restored_state_best_effort("WebDAV V1 migration");
 
     // 4. 重新上传为 V2 格式（upload 内部会 best-effort 清理 V1 远端数据）
     upload().await?;
 
-    Ok(WebDavSyncSummary {
-        decision: SyncDecision::Download,
-        message: "V1 → V2 migration completed".to_string(),
-    })
+    Ok((
+        WebDavSyncSummary {
+            decision: SyncDecision::Download,
+            message: "V1 → V2 migration completed".to_string(),
+        },
+        warning,
+    ))
 }
 
 // ---------------------------------------------------------------------------

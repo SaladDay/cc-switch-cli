@@ -61,9 +61,6 @@ pub(super) fn import(ctx: &mut RuntimeActionContext<'_>, path: String) -> Result
     }
     let state = load_state()?;
     let backup_id = ConfigService::import_config_from_path(&source, &state)?;
-    if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state) {
-        log::warn!("配置导入后同步 live 配置失败: {e}");
-    }
     if backup_id.is_empty() {
         ctx.app
             .push_toast(texts::tui_toast_imported_config(), ToastKind::Success);
@@ -100,9 +97,6 @@ pub(super) fn restore_backup(
 ) -> Result<(), AppError> {
     let state = load_state()?;
     let pre_backup = ConfigService::restore_from_backup_id(&id, &state)?;
-    if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state) {
-        log::warn!("备份恢复后同步 live 配置失败: {e}");
-    }
     if pre_backup.is_empty() {
         ctx.app
             .push_toast(texts::tui_toast_restored_from_backup(), ToastKind::Success);

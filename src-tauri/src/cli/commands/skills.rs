@@ -583,17 +583,12 @@ fn remove_repo(_url: &str) -> Result<(), AppError> {
 
 fn set_repo_enabled(url: &str, enabled: bool) -> Result<(), AppError> {
     let repo = parse_repo_spec(url)?;
-    let existing = SkillService::list_repos()?
-        .into_iter()
-        .find(|candidate| candidate.owner == repo.owner && candidate.name == repo.name)
-        .ok_or_else(|| {
-            AppError::Message(format!(
-                "Repository not found: {}/{}",
-                repo.owner, repo.name
-            ))
-        })?;
-
-    SkillService::upsert_repo(repo_with_enabled(existing, enabled))?;
+    if !SkillService::set_repo_enabled(&repo.owner, &repo.name, enabled)? {
+        return Err(AppError::Message(format!(
+            "Repository not found: {}/{}",
+            repo.owner, repo.name
+        )));
+    }
     println!(
         "{}",
         success(&format!(
@@ -602,11 +597,6 @@ fn set_repo_enabled(url: &str, enabled: bool) -> Result<(), AppError> {
         ))
     );
     Ok(())
-}
-
-fn repo_with_enabled(mut repo: SkillRepo, enabled: bool) -> SkillRepo {
-    repo.enabled = enabled;
-    repo
 }
 
 fn sync_method(method: Option<SyncMethod>) -> Result<(), AppError> {
@@ -705,8 +695,7 @@ fn parse_repo_spec(raw: &str) -> Result<SkillRepo, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_repo_spec, repo_with_enabled};
-    use crate::services::skill::SkillRepo;
+    use super::parse_repo_spec;
 
     #[test]
     fn parse_repo_spec_supports_plain_owner_repo() {
@@ -726,22 +715,5 @@ mod tests {
         assert_eq!(repo.name, "bar");
         assert_eq!(repo.branch, "dev");
         assert!(repo.enabled);
-    }
-
-    #[test]
-    fn repo_with_enabled_preserves_branch_and_identity() {
-        let repo = SkillRepo {
-            owner: "foo".to_string(),
-            name: "bar".to_string(),
-            branch: "release".to_string(),
-            enabled: true,
-        };
-
-        let updated = repo_with_enabled(repo, false);
-
-        assert_eq!(updated.owner, "foo");
-        assert_eq!(updated.name, "bar");
-        assert_eq!(updated.branch, "release");
-        assert!(!updated.enabled);
     }
 }

@@ -2,7 +2,7 @@ use clap::Subcommand;
 
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
-use crate::services::{ProviderService, S3SyncService};
+use crate::services::S3SyncService;
 use crate::settings::{get_s3_sync_settings, set_s3_sync_settings, S3SyncSettings};
 
 #[derive(Subcommand, Debug, Clone)]
@@ -189,21 +189,14 @@ fn upload() -> Result<(), AppError> {
 }
 
 fn download() -> Result<(), AppError> {
-    let summary = S3SyncService::download()?;
-    sync_live_config_after_s3();
-    println!("{}", success(&summary.message));
-    Ok(())
-}
-
-fn sync_live_config_after_s3() {
-    let Ok(state) = crate::AppState::try_new() else {
-        return;
-    };
-    if let Err(error) = ProviderService::sync_current_to_live(&state) {
+    let (summary, post_sync_warning) = S3SyncService::download_with_warning()?;
+    if let Some(error) = &post_sync_warning {
         let en = format!("Live config sync after S3 restore failed: {error}");
         let zh = format!("S3 恢复后同步 live 配置失败: {error}");
         println!("{}", warning(crate::t!(&en, &zh)));
     }
+    println!("{}", success(&summary.message));
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

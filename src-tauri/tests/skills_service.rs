@@ -116,6 +116,62 @@ fn list_installed_triggers_initial_ssot_migration() {
 }
 
 #[test]
+fn migration_reloads_pending_state_before_deciding() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut stale_index = SkillService::load_index().expect("load stale index");
+    assert!(!stale_index.ssot_migration_pending);
+    write_skill_md(
+        &home.join(".claude").join("skills").join("late-skill"),
+        "Late Skill",
+        "Appeared after the stale snapshot",
+    );
+    Database::init()
+        .expect("init db")
+        .set_setting("skills_ssot_migration_pending", "true")
+        .expect("set pending after snapshot");
+
+    let created = SkillService::migrate_ssot_if_pending(&mut stale_index)
+        .expect("migration should reload pending state");
+
+    assert_eq!(created, 1);
+    assert!(stale_index.skills.contains_key("late-skill"));
+    assert!(home
+        .join(".cc-switch")
+        .join("skills")
+        .join("late-skill")
+        .is_dir());
+}
+
+#[test]
+fn set_repo_enabled_updates_only_the_enabled_field() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let repo = SkillService::list_repos()
+        .expect("initialize repos")
+        .into_iter()
+        .next()
+        .expect("default repo");
+
+    assert!(
+        SkillService::set_repo_enabled(&repo.owner, &repo.name, false)
+            .expect("disable existing repo")
+    );
+    let stored = SkillService::list_repos()
+        .expect("list repos")
+        .into_iter()
+        .find(|candidate| candidate.owner == repo.owner && candidate.name == repo.name)
+        .expect("stored repo");
+    assert_eq!(stored.branch, repo.branch);
+    assert!(!stored.enabled);
+    assert!(!SkillService::set_repo_enabled("missing", "repo", true)
+        .expect("missing repo is reported without insertion"));
+}
+
+#[test]
 fn import_from_apps_imports_agents_skill_with_lock_metadata() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -177,11 +233,8 @@ fn scan_unmanaged_includes_agents_and_ssot_sources() {
         "Agents Skill",
         "Found in agents",
     );
-    write_skill_md(
-        &home.join(".cc-switch").join("skills").join("ssot-skill"),
-        "SSOT Skill",
-        "Found in ssot",
-    );
+    let ssot = SkillService::get_ssot_dir().expect("create managed SSOT");
+    write_skill_md(&ssot.join("ssot-skill"), "SSOT Skill", "Found in ssot");
 
     let unmanaged = SkillService::scan_unmanaged().expect("scan unmanaged skills");
 

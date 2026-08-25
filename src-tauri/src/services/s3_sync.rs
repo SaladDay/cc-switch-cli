@@ -12,10 +12,11 @@ use crate::settings::{
 
 use super::s3::{self, S3Credentials};
 use super::sync_protocol::{
-    apply_snapshot_with_restore_guard, build_local_snapshot, localized, run_with_sync_lock,
-    sha256_hex, validate_artifact_size_limit, validate_manifest_compat, verify_artifact,
-    ArtifactMeta, RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES,
-    MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    apply_snapshot_with_restore_guard, build_local_snapshot, localized,
+    project_current_restored_state_best_effort, run_with_sync_lock, sha256_hex,
+    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
+    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
+    PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 use super::webdav_sync::SyncDecision;
 
@@ -68,7 +69,15 @@ impl S3SyncService {
     }
 
     pub fn download() -> Result<S3SyncSummary, AppError> {
-        let result = run_http(run_with_sync_lock(download()));
+        Ok(Self::download_with_warning()?.0)
+    }
+
+    pub(crate) fn download_with_warning() -> Result<(S3SyncSummary, Option<String>), AppError> {
+        let result = run_http(run_with_sync_lock(async {
+            let summary = download().await?;
+            let warning = project_current_restored_state_best_effort("S3 restore");
+            Ok((summary, warning))
+        }));
         if let Err(error) = &result {
             persist_sync_error_best_effort(error, "manual");
         }

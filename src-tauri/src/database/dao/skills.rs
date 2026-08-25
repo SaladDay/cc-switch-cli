@@ -248,6 +248,23 @@ impl Database {
         Ok(())
     }
 
+    /// 精确更新 Skill 仓库启用状态，避免覆盖并发更新的分支等字段。
+    pub fn set_skill_repo_enabled(
+        &self,
+        owner: &str,
+        name: &str,
+        enabled: bool,
+    ) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let changed = conn
+            .execute(
+                "UPDATE skill_repos SET enabled = ?3 WHERE owner = ?1 AND name = ?2",
+                params![owner, name, enabled],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(changed > 0)
+    }
+
     /// 初始化默认的 Skill 仓库（启动时调用，每个数据库仅执行一次）
     pub fn init_default_skill_repos(&self) -> Result<usize, AppError> {
         const INITIALIZED_KEY: &str = "default_skill_repos_initialized";

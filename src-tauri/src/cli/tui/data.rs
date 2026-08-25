@@ -3635,26 +3635,26 @@ fn proxy_target_snapshot_for_app(
 }
 
 fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
-    Ok(SkillsSnapshot {
-        installed: SkillService::list_installed()?,
-        repos: SkillService::list_repos()?,
-        sync_method: SkillService::get_sync_method()?,
-    })
+    Ok(skills_snapshot_from_index(
+        SkillService::load_index_after_migration()?,
+    ))
 }
 
 fn load_skills_snapshot_from_state(state: &AppState) -> Result<SkillsSnapshot, AppError> {
-    let mut installed = state
-        .db
-        .get_all_installed_skills()?
-        .into_values()
-        .collect::<Vec<_>>();
+    Ok(skills_snapshot_from_index(
+        SkillService::load_index_from_database(&state.db)?,
+    ))
+}
+
+fn skills_snapshot_from_index(index: crate::services::skill::SkillsIndex) -> SkillsSnapshot {
+    let mut installed = index.skills.into_values().collect::<Vec<_>>();
     installed.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    Ok(SkillsSnapshot {
+    SkillsSnapshot {
         installed,
-        repos: state.db.get_skill_repos()?,
-        sync_method: SkillService::get_sync_method()?,
-    })
+        repos: index.repos,
+        sync_method: index.sync_method,
+    }
 }
 
 #[cfg(test)]

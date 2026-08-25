@@ -10,7 +10,7 @@ use super::super::app::{
     model_fetch_filter, App, CloudSyncBackend, CloudSyncTransferIntent, ConfirmAction,
     ConfirmOverlay, LoadingKind, Overlay, SessionsPane, ToastKind,
 };
-use super::super::data::{load_state, ProviderRuntimeSnapshot, UiData};
+use super::super::data::{ProviderRuntimeSnapshot, UiData};
 use super::super::runtime_actions::app_display_name;
 use super::super::CacheInvalidation;
 use super::types::{
@@ -1555,43 +1555,25 @@ pub(crate) fn handle_webdav_msg(
                         };
                         app.push_toast(msg, ToastKind::Success);
                     }
-                    WebDavDone::Downloaded { decision, message } => {
-                        match decision {
-                            SyncDecision::V1MigrationNeeded => {
-                                app.overlay = Overlay::Confirm(ConfirmOverlay {
-                                    title: texts::tui_webdav_v1_migration_title().to_string(),
-                                    message: texts::tui_webdav_v1_migration_message().to_string(),
-                                    action: ConfirmAction::WebDavMigrateV1ToV2,
-                                });
-                            }
-                            _ => {
-                                let msg = match decision {
-                                    SyncDecision::Download => {
-                                        texts::tui_toast_webdav_download_ok().to_string()
-                                    }
-                                    _ => message,
-                                };
-                                if let Ok(state) = load_state() {
-                                    if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(
-                                    &state,
-                                ) {
-                                    log::warn!("WebDAV 下载后同步 live 配置失败: {e}");
-                                }
-                                }
-                                app.push_toast(msg, ToastKind::Success);
-                            }
+                    WebDavDone::Downloaded { decision, message } => match decision {
+                        SyncDecision::V1MigrationNeeded => {
+                            app.overlay = Overlay::Confirm(ConfirmOverlay {
+                                title: texts::tui_webdav_v1_migration_title().to_string(),
+                                message: texts::tui_webdav_v1_migration_message().to_string(),
+                                action: ConfirmAction::WebDavMigrateV1ToV2,
+                            });
                         }
-                    }
+                        _ => {
+                            let msg = match decision {
+                                SyncDecision::Download => {
+                                    texts::tui_toast_webdav_download_ok().to_string()
+                                }
+                                _ => message,
+                            };
+                            app.push_toast(msg, ToastKind::Success);
+                        }
+                    },
                     WebDavDone::V1Migrated { message: _ } => {
-                        if let Ok(state) = load_state() {
-                            if let Err(e) =
-                                crate::services::provider::ProviderService::sync_current_to_live(
-                                    &state,
-                                )
-                            {
-                                log::warn!("WebDAV V1 迁移后同步 live 配置失败: {e}");
-                            }
-                        }
                         app.push_toast(
                             texts::tui_toast_webdav_v1_migration_ok(),
                             ToastKind::Success,
@@ -1663,17 +1645,6 @@ pub(crate) fn handle_webdav_msg(
                         app.push_toast(message, ToastKind::Success);
                     }
                     WebDavDone::S3Downloaded { decision, message } => {
-                        if let Ok(state) = load_state() {
-                            if let Err(error) =
-                                crate::services::provider::ProviderService::sync_current_to_live(
-                                    &state,
-                                )
-                            {
-                                log::warn!(
-                                    "S3 restore completed but live config sync failed: {error}"
-                                );
-                            }
-                        }
                         let message = if matches!(decision, SyncDecision::Download) {
                             texts::tui_toast_s3_restore_ok().to_string()
                         } else {

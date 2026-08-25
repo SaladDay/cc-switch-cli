@@ -264,16 +264,12 @@ pub(super) fn repo_toggle_enabled(
     name: String,
     enabled: bool,
 ) -> Result<(), AppError> {
-    let mut index = SkillService::load_index()?;
-    if let Some(repo) = index
-        .repos
-        .iter_mut()
-        .find(|r| r.owner == owner && r.name == name)
-    {
-        repo.enabled = enabled;
-        SkillService::save_index(&index)?;
-        clear_repo_discover_state(ctx);
+    if !SkillService::set_repo_enabled(&owner, &name, enabled)? {
+        return Err(AppError::Message(format!(
+            "Repository not found: {owner}/{name}"
+        )));
     }
+    clear_repo_discover_state(ctx);
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app
         .push_toast(texts::tui_toast_repo_toggled(enabled), ToastKind::Success);

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 use zip::{write::SimpleFileOptions, DateTime};
 
+use crate::config::create_managed_config_dir_all;
 use crate::error::AppError;
 use crate::services::skill::{SkillService, SkillStorageLocation};
 
@@ -70,7 +71,7 @@ impl SkillsBackup {
             fs::remove_dir_all(&self.ssot_dir).map_err(|e| AppError::io(&self.ssot_dir, e))?;
         }
         if self.backup_path.exists() {
-            fs::create_dir_all(&self.ssot_dir).map_err(|e| AppError::io(&self.ssot_dir, e))?;
+            create_managed_config_dir_all(&self.ssot_dir)?;
             copy_dir_recursive(&self.backup_path, &self.ssot_dir)?;
         }
         Ok(())
@@ -85,7 +86,7 @@ fn ensure_unified_ssot_is_fully_managed(ssot: &Path) -> Result<(), AppError> {
     if !unified_storage_enabled() || !ssot.exists() {
         return Ok(());
     }
-    let managed = SkillService::load_index()?.skills;
+    let managed = SkillService::load_index_unlocked()?.skills;
     for entry in fs::read_dir(ssot).map_err(|error| AppError::io(ssot, error))? {
         let entry = entry.map_err(|error| AppError::io(ssot, error))?;
         let file_name = entry.file_name();
@@ -354,7 +355,9 @@ pub fn restore_skills_zip(raw: &[u8]) -> Result<(), AppError> {
         fs::rename(&ssot, &bak).map_err(|e| AppError::io(&ssot, e))?;
     }
 
-    if let Err(e) = copy_dir_recursive(&extracted, &ssot) {
+    if let Err(e) =
+        create_managed_config_dir_all(&ssot).and_then(|_| copy_dir_recursive(&extracted, &ssot))
+    {
         if bak.exists() {
             let _ = fs::remove_dir_all(&ssot);
             let _ = fs::rename(&bak, &ssot);

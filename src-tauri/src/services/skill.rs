@@ -14,6 +14,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
 
@@ -31,6 +32,27 @@ const MAX_SKILL_ARCHIVE_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_SKILL_ARCHIVE_PATH_DEPTH: usize = 64;
 const SKILL_ARCHIVE_ENTRY_COST: u64 = 4096;
 const STORAGE_MIGRATION_JOURNAL_FILE: &str = "skill-storage-migration.json";
+
+// Coordinates the Skills database rows with the filesystem SSOT and app projections.
+// Lock order: process-wide sync coordination (when present) -> this lock -> database mutex.
+fn skill_state_lock() -> &'static RwLock<()> {
+    static LOCK: OnceLock<RwLock<()>> = OnceLock::new();
+    LOCK.get_or_init(|| RwLock::new(()))
+}
+
+pub(crate) fn skill_state_read_guard() -> RwLockReadGuard<'static, ()> {
+    skill_state_lock().read().unwrap_or_else(|poisoned| {
+        log::warn!("Skills state read lock was poisoned; recovering protected state");
+        poisoned.into_inner()
+    })
+}
+
+pub(crate) fn skill_state_write_guard() -> RwLockWriteGuard<'static, ()> {
+    skill_state_lock().write().unwrap_or_else(|poisoned| {
+        log::warn!("Skills state write lock was poisoned; recovering protected state");
+        poisoned.into_inner()
+    })
+}
 
 fn default_skills_index_version() -> u32 {
     SKILLS_INDEX_VERSION
@@ -783,11 +805,33 @@ impl SkillService {
     // ---------------------------------------------------------------------
 
     pub fn load_index() -> Result<SkillsIndex, AppError> {
+        // Default repository initialization is a write, so keep it and the
+        // following multi-query snapshot in one exclusive state window.
+        let _state_guard = skill_state_write_guard();
         let db = Database::init()?;
-
-        // Initialize default repos once per database.
         let _ = db.init_default_skill_repos();
+        Self::load_index_from_db(&db)
+    }
 
+    /// Caller must hold either the Skills state read or write guard.
+    pub(crate) fn load_index_unlocked() -> Result<SkillsIndex, AppError> {
+        let db = Database::init()?;
+        Self::load_index_from_db(&db)
+    }
+
+    pub(crate) fn load_index_after_migration() -> Result<SkillsIndex, AppError> {
+        let mut index = Self::load_index()?;
+        Self::migrate_ssot_if_pending(&mut index)?;
+        let _state_guard = skill_state_read_guard();
+        Self::load_index_unlocked()
+    }
+
+    pub(crate) fn load_index_from_database(db: &Database) -> Result<SkillsIndex, AppError> {
+        let _state_guard = skill_state_read_guard();
+        Self::load_index_from_db(db)
+    }
+
+    fn load_index_from_db(db: &Database) -> Result<SkillsIndex, AppError> {
         let repos = db.get_skill_repos()?;
         let installed = db.get_all_installed_skills()?;
         let skills: HashMap<String, InstalledSkill> = installed
@@ -810,6 +854,12 @@ impl SkillService {
     }
 
     pub fn save_index(index: &SkillsIndex) -> Result<(), AppError> {
+        let _state_guard = skill_state_write_guard();
+        Self::save_index_unlocked(index)
+    }
+
+    /// Caller must hold the Skills state write guard.
+    fn save_index_unlocked(index: &SkillsIndex) -> Result<(), AppError> {
         let db = Database::init()?;
 
         crate::settings::set_skill_sync_method(index.sync_method)?;
@@ -830,6 +880,8 @@ impl SkillService {
     // ---------------------------------------------------------------------
 
     pub fn migrate_ssot_if_pending(index: &mut SkillsIndex) -> Result<usize, AppError> {
+        let _state_guard = skill_state_write_guard();
+        *index = Self::load_index_unlocked()?;
         if !index.ssot_migration_pending {
             return Ok(0);
         }
@@ -912,7 +964,7 @@ impl SkillService {
 
             index.ssot_migration_pending = false;
             let _ = db.set_setting("skills_ssot_migration_pending", "false");
-            Self::save_index(index)?;
+            Self::save_index_unlocked(index)?;
             return Ok(created);
         }
 
@@ -1003,7 +1055,7 @@ impl SkillService {
 
         index.ssot_migration_pending = false;
         let _ = db.set_setting("skills_ssot_migration_pending", "false");
-        Self::save_index(index)?;
+        Self::save_index_unlocked(index)?;
         Ok(created)
     }
 
@@ -1287,6 +1339,12 @@ impl SkillService {
     }
 
     pub fn sync_to_app(index: &SkillsIndex, app: &AppType) -> Result<(), AppError> {
+        let _state_guard = skill_state_read_guard();
+        Self::sync_to_app_unlocked(index, app)
+    }
+
+    /// Caller must hold either the Skills state read or write guard.
+    fn sync_to_app_unlocked(index: &SkillsIndex, app: &AppType) -> Result<(), AppError> {
         if !Self::app_supports_skills(app) {
             return Ok(());
         }
@@ -1340,8 +1398,10 @@ impl SkillService {
     pub fn sync_all_enabled_best_effort() -> Result<(), AppError> {
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index);
+        let _state_guard = skill_state_read_guard();
+        let index = Self::load_index_unlocked()?;
         for app in Self::supported_skill_apps() {
-            if let Err(e) = Self::sync_to_app(&index, &app) {
+            if let Err(e) = Self::sync_to_app_unlocked(&index, &app) {
                 log::warn!("同步 Skill 到 {app:?} 失败: {e}");
             }
         }
@@ -1351,12 +1411,14 @@ impl SkillService {
     pub fn sync_all_enabled(app: Option<&AppType>) -> Result<(), AppError> {
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index)?;
+        let _state_guard = skill_state_read_guard();
+        let index = Self::load_index_unlocked()?;
 
         match app {
-            Some(app) => Self::sync_to_app(&index, app)?,
+            Some(app) => Self::sync_to_app_unlocked(&index, app)?,
             None => {
                 for app in Self::supported_skill_apps() {
-                    Self::sync_to_app(&index, &app)?;
+                    Self::sync_to_app_unlocked(&index, &app)?;
                 }
             }
         }
@@ -1724,6 +1786,7 @@ impl SkillService {
     /// Target copies are verified before the setting changes. Old copies remain
     /// available until every enabled app deployment has been refreshed.
     pub fn migrate_storage(target: SkillStorageLocation) -> Result<MigrationResult, AppError> {
+        let _state_guard = skill_state_write_guard();
         let current = crate::settings::get_skill_storage_location();
         let mut journal = Self::load_storage_migration_journal()?;
         if current == target && journal.is_none() {
@@ -1748,7 +1811,7 @@ impl SkillService {
         Self::validate_skill_storage_destination(&old_dir)?;
         Self::validate_skill_storage_destination(&new_dir)?;
 
-        let index = Self::load_index()?;
+        let index = Self::load_index_unlocked()?;
         // The migration journal and every filesystem sink below use the installed
         // directory as a path segment. Reject a poisoned row before creating the
         // destination or performing any per-Skill write.
@@ -2289,6 +2352,10 @@ impl SkillService {
                 }
             };
 
+            // Remote I/O is complete; keep the local DB and SSOT stable while
+            // hashes are read and missing hash metadata is backfilled.
+            let _state_guard = skill_state_read_guard();
+
             for skill in skills {
                 let directory = match Self::require_valid_directory(&skill.directory) {
                     Ok(directory) => directory,
@@ -2412,20 +2479,12 @@ impl SkillService {
             .map_err(|_| AppError::Message("Remote Skill source escaped its repository".into()))?
             .to_path_buf();
 
-        let ssot_dir = Self::get_ssot_dir()?;
-        let sync_method = Self::get_sync_method()?;
-        let staging = tempfile::Builder::new()
-            .prefix(".cc-switch-skill-update-")
-            .tempdir_in(&ssot_dir)
-            .map_err(|e| AppError::io(&ssot_dir, e))?;
-        let next = staging.path().join("next");
-        let previous = staging.path().join("previous");
-        Self::copy_dir_recursive(&source, &next)?;
-        drop(temp_dir);
-
-        let content_hash = Self::compute_dir_hash(&next)?;
+        let content_hash = Self::compute_dir_hash(&source)?;
         let (new_name, new_description) =
-            Self::read_skill_name_desc(&next.join("SKILL.md"), &skill.directory);
+            Self::read_skill_name_desc(&source.join("SKILL.md"), &skill.directory);
+        // Remote I/O and inspection are complete. Serialize SSOT staging, the
+        // final replacement, metadata write, and app refresh as one mutation.
+        let _state_guard = skill_state_write_guard();
         let current = db.get_installed_skill(skill_id)?.ok_or_else(|| {
             AppError::Message(format!("Skill was removed during update: {skill_id}"))
         })?;
@@ -2436,11 +2495,22 @@ impl SkillService {
             || current.readme_url != skill.readme_url
             || current.content_hash != skill.content_hash
             || current.updated_at != skill.updated_at
+            || current.installed_at != skill.installed_at
         {
             return Err(AppError::Message(format!(
                 "Skill changed during update; run the update again: {skill_id}"
             )));
         }
+        let ssot_dir = Self::get_ssot_dir()?;
+        let staging = tempfile::Builder::new()
+            .prefix(".cc-switch-skill-update-")
+            .tempdir_in(&ssot_dir)
+            .map_err(|e| AppError::io(&ssot_dir, e))?;
+        let next = staging.path().join("next");
+        let previous = staging.path().join("previous");
+        Self::copy_dir_recursive(&source, &next)?;
+        drop(temp_dir);
+        let sync_method = Self::get_sync_method()?;
         let dest = ssot_dir.join(&directory);
         let had_previous = fs::symlink_metadata(&dest).is_ok();
         if had_previous {
@@ -2557,27 +2627,24 @@ impl SkillService {
     }
 
     pub fn set_sync_method(method: SyncMethod) -> Result<(), AppError> {
+        let _state_guard = skill_state_write_guard();
         crate::settings::set_skill_sync_method(method)
     }
 
     pub fn upsert_repo(repo: SkillRepo) -> Result<(), AppError> {
-        let mut index = Self::load_index()?;
-        if let Some(pos) = index
-            .repos
-            .iter()
-            .position(|r| r.owner == repo.owner && r.name == repo.name)
-        {
-            index.repos[pos] = repo;
-        } else {
-            index.repos.push(repo);
-        }
-        Self::save_index(&index)?;
-        Ok(())
+        let _state_guard = skill_state_write_guard();
+        Database::init()?.save_skill_repo(&repo)
     }
 
     pub fn remove_repo(owner: &str, name: &str) -> Result<(), AppError> {
+        let _state_guard = skill_state_write_guard();
         let db = Database::init()?;
         db.delete_skill_repo(owner, name)
+    }
+
+    pub fn set_repo_enabled(owner: &str, name: &str, enabled: bool) -> Result<bool, AppError> {
+        let _state_guard = skill_state_write_guard();
+        Database::init()?.set_skill_repo_enabled(owner, name, enabled)
     }
 
     fn resolve_directory_from_input(index: &SkillsIndex, input: &str) -> Option<String> {
@@ -2620,8 +2687,72 @@ impl SkillService {
         None
     }
 
+    /// Caller must hold the Skills state write guard.
+    fn reuse_existing_install(
+        discoverable: &DiscoverableSkill,
+        install_name: &str,
+        app: &AppType,
+    ) -> Result<Option<InstalledSkill>, AppError> {
+        let db = Database::init()?;
+        for existing in db.get_all_installed_skills()?.values() {
+            if !existing.directory.eq_ignore_ascii_case(install_name) {
+                continue;
+            }
+
+            let same_repo = existing.repo_owner.as_deref()
+                == Some(discoverable.repo_owner.as_str())
+                && existing.repo_name.as_deref() == Some(discoverable.repo_name.as_str());
+            if !same_repo {
+                let existing_repo = format!(
+                    "{}/{}",
+                    existing.repo_owner.as_deref().unwrap_or("unknown"),
+                    existing.repo_name.as_deref().unwrap_or("unknown")
+                );
+                let new_repo = format!("{}/{}", discoverable.repo_owner, discoverable.repo_name);
+                return Err(AppError::Message(format_skill_error(
+                    "SKILL_DIRECTORY_CONFLICT",
+                    &[
+                        ("directory", install_name),
+                        ("existing_repo", existing_repo.as_str()),
+                        ("new_repo", new_repo.as_str()),
+                    ],
+                    Some("uninstallFirst"),
+                )));
+            }
+
+            let mut updated = existing.clone();
+            updated.apps.set_enabled_for(app, true);
+            db.save_skill(&updated)?;
+            Self::sync_to_app_dir(&updated.directory, app, Self::get_sync_method()?)?;
+            return Ok(Some(updated));
+        }
+
+        Ok(None)
+    }
+
+    /// Caller must hold the Skills state write guard.
+    fn persist_and_sync_new_skill(
+        db: &Database,
+        installed: &InstalledSkill,
+        app: &AppType,
+        sync_method: SyncMethod,
+    ) -> Result<(), AppError> {
+        db.save_skill(installed)?;
+        if let Err(error) = Self::sync_to_app_dir(&installed.directory, app, sync_method) {
+            if let Err(rollback_error) = db.delete_skill(&installed.id) {
+                log::error!(
+                    "Failed to roll back Skill {} after sync error: {rollback_error}",
+                    installed.id
+                );
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn toggle_app(directory_or_id: &str, app: &AppType, enabled: bool) -> Result<(), AppError> {
-        let mut index = Self::load_index()?;
+        let _state_guard = skill_state_write_guard();
+        let mut index = Self::load_index_unlocked()?;
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
             return Err(AppError::Message(format!(
                 "未找到已安装的 Skill: {directory_or_id}"
@@ -2644,12 +2775,13 @@ impl SkillService {
             Self::remove_from_app(&record.directory, app)?;
         }
 
-        Self::save_index(&index)?;
+        Database::init()?.save_skill(record)?;
         Ok(())
     }
 
     pub fn set_apps(directory_or_id: &str, apps: SkillApps) -> Result<bool, AppError> {
-        let mut index = Self::load_index()?;
+        let _state_guard = skill_state_write_guard();
+        let mut index = Self::load_index_unlocked()?;
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
             return Err(AppError::Message(format!(
                 "未找到已安装的 Skill: {directory_or_id}"
@@ -2680,12 +2812,13 @@ impl SkillService {
             }
         }
 
-        Self::save_index(&index)?;
+        Database::init()?.save_skill(record)?;
         Ok(true)
     }
 
     pub fn uninstall(directory_or_id: &str) -> Result<(), AppError> {
-        let index = Self::load_index()?;
+        let _state_guard = skill_state_write_guard();
+        let index = Self::load_index_unlocked()?;
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
             return Err(AppError::Message(format!(
                 "未找到已安装的 Skill: {directory_or_id}"
@@ -2766,54 +2899,22 @@ impl SkillService {
                 ))
             })?;
 
-        // Conflict check (directory collisions across repos).
-        if let Some((existing_directory, existing)) = index
-            .skills
-            .iter()
-            .find(|(_, skill)| skill.directory.eq_ignore_ascii_case(&install_name))
-            .map(|(directory, skill)| (directory.clone(), skill.clone()))
-        {
-            let same_repo = existing.repo_owner.as_deref()
-                == Some(discoverable.repo_owner.as_str())
-                && existing.repo_name.as_deref() == Some(discoverable.repo_name.as_str());
-            if !same_repo {
-                let existing_repo = format!(
-                    "{}/{}",
-                    existing.repo_owner.as_deref().unwrap_or("unknown"),
-                    existing.repo_name.as_deref().unwrap_or("unknown")
-                );
-                let new_repo = format!("{}/{}", discoverable.repo_owner, discoverable.repo_name);
-
-                return Err(AppError::Message(format_skill_error(
-                    "SKILL_DIRECTORY_CONFLICT",
-                    &[
-                        ("directory", install_name.as_str()),
-                        ("existing_repo", existing_repo.as_str()),
-                        ("new_repo", new_repo.as_str()),
-                    ],
-                    Some("uninstallFirst"),
-                )));
-            }
-
-            // Already installed: just enable current app and sync.
-            let mut updated = existing.clone();
-            updated.apps.set_enabled_for(app, true);
-            index
-                .skills
-                .insert(existing_directory.clone(), updated.clone());
-            Self::save_index(&index)?;
-            Self::sync_to_app_dir(&existing_directory, app, index.sync_method)?;
-            return Ok(updated);
-        }
-
-        // Ensure SSOT dir and install files.
-        let ssot_dir = Self::get_ssot_dir()?;
-        let dest = ssot_dir.join(&install_name);
         let new_repo = format!("{}/{}", discoverable.repo_owner, discoverable.repo_name);
-        Self::reject_unmanaged_install_collision(&dest, &install_name, &new_repo)?;
+        let needs_download = {
+            let _state_guard = skill_state_write_guard();
+            if let Some(existing) = Self::reuse_existing_install(&discoverable, &install_name, app)?
+            {
+                return Ok(existing);
+            }
+            let dest = Self::get_ssot_dir()?.join(&install_name);
+            Self::reject_unmanaged_install_collision(&dest, &install_name, &new_repo)?;
+            !dest.exists()
+        };
+
         let mut installed_branch = discoverable.repo_branch.clone();
         let mut installed_readme_url = discoverable.readme_url.clone();
-        if !dest.exists() {
+        let mut downloaded_source: Option<(DownloadedRepoGuard, PathBuf)> = None;
+        if needs_download {
             let repo = SkillRepo {
                 owner: discoverable.repo_owner.clone(),
                 name: discoverable.repo_name.clone(),
@@ -2838,9 +2939,9 @@ impl SkillService {
                 ))
             })??;
 
-            let source = Self::resolve_skill_source_dir(&temp_dir, &discoverable.directory)?
+            let temp_dir = DownloadedRepoGuard::new(temp_dir);
+            let source = Self::resolve_skill_source_dir(temp_dir.path(), &discoverable.directory)?
                 .ok_or_else(|| {
-                    let _ = fs::remove_dir_all(&temp_dir);
                     AppError::Message(format_skill_error(
                         "SKILL_DIR_NOT_FOUND",
                         &[("directory", install_name.as_str())],
@@ -2849,7 +2950,6 @@ impl SkillService {
                 })?;
 
             if !source.exists() {
-                let _ = fs::remove_dir_all(&temp_dir);
                 let source_path_string = source.display().to_string();
                 return Err(AppError::Message(format_skill_error(
                     "SKILL_DIR_NOT_FOUND",
@@ -2858,7 +2958,7 @@ impl SkillService {
                 )));
             }
 
-            let source_relative = source.strip_prefix(&temp_dir).map_err(|_| {
+            let source_relative = source.strip_prefix(temp_dir.path()).map_err(|_| {
                 AppError::Message("Remote Skill source escaped its repository".into())
             })?;
             let relative_path = source_relative.to_string_lossy().replace('\\', "/");
@@ -2874,8 +2974,26 @@ impl SkillService {
                 &doc_path,
             ));
             installed_branch = used_branch;
-            Self::copy_dir_recursive(&source, &dest)?;
-            let _ = fs::remove_dir_all(&temp_dir);
+            downloaded_source = Some((temp_dir, source));
+        }
+
+        // Network I/O is complete. Re-check under the write guard before any
+        // SSOT or database mutation, then keep the projection consistent.
+        let _state_guard = skill_state_write_guard();
+        if let Some(existing) = Self::reuse_existing_install(&discoverable, &install_name, app)? {
+            return Ok(existing);
+        }
+        let ssot_dir = Self::get_ssot_dir()?;
+        let dest = ssot_dir.join(&install_name);
+        Self::reject_unmanaged_install_collision(&dest, &install_name, &new_repo)?;
+        if !dest.exists() {
+            let source = downloaded_source
+                .as_ref()
+                .map(|(_, source)| source)
+                .ok_or_else(|| {
+                    AppError::Message("Skill directory changed during install; retry".into())
+                })?;
+            Self::copy_dir_recursive(source, &dest)?;
         }
 
         let installed = InstalledSkill {
@@ -2897,9 +3015,8 @@ impl SkillService {
             updated_at: 0,
         };
 
-        index.skills.insert(install_name.clone(), installed.clone());
-        Self::save_index(&index)?;
-        Self::sync_to_app_dir(&install_name, app, index.sync_method)?;
+        let db = Database::init()?;
+        Self::persist_and_sync_new_skill(&db, &installed, app, Self::get_sync_method()?)?;
 
         Ok(installed)
     }
@@ -2974,7 +3091,8 @@ impl SkillService {
     // ---------------------------------------------------------------------
 
     pub fn scan_unmanaged() -> Result<Vec<UnmanagedSkill>, AppError> {
-        let index = Self::load_index()?;
+        let _state_guard = skill_state_read_guard();
+        let index = Self::load_index_unlocked()?;
         let managed: HashSet<String> = index.skills.keys().cloned().collect();
 
         let mut scan_sources: Vec<(PathBuf, String)> = Vec::new();
@@ -3060,7 +3178,8 @@ impl SkillService {
     pub fn import_from_apps(
         imports: Vec<ImportSkillSelection>,
     ) -> Result<Vec<InstalledSkill>, AppError> {
-        let mut index = Self::load_index()?;
+        let _state_guard = skill_state_write_guard();
+        let mut index = Self::load_index_unlocked()?;
         let ssot_dir = Self::get_ssot_dir()?;
         let agents_lock = parse_agents_lock();
         let mut imported = Vec::new();
@@ -3140,7 +3259,13 @@ impl SkillService {
             imported.push(skill);
         }
 
-        Self::save_index(&index)?;
+        let db = Database::init()?;
+        for repo in &index.repos {
+            db.save_skill_repo(repo)?;
+        }
+        for skill in &imported {
+            db.save_skill(skill)?;
+        }
         Ok(imported)
     }
 
@@ -3373,6 +3498,71 @@ impl SkillService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_state_lock_allows_snapshots_but_excludes_writers() {
+        let first_reader = skill_state_read_guard();
+        let second_reader = skill_state_read_guard();
+        assert!(
+            skill_state_lock().try_write().is_err(),
+            "a Skill mutation must wait for every snapshot reader"
+        );
+
+        drop(second_reader);
+        drop(first_reader);
+    }
+
+    #[test]
+    fn new_install_rolls_back_database_row_when_projection_fails() {
+        let temp = tempfile::tempdir().expect("create test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let _state_guard = skill_state_write_guard();
+        let directory = "rollback-skill";
+        let source = SkillService::get_ssot_dir()
+            .expect("create SSOT")
+            .join(directory);
+        fs::create_dir_all(&source).expect("create source Skill");
+        fs::write(source.join("SKILL.md"), "# managed\n").expect("write source Skill");
+
+        let app_dir =
+            SkillService::get_app_skills_dir(&AppType::Claude).expect("resolve Claude Skills");
+        fs::create_dir_all(app_dir.parent().expect("Claude config directory"))
+            .expect("create Claude config directory");
+        fs::write(&app_dir, "not a directory\n").expect("block app Skills directory creation");
+
+        let installed = InstalledSkill {
+            id: "example/skills:rollback-skill".to_string(),
+            name: "Rollback Skill".to_string(),
+            description: None,
+            directory: directory.to_string(),
+            repo_owner: Some("example".to_string()),
+            repo_name: Some("skills".to_string()),
+            repo_branch: Some("main".to_string()),
+            readme_url: None,
+            apps: SkillApps::only(&AppType::Claude),
+            installed_at: Utc::now().timestamp(),
+            content_hash: None,
+            updated_at: 0,
+        };
+        let db = Database::init().expect("init database");
+
+        SkillService::persist_and_sync_new_skill(
+            &db,
+            &installed,
+            &AppType::Claude,
+            SyncMethod::Symlink,
+        )
+        .expect_err("unmanaged destination must reject projection");
+
+        assert!(db
+            .get_installed_skill(&installed.id)
+            .expect("query rolled-back Skill")
+            .is_none());
+        assert_eq!(
+            fs::read_to_string(app_dir).expect("blocking file remains"),
+            "not a directory\n"
+        );
+    }
 
     fn test_repo_archive_at(
         path: &str,

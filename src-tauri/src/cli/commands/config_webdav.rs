@@ -269,29 +269,25 @@ fn upload() -> Result<(), AppError> {
 }
 
 fn download() -> Result<(), AppError> {
-    let summary = WebDavSyncService::download()?;
-    sync_live_config_after_webdav();
+    let (summary, post_sync_warning) = WebDavSyncService::download_with_warning()?;
+    if let Some(error) = &post_sync_warning {
+        let en = format!("Live config sync after WebDAV operation failed: {error}");
+        let zh = format!("WebDAV 操作后同步 live 配置失败: {error}");
+        println!("{}", warning(crate::t!(&en, &zh)));
+    }
     println!("{}", success(&summary.message));
     Ok(())
 }
 
 fn migrate_v1_to_v2() -> Result<(), AppError> {
-    let summary = WebDavSyncService::migrate_v1_to_v2()?;
-    sync_live_config_after_webdav();
-    println!("{}", success(&summary.message));
-    Ok(())
-}
-
-fn sync_live_config_after_webdav() {
-    let Ok(state) = crate::AppState::try_new() else {
-        return;
-    };
-
-    if let Err(err) = crate::services::ProviderService::sync_current_to_live(&state) {
-        let en = format!("Live config sync after WebDAV operation failed: {err}");
-        let zh = format!("WebDAV 操作后同步 live 配置失败: {err}");
+    let (summary, post_sync_warning) = WebDavSyncService::migrate_v1_to_v2_with_warning()?;
+    if let Some(error) = &post_sync_warning {
+        let en = format!("Live config sync after WebDAV operation failed: {error}");
+        let zh = format!("WebDAV 操作后同步 live 配置失败: {error}");
         println!("{}", warning(crate::t!(&en, &zh)));
     }
+    println!("{}", success(&summary.message));
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

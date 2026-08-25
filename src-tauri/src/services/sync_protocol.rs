@@ -14,7 +14,9 @@ use tempfile::tempdir;
 
 use crate::database::{Database, SCHEMA_VERSION};
 use crate::error::AppError;
+use crate::store::AppState;
 
+use super::skill::{skill_state_read_guard, skill_state_write_guard};
 use super::webdav_sync::archive::{restore_skills_zip, zip_skills_ssot, SkillsBackup};
 
 pub(crate) const PROTOCOL_FORMAT: &str = "cc-switch-webdav-sync";
@@ -43,6 +45,38 @@ where
 {
     let _guard = sync_mutex().lock().await;
     operation.await
+}
+
+pub(crate) fn run_with_sync_lock_sync<T>(
+    operation: impl FnOnce() -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    futures::executor::block_on(async {
+        let _guard = sync_mutex().lock().await;
+        operation()
+    })
+}
+
+pub(crate) fn project_restored_state_best_effort(
+    state: &AppState,
+    context: &str,
+) -> Option<String> {
+    match super::ProviderService::sync_current_to_live(state) {
+        Ok(()) => None,
+        Err(error) => {
+            log::warn!("{context} completed but live config sync failed: {error}");
+            Some(error.to_string())
+        }
+    }
+}
+
+pub(crate) fn project_current_restored_state_best_effort(context: &str) -> Option<String> {
+    match AppState::try_new() {
+        Ok(state) => project_restored_state_best_effort(&state, context),
+        Err(error) => {
+            log::warn!("{context} completed but state reload failed: {error}");
+            Some(error.to_string())
+        }
+    }
 }
 
 pub(crate) fn localized(
@@ -109,7 +143,11 @@ impl RemoteLayout {
 }
 
 pub(crate) fn build_local_snapshot() -> Result<LocalSnapshot, AppError> {
-    let db_sql = Database::init()?.export_sql_string_for_sync()?.into_bytes();
+    let db = Database::init()?;
+    // Keep Skills database rows and the filesystem SSOT at one logical point
+    // in time while the two snapshot artifacts are built.
+    let _skill_state_guard = skill_state_read_guard();
+    let db_sql = db.export_sql_string_for_sync()?.into_bytes();
 
     let temp = tempdir().map_err(|error| {
         io_context_localized(
@@ -298,6 +336,9 @@ pub(crate) fn apply_snapshot(db_sql: &[u8], skills_zip: &[u8]) -> Result<(), App
     })?;
     validate_sql_user_version_for_import(sql)?;
 
+    // Exclude local Skills mutations while both the SSOT and its database rows
+    // are replaced. The outer sync/restore guards are acquired before this lock.
+    let _skill_state_guard = skill_state_write_guard();
     let skills_backup = SkillsBackup::backup_current_skills()?;
     restore_skills_zip(skills_zip)?;
 
@@ -447,15 +488,35 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn webdav_and_s3_share_one_sync_mutex() {
+    async fn cloud_and_synchronous_restore_paths_share_one_sync_mutex() {
         let webdav_lock = crate::services::webdav_sync::sync_mutex();
         let s3_lock = crate::services::s3_sync::sync_mutex();
         assert!(std::ptr::eq(webdav_lock, s3_lock));
 
         let guard = webdav_lock.lock().await;
         assert!(s3_lock.try_lock().is_err());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).expect("announce synchronous restore");
+            run_with_sync_lock_sync(|| {
+                entered_tx.send(()).expect("enter synchronous restore");
+                Ok(())
+            })
+            .expect("run synchronous restore");
+        });
+        started_rx.recv().expect("wait for synchronous restore");
+        assert!(
+            entered_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the synchronous restore path must wait for the cloud sync lock"
+        );
         drop(guard);
-        assert!(s3_lock.try_lock().is_ok());
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("synchronous restore enters after cloud sync");
+        waiter.join().expect("join synchronous restore");
     }
 
     fn manifest(db_compat_version: Option<u32>) -> SyncManifest {
