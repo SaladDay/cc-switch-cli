@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.3] - 2026-08-25
+
+### Added
+
+- **Network / Global Outbound Proxy**: Add persistent HTTP, HTTPS, and SOCKS5 proxy settings across the CLI, TUI, daemon, updater, provider checks, authentication, discovery, and cloud-sync clients. Resolves [#419](https://github.com/SaladDay/cc-switch-cli/issues/419) and provides the supported global alternative discussed in [#420](https://github.com/SaladDay/cc-switch-cli/issues/420).
+- **Skills / Storage and Deployment**: Let users keep managed Skills in either CC Switch storage or the shared `~/.agents/skills` directory, migrate managed content safely between them, and choose symlink or copy deployment from the TUI. Addresses [#413](https://github.com/SaladDay/cc-switch-cli/issues/413) and incorporates the original proposal and implementation work from [#414](https://github.com/SaladDay/cc-switch-cli/pull/414).
+- **Library Embedding / Optional CLI Surface**: Make CLI-only dependencies optional behind the default `cli` feature so Rust and napi-rs consumers can build the library with `default-features = false`, with structural Linux and Windows CI checks protecting that boundary. Includes [#421](https://github.com/SaladDay/cc-switch-cli/pull/421).
+
+### Changed
+
+- **TUI / Provider Templates**: Replace the overflowing horizontal template chip row with a focused field and grouped picker that keeps every preset reachable and restores focus predictably. Fixes [#416](https://github.com/SaladDay/cc-switch-cli/issues/416).
+- **Skills / Upstream Alignment**: Align repository metadata, deleted-default preservation, deployment reconciliation, managed-directory validation, update/install behavior, and configuration/cloud-restore projection with upstream CC-Switch while keeping the CLI/TUI interaction model.
+- **Sponsors / Documentation**: Remove the RunAPI sponsor listing from the English and Chinese READMEs while retaining its provider preset.
+
+### Fixed
+
+- **Skills / State Safety**: Prevent stale snapshots and unsafe managed paths from corrupting or overwriting Skills state during install, update, uninstall, repository changes, storage migration, app projection, and backup or cloud restore operations. New-install projection failures now roll back their database row, and restored managed directories retain secure permissions.
+- **Android / Session Usage**: Use Android's available `flock(2)` path for the cross-process session-usage lock instead of the unsupported standard-library file-lock implementation. Fixes [#426](https://github.com/SaladDay/cc-switch-cli/issues/426).
+- **Library Builds / Feature Boundary**: Keep CLI-only exports and database helpers behind the correct feature gates, and add positive-control CI checks so library-only builds cannot silently regain CLI dependencies.
+
+### Upgrade notes
+
+- The database schema remains at v17; no database migration is required.
+- Existing Skills storage and deployment settings are preserved. Switching to `~/.agents/skills` is explicit and migrates only database-managed Skills; conflicting or unmanaged target directories are not claimed or overwritten.
+- No outbound proxy is saved by default. When no saved proxy exists, standard proxy environment variables remain effective; if none are set, requests go directly. A saved proxy takes precedence over those variables. Existing provider-specific endpoint and authentication settings are unchanged.
+- This patch is recommended for users of Skills, Android/Termux session usage, embedded library builds, provider templates, or outbound proxies.
+
+### Thanks
+
+Thank you to everyone who reported an issue, shared diagnostics, continued a discussion, proposed a change, or opened a pull request during this patch cycle:
+
+- Issue reports, requests, and follow-up testing: [@LeonardoTan19](https://github.com/LeonardoTan19) ([#416](https://github.com/SaladDay/cc-switch-cli/issues/416)), [@Wq-dd](https://github.com/Wq-dd) ([#419](https://github.com/SaladDay/cc-switch-cli/issues/419)), [@wildoranges](https://github.com/wildoranges) ([#420](https://github.com/SaladDay/cc-switch-cli/issues/420)), [@whyseu](https://github.com/whyseu) ([#425](https://github.com/SaladDay/cc-switch-cli/issues/425)), [@Merilune](https://github.com/Merilune) ([#426](https://github.com/SaladDay/cc-switch-cli/issues/426)), and [@Gis-Code](https://github.com/Gis-Code) ([#427](https://github.com/SaladDay/cc-switch-cli/issues/427)).
+- Pull requests and code proposals: [@ShatterDusk](https://github.com/ShatterDusk) ([#414](https://github.com/SaladDay/cc-switch-cli/pull/414)), [@Lingrui98](https://github.com/Lingrui98) ([#417](https://github.com/SaladDay/cc-switch-cli/pull/417)), [@SomSamantray](https://github.com/SomSamantray) ([#418](https://github.com/SaladDay/cc-switch-cli/pull/418)), [@cindyrui71](https://github.com/cindyrui71) and [@bytemain](https://github.com/bytemain) ([#421](https://github.com/SaladDay/cc-switch-cli/pull/421)), and [@bytemain](https://github.com/bytemain) ([#423](https://github.com/SaladDay/cc-switch-cli/pull/423)).
+- Continued issue and pull-request discussions: [@moonjoke001](https://github.com/moonjoke001), [@dividduang](https://github.com/dividduang), and [@suntory1](https://github.com/suntory1) ([#358](https://github.com/SaladDay/cc-switch-cli/issues/358)); [@evelyn-jialin-zhang](https://github.com/evelyn-jialin-zhang) ([#408](https://github.com/SaladDay/cc-switch-cli/issues/408)); and [@ChanthMiao](https://github.com/ChanthMiao) ([#409](https://github.com/SaladDay/cc-switch-cli/pull/409)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and all upstream CC-Switch contributors whose work was adapted here, especially [@yovinchen](https://github.com/yovinchen) ([upstream #596](https://github.com/farion1231/cc-switch/pull/596)) for the global proxy foundation, and [@makoMakoGo](https://github.com/makoMakoGo) ([#4153](https://github.com/farion1231/cc-switch/pull/4153)), [@allenxu09](https://github.com/allenxu09) ([#5356](https://github.com/farion1231/cc-switch/pull/5356)), [@zayokami](https://github.com/zayokami) ([#5811](https://github.com/farion1231/cc-switch/pull/5811), [#6119](https://github.com/farion1231/cc-switch/pull/6119)), and [@YUZHEthefool](https://github.com/YUZHEthefool) ([#6119](https://github.com/farion1231/cc-switch/pull/6119), [#6147](https://github.com/farion1231/cc-switch/pull/6147)) for the Skills behavior and consistency work aligned in this release.
+
+Some acknowledged reports and proposals remain open, were superseded, or were not merged; inclusion here is a thank-you, not a change in their status.
+
 ## [5.10.2] - 2026-08-18
 
 ### Added
