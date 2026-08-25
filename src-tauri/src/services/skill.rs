@@ -14,6 +14,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
 
 use crate::app_config::AppType;
@@ -1060,36 +1061,149 @@ impl SkillService {
         let directory = Self::require_valid_directory(directory)?;
         let ssot_dir = Self::get_ssot_dir()?;
         let source = ssot_dir.join(&directory);
-        if !source.exists() {
-            return Err(AppError::Message(format!(
-                "Skill 不存在于 SSOT: {directory}"
-            )));
-        }
+        Self::validate_sync_source_dir(&source, &directory)?;
 
         let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         // D5: allow creating target app dirs during skills sync.
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
 
         let dest = app_dir.join(&directory);
-        if dest.exists() || Self::is_symlink(&dest) {
-            Self::remove_path(&dest)?;
-        }
 
         match method {
-            SyncMethod::Auto => match Self::create_symlink(&source, &dest) {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    log::warn!(
-                        "Symlink 创建失败，将回退到文件复制: {} -> {}. 错误: {err}",
-                        source.display(),
-                        dest.display()
-                    );
-                    Self::copy_dir_recursive(&source, &dest)
+            SyncMethod::Auto => {
+                if dest.exists() && !Self::is_symlink(&dest) {
+                    return Self::replace_dest_with_copy(&source, &dest, &directory);
                 }
-            },
-            SyncMethod::Symlink => Self::create_symlink(&source, &dest),
-            SyncMethod::Copy => Self::copy_dir_recursive(&source, &dest),
+
+                if Self::is_symlink(&dest) {
+                    Self::remove_path(&dest)?;
+                }
+
+                match Self::create_symlink(&source, &dest) {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        log::warn!(
+                            "Symlink 创建失败，将回退到文件复制: {} -> {}. 错误: {err}",
+                            source.display(),
+                            dest.display()
+                        );
+                        Self::replace_dest_with_copy(&source, &dest, &directory)
+                    }
+                }
+            }
+            SyncMethod::Symlink => {
+                if dest.exists() || Self::is_symlink(&dest) {
+                    Self::remove_path(&dest)?;
+                }
+                Self::create_symlink(&source, &dest)
+            }
+            SyncMethod::Copy => Self::replace_dest_with_copy(&source, &dest, &directory),
         }
+    }
+
+    fn validate_sync_source_dir(source: &Path, directory: &str) -> Result<(), AppError> {
+        if !source.is_dir() {
+            return Err(AppError::Message(format!(
+                "Skill 不存在于 SSOT: {directory}"
+            )));
+        }
+
+        let manifest = source.join("SKILL.md");
+        if !manifest.is_file() {
+            return Err(AppError::Message(format!(
+                "Skill 源目录缺少 SKILL.md，拒绝同步以避免覆盖目标目录: {}",
+                source.display()
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn replace_dest_with_copy(source: &Path, dest: &Path, directory: &str) -> Result<(), AppError> {
+        Self::validate_sync_source_dir(source, directory)?;
+
+        let parent = dest.parent().ok_or_else(|| {
+            AppError::InvalidInput(format!("Invalid Skill destination: {}", dest.display()))
+        })?;
+        fs::create_dir_all(parent).map_err(|error| AppError::io(parent, error))?;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_name = Self::sanitize_backup_segment(directory);
+        let tmp = parent.join(format!(".{tmp_name}.tmp-{}-{nonce}", std::process::id()));
+
+        if tmp.exists() || Self::is_symlink(&tmp) {
+            Self::remove_path(&tmp)?;
+        }
+
+        if let Err(error) = Self::copy_dir_recursive(source, &tmp) {
+            let _ = Self::remove_path(&tmp);
+            return Err(error);
+        }
+
+        if dest.exists() || Self::is_symlink(dest) {
+            Self::remove_path(dest)?;
+        }
+
+        if let Err(error) = fs::rename(&tmp, dest) {
+            let _ = Self::remove_path(&tmp);
+            return Err(AppError::IoContext {
+                context: format!(
+                    "替换 Skill 目录失败: {} -> {}",
+                    tmp.display(),
+                    dest.display()
+                ),
+                source: error,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn sanitize_backup_segment(segment: &str) -> String {
+        let sanitized = segment
+            .chars()
+            .map(|character| match character {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => character,
+                _ => '-',
+            })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
+
+        if sanitized.is_empty() {
+            "skill".to_string()
+        } else {
+            sanitized
+        }
+    }
+
+    /// Return whether a path is a symlink whose target lives under the SSOT.
+    fn is_symlink_to_ssot(path: &Path, ssot_dir: &Path) -> bool {
+        if !Self::is_symlink(path) {
+            return false;
+        }
+
+        let Ok(target) = fs::read_link(path) else {
+            return false;
+        };
+
+        if target.is_absolute() && target.starts_with(ssot_dir) {
+            return true;
+        }
+
+        let resolved = path
+            .parent()
+            .map(|parent| parent.join(&target))
+            .unwrap_or(target.clone());
+        let canonical_ssot = ssot_dir
+            .canonicalize()
+            .unwrap_or_else(|_| ssot_dir.to_path_buf());
+        let canonical_target = resolved.canonicalize().unwrap_or(resolved);
+
+        canonical_target.starts_with(&canonical_ssot)
     }
 
     fn sync_updated_skill_to_app(
@@ -1104,11 +1218,7 @@ impl SkillService {
         let directory = Self::require_valid_directory(directory)?;
         let ssot_dir = Self::get_ssot_dir()?;
         let source = ssot_dir.join(&directory);
-        if !source.is_dir() {
-            return Err(AppError::Message(format!(
-                "Skill does not exist in SSOT: {directory}"
-            )));
-        }
+        Self::validate_sync_source_dir(&source, &directory)?;
         let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
         let dest = app_dir.join(&directory);
@@ -1124,7 +1234,9 @@ impl SkillService {
         let previous = staging.path().join("previous");
         match method {
             SyncMethod::Auto => {
-                if let Err(error) = Self::create_symlink(&source, &next) {
+                if dest.exists() && !Self::is_symlink(&dest) {
+                    Self::copy_dir_recursive(&source, &next)?;
+                } else if let Err(error) = Self::create_symlink(&source, &next) {
                     log::warn!(
                         "Symlink creation failed during Skill update, falling back to copy: {error}"
                     );
@@ -1178,10 +1290,36 @@ impl SkillService {
             return Ok(());
         }
 
-        // Resolve root overlap once so configuration errors still fail the whole
-        // operation; only individual poisoned Skill rows are skipped below.
         let ssot_dir = Self::get_ssot_dir()?;
-        Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
+        let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
+        let indexed_skills: HashMap<String, &InstalledSkill> = index
+            .skills
+            .values()
+            .map(|skill| (skill.directory.to_lowercase(), skill))
+            .collect();
+
+        if app_dir.exists() {
+            for entry in fs::read_dir(&app_dir).map_err(|error| AppError::io(&app_dir, error))? {
+                let entry = entry.map_err(|error| AppError::io(&app_dir, error))?;
+                let path = entry.path();
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+
+                if dir_name.starts_with('.') {
+                    continue;
+                }
+
+                if let Some(skill) = indexed_skills.get(&dir_name.to_lowercase()) {
+                    if !skill.apps.is_enabled_for(app) {
+                        Self::remove_path(&path)?;
+                    }
+                    continue;
+                }
+
+                if Self::is_symlink_to_ssot(&path, &ssot_dir) {
+                    Self::remove_path(&path)?;
+                }
+            }
+        }
 
         for skill in index.skills.values() {
             if skill.apps.is_enabled_for(app) {
@@ -1498,6 +1636,7 @@ impl SkillService {
     ) -> Result<(), AppError> {
         let directory = Self::require_valid_directory(directory)?;
         let source = new_root.join(&directory);
+        Self::validate_sync_source_dir(&source, &directory)?;
         let expected_hash = Self::migration_tree_hash(&source)?;
         let app_dir = Self::get_distinct_app_skills_dir(new_root, app)?;
         let destination = app_dir.join(&directory);
@@ -3396,6 +3535,13 @@ mod tests {
             .expect("resolve isolated SSOT")
             .join("demo");
         fs::create_dir_all(&source).expect("create replacement source");
+        SkillService::sync_updated_skill_to_app("demo", &AppType::Codex, SyncMethod::Copy)
+            .expect_err("an incomplete staged source should fail");
+        assert_eq!(
+            fs::read_to_string(deployed.join("SKILL.md")).expect("read preserved deployment"),
+            "old"
+        );
+
         fs::write(source.join("SKILL.md"), "new").expect("write replacement source");
         SkillService::sync_updated_skill_to_app("demo", &AppType::Codex, SyncMethod::Copy)
             .expect("deploy replacement");
@@ -3403,6 +3549,179 @@ mod tests {
             fs::read_to_string(deployed.join("SKILL.md")).expect("read replaced deployment"),
             "new"
         );
+    }
+
+    #[test]
+    fn copy_sync_rejects_an_incomplete_source_without_touching_the_destination() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve isolated SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create incomplete source");
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Codex)
+            .expect("resolve isolated Codex Skills directory");
+        let destination = app_dir.join("demo");
+        fs::create_dir_all(&destination).expect("create existing destination");
+        fs::write(destination.join("SKILL.md"), "old").expect("write existing destination");
+
+        let error = SkillService::sync_to_app_dir("demo", &AppType::Codex, SyncMethod::Copy)
+            .expect_err("a source without SKILL.md must not be deployed");
+
+        assert!(error.to_string().contains("SKILL.md"), "{error}");
+        assert_eq!(
+            fs::read_to_string(destination.join("SKILL.md")).expect("read preserved destination"),
+            "old"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_sync_keeps_the_destination_when_staging_fails() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve isolated SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create source");
+        fs::write(source.join("SKILL.md"), "new").expect("write source manifest");
+        std::os::unix::fs::symlink(source.join("missing"), source.join("broken"))
+            .expect("create dangling source symlink");
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Codex)
+            .expect("resolve isolated Codex Skills directory");
+        let destination = app_dir.join("demo");
+        fs::create_dir_all(&destination).expect("create existing destination");
+        fs::write(destination.join("SKILL.md"), "old").expect("write existing destination");
+
+        SkillService::sync_to_app_dir("demo", &AppType::Codex, SyncMethod::Copy)
+            .expect_err("a staging copy failure must be reported");
+
+        assert_eq!(
+            fs::read_to_string(destination.join("SKILL.md")).expect("read preserved destination"),
+            "old"
+        );
+    }
+
+    #[test]
+    fn auto_sync_refreshes_an_existing_copy_without_converting_it_to_a_symlink() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve isolated SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create source");
+        fs::write(source.join("SKILL.md"), "new").expect("write source manifest");
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Codex)
+            .expect("resolve isolated Codex Skills directory");
+        let destination = app_dir.join("demo");
+        fs::create_dir_all(&destination).expect("create existing copy");
+        fs::write(destination.join("SKILL.md"), "old").expect("write existing copy");
+
+        SkillService::sync_to_app_dir("demo", &AppType::Codex, SyncMethod::Auto)
+            .expect("refresh existing copy");
+
+        assert!(!SkillService::is_symlink(&destination));
+        assert_eq!(
+            fs::read_to_string(destination.join("SKILL.md")).expect("read refreshed copy"),
+            "new"
+        );
+
+        fs::write(source.join("SKILL.md"), "updated").expect("update source manifest");
+        SkillService::sync_updated_skill_to_app("demo", &AppType::Codex, SyncMethod::Auto)
+            .expect("refresh existing copy after a Skill update");
+        assert!(!SkillService::is_symlink(&destination));
+        assert_eq!(
+            fs::read_to_string(destination.join("SKILL.md")).expect("read updated copy"),
+            "updated"
+        );
+    }
+
+    #[test]
+    fn copy_staging_sanitizes_nonportable_skill_names() {
+        assert_eq!(
+            SkillService::sanitize_backup_segment(&"💡".repeat(60)),
+            "skill"
+        );
+        assert_eq!(
+            SkillService::sanitize_backup_segment("demo skill"),
+            "demo-skill"
+        );
+    }
+
+    #[test]
+    fn app_sync_removes_disabled_deployments_but_preserves_unmanaged_directories() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Codex)
+            .expect("resolve isolated Codex Skills directory");
+        for directory in ["disabled", "unmanaged"] {
+            let path = app_dir.join(directory);
+            fs::create_dir_all(&path).expect("create app Skill directory");
+            fs::write(path.join("SKILL.md"), directory).expect("write app Skill manifest");
+        }
+        let mut index = SkillsIndex::default();
+        let disabled = poisoned_skill("local:disabled", "disabled");
+        index.skills.insert(disabled.directory.clone(), disabled);
+
+        SkillService::sync_to_app(&index, &AppType::Codex).expect("reconcile app Skills");
+
+        assert!(!app_dir.join("disabled").exists());
+        assert!(app_dir.join("unmanaged").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_sync_removes_an_orphaned_ssot_symlink_without_touching_its_source() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve isolated SSOT")
+            .join("orphaned");
+        fs::create_dir_all(&source).expect("create orphaned SSOT source");
+        fs::write(source.join("SKILL.md"), "orphaned").expect("write orphaned source");
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Codex)
+            .expect("resolve isolated Codex Skills directory");
+        fs::create_dir_all(&app_dir).expect("create Codex Skills directory");
+        let deployment = app_dir.join("orphaned");
+        std::os::unix::fs::symlink(&source, &deployment).expect("create orphaned deployment");
+
+        SkillService::sync_to_app(&SkillsIndex::default(), &AppType::Codex)
+            .expect("reconcile orphaned deployment");
+
+        assert!(fs::symlink_metadata(&deployment).is_err());
+        assert!(source.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn migration_refresh_rejects_matching_incomplete_source_and_destination() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let old_root = home.path().join("old-skills");
+        let new_root = home.path().join("new-skills");
+        let source = new_root.join("demo");
+        fs::create_dir_all(&source).expect("create incomplete migrated source");
+        fs::write(source.join("data.txt"), "same").expect("write migrated source content");
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Codex)
+            .expect("resolve isolated Codex Skills directory");
+        let destination = app_dir.join("demo");
+        fs::create_dir_all(&destination).expect("create matching deployment");
+        fs::write(destination.join("data.txt"), "same").expect("write matching deployment");
+
+        let error = SkillService::sync_migrated_skill_to_app(
+            "demo",
+            &AppType::Codex,
+            SyncMethod::Copy,
+            &old_root,
+            &new_root,
+        )
+        .expect_err("a migrated source without SKILL.md must be rejected");
+
+        assert!(error.to_string().contains("SKILL.md"), "{error}");
+        assert_eq!(
+            fs::read_to_string(destination.join("data.txt")).expect("read preserved destination"),
+            "same"
+        );
+        assert!(source.join("data.txt").is_file());
     }
 
     #[test]
