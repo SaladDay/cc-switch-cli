@@ -1959,27 +1959,23 @@ fn run_session_scan(
         }
     };
 
-    // Opening a scope reads one immutable page only. Sessions is intentionally
-    // manual-refresh-only: a valid persisted generation completes an ordinary
-    // entry request here, without walking or statting provider sources. A
-    // missing manifest falls through to the unavoidable one-time bootstrap.
+    // Opening a scope reads one immutable page only, so a persisted generation
+    // can paint immediately. Keep the request active afterward and revalidate
+    // provider sources through the sidecar cache; manual refresh alone forces
+    // unchanged files to be reparsed.
     let mut needs_provisional = false;
     if !force {
         let opened = manifest_store
             .open_reader(&provider_id)
             .and_then(|reader| reader.load_page(0).map(|page| (reader, page)));
         needs_provisional = opened.is_none();
-        let complete = opened.is_some();
         let _ = tx.send(SessionMsg::ScopeOpened {
             request_id,
             scope_epoch,
             scope: provider_id.clone(),
-            complete,
+            complete: false,
             result: Ok(opened),
         });
-        if complete {
-            return;
-        }
     }
 
     let store = match crate::session_manager::scan_cache_store::ScanCacheStore::open() {
@@ -4157,7 +4153,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(home_settings)]
-    fn session_entry_uses_valid_manifest_without_source_revalidation() {
+    fn session_entry_shows_cached_manifest_then_revalidates_sources() {
         let home = tempfile::tempdir().expect("isolated test home");
         let _env = crate::test_support::TestEnvGuard::isolated(home.path());
         let config_dir = home.path().join(".cc-switch");
@@ -4185,24 +4181,45 @@ mod tests {
             .expect("stage cached session");
         builder.publish().expect("publish cached manifest");
 
+        let project_dir = home.path().join(".claude").join("projects").join("project");
+        std::fs::create_dir_all(&project_dir).expect("create Claude project directory");
+        std::fs::write(
+            project_dir.join("fresh-session.jsonl"),
+            concat!(
+                "{\"sessionId\":\"fresh-session\",\"cwd\":\"/tmp/project\",\"timestamp\":\"2026-08-26T10:00:00Z\"}\n",
+                "{\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"timestamp\":\"2026-08-26T10:01:00Z\"}\n"
+            ),
+        )
+        .expect("write fresh Claude session");
+
         let (tx, rx) = mpsc::channel();
-        run_session_scan(17, 3, "claude".to_string(), false, 0, &tx);
+        let generation = SESSION_SCAN_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        run_session_scan(17, 3, "claude".to_string(), false, generation, &tx);
 
         assert!(matches!(
             rx.recv().expect("cached-open result"),
             SessionMsg::ScopeOpened {
                 request_id: 17,
                 scope_epoch: 3,
-                complete: true,
+                complete: false,
                 result: Ok(Some((_, page))),
                 ..
             } if page.rows.first().is_some_and(|row| row.session_id == "cached-session")
                 && page.rows.first().and_then(|row| row.usage).is_none()
         ));
-        assert!(
-            rx.try_recv().is_err(),
-            "a valid cached open must not publish a rebuilt manifest"
-        );
+        assert!(matches!(
+            rx.recv().expect("revalidated manifest"),
+            SessionMsg::ManifestPublished {
+                request_id: 17,
+                scope_epoch: 3,
+                result: Ok((published, _)),
+                ..
+            } if published.total_rows == 1
+                && published.first_page.rows.first().is_some_and(|row| {
+                    row.session_id == "fresh-session"
+                })
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

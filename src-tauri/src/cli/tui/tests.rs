@@ -1178,7 +1178,7 @@ fn no_op_reload_candidate_preserves_pending_app_data_load() {
 }
 
 #[test]
-fn switch_to_sessions_queues_cached_open_without_forcing_source_refresh() {
+fn switch_to_sessions_queues_cache_aware_source_refresh() {
     let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
     let mut app = App::new(Some(AppType::Codex));
     let mut data = UiData::default();
@@ -1284,6 +1284,39 @@ fn failed_automatic_sessions_scan_is_not_retried_each_event_loop() {
     assert_eq!(
         app.sessions.last_error.as_deref(),
         Some("injected disk-full failure")
+    );
+}
+
+#[test]
+fn deferred_manual_sessions_refresh_runs_once_after_automatic_scan_settles() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Sessions;
+    let automatic_request = app.sessions.start_scan("claude".to_string());
+    app.sessions.defer_manual_refresh("claude".to_string());
+    let (tx, rx) = mpsc::channel();
+
+    queue_sessions_refresh_if_needed(&mut app, Some(&tx));
+    assert!(rx.try_recv().is_err(), "the active scan remains serialized");
+
+    app.sessions
+        .fail_scan(automatic_request, "injected automatic failure".to_string());
+    queue_sessions_refresh_if_needed(&mut app, Some(&tx));
+
+    let forced_request = match rx.recv().expect("deferred manual refresh") {
+        SessionReq::Refresh {
+            request_id,
+            provider_id,
+            force: true,
+            ..
+        } if provider_id == "claude" => request_id,
+        other => panic!("unexpected sessions request: {other:?}"),
+    };
+    assert!(app.sessions.take_manual_refresh_publication(forced_request));
+
+    queue_sessions_refresh_if_needed(&mut app, Some(&tx));
+    assert!(
+        rx.try_recv().is_err(),
+        "the deferred refresh runs only once"
     );
 }
 

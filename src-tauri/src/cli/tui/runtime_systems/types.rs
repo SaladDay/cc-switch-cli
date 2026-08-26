@@ -177,9 +177,8 @@ pub(crate) enum SessionMsg {
         request_id: u64,
         scope_epoch: u64,
         scope: String,
-        /// True when a valid persisted manifest satisfied this request and no
-        /// source revalidation follows. A cache miss keeps the scan active
-        /// while the same worker performs the one-time bootstrap build.
+        /// True when this cached open completes the request. False keeps the
+        /// scan active while the same worker revalidates provider sources.
         complete: bool,
         result: Result<
             Option<(

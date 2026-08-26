@@ -491,7 +491,7 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
             if complete && opened {
                 app.sessions.finish_cached_open(request_id);
             }
-            if complete && cost_page_ready {
+            if cost_page_ready {
                 request_session_cost_if_visible(app);
             }
             if complete
@@ -2608,6 +2608,39 @@ mod tests {
     }
 
     #[test]
+    fn cached_session_manifest_open_requests_cost_even_if_revalidation_fails() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Sessions;
+        let request_id = app.sessions.start_scan("claude".to_string());
+        let scope_epoch = app.sessions.scope_epoch;
+        let (published, reader) =
+            published("cached", 1, vec![session("claude", "cached-session", 2)]);
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ScopeOpened {
+                request_id,
+                scope_epoch,
+                scope: "claude".to_string(),
+                complete: false,
+                result: Ok(Some((reader, published.first_page))),
+            },
+        );
+
+        assert_eq!(app.sessions.scan_active, Some(request_id));
+        assert!(app.sessions.loading);
+        assert_eq!(app.sessions.rows[0].session_id, "cached-session");
+        app.sessions
+            .fail_scan(request_id, "injected revalidation failure".to_string());
+        assert!(app.sessions.scan_active.is_none());
+        assert_eq!(app.sessions.rows[0].session_id, "cached-session");
+        assert!(
+            app.sessions.take_cost_overlay_request(),
+            "a cached page must request its overlay before revalidation settles"
+        );
+    }
+
+    #[test]
     fn speculative_session_page_load_does_not_requery_the_visible_page() {
         let mut app = App::new(Some(AppType::Claude));
         let _request_id = app.sessions.start_scan("claude".to_string());
@@ -2717,6 +2750,15 @@ mod tests {
         assert!(
             app.sessions.pending_manifest.is_some(),
             "the replacement still reconciles selection off the UI thread"
+        );
+        assert!(
+            app.sessions.manual_refresh_is_active(),
+            "manual origin remains active until manifest reconciliation settles"
+        );
+        assert!(
+            !app.sessions
+                .take_manual_refresh_publication(refresh_request),
+            "manual publication side effects are consumed only once"
         );
         assert!(
             app.sessions.take_cost_overlay_request(),

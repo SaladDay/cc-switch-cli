@@ -2743,12 +2743,14 @@ fn queue_sessions_refresh_if_needed(
     let desired = app.sessions.desired_view_spec(Some(&query));
 
     let purge_refresh = app.sessions.purge_refresh_required();
+    let deferred_manual_refresh = app.sessions.manual_refresh_is_deferred_for(&provider_id);
+    let force_refresh = purge_refresh || deferred_manual_refresh;
     // Desired views are rebuilt from the saved authoritative base before the
     // scan-attempt guard is considered. That guard prevents failed-scan retry
     // storms; it must not block recovery or a debounced project/query change.
     let current_base_available = app.sessions.provider_id.as_deref() == Some(provider_id.as_str())
         && app.sessions.base_query_source().is_some();
-    if !purge_refresh && current_base_available {
+    if !force_refresh && current_base_available {
         if desired.is_base_view() {
             if !app.sessions.base_view_is_current() {
                 app.sessions.ensure_base_restore_staged();
@@ -2765,18 +2767,22 @@ fn queue_sessions_refresh_if_needed(
         }
         return;
     }
-    if !purge_refresh && app.sessions.loaded_for_provider(&provider_id) {
+    if !force_refresh && app.sessions.loaded_for_provider(&provider_id) {
         return;
     }
     if (app.sessions.provider_id.as_deref() == Some(provider_id.as_str())
         && app.sessions.scan_active.is_some())
-        || (!purge_refresh && app.sessions.scan_attempted_for_scope(&provider_id))
+        || (!force_refresh && app.sessions.scan_attempted_for_scope(&provider_id))
     {
         return;
     }
 
     let Some(tx) = session_req_tx else {
+        let deferred_manual_refresh = app.sessions.take_deferred_manual_refresh(&provider_id);
         let request_id = app.sessions.start_scan(provider_id);
+        if deferred_manual_refresh {
+            app.sessions.mark_manual_refresh(request_id);
+        }
         if purge_refresh {
             app.sessions.consume_purge_refresh();
         }
@@ -2789,7 +2795,11 @@ fn queue_sessions_refresh_if_needed(
         return;
     };
 
+    let deferred_manual_refresh = app.sessions.take_deferred_manual_refresh(&provider_id);
     let request_id = app.sessions.start_scan(provider_id.clone());
+    if deferred_manual_refresh {
+        app.sessions.mark_manual_refresh(request_id);
+    }
     if purge_refresh {
         app.sessions.consume_purge_refresh();
     }
@@ -2797,9 +2807,9 @@ fn queue_sessions_refresh_if_needed(
         request_id,
         scope_epoch: app.sessions.scope_epoch,
         provider_id,
-        // Entering the page opens the persisted manifest only. A missing
-        // manifest bootstraps once; source revalidation is otherwise manual.
-        force: purge_refresh,
+        // Entering the page shows the persisted manifest first, then performs
+        // a cache-aware source revalidation in the same background scan.
+        force: purge_refresh || deferred_manual_refresh,
     }) {
         app.sessions.fail_scan(request_id, err.to_string());
         app.push_toast(

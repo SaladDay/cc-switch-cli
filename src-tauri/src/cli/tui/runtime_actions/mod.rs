@@ -621,6 +621,7 @@ pub(crate) fn handle_action(
                 return Ok(());
             };
             if ctx.app.sessions.scan_active.is_none() {
+                ctx.app.sessions.take_deferred_manual_refresh(&provider_id);
                 let request_id = ctx.app.sessions.start_scan(provider_id.clone());
                 ctx.app.sessions.mark_manual_refresh(request_id);
                 if let Err(err) = tx.send(SessionReq::Refresh {
@@ -638,6 +639,8 @@ pub(crate) fn handle_action(
                     );
                     return Ok(());
                 }
+            } else if !ctx.app.sessions.manual_refresh_is_active() {
+                ctx.app.sessions.defer_manual_refresh(provider_id);
             }
             queue_active_session_message_refresh(ctx.app, tx);
             Ok(())
@@ -1522,6 +1525,7 @@ mod tests {
             .expect("manual refresh during list scan");
 
         assert_eq!(app.sessions.scan_active, Some(scan_request));
+        assert!(app.sessions.manual_refresh_is_deferred_for("codex"));
         assert!(matches!(
             rx.recv().expect("transcript refresh"),
             SessionReq::LoadMessagePage {
@@ -1532,6 +1536,31 @@ mod tests {
                 ..
             } if queued_key == key
         ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn repeated_manual_sessions_refresh_does_not_queue_another_full_scan() {
+        let mut app = App::new(Some(AppType::Codex));
+        let mut data = UiData::default();
+        let (tx, rx) = mpsc::channel();
+
+        run_action_with_sessions(&mut app, &mut data, &tx, Action::SessionsRefresh)
+            .expect("first manual refresh");
+        assert!(matches!(
+            rx.recv().expect("full refresh"),
+            SessionReq::Refresh {
+                provider_id,
+                force: true,
+                ..
+            } if provider_id == "codex"
+        ));
+
+        run_action_with_sessions(&mut app, &mut data, &tx, Action::SessionsRefresh)
+            .expect("repeated manual refresh");
+
+        assert!(app.sessions.manual_refresh_is_active());
+        assert!(!app.sessions.manual_refresh_is_deferred_for("codex"));
         assert!(rx.try_recv().is_err());
     }
 

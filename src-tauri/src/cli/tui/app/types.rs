@@ -1168,6 +1168,9 @@ pub struct SessionsState {
     cost_request_pending: bool,
     cost_cancel_pending: Option<u64>,
     manual_refresh_scan: Option<u64>,
+    manual_refresh_publication_pending: bool,
+    /// One manual list refresh requested while that scope already has a scan.
+    deferred_manual_refresh_scope: Option<String>,
     manual_usage_sync_pending: bool,
     /// Scope of the most recent open/bootstrap attempt, successful or failed.
     /// The event loop uses this terminal marker to avoid retrying a failed
@@ -1279,6 +1282,8 @@ impl Default for SessionsState {
             cost_request_pending: false,
             cost_cancel_pending: None,
             manual_refresh_scan: None,
+            manual_refresh_publication_pending: false,
+            deferred_manual_refresh_scope: None,
             manual_usage_sync_pending: false,
             scan_attempted_scope: None,
             detail_key: None,
@@ -3682,6 +3687,9 @@ impl SessionsState {
     pub(crate) fn start_scan(&mut self, provider_id: String) -> u64 {
         let changing_scope = self.provider_id.as_deref() != Some(provider_id.as_str());
         if changing_scope {
+            if self.deferred_manual_refresh_scope.as_deref() != Some(provider_id.as_str()) {
+                self.deferred_manual_refresh_scope = None;
+            }
             self.request_cost_cancel();
             self.scope_epoch = self.scope_epoch.wrapping_add(1);
             self.view_epoch = self.view_epoch.wrapping_add(1);
@@ -3714,6 +3722,7 @@ impl SessionsState {
         self.scan_seq = self.scan_seq.wrapping_add(1);
         self.scan_active = Some(self.scan_seq);
         self.manual_refresh_scan = None;
+        self.manual_refresh_publication_pending = false;
         self.scan_tombstones_to_clear = Some((
             self.scan_seq,
             provider_id,
@@ -3728,12 +3737,34 @@ impl SessionsState {
     pub(crate) fn mark_manual_refresh(&mut self, request_id: u64) {
         if self.scan_active == Some(request_id) {
             self.manual_refresh_scan = Some(request_id);
+            self.manual_refresh_publication_pending = true;
+        }
+    }
+
+    pub(crate) fn manual_refresh_is_active(&self) -> bool {
+        self.scan_active.is_some() && self.manual_refresh_scan == self.scan_active
+    }
+
+    pub(crate) fn defer_manual_refresh(&mut self, provider_id: String) {
+        self.deferred_manual_refresh_scope = Some(provider_id);
+    }
+
+    pub(crate) fn manual_refresh_is_deferred_for(&self, provider_id: &str) -> bool {
+        self.deferred_manual_refresh_scope.as_deref() == Some(provider_id)
+    }
+
+    pub(crate) fn take_deferred_manual_refresh(&mut self, provider_id: &str) -> bool {
+        if self.manual_refresh_is_deferred_for(provider_id) {
+            self.deferred_manual_refresh_scope = None;
+            true
+        } else {
+            false
         }
     }
 
     pub(crate) fn take_manual_refresh_publication(&mut self, request_id: u64) -> bool {
-        if self.manual_refresh_scan == Some(request_id) {
-            self.manual_refresh_scan = None;
+        if self.manual_refresh_scan == Some(request_id) && self.manual_refresh_publication_pending {
+            self.manual_refresh_publication_pending = false;
             true
         } else {
             false
@@ -3778,6 +3809,7 @@ impl SessionsState {
         if self.scan_active == Some(request_id) {
             if self.manual_refresh_scan == Some(request_id) {
                 self.manual_refresh_scan = None;
+                self.manual_refresh_publication_pending = false;
             }
             if self
                 .scan_tombstones_to_clear
