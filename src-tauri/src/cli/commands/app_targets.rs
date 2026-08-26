@@ -4,7 +4,15 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 
 pub(crate) fn supported_app_target_labels() -> &'static str {
-    "claude, codex, gemini, opencode, hermes"
+    "claude, codex, gemini, opencode, hermes, pi"
+}
+
+fn supported_app_target_labels_for(feature: &str) -> &'static str {
+    if feature.eq_ignore_ascii_case("MCP") {
+        "claude, codex, gemini, opencode, hermes"
+    } else {
+        supported_app_target_labels()
+    }
 }
 
 pub(crate) fn app_targets_or_default(
@@ -42,7 +50,7 @@ pub(crate) fn parse_app_targets(
     if targets.is_empty() {
         return Err(AppError::InvalidInput(format!(
             "Please provide at least one app. Supported apps: {}",
-            supported_app_target_labels()
+            supported_app_target_labels_for(feature)
         )));
     }
 
@@ -54,14 +62,21 @@ fn parse_app_target(value: &str, feature: &str) -> Result<AppType, AppError> {
     let app = AppType::from_str(&normalized).map_err(|_| {
         AppError::InvalidInput(format!(
             "Unsupported app id: '{value}'. Supported apps: {}",
-            supported_app_target_labels()
+            supported_app_target_labels_for(feature)
         ))
     })?;
 
     if matches!(app, AppType::OpenClaw) {
         return Err(AppError::InvalidInput(format!(
             "{feature} does not support openclaw yet. Supported apps: {}",
-            supported_app_target_labels()
+            supported_app_target_labels_for(feature)
+        )));
+    }
+
+    if matches!(app, AppType::Pi) && feature.eq_ignore_ascii_case("MCP") {
+        return Err(AppError::InvalidInput(format!(
+            "{feature} does not support pi. Supported apps: {}",
+            supported_app_target_labels_for(feature)
         )));
     }
 
@@ -110,5 +125,16 @@ mod tests {
             err.to_string().contains("does not support openclaw"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parse_app_targets_accepts_pi_for_skills_but_not_mcp() {
+        assert_eq!(
+            parse_app_targets(&["pi".to_string()], "Skills").expect("Pi skills target"),
+            vec![AppType::Pi]
+        );
+        let error = parse_app_targets(&["pi".to_string()], "MCP")
+            .expect_err("Pi must not be an MCP target");
+        assert!(error.to_string().contains("does not support pi"));
     }
 }

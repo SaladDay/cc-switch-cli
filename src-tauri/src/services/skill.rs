@@ -621,6 +621,12 @@ fn merge_repos_from_lock(
 
 pub struct SkillService;
 
+#[derive(Debug, Clone)]
+enum PiSkillDeployment {
+    Symlink { expected_target: PathBuf },
+    Copy { expected_hash: String },
+}
+
 impl SkillService {
     fn app_supports_skills(app: &AppType) -> bool {
         !matches!(app, AppType::OpenClaw)
@@ -633,6 +639,7 @@ impl SkillService {
             AppType::Gemini,
             AppType::OpenCode,
             AppType::Hermes,
+            AppType::Pi,
         ]
         .into_iter()
     }
@@ -716,6 +723,7 @@ impl SkillService {
             AppType::OpenCode => crate::opencode_config::get_opencode_dir().join("skills"),
             AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
             AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir().join("skills"),
+            AppType::Pi => crate::pi_config::get_pi_agent_dir()?.join("skills"),
         })
     }
 
@@ -833,7 +841,10 @@ impl SkillService {
 
     fn load_index_from_db(db: &Database) -> Result<SkillsIndex, AppError> {
         let repos = db.get_skill_repos()?;
-        let installed = db.get_all_installed_skills()?;
+        let mut installed = db.get_all_installed_skills()?;
+        for skill in installed.values_mut() {
+            skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+        }
         let skills: HashMap<String, InstalledSkill> = installed
             .into_values()
             .map(|skill| (skill.directory.clone(), skill))
@@ -970,7 +981,9 @@ impl SkillService {
 
         let mut discovered: HashMap<String, SkillApps> = HashMap::new();
 
-        for app in Self::supported_skill_apps() {
+        // Pi support did not exist before the SSOT migration. Never claim an
+        // independently installed Pi skill as a legacy CC Switch deployment.
+        for app in Self::supported_skill_apps().filter(|app| !matches!(app, AppType::Pi)) {
             let app_dir = match Self::get_app_skills_dir(&app) {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -1085,6 +1098,145 @@ impl SkillService {
             .unwrap_or(false)
     }
 
+    fn skill_exists_in_app(directory: &str, app: &AppType) -> bool {
+        let Ok(directory) = Self::require_valid_directory(directory) else {
+            return false;
+        };
+        let Ok(app_dir) = Self::get_app_skills_dir(app) else {
+            return false;
+        };
+        app_dir.join(directory).is_dir()
+    }
+
+    fn compute_pi_deployment_hash(dir: &Path) -> Result<String, AppError> {
+        use sha2::{Digest, Sha256};
+
+        fn collect(current: &Path, entries: &mut Vec<PathBuf>) -> Result<(), AppError> {
+            for entry in fs::read_dir(current).map_err(|error| AppError::io(current, error))? {
+                let entry = entry.map_err(|error| AppError::io(current, error))?;
+                let path = entry.path();
+                let file_type = entry
+                    .file_type()
+                    .map_err(|error| AppError::io(&path, error))?;
+                entries.push(path.clone());
+                if file_type.is_dir() {
+                    collect(&path, entries)?;
+                }
+            }
+            Ok(())
+        }
+
+        if !dir.is_dir() {
+            return Err(AppError::Message(format!(
+                "Skill directory not found: {}",
+                dir.display()
+            )));
+        }
+        let mut entries = Vec::new();
+        collect(dir, &mut entries)?;
+        entries.sort();
+
+        let mut hasher = Sha256::new();
+        for path in entries {
+            let relative = path.strip_prefix(dir).unwrap_or(&path);
+            hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+            hasher.update(b"\0");
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|error| AppError::io(&path, error))?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                hasher.update(b"link\0");
+                hasher.update(
+                    fs::read_link(&path)
+                        .map_err(|error| AppError::io(&path, error))?
+                        .to_string_lossy()
+                        .as_bytes(),
+                );
+            } else if file_type.is_dir() {
+                hasher.update(b"dir\0");
+            } else if file_type.is_file() {
+                hasher.update(b"file\0");
+                hasher.update(fs::read(&path).map_err(|error| AppError::io(&path, error))?);
+            } else {
+                hasher.update(b"other\0");
+            }
+            hasher.update(b"\0");
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn inspect_pi_skill_destination(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<Option<PiSkillDeployment>, AppError> {
+        if !destination.exists() && !Self::is_symlink(destination) {
+            return Ok(None);
+        }
+        if Self::is_symlink(destination) {
+            let target =
+                fs::read_link(destination).map_err(|error| AppError::io(destination, error))?;
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                destination
+                    .parent()
+                    .map(|parent| parent.join(&target))
+                    .unwrap_or(target)
+            };
+            if matches!(
+                (resolved.canonicalize(), source.canonicalize()),
+                (Ok(resolved), Ok(source)) if resolved == source
+            ) {
+                return Ok(Some(PiSkillDeployment::Symlink {
+                    expected_target: resolved,
+                }));
+            }
+        } else if destination.is_dir() {
+            if let (Ok(destination_hash), Ok(source_hash)) = (
+                Self::compute_pi_deployment_hash(destination),
+                Self::compute_pi_deployment_hash(source),
+            ) {
+                if destination_hash == source_hash {
+                    return Ok(Some(PiSkillDeployment::Copy {
+                        expected_hash: destination_hash,
+                    }));
+                }
+            }
+        }
+        Err(AppError::InvalidInput(format!(
+            "Pi skill destination already exists and is not managed by CC Switch: {}",
+            destination.display()
+        )))
+    }
+
+    fn preflight_pi_skill_destination(
+        source: &Path,
+        directory: &str,
+        app: &AppType,
+    ) -> Result<(), AppError> {
+        if !matches!(app, AppType::Pi) {
+            return Ok(());
+        }
+        let ssot_dir = Self::get_ssot_dir()?;
+        let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
+        let destination = app_dir.join(directory);
+        if destination.exists() || Self::is_symlink(&destination) {
+            Self::inspect_pi_skill_destination(source, &destination)?;
+        }
+        Ok(())
+    }
+
+    fn pi_skill_destination_is_managed(source: &Path, destination: &Path) -> bool {
+        Self::inspect_pi_skill_destination(source, destination)
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    fn copy_skill_to_app(source: &Path, destination: &Path) -> Result<(), AppError> {
+        Self::copy_dir_recursive(source, destination)
+    }
+
     fn remove_path(path: &Path) -> Result<(), AppError> {
         if Self::is_symlink(path) {
             #[cfg(unix)]
@@ -1121,6 +1273,13 @@ impl SkillService {
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
 
         let dest = app_dir.join(&directory);
+
+        // Pi's native Skills directory may contain user-managed entries. Match
+        // upstream by replacing only a destination that still mirrors the
+        // CC Switch source; preserve every conflicting entry.
+        if matches!(app, AppType::Pi) && (dest.exists() || Self::is_symlink(&dest)) {
+            Self::inspect_pi_skill_destination(&source, &dest)?;
+        }
 
         match method {
             SyncMethod::Auto => {
@@ -1275,6 +1434,15 @@ impl SkillService {
         let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
         let dest = app_dir.join(&directory);
+        if matches!(app, AppType::Pi)
+            && (dest.exists() || Self::is_symlink(&dest))
+            && !Self::pi_skill_destination_is_managed(&source, &dest)
+        {
+            return Err(AppError::InvalidInput(format!(
+                "Pi skill destination changed outside CC Switch and was preserved: {}",
+                dest.display()
+            )));
+        }
         if source == dest {
             return Ok(());
         }
@@ -1293,11 +1461,11 @@ impl SkillService {
                     log::warn!(
                         "Symlink creation failed during Skill update, falling back to copy: {error}"
                     );
-                    Self::copy_dir_recursive(&source, &next)?;
+                    Self::copy_skill_to_app(&source, &next)?;
                 }
             }
             SyncMethod::Symlink => Self::create_symlink(&source, &next)?,
-            SyncMethod::Copy => Self::copy_dir_recursive(&source, &next)?,
+            SyncMethod::Copy => Self::copy_skill_to_app(&source, &next)?,
         }
 
         let had_previous = fs::symlink_metadata(&dest).is_ok();
@@ -1323,6 +1491,66 @@ impl SkillService {
         Ok(())
     }
 
+    fn refresh_pi_skill_destination(
+        source: &Path,
+        destination: &Path,
+        deployment: &PiSkillDeployment,
+    ) -> Result<(), AppError> {
+        match deployment {
+            PiSkillDeployment::Symlink { expected_target } => {
+                if !Self::is_symlink(destination) {
+                    return Err(AppError::InvalidInput(format!(
+                        "Pi skill destination changed during update: {}",
+                        destination.display()
+                    )));
+                }
+                let target =
+                    fs::read_link(destination).map_err(|error| AppError::io(destination, error))?;
+                let resolved = if target.is_absolute() {
+                    target
+                } else {
+                    destination
+                        .parent()
+                        .map(|parent| parent.join(&target))
+                        .unwrap_or(target)
+                };
+                if &resolved != expected_target {
+                    return Err(AppError::InvalidInput(format!(
+                        "Pi skill destination changed during update: {}",
+                        destination.display()
+                    )));
+                }
+                Ok(())
+            }
+            PiSkillDeployment::Copy { expected_hash } => {
+                if Self::is_symlink(destination)
+                    || !destination.is_dir()
+                    || !matches!(
+                        Self::compute_pi_deployment_hash(destination),
+                        Ok(current_hash) if &current_hash == expected_hash
+                    )
+                {
+                    return Err(AppError::InvalidInput(format!(
+                        "Pi skill destination changed during update: {}",
+                        destination.display()
+                    )));
+                }
+
+                let directory =
+                    destination
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .ok_or_else(|| {
+                            AppError::InvalidInput(format!(
+                                "Invalid Pi Skill destination: {}",
+                                destination.display()
+                            ))
+                        })?;
+                Self::replace_dest_with_copy(source, destination, directory)
+            }
+        }
+    }
+
     pub fn remove_from_app(directory: &str, app: &AppType) -> Result<(), AppError> {
         if !Self::app_supports_skills(app) {
             return Ok(());
@@ -1333,6 +1561,15 @@ impl SkillService {
         let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         let path = app_dir.join(&directory);
         if path.exists() || Self::is_symlink(&path) {
+            if matches!(app, AppType::Pi) {
+                let source = Self::get_ssot_dir()?.join(directory);
+                if !Self::pi_skill_destination_is_managed(&source, &path) {
+                    return Err(AppError::InvalidInput(format!(
+                        "Pi skill destination changed outside CC Switch and was preserved: {}",
+                        path.display()
+                    )));
+                }
+            }
             Self::remove_path(&path)?;
         }
         Ok(())
@@ -2441,10 +2678,11 @@ impl SkillService {
     /// Update one repository-backed Skill after an explicit user action.
     async fn update_skill(&self, skill_id: &str) -> Result<SkillUpdateOutcome, AppError> {
         let db = Database::init()?;
-        let skill = db
+        let mut skill = db
             .get_installed_skill(skill_id)?
             .ok_or_else(|| AppError::Message(format!("Skill not found: {skill_id}")))?;
         let directory = Self::require_valid_directory(&skill.directory)?;
+        skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
 
         let (owner, name) = match (&skill.repo_owner, &skill.repo_name) {
             (Some(owner), Some(name)) => (owner.clone(), name.clone()),
@@ -2485,9 +2723,10 @@ impl SkillService {
         // Remote I/O and inspection are complete. Serialize SSOT staging, the
         // final replacement, metadata write, and app refresh as one mutation.
         let _state_guard = skill_state_write_guard();
-        let current = db.get_installed_skill(skill_id)?.ok_or_else(|| {
+        let mut current = db.get_installed_skill(skill_id)?.ok_or_else(|| {
             AppError::Message(format!("Skill was removed during update: {skill_id}"))
         })?;
+        current.apps.pi = Self::skill_exists_in_app(&current.directory, &AppType::Pi);
         if current.directory != skill.directory
             || current.repo_owner != skill.repo_owner
             || current.repo_name != skill.repo_name
@@ -2512,6 +2751,12 @@ impl SkillService {
         drop(temp_dir);
         let sync_method = Self::get_sync_method()?;
         let dest = ssot_dir.join(&directory);
+        let pi_deployment = if current.apps.pi {
+            let pi_dir = Self::get_distinct_app_skills_dir(&ssot_dir, &AppType::Pi)?;
+            Self::inspect_pi_skill_destination(&dest, &pi_dir.join(&directory))?
+        } else {
+            None
+        };
         let had_previous = fs::symlink_metadata(&dest).is_ok();
         if had_previous {
             fs::rename(&dest, &previous).map_err(|e| AppError::IoContext {
@@ -2569,7 +2814,22 @@ impl SkillService {
         drop(staging);
 
         let mut deployment_failures = Vec::new();
+        if let Some(deployment) = pi_deployment.as_ref() {
+            let pi_destination = Self::get_app_skills_dir(&AppType::Pi)?.join(&updated.directory);
+            if let Err(error) =
+                Self::refresh_pi_skill_destination(&dest, &pi_destination, deployment)
+            {
+                log::warn!(
+                    "Updated Skill {} but failed to sync it to Pi: {error}",
+                    updated.id
+                );
+                deployment_failures.push(format!("Pi: {error}"));
+            }
+        }
         for app in Self::supported_skill_apps() {
+            if matches!(app, AppType::Pi) {
+                continue;
+            }
             if updated.apps.is_enabled_for(&app) {
                 if let Err(error) =
                     Self::sync_updated_skill_to_app(&updated.directory, &app, sync_method)
@@ -2737,6 +2997,8 @@ impl SkillService {
         app: &AppType,
         sync_method: SyncMethod,
     ) -> Result<(), AppError> {
+        let source = Self::get_ssot_dir()?.join(&installed.directory);
+        Self::preflight_pi_skill_destination(&source, &installed.directory, app)?;
         db.save_skill(installed)?;
         if let Err(error) = Self::sync_to_app_dir(&installed.directory, app, sync_method) {
             if let Err(rollback_error) = db.delete_skill(&installed.id) {
@@ -2833,13 +3095,7 @@ impl SkillService {
         match Self::require_valid_directory(&record.directory) {
             Ok(directory) => {
                 // Remove from app dirs (best effort).
-                for app in [
-                    AppType::Claude,
-                    AppType::Codex,
-                    AppType::Gemini,
-                    AppType::OpenCode,
-                    AppType::Hermes,
-                ] {
+                for app in Self::supported_skill_apps() {
                     if let Err(error) = Self::remove_from_app(&directory, &app) {
                         log::warn!("从 {app:?} 删除 Skill {directory} 失败: {error}");
                     }
@@ -3236,7 +3492,8 @@ impl SkillService {
 
             let skill_md = dest.join("SKILL.md");
             let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
-            let apps = selection.apps;
+            let mut apps = selection.apps;
+            apps.pi = Self::skill_exists_in_app(&dir_name, &AppType::Pi);
             let (id, repo_owner, repo_name, repo_branch, readme_url) =
                 build_repo_info_from_lock(&agents_lock, &dir_name);
 
@@ -3498,6 +3755,7 @@ impl SkillService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn skill_state_lock_allows_snapshots_but_excludes_writers() {
@@ -3638,6 +3896,202 @@ mod tests {
             SkillService::compute_dir_hash(temp.path()).expect("hash changed content"),
             initial
         );
+    }
+
+    #[test]
+    fn pi_deployment_hash_includes_hidden_native_changes() {
+        let temp = tempfile::tempdir().expect("create Pi hash fixture");
+        fs::write(temp.path().join("SKILL.md"), "managed").expect("write manifest");
+        let initial =
+            SkillService::compute_pi_deployment_hash(temp.path()).expect("compute Pi hash");
+        fs::write(temp.path().join(".env"), "native edit").expect("write hidden native file");
+        assert_ne!(
+            SkillService::compute_pi_deployment_hash(temp.path()).expect("hash hidden edit"),
+            initial
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn pi_remove_preserves_a_same_name_external_directory() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create managed source");
+        fs::write(source.join("SKILL.md"), "managed").expect("write managed source");
+        let destination = SkillService::get_app_skills_dir(&AppType::Pi)
+            .expect("resolve Pi skills")
+            .join("demo");
+        fs::create_dir_all(&destination).expect("create external Pi skill");
+        fs::write(destination.join("SKILL.md"), "external").expect("write external Pi skill");
+
+        SkillService::remove_from_app("demo", &AppType::Pi)
+            .expect_err("external Pi skill must be preserved");
+        assert_eq!(
+            fs::read_to_string(destination.join("SKILL.md")).expect("read preserved skill"),
+            "external"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn pi_remove_accepts_an_identical_directory() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create managed source");
+        fs::write(source.join("SKILL.md"), "identical").expect("write managed source");
+        let destination = SkillService::get_app_skills_dir(&AppType::Pi)
+            .expect("resolve Pi skills")
+            .join("demo");
+        fs::create_dir_all(&destination).expect("create external Pi skill");
+        fs::write(destination.join("SKILL.md"), "identical").expect("write external Pi skill");
+
+        SkillService::remove_from_app("demo", &AppType::Pi)
+            .expect("an identical Pi deployment is safe to remove");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn pi_native_directory_is_reported_as_enabled() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create managed source");
+        fs::write(source.join("SKILL.md"), "identical").expect("write managed source");
+        let destination = SkillService::get_app_skills_dir(&AppType::Pi)
+            .expect("resolve Pi skills")
+            .join("demo");
+        fs::create_dir_all(&destination).expect("create external Pi skill");
+        fs::write(destination.join("SKILL.md"), "identical").expect("write external Pi skill");
+
+        assert!(SkillService::skill_exists_in_app("demo", &AppType::Pi));
+    }
+
+    #[test]
+    #[serial]
+    fn pi_matching_copy_allows_safe_removal() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create managed source");
+        fs::write(source.join("SKILL.md"), "managed").expect("write managed source");
+
+        SkillService::sync_to_app_dir("demo", &AppType::Pi, SyncMethod::Copy)
+            .expect("deploy managed copy");
+        let destination = SkillService::get_app_skills_dir(&AppType::Pi)
+            .expect("resolve Pi skills")
+            .join("demo");
+        assert_eq!(
+            fs::read_to_string(destination.join("SKILL.md")).expect("read managed copy"),
+            "managed"
+        );
+
+        SkillService::remove_from_app("demo", &AppType::Pi).expect("remove managed copy");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn importing_a_native_pi_skill_keeps_the_matching_directory() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        let destination = SkillService::get_app_skills_dir(&AppType::Pi)
+            .expect("resolve Pi skills")
+            .join("demo");
+        fs::create_dir_all(&destination).expect("create native Pi skill");
+        fs::write(destination.join("SKILL.md"), "native").expect("write native Pi skill");
+
+        let imported = SkillService::import_from_apps(vec![ImportSkillSelection {
+            directory: "demo".to_string(),
+            apps: SkillApps::only(&AppType::Pi),
+        }])
+        .expect("import native Pi skill");
+
+        assert_eq!(imported.len(), 1);
+        assert_eq!(
+            fs::read_to_string(destination.join("SKILL.md")).expect("read native Pi skill"),
+            "native"
+        );
+        let index = SkillService::load_index().expect("reload imported skill");
+        assert!(index.skills["demo"].apps.pi);
+    }
+
+    #[test]
+    #[serial]
+    fn uninstall_preserves_a_modified_pi_copy_and_removes_managed_state() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        let destination = SkillService::get_app_skills_dir(&AppType::Pi)
+            .expect("resolve Pi skills")
+            .join("demo");
+        fs::create_dir_all(&destination).expect("create native Pi skill");
+        fs::write(destination.join("SKILL.md"), "native").expect("write native Pi skill");
+        SkillService::import_from_apps(vec![ImportSkillSelection {
+            directory: "demo".to_string(),
+            apps: SkillApps::only(&AppType::Pi),
+        }])
+        .expect("import native Pi skill");
+        fs::write(destination.join("SKILL.md"), "modified outside CC Switch")
+            .expect("modify deployed Pi skill");
+
+        SkillService::uninstall("demo").expect("uninstall managed state");
+
+        assert!(destination.exists());
+        assert!(!SkillService::get_ssot_dir()
+            .expect("resolve SSOT")
+            .join("demo")
+            .exists());
+        assert!(!SkillService::load_index()
+            .expect("reload preserved index")
+            .skills
+            .contains_key("demo"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn pi_explicit_sync_method_replaces_the_managed_deployment_type() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        let source = SkillService::get_ssot_dir()
+            .expect("resolve SSOT")
+            .join("demo");
+        fs::create_dir_all(&source).expect("create managed source");
+        fs::write(source.join("SKILL.md"), "managed").expect("write managed source");
+        let destination = SkillService::get_app_skills_dir(&AppType::Pi)
+            .expect("resolve Pi skills")
+            .join("demo");
+
+        SkillService::sync_to_app_dir("demo", &AppType::Pi, SyncMethod::Copy)
+            .expect("deploy managed copy");
+        assert!(!SkillService::is_symlink(&destination));
+        assert!(destination.join("SKILL.md").exists());
+
+        SkillService::sync_to_app_dir("demo", &AppType::Pi, SyncMethod::Symlink)
+            .expect("replace copy with symlink");
+        assert!(SkillService::is_symlink(&destination));
+
+        SkillService::sync_to_app_dir("demo", &AppType::Pi, SyncMethod::Copy)
+            .expect("replace symlink with copy");
+        assert!(!SkillService::is_symlink(&destination));
+        assert!(destination.join("SKILL.md").exists());
     }
 
     #[test]

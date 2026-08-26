@@ -27,6 +27,7 @@ mod mcp;
 mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
+mod pi_config;
 mod prompt;
 mod prompt_files;
 mod provider;

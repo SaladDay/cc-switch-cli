@@ -955,6 +955,18 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::PiConfigDir) => {
+                    let buffer = crate::settings::get_settings()
+                        .pi_config_dir
+                        .unwrap_or_default();
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_pi_config_dir_label().to_string(),
+                        prompt: texts::tui_settings_pi_config_dir_prompt().to_string(),
+                        input: TextInput::new(buffer),
+                        submit: TextSubmit::SettingsPiConfigDir,
+                    });
+                    Action::None
+                }
                 Some(SettingsItem::ManagedAccounts) => {
                     let action = self.push_route_and_switch(Route::SettingsManagedAccounts);
                     if self.managed_auth_status.is_none() {

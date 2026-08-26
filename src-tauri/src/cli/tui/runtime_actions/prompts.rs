@@ -143,3 +143,59 @@ pub(super) fn delete(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
 }
+
+pub(super) fn delete_pi_system_prompt(
+    ctx: &mut RuntimeActionContext<'_>,
+    kind: crate::services::pi_prompt_files::PiPromptFileKind,
+    expected_revision: String,
+) -> Result<(), AppError> {
+    crate::services::pi_prompt_files::PiPromptFileService::delete(kind, &expected_revision)?;
+    ctx.app
+        .push_toast(texts::tui_toast_prompt_deleted(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+pub(super) fn delete_pi_prompt_template(
+    ctx: &mut RuntimeActionContext<'_>,
+    slug: String,
+    expected_revision: String,
+) -> Result<(), AppError> {
+    crate::services::pi_prompt_files::PiPromptTemplateService::delete(&slug, &expected_revision)?;
+    ctx.app
+        .push_toast(texts::tui_toast_prompt_deleted(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.pi_prompt_template_idx = ctx
+        .app
+        .pi_prompt_template_idx
+        .min(ctx.data.pi_prompts.templates.len().saturating_sub(1));
+    Ok(())
+}
+
+pub(super) fn rename_pi_prompt_template(
+    ctx: &mut RuntimeActionContext<'_>,
+    original_slug: String,
+    new_slug: String,
+    expected_revision: String,
+    content: String,
+) -> Result<(), AppError> {
+    crate::services::pi_prompt_files::PiPromptTemplateService::upsert(
+        &new_slug,
+        Some(&original_slug),
+        &expected_revision,
+        &content,
+    )?;
+    ctx.app
+        .push_toast(texts::tui_toast_prompt_renamed(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    if let Some(index) = ctx
+        .data
+        .pi_prompts
+        .templates
+        .iter()
+        .position(|template| template.slug == new_slug)
+    {
+        ctx.app.pi_prompt_template_idx = index;
+    }
+    Ok(())
+}

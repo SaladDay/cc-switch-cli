@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
@@ -36,6 +37,7 @@ struct ModelFetchTarget {
     is_full_url: bool,
     auth_value: Option<String>,
     custom_user_agent: Option<String>,
+    request_headers: Option<BTreeMap<String, String>>,
     strategy: ProviderModelFetchStrategy,
 }
 
@@ -73,6 +75,22 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     let app_str = app_type.as_str().to_string();
     let providers = ProviderService::list(&state, app_type.clone())?;
     let current_id = ProviderService::current(&state, app_type.clone())?;
+    let pi_state = if matches!(app_type, AppType::Pi) {
+        match crate::services::pi_state::PiStateService::current(&state) {
+            Ok(current) => Some(current),
+            Err(error) => {
+                println!(
+                    "{}",
+                    warning(&format!(
+                        "Pi models.json could not be read; enabled state is unavailable: {error}"
+                    ))
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     if providers.is_empty() {
         println!("{}", info("No providers found."));
@@ -92,7 +110,17 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     });
 
     for (id, provider) in provider_list {
-        let current_marker = if id == current_id { "✓" } else { " " };
+        let current_marker = if pi_state.as_ref().is_some_and(|state| {
+            state
+                .enabled_provider_ids
+                .iter()
+                .any(|enabled| enabled == &id)
+        }) || (!matches!(app_type, AppType::Pi) && id == current_id)
+        {
+            "✓"
+        } else {
+            " "
+        };
         let api_url = extract_api_url(&provider, &app_type).unwrap_or_else(|| "N/A".to_string());
 
         table.add_row(vec![current_marker.to_string(), id, provider.name, api_url]);
@@ -100,12 +128,22 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
 
     println!("{}", table);
     println!("\n{} Application: {}", info("ℹ"), app_str);
-    println!("{} Current: {}", info("→"), highlight(&current_id));
+    if matches!(app_type, AppType::Pi) {
+        println!("{} ✓ = present in Pi models.json", info("→"));
+    } else {
+        println!("{} Current: {}", info("→"), highlight(&current_id));
+    }
 
     Ok(())
 }
 
 pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Pi) {
+        return Err(AppError::InvalidInput(
+            "Pi owns the current/default provider; CC Switch only manages explicit models.json entries"
+                .to_string(),
+        ));
+    }
     let state = get_state()?;
     let current_id = ProviderService::current(&state, app_type.clone())?;
     let providers = ProviderService::list(&state, app_type.clone())?;
@@ -352,6 +390,7 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
                 target.auth_value.as_deref(),
                 target.custom_user_agent.as_deref(),
                 to_tui_strategy(target.strategy),
+                target.request_headers.as_ref(),
             )
             .await
             .map_err(AppError::Message)
@@ -806,6 +845,7 @@ fn model_fetch_target(
                 is_full_url,
                 auth_value: Some(auth_value),
                 custom_user_agent,
+                request_headers: None,
                 strategy,
             })
         }
@@ -817,6 +857,7 @@ fn model_fetch_target(
                     || AppError::Message(format!("Missing API key for provider '{}'", provider.id)),
                 )?),
                 custom_user_agent,
+                request_headers: None,
                 strategy: ProviderModelFetchStrategy::Bearer,
             })
         }
@@ -827,6 +868,7 @@ fn model_fetch_target(
                 is_full_url,
                 auth_value: Some(auth_value),
                 custom_user_agent,
+                request_headers: None,
                 strategy,
             })
         }
@@ -847,6 +889,7 @@ fn model_fetch_target(
                     })?,
             ),
             custom_user_agent,
+            request_headers: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::Hermes => Ok(ModelFetchTarget {
@@ -866,6 +909,7 @@ fn model_fetch_target(
                     })?,
             ),
             custom_user_agent,
+            request_headers: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::OpenClaw => Ok(ModelFetchTarget {
@@ -884,8 +928,58 @@ fn model_fetch_target(
                     })?,
             ),
             custom_user_agent,
+            request_headers: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
+        AppType::Pi => {
+            let api = provider.settings_config.get("api").and_then(Value::as_str);
+            let strategy = match api {
+                Some("anthropic-messages") => ProviderModelFetchStrategy::Anthropic,
+                Some("google-generative-ai") => ProviderModelFetchStrategy::GoogleApiKey,
+                _ => ProviderModelFetchStrategy::Bearer,
+            };
+            let mut request_headers = provider
+                .settings_config
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            value
+                                .as_str()
+                                .map(|value| (name.clone(), value.to_string()))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .filter(|headers| !headers.is_empty());
+            let api_key = provider
+                .settings_config
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let auth_value = if matches!(api, Some("anthropic-messages")) {
+                if let Some(api_key) = api_key.as_ref() {
+                    request_headers
+                        .get_or_insert_with(BTreeMap::new)
+                        .entry("x-api-key".to_string())
+                        .or_insert_with(|| api_key.clone());
+                }
+                None
+            } else {
+                api_key
+            };
+            Ok(ModelFetchTarget {
+                base_url,
+                is_full_url,
+                auth_value,
+                custom_user_agent,
+                request_headers,
+                strategy,
+            })
+        }
     }
 }
 
@@ -912,6 +1006,7 @@ fn one_off_model_fetch_target(
         is_full_url: false,
         auth_value,
         custom_user_agent: None,
+        request_headers: None,
         strategy,
     })
 }
@@ -920,7 +1015,7 @@ fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetc
     match app_type {
         AppType::Claude => ProviderModelFetchStrategy::Anthropic,
         AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
             ProviderModelFetchStrategy::Bearer
         }
     }
@@ -1357,6 +1452,34 @@ base_url = "https://current.example.com/v1"
             Some("cc-switch-model-fetch/test")
         );
         assert!(target.is_full_url);
+    }
+
+    #[test]
+    fn pi_model_fetch_uses_native_api_auth_and_headers() {
+        let provider = Provider::with_id(
+            "pi-demo".to_string(),
+            "Pi Demo".to_string(),
+            json!({
+                "baseUrl": "https://pi.example.com/v1",
+                "api": "anthropic-messages",
+                "apiKey": "pi-secret",
+                "headers": { "x-client": "cc-switch" },
+                "models": [{ "id": "model-a" }]
+            }),
+            None,
+        );
+
+        let target = model_fetch_target(&provider, &AppType::Pi)
+            .expect("Pi provider should resolve fetch target");
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
+        assert_eq!(target.auth_value, None);
+        assert_eq!(
+            target.request_headers,
+            Some(BTreeMap::from([
+                ("x-api-key".to_string(), "pi-secret".to_string()),
+                ("x-client".to_string(), "cc-switch".to_string()),
+            ]))
+        );
     }
 
     #[test]

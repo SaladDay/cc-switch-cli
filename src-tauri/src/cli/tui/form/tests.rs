@@ -6624,6 +6624,36 @@ fn provider_add_form_openclaw_ignores_legacy_api_aliases_when_loading() {
 }
 
 #[test]
+fn provider_add_form_pi_uses_model_url_without_materializing_provider_url() {
+    let provider = Provider::with_id(
+        "pi-model-url".to_string(),
+        "Pi Model URL".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [{
+                "id": "pi-model",
+                "baseUrl": "https://pi-model.example/v1"
+            }]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Pi, &provider);
+    assert!(form.opencode_base_url.value.is_empty());
+    assert_eq!(
+        form.current_provider_base_url(),
+        "https://pi-model.example/v1"
+    );
+
+    let roundtrip = form.to_provider_json_value();
+    assert!(roundtrip["settingsConfig"].get("baseUrl").is_none());
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["baseUrl"],
+        "https://pi-model.example/v1"
+    );
+}
+
+#[test]
 fn provider_add_form_openclaw_ignores_legacy_context_window_alias_when_loading() {
     let provider = Provider::with_id(
         "oclaw1".to_string(),
@@ -7450,4 +7480,150 @@ fn provider_add_form_usage_query_numeric_fields_match_upstream_normalization() {
 
     assert_eq!(script["timeout"], 10);
     assert_eq!(script["autoQueryInterval"], 0);
+}
+
+#[test]
+fn provider_pi_models_editor_value_round_trips_through_form() {
+    let mut form = ProviderAddFormState::new(AppType::Pi);
+    let models = json!([
+        {
+            "id": "primary-model",
+            "name": "Primary Model",
+            "contextWindow": 128000,
+            "futureCapability": { "preserve": true }
+        },
+        { "id": "fallback-model", "name": "Fallback Model" }
+    ]);
+
+    form.apply_openclaw_models_value(models.clone())
+        .expect("Pi models array should apply");
+
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["models"],
+        models
+    );
+}
+
+#[test]
+fn provider_add_form_pi_uses_native_api_default() {
+    let mut form = ProviderAddFormState::new(AppType::Pi);
+    form.name.set("Custom Pi");
+
+    assert_eq!(
+        form.opencode_npm_package.value,
+        crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
+    );
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["api"],
+        "openai-completions"
+    );
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["name"],
+        "Custom Pi"
+    );
+}
+
+#[test]
+fn provider_edit_form_pi_updates_only_a_native_name_that_followed_the_display_name() {
+    let following = Provider::with_id(
+        "following".to_string(),
+        "Original".to_string(),
+        json!({
+            "name": "Original",
+            "api": "openai-completions",
+            "models": [{ "id": "model" }]
+        }),
+        None,
+    );
+    let mut following_form = ProviderAddFormState::from_provider(AppType::Pi, &following);
+    following_form.name.set("Renamed");
+    assert_eq!(
+        following_form.to_provider_json_value()["settingsConfig"]["name"],
+        "Renamed"
+    );
+
+    let independent = Provider::with_id(
+        "independent".to_string(),
+        "Catalog label".to_string(),
+        json!({
+            "name": "Native label",
+            "api": "openai-completions",
+            "models": [{ "id": "model" }]
+        }),
+        None,
+    );
+    let mut independent_form = ProviderAddFormState::from_provider(AppType::Pi, &independent);
+    independent_form.name.set("Renamed catalog label");
+    assert_eq!(
+        independent_form.to_provider_json_value()["settingsConfig"]["name"],
+        "Native label"
+    );
+}
+
+#[test]
+fn provider_add_form_pi_preserves_missing_api_on_existing_partial_node() {
+    let provider = Provider::with_id(
+        "anthropic".to_string(),
+        "Anthropic override".to_string(),
+        json!({
+            "futureField": { "preserve": true },
+            "models": [{ "id": "claude-sonnet" }]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Pi, &provider);
+    assert!(form.opencode_npm_package.value.is_empty());
+    let roundtrip = form.to_provider_json_value();
+    assert!(roundtrip["settingsConfig"].get("api").is_none());
+    assert_eq!(
+        roundtrip["settingsConfig"]["futureField"],
+        json!({ "preserve": true })
+    );
+}
+
+#[test]
+fn provider_add_form_pi_preserves_raw_native_settings_and_names_a_copy() {
+    let settings = json!({
+        "api": "openai-completions",
+        "apiKey": " key-with-native-spacing ",
+        "baseUrl": "https://pi.example/v1",
+        "models": [
+            {
+                "id": "float-context",
+                "contextWindow": 1000000.0,
+                "compat": { "future": true }
+            },
+            {
+                "id": "alias-context",
+                "context_window": 64000,
+                "extension": [1, 2, 3]
+            }
+        ],
+        "unknownNested": { "keep": { "exact": true } }
+    });
+    let provider = Provider::with_id(
+        "native-shape".to_string(),
+        "Native Shape".to_string(),
+        settings.clone(),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Pi, &provider);
+    assert_eq!(form.initial_pi_settings_config(), Some(settings.clone()));
+    assert_eq!(form.to_provider_json_value()["settingsConfig"], settings);
+
+    let copy = ProviderAddFormState::copy_from_provider_with_common_snippet(
+        AppType::Pi,
+        &provider,
+        "",
+        &[provider.id.clone()],
+    );
+    assert_eq!(copy.initial_pi_settings_config(), None);
+    let mut expected_copy = settings;
+    expected_copy["name"] = json!("Native Shape copy");
+    assert_eq!(
+        copy.to_provider_json_value()["settingsConfig"],
+        expected_copy
+    );
 }

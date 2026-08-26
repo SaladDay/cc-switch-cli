@@ -23,6 +23,14 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
+/// 获取用户主目录，缺失时回退到当前目录。
+pub fn get_home_dir() -> PathBuf {
+    home_dir().unwrap_or_else(|| {
+        log::warn!("无法获取用户主目录，回退到当前目录");
+        PathBuf::from(".")
+    })
+}
+
 /// 获取 Claude Code 配置目录路径
 ///
 /// Priority: `CLAUDE_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.claude`
@@ -307,8 +315,21 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
 
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
+    atomic_write_with_privacy(path, data, false)
+}
+
+/// 原子写入包含凭据的文件。Unix 上新文件和替换文件始终使用 0600。
+pub fn atomic_write_private(path: &Path, data: &[u8]) -> Result<(), AppError> {
+    atomic_write_with_privacy(path, data, true)
+}
+
+fn atomic_write_with_privacy(
+    path: &Path,
+    data: &[u8],
+    force_private: bool,
+) -> Result<(), AppError> {
     let managed_write_path = resolve_managed_storage_path(path)?;
-    let should_restrict_file = should_restrict_sensitive_config_file(path)?;
+    let should_restrict_file = force_private || should_restrict_sensitive_config_file(path)?;
     let write_path = managed_write_path.unwrap_or_else(|| path.to_path_buf());
     if path != write_path && should_restrict_file {
         debug_assert!(write_path.is_absolute());

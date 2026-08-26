@@ -154,7 +154,7 @@ pub fn common_snippet_has_effective_config(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|obj| !obj.is_empty()),
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
     }
 }
 
@@ -219,7 +219,7 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
                 label: "Google OAuth",
             },
         ],
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
             vec![ProviderAddTemplateChoice {
                 template: ProviderAddTemplate::Custom,
                 label: "Custom",
@@ -669,6 +669,7 @@ fn build_sponsor_template_settings_config(
                 })
             }
         }
+        AppType::Pi => Err(unsupported_template_error(ProviderAddTemplate::Custom)),
     }
 }
 
@@ -723,6 +724,22 @@ pub fn apply_additive_template_field_overrides(
                 defaults.user_agent_enabled,
                 models_with_primary_override(current, model),
             )
+        }
+        AppType::Pi => {
+            let mut updated = current.clone();
+            let object = updated.as_object_mut().ok_or_else(|| {
+                AppError::InvalidInput("Pi provider configuration must be an object".to_string())
+            })?;
+            if let Some(api_key) = api_key {
+                object.insert("apiKey".to_string(), Value::String(api_key.to_string()));
+            }
+            if let Some(base_url) = base_url {
+                object.insert("baseUrl".to_string(), Value::String(base_url.to_string()));
+            }
+            if let Some(model) = model {
+                object.insert("models".to_string(), json!([{ "id": model }]));
+            }
+            Ok(updated)
         }
         AppType::Claude | AppType::Codex | AppType::Gemini => Err(AppError::InvalidInput(format!(
             "{} does not use additive provider settings",
@@ -2466,6 +2483,29 @@ requires_openai_auth = true
         assert!(defaults.user_agent_enabled);
         assert!(defaults.models_json.contains("existing-model"));
     }
+
+    #[test]
+    fn pi_prompt_url_validation_allows_only_unchanged_legacy_values() {
+        let invalid = json!({
+            "baseUrl": "not-a-url",
+            "models": [{ "id": "model" }]
+        });
+        let changed_invalid = json!({
+            "baseUrl": "still-not-a-url",
+            "models": [{ "id": "model" }]
+        });
+        let valid_model_url = json!({
+            "models": [{
+                "id": "model",
+                "baseUrl": "https://pi.example/v1"
+            }]
+        });
+
+        assert!(validate_pi_prompt_request_url(None, &invalid).is_err());
+        assert!(validate_pi_prompt_request_url(Some(&invalid), &invalid).is_ok());
+        assert!(validate_pi_prompt_request_url(Some(&invalid), &changed_invalid).is_err());
+        assert!(validate_pi_prompt_request_url(None, &valid_model_url).is_ok());
+    }
 }
 
 fn build_codex_settings_config(
@@ -3700,6 +3740,108 @@ pub fn prompt_basic_fields(
     Ok((name, website_url))
 }
 
+fn prompt_pi_config(current: Option<&Value>) -> Result<Value, AppError> {
+    let mut config = current.cloned().unwrap_or_else(|| json!({}));
+    let object = config.as_object_mut().ok_or_else(|| {
+        AppError::InvalidInput("Pi provider configuration must be an object".to_string())
+    })?;
+
+    let current_base_url = object
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let base_url = Text::new("Base URL:")
+        .with_initial_value(current_base_url)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    if base_url.trim().is_empty() {
+        object.remove("baseUrl");
+    } else {
+        object.insert(
+            "baseUrl".to_string(),
+            Value::String(base_url.trim().to_string()),
+        );
+    }
+
+    let current_api_key = object
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let api_key = Text::new("API Key:")
+        .with_initial_value(current_api_key)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    if api_key.trim().is_empty() {
+        object.remove("apiKey");
+    } else {
+        object.insert(
+            "apiKey".to_string(),
+            Value::String(api_key.trim().to_string()),
+        );
+    }
+
+    let current_api = object
+        .get("api")
+        .and_then(Value::as_str)
+        .unwrap_or(if current.is_none() {
+            "openai-completions"
+        } else {
+            ""
+        });
+    let api = Text::new("API protocol:")
+        .with_initial_value(current_api)
+        .with_help_message("For example: openai-completions or anthropic-messages")
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    if current.is_none() && !crate::openclaw_config::OPENCLAW_API_PROTOCOLS.contains(&api.trim()) {
+        return Err(AppError::InvalidInput(format!(
+            "Unsupported Pi API protocol: {}",
+            api.trim()
+        )));
+    }
+    if api.trim().is_empty() {
+        object.remove("api");
+    } else {
+        object.insert("api".to_string(), Value::String(api.trim().to_string()));
+    }
+
+    if current.is_none() {
+        let model = Text::new("Model ID:")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+        if model.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "A custom Pi provider requires at least one model ID".to_string(),
+            ));
+        }
+        object.insert("models".to_string(), json!([{ "id": model.trim() }]));
+    }
+
+    validate_pi_prompt_request_url(current, &config)?;
+
+    Ok(config)
+}
+
+fn validate_pi_prompt_request_url(current: Option<&Value>, edited: &Value) -> Result<(), AppError> {
+    let request_url = |config: &Value| {
+        crate::pi_config::provider_base_url(config)
+            .ok()
+            .map(|url| url.trim().to_string())
+    };
+    let original_request_url = current.and_then(request_url);
+    let edited_request_url = request_url(edited);
+    if (current.is_none() || edited_request_url != original_request_url)
+        && edited_request_url
+            .as_deref()
+            .is_none_or(|url| !crate::pi_config::is_valid_request_url(url))
+    {
+        return Err(AppError::InvalidInput(
+            "Pi Base URL must be an absolute HTTP(S) URL".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// 根据应用类型收集 settings_config
 pub fn prompt_settings_config(
     app_type: &AppType,
@@ -3741,6 +3883,13 @@ pub fn prompt_settings_config(
         AppType::OpenCode => prompt_opencode_config(current).map(SettingsConfigPromptResult::new),
         AppType::Hermes => prompt_hermes_config(current).map(SettingsConfigPromptResult::new),
         AppType::OpenClaw => prompt_openclaw_config(current).map(SettingsConfigPromptResult::new),
+        AppType::Pi => {
+            let mut config = prompt_pi_config(current)?;
+            if current.is_none() {
+                config["name"] = Value::String(provider_name.trim().to_string());
+            }
+            Ok(SettingsConfigPromptResult::new(config))
+        }
     }
 }
 
@@ -4471,6 +4620,29 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 .settings_config
                 .get("models")
                 .and_then(|v| v.as_array())
+            {
+                println!("  {}: {}", texts::model_label(), models.len());
+            }
+        }
+        AppType::Pi => {
+            if provider.configured_api_key(app_type).is_some() {
+                println!(
+                    "  {}: {}",
+                    texts::api_key_display_label(),
+                    crate::t!("configured", "已配置")
+                );
+            }
+            if let Some(base_url) = provider
+                .settings_config
+                .get("baseUrl")
+                .and_then(Value::as_str)
+            {
+                println!("  {}: {}", texts::base_url_display_label(), base_url);
+            }
+            if let Some(models) = provider
+                .settings_config
+                .get("models")
+                .and_then(Value::as_array)
             {
                 println!("  {}: {}", texts::model_label(), models.len());
             }

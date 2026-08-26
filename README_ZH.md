@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes 和 OpenClaw。**
+**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw 和 Pi。**
 
 [![Version](https://img.shields.io/badge/version-5.10.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -170,8 +170,9 @@ cc-switch --app codex mcp sync          # 同步 Codex MCP 服务器
 cc-switch --app gemini prompts list     # 列出 Gemini 提示词
 cc-switch --app hermes provider list    # 管理 Hermes 供应商
 cc-switch --app openclaw provider list  # 管理 OpenClaw 供应商
+cc-switch --app pi provider list        # 管理 Pi 供应商
 
-# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`
+# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`、`pi`
 ```
 
 需要在多个终端同时使用不同供应商时，请使用 `cc-switch start`。它只影响由该命令启动的 Claude 或 Codex 会话；`provider switch` 和 `use` 仍会切换全局供应商。在 TUI 的供应商页选中供应商后按 `o`，效果相同。
@@ -303,7 +304,10 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 供应商管理
 
-管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes** 与 **OpenClaw** 的 API 配置。
+管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes**、**OpenClaw** 与 **Pi** 的 API 配置。
+
+Pi 供应商遵循原生的增量管理模型：是否启用完全取决于 `models.json.providers` 中的成员关系。CC-Switch 不会修改 Pi 的登录凭据或全局默认供应商/模型。
+Pi TUI 延续其他应用的表格、表单与快捷键交互，并将预设、系统提示词和 Prompt Templates 分为独立页面。
 
 **功能：** 一键切换、Claude 独立 settings 导出、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 
@@ -359,7 +363,7 @@ cc-switch mcp import --app claude    # 从实时配置导入
 
 管理 AI 编码助手的系统提示词预设。
 
-**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)、Hermes (`AGENTS.md`)、OpenClaw (`AGENTS.md`)。
+**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)、Hermes (`AGENTS.md`)、OpenClaw (`AGENTS.md`)、Pi（`AGENTS.md`、原生系统提示词和 prompt templates）。
 
 ```bash
 cc-switch prompts list               # 列出提示词预设
@@ -371,11 +375,13 @@ cc-switch prompts rename <id> [name] # 重命名提示词预设，不传名称�
 cc-switch prompts edit <id>          # 编辑提示词预设
 cc-switch prompts show <id>          # 显示完整内容
 cc-switch prompts delete <id>        # 删除提示词
+cc-switch --app pi prompts system edit append # 编辑 APPEND_SYSTEM.md
+cc-switch --app pi prompts templates list     # 列出 Pi prompt templates
 ```
 
 ### 🎯 Skills 管理
 
-通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode/Hermes 的能力。
+通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode/Hermes/Pi 的能力。
 
 **功能：** SSOT 技能仓库、多应用启用/禁用、同步到应用目录、手动检查/执行更新、扫描/导入未管理技能、仓库发现。
 
@@ -409,7 +415,7 @@ TUI 首页按应用与模型展示响应式的 30 天视图，包括 token/cost 
 
 查看历史会话，一键 resume，删除旧会话，并将本地会话日志导入 token / cost 统计，方便管理用量。
 
-**功能：** 完整历史分页、跨应用扫描、消息预览、可复制的 resume 命令、安全删除、JSON 输出、当前页 token/cost，以及 Claude、Codex、Gemini、OpenCode 的用量同步。Hermes cost 可用时也会显示。
+**功能：** 完整历史分页、跨应用扫描、消息预览、可复制的 resume 命令、安全删除、JSON 输出、当前页 token/cost，以及 Claude、Codex、Gemini、OpenCode、Pi 的用量同步。Hermes cost 可用时也会显示。
 
 ```bash
 cc-switch sessions list --all        # 列出支持应用的历史会话
@@ -491,12 +497,12 @@ cc-switch proxy serve --takeover claude           # 前台调试模式；存在 
 
 ### 🧪 环境与本地工具
 
-检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI 是否已经装好。
+检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw/Pi CLI 是否已经装好。
 
 ```bash
 cc-switch env check                  # 检查环境变量冲突
 cc-switch env list                   # 列出相关环境变量
-cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI
+cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw/Pi CLI
 ```
 
 ### 🌐 多语言支持
@@ -562,6 +568,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 - OpenCode: `~/.config/opencode/opencode.json`（供应商 + MCP + 运行时配置）, `~/.config/opencode/AGENTS.md`（提示词）
 - Hermes: `~/.hermes/config.yaml`（供应商 + MCP + 记忆设置）, `~/.hermes/AGENTS.md`（提示词）, `~/.hermes/skills/`（技能）, `~/.hermes/memories/`（记忆）
 - OpenClaw: `~/.openclaw/openclaw.json`（供应商 + Env/Tools/Agents Defaults）, `~/.openclaw/AGENTS.md`（提示词）
+- Pi: `~/.pi/agent/models.json`（增量供应商）, `~/.pi/agent/settings.json`（只读默认项 / 会话位置）, `~/.pi/agent/AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`prompts/`、`skills/` 与 `sessions/`
 
 ---
 
@@ -652,13 +659,14 @@ cc-switch
 
 <br>
 
-CC-Switch 目前支持六个 AI 编程助手：
+CC-Switch 目前支持七个 AI 编程助手：
 - **Claude Code** (`--app claude`，默认)
 - **Codex** (`--app codex`)
 - **Gemini** (`--app gemini`)
 - **OpenCode** (`--app opencode`)
 - **Hermes** (`--app hermes`)
 - **OpenClaw** (`--app openclaw`)
+- **Pi** (`--app pi`)
 
 使用全局 `--app` 参数指定要管理的应用：
 ```bash

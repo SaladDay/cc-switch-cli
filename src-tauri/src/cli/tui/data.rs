@@ -24,6 +24,10 @@ use crate::prompt::Prompt;
 use crate::prompt_files::prompt_file_path;
 use crate::provider::Provider;
 use crate::services::config::BackupInfo;
+use crate::services::pi_prompt_files::{
+    PiPromptFileKind, PiPromptFileService, PiPromptFileSnapshot, PiPromptTemplate,
+    PiPromptTemplateService,
+};
 use crate::services::{ConfigService, McpService, PromptService, ProviderService, SkillService};
 use crate::store::AppState;
 
@@ -219,6 +223,9 @@ pub struct ProvidersSnapshot {
     pub current_id: String,
     pub rows: Vec<ProviderRow>,
     pub live_ids: HashSet<String>,
+    /// Pi provider membership could not be read from models.json. Mutating
+    /// membership actions must fail closed while this is true.
+    pub pi_membership_unknown: bool,
     /// True only for the transient projection shown while a cold-switched app's
     /// real data is still loading. Lets the renderer show a "loading" state
     /// instead of the "no providers / import config" empty CTA, so a freshly
@@ -253,6 +260,12 @@ pub struct PromptImportCandidate {
 pub struct PromptsSnapshot {
     pub rows: Vec<PromptRow>,
     pub import_candidate: Option<PromptImportCandidate>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PiPromptsSnapshot {
+    pub system_files: Vec<(PiPromptFileKind, PiPromptFileSnapshot)>,
+    pub templates: Vec<PiPromptTemplate>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -395,6 +408,7 @@ impl ProxySnapshot {
             AppType::OpenCode => None,
             AppType::Hermes => None,
             AppType::OpenClaw => None,
+            AppType::Pi => None,
         }
     }
 
@@ -1172,6 +1186,7 @@ pub struct UiData {
     pub providers: ProvidersSnapshot,
     pub mcp: McpSnapshot,
     pub prompts: PromptsSnapshot,
+    pub pi_prompts: PiPromptsSnapshot,
     pub config: ConfigSnapshot,
     pub skills: SkillsSnapshot,
     pub proxy: ProxySnapshot,
@@ -1261,6 +1276,7 @@ impl UiData {
         let providers = load_providers_with_mode(state, app_type, provider_load_mode)?;
         let mcp = load_mcp(state)?;
         let prompts = load_prompts(state, app_type)?;
+        let pi_prompts = load_pi_prompts(app_type)?;
         let config = load_config_snapshot(state, app_type)?;
         let skills = match provider_load_mode {
             ProviderLoadMode::SyncLive => load_skills_snapshot()?,
@@ -1272,6 +1288,7 @@ impl UiData {
             providers,
             mcp,
             prompts,
+            pi_prompts,
             config,
             skills,
             proxy,
@@ -1296,6 +1313,7 @@ impl UiData {
             },
             mcp: self.mcp.clone(),
             prompts: PromptsSnapshot::default(),
+            pi_prompts: PiPromptsSnapshot::default(),
             config: self.config.loading_projection(app_type),
             skills: self.skills.clone(),
             proxy,
@@ -1505,6 +1523,30 @@ fn load_providers_with_mode(
     } else {
         None
     };
+    let (pi_state, pi_membership_unknown) = if matches!(app_type, AppType::Pi) {
+        match crate::services::pi_state::PiStateService::current(state) {
+            Ok(current) => (Some(current), false),
+            Err(error) => {
+                log::warn!("Failed to read Pi provider membership: {error}");
+                (None, true)
+            }
+        }
+    } else {
+        (None, false)
+    };
+    let pi_live_ids = pi_state
+        .as_ref()
+        .map(|current| {
+            current
+                .enabled_provider_ids
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let pi_default_provider_id = pi_state
+        .as_ref()
+        .and_then(|current| current.default_provider_id.clone());
     let openclaw_default_model = if matches!(app_type, AppType::OpenClaw) {
         crate::openclaw_config::get_default_model()?
     } else {
@@ -1535,11 +1577,13 @@ fn load_providers_with_mode(
                     AppType::OpenCode => opencode_live_ids.contains(&id),
                     AppType::Hermes => hermes_live_ids.contains(&id),
                     AppType::OpenClaw => openclaw_live_ids.contains(&id),
+                    AppType::Pi => pi_live_ids.contains(&id),
                     _ => true,
                 },
                 is_saved: true,
                 is_default_model: match app_type {
                     AppType::Hermes => hermes_current_provider_id.as_deref() == Some(id.as_str()),
+                    AppType::Pi => pi_default_provider_id.as_deref() == Some(id.as_str()),
                     _ => openclaw_primary_default_provider_id.as_deref() == Some(id.as_str()),
                 },
                 primary_model_id: extract_primary_model_id(
@@ -1603,6 +1647,7 @@ fn load_providers_with_mode(
         AppType::OpenCode => opencode_live_ids,
         AppType::Hermes => hermes_live_ids,
         AppType::OpenClaw => openclaw_live_providers.keys().cloned().collect(),
+        AppType::Pi => pi_live_ids,
         _ => HashSet::new(),
     };
 
@@ -1610,6 +1655,7 @@ fn load_providers_with_mode(
         current_id,
         rows,
         live_ids,
+        pi_membership_unknown,
         loading: false,
     })
 }
@@ -1695,6 +1741,7 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .or_else(|| settings_config.get("base_url"))?
             .as_str()
             .map(|s| s.to_string()),
+        AppType::Pi => crate::pi_config::provider_base_url(settings_config).ok(),
     }
 }
 
@@ -1819,6 +1866,24 @@ fn load_prompts(state: &AppState, app_type: &AppType) -> Result<PromptsSnapshot,
     Ok(PromptsSnapshot {
         rows,
         import_candidate,
+    })
+}
+
+fn load_pi_prompts(app_type: &AppType) -> Result<PiPromptsSnapshot, AppError> {
+    if !matches!(app_type, AppType::Pi) {
+        return Ok(PiPromptsSnapshot::default());
+    }
+    let system_files = [
+        PiPromptFileKind::SystemAppend,
+        PiPromptFileKind::SystemOverride,
+    ]
+    .into_iter()
+    .map(|kind| PiPromptFileService::read(kind).map(|snapshot| (kind, snapshot)))
+    .collect::<Result<Vec<_>, _>>()?;
+    let templates = PiPromptTemplateService::list()?;
+    Ok(PiPromptsSnapshot {
+        system_files,
+        templates,
     })
 }
 
@@ -5763,6 +5828,21 @@ base_url = "https://current.example.com/v1"
         assert_eq!(
             extract_api_url(&settings, &AppType::OpenCode),
             Some("https://opencode.example".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_api_url_pi_reads_a_model_level_base_url() {
+        let settings = json!({
+            "models": [{
+                "id": "pi-model",
+                "baseUrl": "https://pi-model.example/v1"
+            }]
+        });
+
+        assert_eq!(
+            extract_api_url(&settings, &AppType::Pi),
+            Some("https://pi-model.example/v1".to_string())
         );
     }
 

@@ -21,7 +21,9 @@ impl StreamCheckService {
             }
             AppType::Hermes => Self::extract_hermes_base_url(provider),
             AppType::OpenClaw => Self::extract_openclaw_base_url(provider),
+            AppType::Pi => crate::pi_config::provider_base_url(&provider.settings_config),
             AppType::Claude | AppType::Codex | AppType::Gemini => get_adapter(app_type)
+                .expect("proxy-capable app must have an adapter")
                 .extract_base_url(provider)
                 .map(|url| url.trim().trim_end_matches('/').to_string())
                 .map_err(|err| AppError::Message(format!("Failed to extract base_url: {err}"))),

@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::Value;
 
 fn model_fetch_model_index(
     models_len: usize,
@@ -1000,6 +1001,8 @@ impl App {
                             .then(|| provider.claude_api_key.value.clone()),
                         custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
                             .then(|| provider.custom_user_agent.value.clone()),
+                        api_protocol: None,
+                        request_headers: None,
                         codex_oauth,
                         codex_oauth_account_id,
                         field: ProviderAddField::ClaudeModelConfig,
@@ -1140,6 +1143,14 @@ impl App {
                         }
                     } else if field == ProviderAddField::HermesModels {
                         provider.set_selected_hermes_model_id_from_picker(&selected_model);
+                    } else if field == ProviderAddField::OpenClawModels {
+                        if !provider.openclaw_models.iter().any(|model| {
+                            model.get("id").and_then(Value::as_str) == Some(selected_model.as_str())
+                        }) {
+                            provider
+                                .openclaw_models
+                                .push(serde_json::json!({ "id": selected_model }));
+                        }
                     } else if field == ProviderAddField::CodexLocalRouting {
                         provider.upsert_codex_model_catalog_model(&selected_model);
                     } else if let Some(input_field) = provider.input_mut(field) {
@@ -1548,7 +1559,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(5);
+                *selected = (*selected + 1).min(6);
                 Action::None
             }
             KeyCode::Char(' ') => {
@@ -1617,11 +1628,11 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(4);
+                *selected = (*selected + 1).min(5);
                 Action::None
             }
             KeyCode::Char(' ') => {
-                let app_type = app_type_for_picker_index(*selected);
+                let app_type = skill_app_type_for_picker_index(*selected);
                 let enabled = apps.is_enabled_for(&app_type);
                 apps.set_enabled_for(&app_type, !enabled);
                 Action::None

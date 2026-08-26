@@ -255,6 +255,25 @@ fn sessions_help_describes_costs_as_local_estimates_without_ui_prefixes() {
     assert!(!chinese.contains('~'), "{chinese}");
 }
 
+#[test]
+fn pi_native_prompt_pages_put_behavioral_guidance_in_context_help() {
+    let mut app = App::new(Some(AppType::Pi));
+    let data = UiData::default();
+    let _english = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+    app.route = route::Route::PiSystemPrompts;
+    let system = help::context_help_for_app(&app, &data).lines.join("\n");
+    assert!(system.contains("APPEND_SYSTEM.md"), "{system}");
+    assert!(system.contains("replaces"), "{system}");
+    assert!(system.contains("conflict"), "{system}");
+
+    app.route = route::Route::PiPromptTemplates;
+    let templates = help::context_help_for_app(&app, &data).lines.join("\n");
+    assert!(templates.contains("prompts/*.md"), "{templates}");
+    assert!(templates.contains("slash-command"), "{templates}");
+    assert!(templates.contains("traversal"), "{templates}");
+}
+
 struct EnvGuard {
     _lock: TestHomeSettingsLock,
     old_home: Option<OsString>,
@@ -5363,6 +5382,7 @@ async fn model_fetch_full_url_reports_when_models_endpoint_cannot_be_derived() {
         None,
         None,
         ModelFetchStrategy::Bearer,
+        None,
     )
     .await
     .expect_err("origin-only full URL should not invent a models endpoint");
@@ -5410,6 +5430,7 @@ async fn model_fetch_sends_trimmed_custom_user_agent() {
         Some("sk-test"),
         Some("  cc-switch-model-fetch/test  "),
         ModelFetchStrategy::Bearer,
+        None,
     )
     .await
     .expect("model fetch should succeed");
@@ -5437,6 +5458,7 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
         opencode: true,
         hermes: false,
         openclaw: true,
+        pi: false,
     })
     .expect("save visible apps");
 

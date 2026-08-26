@@ -77,6 +77,17 @@ fn sanitize_claude_common_config_value_for_form(value: Value) -> Value {
     }
 }
 
+fn pi_native_string_field_changed(
+    original: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+    current: &str,
+) -> bool {
+    match original.and_then(|settings| settings.get(key)) {
+        Some(Value::String(value)) => value != current,
+        Some(_) | None => !current.is_empty(),
+    }
+}
+
 pub(crate) fn sanitize_claude_common_config_for_form(snippet: &str) -> Result<Value, String> {
     let value = serde_json::from_str::<Value>(snippet)
         .map_err(|error| texts::common_config_snippet_invalid_json(&error.to_string()))?;
@@ -670,116 +681,188 @@ impl ProviderAddFormState {
                     &self.hermes_rate_limit_delay.value,
                 );
             }
-            AppType::OpenClaw => {
-                settings_obj.remove("npm");
-                settings_obj.remove("options");
-                settings_obj.remove("api_key");
-                settings_obj.remove("base_url");
+            AppType::OpenClaw | AppType::Pi => {
+                let is_pi = matches!(self.app_type, AppType::Pi);
+                let original_pi_settings = is_pi
+                    .then(|| {
+                        self.extra
+                            .pointer("/settingsConfig")
+                            .and_then(Value::as_object)
+                    })
+                    .flatten();
+                if is_pi {
+                    let original_native_name = original_pi_settings
+                        .and_then(|settings| settings.get("name"))
+                        .and_then(Value::as_str);
+                    let original_display_name = self.extra.get("name").and_then(Value::as_str);
+                    let native_name_follows_display = !self.mode.is_edit()
+                        || matches!(
+                            (original_native_name, original_display_name),
+                            (Some(native), Some(display)) if native.trim() == display.trim()
+                        );
+                    if native_name_follows_display {
+                        settings_obj.insert(
+                            "name".to_string(),
+                            Value::String(self.name.value.trim().to_string()),
+                        );
+                    }
+                }
+                if !is_pi {
+                    settings_obj.remove("npm");
+                    settings_obj.remove("options");
+                    settings_obj.remove("api_key");
+                    settings_obj.remove("base_url");
+                }
 
-                set_or_remove_trimmed(settings_obj, "apiKey", &self.opencode_api_key.value);
-                set_or_remove_trimmed(settings_obj, "baseUrl", &self.opencode_base_url.value);
+                if !is_pi
+                    || pi_native_string_field_changed(
+                        original_pi_settings,
+                        "apiKey",
+                        &self.opencode_api_key.value,
+                    )
+                {
+                    set_or_remove_trimmed(settings_obj, "apiKey", &self.opencode_api_key.value);
+                }
+                if !is_pi
+                    || pi_native_string_field_changed(
+                        original_pi_settings,
+                        "baseUrl",
+                        &self.opencode_base_url.value,
+                    )
+                {
+                    set_or_remove_trimmed(settings_obj, "baseUrl", &self.opencode_base_url.value);
+                }
 
                 let api_value = self.opencode_npm_package.value.trim();
-                settings_obj.insert(
-                    "api".to_string(),
-                    json!(if api_value.is_empty() {
-                        OPENCLAW_DEFAULT_API_PROTOCOL
+                if !is_pi
+                    || pi_native_string_field_changed(
+                        original_pi_settings,
+                        "api",
+                        &self.opencode_npm_package.value,
+                    )
+                {
+                    if is_pi && api_value.is_empty() {
+                        settings_obj.remove("api");
                     } else {
-                        api_value
-                    }),
-                );
-
-                let mut headers_obj = match settings_obj.remove("headers") {
-                    Some(Value::Object(map)) => map,
-                    _ => serde_json::Map::new(),
-                };
-                if self.openclaw_user_agent {
-                    headers_obj
-                        .entry("User-Agent".to_string())
-                        .or_insert_with(|| json!(OPENCLAW_DEFAULT_USER_AGENT));
-                } else {
-                    headers_obj.remove("User-Agent");
-                }
-                if headers_obj.is_empty() {
-                    settings_obj.remove("headers");
-                } else {
-                    settings_obj.insert("headers".to_string(), Value::Object(headers_obj));
+                        settings_obj.insert(
+                            "api".to_string(),
+                            json!(if api_value.is_empty() {
+                                OPENCLAW_DEFAULT_API_PROTOCOL
+                            } else {
+                                api_value
+                            }),
+                        );
+                    }
                 }
 
-                let mut models = if self.openclaw_models.is_empty() {
-                    match settings_obj.remove("models") {
-                        Some(Value::Array(items)) => items,
-                        _ => Vec::new(),
+                if !is_pi {
+                    let mut headers_obj = match settings_obj.remove("headers") {
+                        Some(Value::Object(map)) => map,
+                        _ => serde_json::Map::new(),
+                    };
+                    if self.openclaw_user_agent {
+                        headers_obj
+                            .entry("User-Agent".to_string())
+                            .or_insert_with(|| json!(OPENCLAW_DEFAULT_USER_AGENT));
+                    } else {
+                        headers_obj.remove("User-Agent");
+                    }
+                    if headers_obj.is_empty() {
+                        settings_obj.remove("headers");
+                    } else {
+                        settings_obj.insert("headers".to_string(), Value::Object(headers_obj));
+                    }
+                }
+
+                if is_pi {
+                    let models_changed =
+                        match original_pi_settings.and_then(|settings| settings.get("models")) {
+                            Some(Value::Array(models)) => models != &self.openclaw_models,
+                            Some(_) | None => !self.openclaw_models.is_empty(),
+                        };
+                    if models_changed {
+                        settings_obj.insert(
+                            "models".to_string(),
+                            Value::Array(self.openclaw_models.clone()),
+                        );
                     }
                 } else {
-                    self.openclaw_models.clone()
-                };
+                    let mut models = if self.openclaw_models.is_empty() {
+                        match settings_obj.remove("models") {
+                            Some(Value::Array(items)) => items,
+                            _ => Vec::new(),
+                        }
+                    } else {
+                        self.openclaw_models.clone()
+                    };
 
-                let model_id = self.openclaw_primary_model_id();
-                match model_id {
-                    Some(model_id) => {
-                        let mut original_index = self
-                            .opencode_model_original_id
-                            .as_deref()
-                            .and_then(|original_id| openclaw_model_index(&models, original_id));
+                    let model_id = self.openclaw_primary_model_id();
+                    match model_id {
+                        Some(model_id) => {
+                            let mut original_index = self
+                                .opencode_model_original_id
+                                .as_deref()
+                                .and_then(|original_id| openclaw_model_index(&models, original_id));
 
-                        if let Some(existing_index) = openclaw_model_index(&models, &model_id) {
-                            if Some(existing_index) != original_index {
-                                models.remove(existing_index);
-                                if let Some(index) = original_index.as_mut() {
-                                    if existing_index < *index {
-                                        *index = index.saturating_sub(1);
+                            if let Some(existing_index) = openclaw_model_index(&models, &model_id) {
+                                if Some(existing_index) != original_index {
+                                    models.remove(existing_index);
+                                    if let Some(index) = original_index.as_mut() {
+                                        if existing_index < *index {
+                                            *index = index.saturating_sub(1);
+                                        }
                                     }
                                 }
                             }
+
+                            let target_index =
+                                original_index.or_else(|| openclaw_model_index(&models, &model_id));
+
+                            let mut model_obj = target_index
+                                .and_then(|index| models.get(index).cloned())
+                                .and_then(|value| value.as_object().cloned())
+                                .unwrap_or_default();
+
+                            model_obj.insert("id".to_string(), json!(model_id.clone()));
+
+                            let model_name = self.opencode_model_name.value.trim();
+                            if model_name.is_empty() {
+                                model_obj.remove("name");
+                            } else {
+                                model_obj.insert("name".to_string(), json!(model_name));
+                            }
+
+                            let context_value = self.opencode_model_context_limit.value.trim();
+                            if context_value.is_empty() {
+                                model_obj.remove("contextWindow");
+                                model_obj.remove("context_window");
+                            } else if let Ok(context_window) = context_value.parse::<u32>() {
+                                model_obj.remove("context_window");
+                                model_obj
+                                    .insert("contextWindow".to_string(), json!(context_window));
+                            }
+
+                            let updated_model = Value::Object(model_obj);
+                            if let Some(index) = target_index {
+                                models[index] = updated_model;
+                            } else {
+                                models.push(updated_model);
+                            }
                         }
-
-                        let target_index =
-                            original_index.or_else(|| openclaw_model_index(&models, &model_id));
-
-                        let mut model_obj = target_index
-                            .and_then(|index| models.get(index).cloned())
-                            .and_then(|value| value.as_object().cloned())
-                            .unwrap_or_default();
-
-                        model_obj.insert("id".to_string(), json!(model_id.clone()));
-
-                        let model_name = self.opencode_model_name.value.trim();
-                        if model_name.is_empty() {
-                            model_obj.remove("name");
-                        } else {
-                            model_obj.insert("name".to_string(), json!(model_name));
-                        }
-
-                        let context_value = self.opencode_model_context_limit.value.trim();
-                        if context_value.is_empty() {
-                            model_obj.remove("contextWindow");
-                            model_obj.remove("context_window");
-                        } else if let Ok(context_window) = context_value.parse::<u32>() {
-                            model_obj.remove("context_window");
-                            model_obj.insert("contextWindow".to_string(), json!(context_window));
-                        }
-
-                        let updated_model = Value::Object(model_obj);
-                        if let Some(index) = target_index {
-                            models[index] = updated_model;
-                        } else {
-                            models.push(updated_model);
-                        }
-                    }
-                    None => {
-                        if let Some(original_id) = self.opencode_model_original_id.as_deref() {
-                            if let Some(index) = openclaw_model_index(&models, original_id) {
-                                models.remove(index);
+                        None => {
+                            if let Some(original_id) = self.opencode_model_original_id.as_deref() {
+                                if let Some(index) = openclaw_model_index(&models, original_id) {
+                                    models.remove(index);
+                                }
                             }
                         }
                     }
-                }
 
-                if models.is_empty() {
-                    settings_obj.remove("models");
-                } else {
-                    settings_obj.insert("models".to_string(), Value::Array(models));
+                    if models.is_empty() {
+                        settings_obj.remove("models");
+                    } else {
+                        settings_obj.insert("models".to_string(), Value::Array(models));
+                    }
                 }
             }
         }
@@ -1402,7 +1485,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

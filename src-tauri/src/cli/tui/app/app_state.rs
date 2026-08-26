@@ -132,6 +132,8 @@ pub enum Action {
         is_full_url: bool,
         api_key: Option<String>,
         custom_user_agent: Option<String>,
+        api_protocol: Option<String>,
+        request_headers: Option<std::collections::BTreeMap<String, String>>,
         codex_oauth: bool,
         codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
@@ -199,6 +201,20 @@ pub enum Action {
     },
     PromptDelete {
         id: String,
+    },
+    PiSystemPromptDelete {
+        kind: crate::services::pi_prompt_files::PiPromptFileKind,
+        expected_revision: String,
+    },
+    PiPromptTemplateDelete {
+        slug: String,
+        expected_revision: String,
+    },
+    PiPromptTemplateRename {
+        original_slug: String,
+        new_slug: String,
+        expected_revision: String,
+        content: String,
     },
     PromptFormOpenExternal,
     PromptOpenImportCandidate {
@@ -324,6 +340,9 @@ pub enum Action {
         app_type: AppType,
     },
     SetOpenClawConfigDir {
+        path: Option<String>,
+    },
+    SetPiConfigDir {
         path: Option<String>,
     },
     SetPreferredEditor {
@@ -506,6 +525,7 @@ pub enum SettingsItem {
     SkillsStorageLocation,
     SkillsSyncMethod,
     OpenClawConfigDir,
+    PiConfigDir,
     ManagedAccounts,
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
@@ -517,7 +537,7 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 17] = [
+    pub const ALL: [SettingsItem; 18] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::Theme,
@@ -528,6 +548,7 @@ impl SettingsItem {
         SettingsItem::SkillsStorageLocation,
         SettingsItem::SkillsSyncMethod,
         SettingsItem::OpenClawConfigDir,
+        SettingsItem::PiConfigDir,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
         SettingsItem::PreserveCodexOfficialAuth,
@@ -749,6 +770,8 @@ pub struct App {
     pub provider_idx: usize,
     pub mcp_idx: usize,
     pub prompt_idx: usize,
+    pub pi_system_prompt_idx: usize,
+    pub pi_prompt_template_idx: usize,
     pub skills_idx: usize,
     pub skills_discover_idx: usize,
     pub skills_repo_idx: usize,

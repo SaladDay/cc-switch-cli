@@ -28,16 +28,18 @@ pub enum LocalTool {
     OpenCode,
     Hermes,
     OpenClaw,
+    Pi,
 }
 
 impl LocalTool {
-    pub const ALL: [LocalTool; 6] = [
+    pub const ALL: [LocalTool; 7] = [
         LocalTool::Claude,
         LocalTool::Codex,
         LocalTool::Gemini,
         LocalTool::OpenCode,
         LocalTool::Hermes,
         LocalTool::OpenClaw,
+        LocalTool::Pi,
     ];
 
     pub fn all() -> &'static [LocalTool] {
@@ -52,6 +54,7 @@ impl LocalTool {
             LocalTool::OpenCode => "OpenCode",
             LocalTool::Hermes => "Hermes",
             LocalTool::OpenClaw => "OpenClaw",
+            LocalTool::Pi => "Pi",
         }
     }
 
@@ -63,6 +66,7 @@ impl LocalTool {
             LocalTool::OpenCode => "opencode",
             LocalTool::Hermes => "hermes",
             LocalTool::OpenClaw => "openclaw",
+            LocalTool::Pi => "pi",
         }
     }
 
@@ -74,6 +78,7 @@ impl LocalTool {
             LocalTool::OpenCode => &["--version", "version"],
             LocalTool::Hermes => &["--version", "version"],
             LocalTool::OpenClaw => &["--version", "version"],
+            LocalTool::Pi => &["--version"],
         }
     }
 
@@ -100,6 +105,7 @@ impl LocalTool {
             AppType::OpenCode => LocalTool::OpenCode,
             AppType::Hermes => LocalTool::Hermes,
             AppType::OpenClaw => LocalTool::OpenClaw,
+            AppType::Pi => LocalTool::Pi,
         }
     }
 }
@@ -853,10 +859,11 @@ mod tests {
 
         assert_eq!(
             display_names,
-            vec!["Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw"]
+            vec!["Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw", "Pi"]
         );
         assert_eq!(LocalTool::Hermes.binary_name(), "hermes");
         assert_eq!(LocalTool::OpenClaw.binary_name(), "openclaw");
+        assert_eq!(LocalTool::Pi.binary_name(), "pi");
         assert_eq!(LocalTool::Hermes.version_timeout(), Duration::from_secs(10));
         assert_eq!(LocalTool::Claude.version_timeout(), Duration::from_secs(5));
     }

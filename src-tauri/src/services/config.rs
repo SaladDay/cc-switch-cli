@@ -315,6 +315,7 @@ impl ConfigService {
             AppType::OpenCode => {}
             AppType::Hermes => {}
             AppType::OpenClaw => {}
+            AppType::Pi => {}
         }
 
         Ok(())

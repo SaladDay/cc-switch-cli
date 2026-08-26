@@ -287,7 +287,7 @@ impl RequestForwarder {
             attempted_providers += 1;
             pending_upstream_response = None;
             let provider_needs_transform = matches!(app_type, AppType::Claude)
-                && get_adapter(app_type).needs_transform(&provider);
+                && get_adapter(app_type).is_some_and(|adapter| adapter.needs_transform(&provider));
 
             match self
                 .send_streaming_request(
@@ -532,7 +532,7 @@ impl RequestForwarder {
             attempted_providers += 1;
             pending_upstream_response = None;
             let provider_needs_transform = matches!(app_type, AppType::Claude)
-                && get_adapter(app_type).needs_transform(&provider);
+                && get_adapter(app_type).is_some_and(|adapter| adapter.needs_transform(&provider));
 
             match self
                 .send_buffered_request(

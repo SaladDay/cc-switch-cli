@@ -1,8 +1,11 @@
-use clap::{ArgAction, Subcommand};
+use clap::{ArgAction, Subcommand, ValueEnum};
 
 use crate::app_config::AppType;
 use crate::cli::ui::{create_table, highlight, info, success};
 use crate::error::AppError;
+use crate::services::pi_prompt_files::{
+    PiPromptFileKind, PiPromptFileService, PiPromptTemplateService,
+};
 use crate::services::PromptService;
 use crate::store::AppState;
 
@@ -68,6 +71,61 @@ pub enum PromptsCommand {
         /// Prompt preset ID
         id: String,
     },
+    /// Manage Pi's native SYSTEM.md or APPEND_SYSTEM.md
+    System {
+        #[command(subcommand)]
+        command: PiSystemPromptCommand,
+    },
+    /// Manage Pi's native slash-command prompt templates
+    Templates {
+        #[command(subcommand)]
+        command: PiPromptTemplatesCommand,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum PiSystemPromptKind {
+    /// APPEND_SYSTEM.md (recommended)
+    Append,
+    /// SYSTEM.md (replaces Pi's built-in system prompt)
+    Override,
+}
+
+impl From<PiSystemPromptKind> for PiPromptFileKind {
+    fn from(value: PiSystemPromptKind) -> Self {
+        match value {
+            PiSystemPromptKind::Append => Self::SystemAppend,
+            PiSystemPromptKind::Override => Self::SystemOverride,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum PiSystemPromptCommand {
+    /// Show a native Pi system prompt file
+    Show { kind: PiSystemPromptKind },
+    /// Edit a native Pi system prompt file
+    Edit { kind: PiSystemPromptKind },
+    /// Delete a native Pi system prompt file
+    Delete { kind: PiSystemPromptKind },
+}
+
+#[derive(Subcommand)]
+pub enum PiPromptTemplatesCommand {
+    /// List Pi prompt templates
+    List,
+    /// Show a Pi prompt template
+    Show { slug: String },
+    /// Create a Pi prompt template
+    Create { slug: String },
+    /// Edit or rename a Pi prompt template
+    Edit {
+        slug: String,
+        #[arg(long)]
+        new_slug: Option<String>,
+    },
+    /// Delete a Pi prompt template
+    Delete { slug: String },
 }
 
 pub fn execute(cmd: PromptsCommand, app: Option<AppType>) -> Result<(), AppError> {
@@ -96,7 +154,187 @@ pub fn execute(cmd: PromptsCommand, app: Option<AppType>) -> Result<(), AppError
         } => rename_prompt(app_type, &id, new_id, named.or(name), description),
         PromptsCommand::Delete { id } => delete_prompt(app_type, &id),
         PromptsCommand::Show { id } => show_prompt(app_type, &id),
+        PromptsCommand::System { command } => manage_pi_system_prompt(app_type, command),
+        PromptsCommand::Templates { command } => manage_pi_prompt_templates(app_type, command),
     }
+}
+
+fn require_pi(app_type: &AppType, resource: &str) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Pi) {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput(format!(
+            "{resource} is only available with --app pi"
+        )))
+    }
+}
+
+fn manage_pi_system_prompt(
+    app_type: AppType,
+    command: PiSystemPromptCommand,
+) -> Result<(), AppError> {
+    require_pi(&app_type, "Pi native system prompts")?;
+    let (kind, action) = match command {
+        PiSystemPromptCommand::Show { kind } => (kind, "show"),
+        PiSystemPromptCommand::Edit { kind } => (kind, "edit"),
+        PiSystemPromptCommand::Delete { kind } => (kind, "delete"),
+    };
+    let filename = match kind {
+        PiSystemPromptKind::Append => "APPEND_SYSTEM.md",
+        PiSystemPromptKind::Override => "SYSTEM.md",
+    };
+    let native_kind = kind.into();
+
+    match action {
+        "show" => {
+            let snapshot = PiPromptFileService::read(native_kind)?;
+            if snapshot.exists {
+                println!("{}", highlight(filename));
+                println!("{}", snapshot.content);
+            } else {
+                println!("{}", info(&format!("{filename} does not exist.")));
+            }
+        }
+        "edit" => {
+            let snapshot = PiPromptFileService::read(native_kind)?;
+            if matches!(kind, PiSystemPromptKind::Override) && !snapshot.exists {
+                println!(
+                    "{}",
+                    info("SYSTEM.md replaces Pi's built-in system prompt; APPEND_SYSTEM.md is recommended for normal additions.")
+                );
+                let confirmed = inquire::Confirm::new("Create SYSTEM.md?")
+                    .with_default(false)
+                    .prompt()
+                    .map_err(|error| AppError::Message(format!("Prompt failed: {error}")))?;
+                if !confirmed {
+                    println!("{}", info("Cancelled."));
+                    return Ok(());
+                }
+            }
+            let initial = if snapshot.exists {
+                snapshot.content.as_str()
+            } else {
+                "# Write the Pi system prompt here\n"
+            };
+            let edited = crate::cli::editor::open_external_editor(initial)?;
+            if snapshot.exists && edited == snapshot.content {
+                println!("{}", info("No changes detected."));
+                return Ok(());
+            }
+            PiPromptFileService::replace(native_kind, &snapshot.revision, &edited)?;
+            println!("{}", success(&format!("✓ Saved {filename}")));
+        }
+        "delete" => {
+            let snapshot = PiPromptFileService::read(native_kind)?;
+            if !snapshot.exists {
+                println!("{}", info(&format!("{filename} does not exist.")));
+                return Ok(());
+            }
+            let confirmed = inquire::Confirm::new(&format!("Delete {filename}?"))
+                .with_default(false)
+                .prompt()
+                .map_err(|error| AppError::Message(format!("Prompt failed: {error}")))?;
+            if !confirmed {
+                println!("{}", info("Cancelled."));
+                return Ok(());
+            }
+            PiPromptFileService::delete(native_kind, &snapshot.revision)?;
+            println!("{}", success(&format!("✓ Deleted {filename}")));
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn manage_pi_prompt_templates(
+    app_type: AppType,
+    command: PiPromptTemplatesCommand,
+) -> Result<(), AppError> {
+    require_pi(&app_type, "Pi prompt templates")?;
+    let templates = PiPromptTemplateService::list()?;
+    match command {
+        PiPromptTemplatesCommand::List => {
+            if templates.is_empty() {
+                println!("{}", info("No Pi prompt templates found."));
+            } else {
+                let mut table = create_table();
+                table.set_header(vec!["Slug", "Lines", "Size"]);
+                for template in templates {
+                    table.add_row(vec![
+                        template.slug,
+                        template.content.lines().count().to_string(),
+                        format!("{} bytes", template.content.len()),
+                    ]);
+                }
+                println!("{table}");
+            }
+        }
+        PiPromptTemplatesCommand::Show { slug } => {
+            let template = templates
+                .into_iter()
+                .find(|template| template.slug == slug)
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!("Pi prompt template '{slug}' not found"))
+                })?;
+            println!("{}", highlight(&template.slug));
+            println!("{}", template.content);
+        }
+        PiPromptTemplatesCommand::Create { slug } => {
+            if templates.iter().any(|template| template.slug == slug) {
+                return Err(AppError::InvalidInput(format!(
+                    "Pi prompt template '{slug}' already exists"
+                )));
+            }
+            let edited =
+                crate::cli::editor::open_external_editor("# Write the Pi prompt template here\n")?;
+            PiPromptTemplateService::upsert(&slug, None, "missing", &edited)?;
+            println!(
+                "{}",
+                success(&format!("✓ Created Pi prompt template '{slug}'"))
+            );
+        }
+        PiPromptTemplatesCommand::Edit { slug, new_slug } => {
+            let template = templates
+                .into_iter()
+                .find(|template| template.slug == slug)
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!("Pi prompt template '{slug}' not found"))
+                })?;
+            let target_slug = new_slug.as_deref().unwrap_or(&slug);
+            let edited = crate::cli::editor::open_external_editor(&template.content)?;
+            if target_slug == slug && edited == template.content {
+                println!("{}", info("No changes detected."));
+                return Ok(());
+            }
+            PiPromptTemplateService::upsert(target_slug, Some(&slug), &template.revision, &edited)?;
+            println!(
+                "{}",
+                success(&format!("✓ Saved Pi prompt template '{target_slug}'"))
+            );
+        }
+        PiPromptTemplatesCommand::Delete { slug } => {
+            let template = templates
+                .into_iter()
+                .find(|template| template.slug == slug)
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!("Pi prompt template '{slug}' not found"))
+                })?;
+            let confirmed = inquire::Confirm::new(&format!("Delete Pi prompt template '{slug}'?"))
+                .with_default(false)
+                .prompt()
+                .map_err(|error| AppError::Message(format!("Prompt failed: {error}")))?;
+            if !confirmed {
+                println!("{}", info("Cancelled."));
+                return Ok(());
+            }
+            PiPromptTemplateService::delete(&slug, &template.revision)?;
+            println!(
+                "{}",
+                success(&format!("✓ Deleted Pi prompt template '{slug}'"))
+            );
+        }
+    }
+    Ok(())
 }
 
 fn get_state() -> Result<AppState, AppError> {

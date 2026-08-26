@@ -36,6 +36,7 @@ fn inquire_color_for_app(app_type: &AppType) -> InquireColor {
         AppType::OpenCode => InquireColor::LightGreen,
         AppType::Hermes => InquireColor::LightBlue,
         AppType::OpenClaw => InquireColor::LightRed,
+        AppType::Pi => InquireColor::LightCyan,
     }
 }
 
@@ -88,6 +89,7 @@ fn highlight_color_for_app(app_type: &AppType) -> Color {
         AppType::OpenCode => Color::BrightGreen,
         AppType::Hermes => Color::BrightBlue,
         AppType::OpenClaw => Color::BrightRed,
+        AppType::Pi => Color::BrightCyan,
     }
 }
 

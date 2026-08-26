@@ -375,6 +375,7 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
             "unifyCodexMigrateExisting": settings.unify_codex_migrate_existing.unwrap_or(false),
             "hasCodexHistoryUnifyBackup": crate::codex_history_migration::has_codex_official_history_unify_backup(),
             "openclawConfigDir": settings.openclaw_config_dir,
+            "piConfigDir": settings.pi_config_dir,
             "preferredEditor": settings.preferred_editor,
         });
         println!(
@@ -409,6 +410,10 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
             .openclaw_config_dir
             .as_deref()
             .unwrap_or("(default)")
+    );
+    println!(
+        "Pi config dir: {}",
+        settings.pi_config_dir.as_deref().unwrap_or("(default)")
     );
     println!(
         "Preferred editor: {}",
@@ -507,6 +512,7 @@ fn set_visible_apps_list(apps: Vec<AppType>) -> Result<(), AppError> {
         opencode: false,
         hermes: false,
         openclaw: false,
+        pi: false,
     };
     for app in apps {
         visible_apps.set_enabled_for(&app, true);
@@ -882,6 +888,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         })
         .expect("save manual visible apps");
 
@@ -905,6 +912,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         })
         .expect_err("empty visible apps should be rejected");
 

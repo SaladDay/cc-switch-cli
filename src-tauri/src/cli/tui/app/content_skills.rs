@@ -66,7 +66,7 @@ impl App {
                 self.overlay = Overlay::SkillsAppsPicker {
                     directory: skill.directory.clone(),
                     name: skill.name.clone(),
-                    selected: four_app_picker_index(&self.app_type),
+                    selected: skills_app_picker_index(&self.app_type),
                     apps: skill.apps.clone(),
                 };
                 Action::None
@@ -266,7 +266,7 @@ impl App {
                 self.overlay = Overlay::SkillsAppsPicker {
                     directory: skill.directory.clone(),
                     name: skill.name.clone(),
-                    selected: four_app_picker_index(&self.app_type),
+                    selected: skills_app_picker_index(&self.app_type),
                     apps: skill.apps.clone(),
                 };
                 Action::None

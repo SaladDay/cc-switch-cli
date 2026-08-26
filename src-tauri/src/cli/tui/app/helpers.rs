@@ -693,6 +693,8 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
             | Route::Sessions
             | Route::Mcp
             | Route::Prompts
+            | Route::PiSystemPrompts
+            | Route::PiPromptTemplates
             | Route::HermesMemory
             | Route::Config
             | Route::ConfigOpenClawWorkspace
@@ -1758,11 +1760,27 @@ pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
         AppType::OpenCode => 3,
         AppType::Hermes => 4,
         AppType::OpenClaw => 5,
+        AppType::Pi => 6,
     }
 }
 
 pub(crate) fn four_app_picker_index(app_type: &AppType) -> usize {
     app_type_picker_index(app_type).min(4)
+}
+
+pub(crate) fn skills_app_picker_index(app_type: &AppType) -> usize {
+    match app_type {
+        AppType::Pi | AppType::OpenClaw => 5,
+        _ => app_type_picker_index(app_type),
+    }
+}
+
+pub(crate) fn skill_app_type_for_picker_index(index: usize) -> AppType {
+    if index == 5 {
+        AppType::Pi
+    } else {
+        app_type_for_picker_index(index)
+    }
 }
 
 pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
@@ -1772,6 +1790,7 @@ pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
         3 => AppType::OpenCode,
         4 => AppType::Hermes,
         5 => AppType::OpenClaw,
+        6 => AppType::Pi,
         _ => AppType::Claude,
     }
 }

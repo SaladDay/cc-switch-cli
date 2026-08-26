@@ -505,6 +505,22 @@ fn deeplink_import_prompt_for_non_claude_app() {
 }
 
 #[test]
+fn deeplink_parser_accepts_pi_prompts_but_not_pi_providers() {
+    let content_b64 = BASE64_URL_SAFE_NO_PAD.encode(b"pi prompt content");
+    let prompt_url =
+        format!("ccswitch://v1/import?resource=prompt&app=pi&name=PiPrompt&content={content_b64}");
+    let prompt = parse_deeplink_url(&prompt_url).expect("parse Pi prompt deeplink");
+    assert_eq!(prompt.app.as_deref(), Some("pi"));
+
+    let provider =
+        parse_deeplink_url("ccswitch://v1/import?resource=provider&app=pi&name=PiProvider");
+    assert!(
+        provider.is_err(),
+        "Pi provider deeplinks remain unsupported"
+    );
+}
+
+#[test]
 fn deeplink_import_skill_repo_persists() {
     let _guard = lock_test_mutex();
     reset_test_fs();

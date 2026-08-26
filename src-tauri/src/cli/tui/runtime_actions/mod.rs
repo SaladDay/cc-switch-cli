@@ -73,6 +73,26 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::SettingsManagedAccounts => route.clone(),
             _ => super::route::Route::Main,
         },
+        AppType::Pi => match route {
+            super::route::Route::Main
+            | super::route::Route::Providers
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
+            | super::route::Route::Sessions
+            | super::route::Route::Prompts
+            | super::route::Route::PiSystemPrompts
+            | super::route::Route::PiPromptTemplates
+            | super::route::Route::Skills
+            | super::route::Route::SkillsDiscover
+            | super::route::Route::SkillsRepos
+            | super::route::Route::SkillDetail { .. }
+            | super::route::Route::Settings
+            | super::route::Route::SettingsProxy
+            | super::route::Route::SettingsManagedAccounts => route.clone(),
+            _ => super::route::Route::Main,
+        },
         _ => match route {
             super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
@@ -80,6 +100,9 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::ConfigOpenClawTools
             | super::route::Route::ConfigOpenClawAgents => super::route::Route::Config,
             super::route::Route::HermesMemory => super::route::Route::Main,
+            super::route::Route::PiSystemPrompts | super::route::Route::PiPromptTemplates => {
+                super::route::Route::Main
+            }
             _ => route.clone(),
         },
     }
@@ -910,6 +933,8 @@ pub(crate) fn handle_action(
             is_full_url,
             api_key,
             custom_user_agent,
+            api_protocol,
+            request_headers,
             codex_oauth,
             codex_oauth_account_id,
             field,
@@ -920,6 +945,8 @@ pub(crate) fn handle_action(
             is_full_url,
             api_key,
             custom_user_agent,
+            api_protocol,
+            request_headers,
             codex_oauth,
             codex_oauth_account_id,
             field,
@@ -947,6 +974,26 @@ pub(crate) fn handle_action(
             content,
         } => prompts::save(&mut ctx, old_id, new_id, name, description, content),
         Action::PromptDelete { id } => prompts::delete(&mut ctx, id),
+        Action::PiSystemPromptDelete {
+            kind,
+            expected_revision,
+        } => prompts::delete_pi_system_prompt(&mut ctx, kind, expected_revision),
+        Action::PiPromptTemplateDelete {
+            slug,
+            expected_revision,
+        } => prompts::delete_pi_prompt_template(&mut ctx, slug, expected_revision),
+        Action::PiPromptTemplateRename {
+            original_slug,
+            new_slug,
+            expected_revision,
+            content,
+        } => prompts::rename_pi_prompt_template(
+            &mut ctx,
+            original_slug,
+            new_slug,
+            expected_revision,
+            content,
+        ),
         Action::PromptFormOpenExternal => prompts::open_form_external(&mut ctx),
         Action::PromptOpenImportCandidate { filename, content } => {
             prompts::open_import_candidate(&mut ctx, filename, content)
@@ -1051,6 +1098,7 @@ pub(crate) fn handle_action(
             settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
+        Action::SetPiConfigDir { path } => settings::set_pi_config_dir(&mut ctx, path),
         Action::SetPreferredEditor { command } => settings::set_preferred_editor(&mut ctx, command),
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
@@ -1819,6 +1867,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: true,
+            pi: false,
         })
         .expect("save initial visible apps");
 
@@ -1829,6 +1878,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         };
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
@@ -1889,6 +1939,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: true,
+            pi: false,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
             .expect("save initial visible apps");
@@ -1911,6 +1962,7 @@ mod tests {
                     opencode: false,
                     hermes: false,
                     openclaw: false,
+                    pi: false,
                 },
             },
         )
@@ -1939,6 +1991,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: true,
+            pi: false,
         })
         .expect("save initial visible apps");
         write_invalid_legacy_config(temp_home.path());
@@ -1950,6 +2003,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: false,
+            pi: false,
         };
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
@@ -1987,6 +2041,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: true,
+            pi: false,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
             .expect("save initial visible apps");
@@ -2006,6 +2061,7 @@ mod tests {
                     opencode: false,
                     hermes: false,
                     openclaw: false,
+                    pi: false,
                 },
             },
         )
@@ -2035,6 +2091,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -2047,6 +2104,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         };
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
@@ -2093,6 +2151,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: true,
+            pi: false,
         };
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = initial_visible_apps.clone();
@@ -2119,6 +2178,7 @@ mod tests {
                     opencode: false,
                     hermes: false,
                     openclaw: false,
+                    pi: false,
                 },
                 selected: 5,
             },

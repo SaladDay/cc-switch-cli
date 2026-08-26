@@ -146,7 +146,9 @@ impl ProviderType {
                 }
                 ProviderType::Gemini
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => ProviderType::Codex,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+                ProviderType::Codex
+            }
         }
     }
 
@@ -190,15 +192,16 @@ impl std::str::FromStr for ProviderType {
     }
 }
 
-pub fn get_adapter(app_type: &AppType) -> Box<dyn ProviderAdapter> {
-    match app_type {
+pub fn get_adapter(app_type: &AppType) -> Option<Box<dyn ProviderAdapter>> {
+    Some(match app_type {
         AppType::Claude => Box::new(ClaudeAdapter::new()),
         AppType::Codex => Box::new(CodexAdapter::new()),
         AppType::Gemini => Box::new(GeminiAdapter::new()),
         AppType::OpenCode => Box::new(CodexAdapter::new()),
         AppType::Hermes => Box::new(CodexAdapter::new()),
         AppType::OpenClaw => Box::new(CodexAdapter::new()),
-    }
+        AppType::Pi => return None,
+    })
 }
 
 #[allow(dead_code)]

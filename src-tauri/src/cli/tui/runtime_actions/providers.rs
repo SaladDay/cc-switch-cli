@@ -426,7 +426,9 @@ pub(super) fn remove_from_config(
             refresh_provider_data_after_write(ctx, &state)?;
             Ok(())
         }
-        crate::app_config::AppType::OpenCode | crate::app_config::AppType::Hermes => {
+        crate::app_config::AppType::OpenCode
+        | crate::app_config::AppType::Hermes
+        | crate::app_config::AppType::Pi => {
             let state = load_state()?;
             ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
             ctx.app.push_toast(
@@ -526,6 +528,8 @@ pub(super) fn model_fetch(
     is_full_url: bool,
     api_key: Option<String>,
     custom_user_agent: Option<String>,
+    api_protocol: Option<String>,
+    request_headers: Option<std::collections::BTreeMap<String, String>>,
     codex_oauth: bool,
     codex_oauth_account_id: Option<String>,
     field: ProviderAddField,
@@ -564,6 +568,8 @@ pub(super) fn model_fetch(
         is_full_url,
         api_key,
         custom_user_agent,
+        api_protocol,
+        request_headers,
         codex_oauth,
         codex_oauth_account_id,
         field,

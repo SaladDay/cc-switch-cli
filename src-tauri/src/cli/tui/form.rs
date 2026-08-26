@@ -638,6 +638,7 @@ pub struct ProviderAddFormState {
     pub hermes_model_input: TextInput,
     pub hermes_rate_limit_delay: TextInput,
     initial_snapshot: Value,
+    initial_pi_settings_config: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

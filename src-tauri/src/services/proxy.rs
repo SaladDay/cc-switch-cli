@@ -158,6 +158,13 @@ fn proxy_runtime_registry() -> &'static StdMutex<HashMap<String, Weak<ProxyRunti
 }
 
 impl ProxyService {
+    pub(crate) async fn lock_switch_for_app(
+        &self,
+        app_type: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.switch_locks.lock_for_app(app_type).await
+    }
+
     fn run_in_blocking_runtime<T, F, Fut>(&self, task: F) -> Result<T, String>
     where
         T: Send + 'static,
@@ -1743,7 +1750,11 @@ impl ProxyService {
                         Some(&cached),
                     )?;
                 }
-                AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
+                AppType::Gemini
+                | AppType::OpenCode
+                | AppType::Hermes
+                | AppType::OpenClaw
+                | AppType::Pi => {}
             }
             if cached != original {
                 self.save_failover_live_snapshot(app_type, &provider.id, &cached)
@@ -2555,7 +2566,9 @@ impl ProxyService {
                     (None, _) => Ok(incoming_snapshot),
                 }
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(backup_snapshot),
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+                Ok(backup_snapshot)
+            }
         }
     }
 

@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**Manage Claude Code, Codex, Gemini, OpenCode, Hermes, and OpenClaw from one interactive TUI or scriptable CLI.**
+**Manage Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, and Pi from one interactive TUI or scriptable CLI.**
 
 [![Version](https://img.shields.io/badge/version-5.10.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -171,8 +171,9 @@ cc-switch --app codex mcp sync          # Sync Codex MCP servers
 cc-switch --app gemini prompts list     # List Gemini prompts
 cc-switch --app hermes provider list    # Manage Hermes providers
 cc-switch --app openclaw provider list  # Manage OpenClaw providers
+cc-switch --app pi provider list        # Manage Pi providers
 
-# Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `hermes`, `openclaw`
+# Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `hermes`, `openclaw`, `pi`
 ```
 
 Use `cc-switch start` when you want different providers in multiple terminals. It only affects the Claude or Codex session launched by that command; `provider switch` and `use` still change the global provider. In the TUI, select a provider on the Providers page and press `o` for the same behavior.
@@ -300,7 +301,10 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 Provider Management
 
-Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, **Hermes**, and **OpenClaw**.
+Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, **Hermes**, **OpenClaw**, and **Pi**.
+
+Pi provider management follows Pi's native additive model: membership comes from `models.json.providers`. CC-Switch does not modify Pi login credentials or its global default provider/model.
+The Pi TUI keeps the same table/form/shortcut conventions as the other apps and exposes Presets, System Prompts, and Prompt Templates as separate pages.
 
 **Features:** One-click switching, standalone Claude settings export, multi-endpoint support, API key management, remote model discovery, and per-app diagnostics such as speed testing or stream health checks where supported.
 
@@ -356,7 +360,7 @@ cc-switch mcp import --app claude    # Import from live config
 
 Manage system prompt presets for AI coding assistants.
 
-**Cross-app support:** Claude (`CLAUDE.md`), Codex (`AGENTS.md`), Gemini (`GEMINI.md`), OpenCode (`AGENTS.md`), Hermes (`AGENTS.md`), OpenClaw (`AGENTS.md`).
+**Cross-app support:** Claude (`CLAUDE.md`), Codex (`AGENTS.md`), Gemini (`GEMINI.md`), OpenCode (`AGENTS.md`), Hermes (`AGENTS.md`), OpenClaw (`AGENTS.md`), Pi (`AGENTS.md`, native system prompts, and prompt templates).
 
 ```bash
 cc-switch prompts list               # List prompt presets
@@ -368,11 +372,13 @@ cc-switch prompts rename <id> [name] # Rename prompt preset, interactive if name
 cc-switch prompts edit <id>          # Edit prompt preset
 cc-switch prompts show <id>          # Display full content
 cc-switch prompts delete <id>        # Delete prompt
+cc-switch --app pi prompts system edit append # Edit APPEND_SYSTEM.md
+cc-switch --app pi prompts templates list     # List Pi prompt templates
 ```
 
 ### 🎯 Skills Management
 
-Manage and extend Claude Code/Codex/Gemini/OpenCode/Hermes capabilities with community skills.
+Manage and extend Claude Code/Codex/Gemini/OpenCode/Hermes/Pi capabilities with community skills.
 
 **Features:** SSOT-based skills store, multi-app enable/disable, sync to app directories, manual update checks/updates, unmanaged scan/import, repo discovery, skills.sh marketplace search.
 
@@ -407,7 +413,7 @@ The TUI home page shows a responsive 30-day view by app and model, including tok
 
 Review saved assistant sessions, resume a session with one command, delete old records, and import local session logs into token/cost statistics.
 
-**Features:** complete paged history, cross-app scanning, message preview, copyable resume commands, safe deletion, JSON output, visible-page token/cost details, and usage sync for Claude, Codex, Gemini, and OpenCode. Hermes cost is shown when available.
+**Features:** complete paged history, cross-app scanning, message preview, copyable resume commands, safe deletion, JSON output, visible-page token/cost details, and usage sync for Claude, Codex, Gemini, OpenCode, and Pi. Hermes cost is shown when available.
 
 ```bash
 cc-switch sessions list --all        # List saved sessions across supported apps
@@ -494,7 +500,7 @@ Inspect environment conflicts and whether required local CLIs are installed.
 ```bash
 cc-switch env check                  # Check environment conflicts
 cc-switch env list                   # List relevant environment variables
-cc-switch env tools                  # Check Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLIs
+cc-switch env tools                  # Check Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw/Pi CLIs
 ```
 
 ### 🌐 Multi-language Support
@@ -560,6 +566,7 @@ When `CC_SWITCH_CONFIG_DIR` is set, CC-Switch uses that directory as its config 
 - OpenCode: `~/.config/opencode/opencode.json` (providers + MCP + runtime config), `~/.config/opencode/AGENTS.md` (prompts)
 - Hermes: `~/.hermes/config.yaml` (providers + MCP + memory settings), `~/.hermes/AGENTS.md` (prompts), `~/.hermes/skills/` (skills), `~/.hermes/memories/` (memory)
 - OpenClaw: `~/.openclaw/openclaw.json` (providers + env/tools/agents defaults), `~/.openclaw/AGENTS.md` (prompts)
+- Pi: `~/.pi/agent/models.json` (additive providers), `~/.pi/agent/settings.json` (read-only defaults/session location), `~/.pi/agent/AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `prompts/`, `skills/`, and `sessions/`
 
 ---
 
@@ -650,13 +657,14 @@ cc-switch
 
 <br>
 
-CC-Switch currently supports six AI coding assistants:
+CC-Switch currently supports seven AI coding assistants:
 - **Claude Code** (`--app claude`, default)
 - **Codex** (`--app codex`)
 - **Gemini** (`--app gemini`)
 - **OpenCode** (`--app opencode`)
 - **Hermes** (`--app hermes`)
 - **OpenClaw** (`--app openclaw`)
+- **Pi** (`--app pi`)
 
 Use the global `--app` flag to specify which app to manage:
 ```bash
