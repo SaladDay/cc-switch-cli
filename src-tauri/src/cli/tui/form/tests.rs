@@ -217,6 +217,120 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
 }
 
 #[test]
+fn provider_add_form_pi_exposes_only_the_selected_template_scope() {
+    let form = ProviderAddFormState::new(AppType::Pi);
+    assert_eq!(
+        form.template_labels(),
+        vec![
+            "Custom",
+            "DeepSeek",
+            "Zhipu GLM",
+            "Zhipu GLM en",
+            "ModelScope",
+            "MiniMax",
+            "Xiaomi MiMo",
+            "Xiaomi MiMo Token Plan (China)",
+            "OpenCode Go",
+            "OpenRouter",
+            "PackyCode",
+            "AICodeMirror",
+            "FennoAI",
+            "RunAPI",
+            "Qiniu",
+            "Cubence",
+        ]
+    );
+}
+
+#[test]
+fn provider_add_form_pi_picker_uses_family_sections() {
+    let rows = ProviderAddFormState::new(AppType::Pi).template_picker_rows();
+    assert_eq!(
+        rows.first(),
+        Some(&ProviderTemplateRow::Header(
+            ProviderTemplateSection::BuiltIn
+        ))
+    );
+    assert_eq!(
+        rows.get(11),
+        Some(&ProviderTemplateRow::Header(
+            ProviderTemplateSection::Sponsors
+        ))
+    );
+
+    let items = rows
+        .iter()
+        .filter_map(|row| match row {
+            ProviderTemplateRow::Item {
+                flat_idx,
+                label,
+                section,
+            } => Some((*flat_idx, *label, *section)),
+            ProviderTemplateRow::Header(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(items.len(), 16);
+    assert_eq!(items[0], (0, "Custom", ProviderTemplateSection::BuiltIn));
+    assert_eq!(
+        items[9],
+        (9, "OpenRouter", ProviderTemplateSection::BuiltIn)
+    );
+    assert_eq!(
+        items[10],
+        (10, "PackyCode", ProviderTemplateSection::Sponsors)
+    );
+    assert_eq!(
+        items[15],
+        (15, "Cubence", ProviderTemplateSection::Sponsors)
+    );
+}
+
+#[test]
+fn provider_add_form_pi_templates_preserve_upstream_native_settings() {
+    let presets = crate::provider_preset_pi::PI_BUILTIN_PROVIDER_PRESETS
+        .iter()
+        .chain(crate::provider_preset_pi::PI_SPONSOR_PROVIDER_PRESETS.iter());
+
+    for (offset, preset) in presets.enumerate() {
+        let mut form = ProviderAddFormState::new(AppType::Pi);
+        form.apply_template(offset + 1, &[]);
+        let provider = form.to_provider_json_value();
+
+        assert_eq!(provider["id"], preset.provider_key, "{} id", preset.label);
+        assert_eq!(provider["name"], preset.label, "{} name", preset.label);
+        assert_eq!(
+            provider["category"], preset.category,
+            "{} category",
+            preset.label
+        );
+        assert_eq!(provider["icon"], preset.icon, "{} icon", preset.label);
+        assert_eq!(
+            provider["settingsConfig"],
+            preset.settings_config(),
+            "{} native settings",
+            preset.label
+        );
+
+        if let Some(sponsor_id) = preset.sponsor_id {
+            let sponsor = crate::provider_preset_sponsors::sponsor_provider_preset(sponsor_id)
+                .expect("selected Pi sponsor must exist in the CLI sponsor registry");
+            assert_eq!(provider["websiteUrl"], sponsor.website_url);
+            assert_eq!(provider["meta"]["isPartner"], true);
+            assert_eq!(
+                provider["meta"]["partnerPromotionKey"],
+                sponsor.partner_promotion_key
+            );
+        } else {
+            assert_eq!(provider["websiteUrl"], preset.website_url);
+            assert!(provider["meta"].get("isPartner").is_none());
+            if let Some(promotion_key) = preset.partner_promotion_key {
+                assert_eq!(provider["meta"]["partnerPromotionKey"], promotion_key);
+            }
+        }
+    }
+}
+
+#[test]
 fn cli_provider_templates_match_tui_serializer_output() {
     for (app_type, template, label) in [
         (

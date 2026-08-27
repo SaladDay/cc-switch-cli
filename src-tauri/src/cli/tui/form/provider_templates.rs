@@ -5,7 +5,12 @@ use crate::provider_preset_models::{
     sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL, CODEX_OAUTH_FAST_MODEL,
     GEMINI_DEFAULT_MODEL,
 };
-use crate::provider_preset_sponsors::{sponsor_provider_presets_for_app, SponsorProviderPreset};
+use crate::provider_preset_pi::{
+    PiProviderPreset, PI_BUILTIN_PROVIDER_PRESETS, PI_SPONSOR_PROVIDER_PRESETS,
+};
+use crate::provider_preset_sponsors::{
+    sponsor_provider_preset, sponsor_provider_presets_for_app, SponsorProviderPreset,
+};
 use serde_json::json;
 
 use super::{
@@ -197,6 +202,14 @@ pub(super) fn provider_sponsor_presets(app_type: &AppType) -> &'static [SponsorP
     sponsor_provider_presets_for_app(app_type)
 }
 
+fn pi_provider_preset_for_flat_idx(flat_idx: usize) -> Option<&'static PiProviderPreset> {
+    let preset_idx = flat_idx.checked_sub(1)?;
+    PI_BUILTIN_PROVIDER_PRESETS.get(preset_idx).or_else(|| {
+        PI_SPONSOR_PROVIDER_PRESETS
+            .get(preset_idx.saturating_sub(PI_BUILTIN_PROVIDER_PRESETS.len()))
+    })
+}
+
 pub(super) fn provider_after_sponsor_template_defs(
     app_type: &AppType,
 ) -> &'static [ProviderTemplateDef] {
@@ -260,6 +273,9 @@ impl ProviderAddFormState {
     }
 
     pub fn template_count(&self) -> usize {
+        if matches!(self.app_type, AppType::Pi) {
+            return 1 + PI_BUILTIN_PROVIDER_PRESETS.len() + PI_SPONSOR_PROVIDER_PRESETS.len();
+        }
         provider_builtin_template_defs(&self.app_type).len()
             + provider_sponsor_presets(&self.app_type).len()
             + provider_after_sponsor_template_defs(&self.app_type).len()
@@ -272,6 +288,21 @@ impl ProviderAddFormState {
     /// marker no longer separates sponsors from built-ins the way it did in
     /// the old chip row (which the MCP form and the CLI chooser still use).
     pub fn template_labels(&self) -> Vec<&'static str> {
+        if matches!(self.app_type, AppType::Pi) {
+            let mut labels = Vec::with_capacity(self.template_count());
+            labels.push("Custom");
+            labels.extend(
+                PI_BUILTIN_PROVIDER_PRESETS
+                    .iter()
+                    .map(|preset| preset.label),
+            );
+            labels.extend(
+                PI_SPONSOR_PROVIDER_PRESETS
+                    .iter()
+                    .map(|preset| preset.label),
+            );
+            return labels;
+        }
         let mut labels = provider_builtin_template_defs(&self.app_type)
             .iter()
             .map(|def| def.label)
@@ -296,6 +327,41 @@ impl ProviderAddFormState {
     /// headers are only emitted when the app actually has sponsor presets,
     /// so single-section apps stay a plain list.
     pub fn template_picker_rows(&self) -> Vec<ProviderTemplateRow> {
+        if matches!(self.app_type, AppType::Pi) {
+            let mut rows = Vec::with_capacity(self.template_count() + 2);
+            rows.push(ProviderTemplateRow::Header(
+                ProviderTemplateSection::BuiltIn,
+            ));
+            rows.push(ProviderTemplateRow::Item {
+                flat_idx: 0,
+                label: "Custom",
+                section: ProviderTemplateSection::BuiltIn,
+            });
+            rows.extend(
+                PI_BUILTIN_PROVIDER_PRESETS
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, preset)| ProviderTemplateRow::Item {
+                        flat_idx: 1 + offset,
+                        label: preset.label,
+                        section: ProviderTemplateSection::BuiltIn,
+                    }),
+            );
+            rows.push(ProviderTemplateRow::Header(
+                ProviderTemplateSection::Sponsors,
+            ));
+            rows.extend(
+                PI_SPONSOR_PROVIDER_PRESETS
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, preset)| ProviderTemplateRow::Item {
+                        flat_idx: 1 + PI_BUILTIN_PROVIDER_PRESETS.len() + offset,
+                        label: preset.label,
+                        section: ProviderTemplateSection::Sponsors,
+                    }),
+            );
+            return rows;
+        }
         let builtin_defs = provider_builtin_template_defs(&self.app_type);
         let sponsor_presets = provider_sponsor_presets(&self.app_type);
         let after_sponsor_defs = provider_after_sponsor_template_defs(&self.app_type);
@@ -344,7 +410,7 @@ impl ProviderAddFormState {
         let builtin_defs = provider_builtin_template_defs(&self.app_type);
         let sponsor_presets = provider_sponsor_presets(&self.app_type);
         let after_sponsor_defs = provider_after_sponsor_template_defs(&self.app_type);
-        let total_templates = builtin_defs.len() + sponsor_presets.len() + after_sponsor_defs.len();
+        let total_templates = self.template_count();
         let idx = idx.min(total_templates.saturating_sub(1));
         self.template_idx = idx;
         self.field_errors.clear();
@@ -357,7 +423,11 @@ impl ProviderAddFormState {
             self.codex_prompt_cache_routing = PromptCacheRoutingMode::Auto;
         }
 
-        if idx >= builtin_defs.len() && idx < builtin_defs.len() + sponsor_presets.len() {
+        if matches!(self.app_type, AppType::Pi) && idx > 0 {
+            if let Some(preset) = pi_provider_preset_for_flat_idx(idx) {
+                self.apply_pi_provider_preset(preset);
+            }
+        } else if idx >= builtin_defs.len() && idx < builtin_defs.len() + sponsor_presets.len() {
             let sponsor_idx = idx.saturating_sub(builtin_defs.len());
             if let Some(preset) = sponsor_presets.get(sponsor_idx) {
                 self.apply_sponsor_preset(preset);
@@ -756,6 +826,88 @@ impl ProviderAddFormState {
 
         if matches!(self.app_type, AppType::Codex) {
             self.codex_local_routing_enabled = !self.codex_model_catalog.is_empty();
+        }
+    }
+
+    fn apply_pi_provider_preset(&mut self, preset: &PiProviderPreset) {
+        let settings = preset.settings_config();
+        let sponsor = preset.sponsor_id.and_then(sponsor_provider_preset);
+        let mut extra = json!({
+            "category": preset.category,
+            "icon": preset.icon,
+            "settingsConfig": settings.clone(),
+        });
+
+        if let Some(icon_color) = preset.icon_color {
+            extra["iconColor"] = json!(icon_color);
+        }
+        if let Some(sponsor) = sponsor {
+            extra["meta"] = json!({
+                "isPartner": true,
+                "partnerPromotionKey": sponsor.partner_promotion_key,
+            });
+        } else if let Some(partner_promotion_key) = preset.partner_promotion_key {
+            extra["meta"] = json!({
+                "partnerPromotionKey": partner_promotion_key,
+            });
+        }
+
+        self.extra = extra;
+        self.id.set(preset.provider_key);
+        self.id_is_manual = true;
+        self.name.set(preset.label);
+        self.website_url
+            .set(sponsor.map_or(preset.website_url, |item| item.website_url));
+        self.notes.set("");
+        self.openclaw_user_agent = false;
+
+        self.opencode_api_key.set(
+            settings
+                .get("apiKey")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        );
+        self.opencode_base_url.set(
+            settings
+                .get("baseUrl")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        );
+        self.opencode_npm_package.set(
+            settings
+                .get("api")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        );
+        self.openclaw_models = settings
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        self.opencode_model_id.set("");
+        self.opencode_model_name.set("");
+        self.opencode_model_context_limit.set("");
+        self.opencode_model_output_limit.set("");
+        self.opencode_model_original_id = None;
+        if let Some(model) = self.openclaw_models.first() {
+            if let Some(id) = model.get("id").and_then(serde_json::Value::as_str) {
+                self.opencode_model_id.set(id);
+                self.opencode_model_original_id = Some(id.to_string());
+            }
+            if let Some(name) = model.get("name").and_then(serde_json::Value::as_str) {
+                self.opencode_model_name.set(name);
+            }
+            if let Some(context_window) = model
+                .get("contextWindow")
+                .and_then(serde_json::Value::as_u64)
+            {
+                self.opencode_model_context_limit
+                    .set(context_window.to_string());
+            }
+            if let Some(max_tokens) = model.get("maxTokens").and_then(serde_json::Value::as_u64) {
+                self.opencode_model_output_limit.set(max_tokens.to_string());
+            }
         }
     }
 

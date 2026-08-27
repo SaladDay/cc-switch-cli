@@ -33,6 +33,7 @@ mod prompt_files;
 mod provider;
 mod provider_defaults;
 mod provider_preset_models;
+mod provider_preset_pi;
 mod provider_preset_sponsors;
 mod proxy;
 mod services;
