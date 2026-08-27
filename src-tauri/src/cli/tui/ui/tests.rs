@@ -2843,6 +2843,8 @@ fn codex_model_catalog_renders_only_the_selected_large_collection_window() {
             supports_parallel_tool_calls: None,
             input_modalities: Vec::new(),
             base_instructions: String::new(),
+            reasoning_levels: Vec::new(),
+            default_reasoning_level: String::new(),
         })
         .collect();
     form.codex_model_catalog[selected].model = format!("SELECTED-CODEX-{}", "X".repeat(1_000_000));

@@ -1334,6 +1334,24 @@ impl ProviderAddFormState {
                 obj.insert("baseInstructions".to_string(), json!(base_instructions));
             }
 
+            let reasoning_levels = row
+                .reasoning_levels
+                .iter()
+                .map(|level| level.trim())
+                .filter(|level| !level.is_empty())
+                .collect::<Vec<_>>();
+            if !reasoning_levels.is_empty() {
+                obj.insert("reasoningLevels".to_string(), json!(reasoning_levels));
+            }
+
+            let default_reasoning_level = row.default_reasoning_level.trim();
+            if !default_reasoning_level.is_empty() {
+                obj.insert(
+                    "defaultReasoningLevel".to_string(),
+                    json!(default_reasoning_level),
+                );
+            }
+
             models.push(Value::Object(obj));
         }
 

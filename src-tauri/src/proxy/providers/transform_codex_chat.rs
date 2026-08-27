@@ -423,7 +423,11 @@ fn apply_reasoning_options(
     let Some(effort) = body.pointer("/reasoning/effort").and_then(|v| v.as_str()) else {
         return;
     };
-    let Some(mapped) = map_reasoning_effort(effort, config.effort_value_mode.as_deref()) else {
+    let Some(mapped) = map_reasoning_effort(
+        effort,
+        config.effort_value_mode.as_deref(),
+        config.effort_levels.as_deref(),
+    ) else {
         return;
     };
 
@@ -454,7 +458,11 @@ fn reasoning_requested(body: &Value) -> Option<bool> {
     body.get("reasoning").map(|value| !value.is_null())
 }
 
-fn map_reasoning_effort(effort: &str, mode: Option<&str>) -> Option<&'static str> {
+fn map_reasoning_effort<'a>(
+    effort: &str,
+    mode: Option<&str>,
+    effort_levels: Option<&'a [String]>,
+) -> Option<&'a str> {
     let effort = effort.trim().to_ascii_lowercase();
     if matches!(effort.as_str(), "none" | "off" | "disabled") {
         return None;
@@ -481,6 +489,24 @@ fn map_reasoning_effort(effort: &str, mode: Option<&str>) -> Option<&'static str
             "minimal" => Some("minimal"),
             _ => None,
         },
+        "zen" => {
+            let levels = effort_levels?;
+            let requested = zen_effort_rank(&effort)?;
+            levels
+                .iter()
+                .filter_map(|level| zen_effort_rank(level).map(|rank| (rank, level.as_str())))
+                .filter(|(rank, _)| *rank >= requested)
+                .min_by_key(|(rank, _)| *rank)
+                .or_else(|| {
+                    levels
+                        .iter()
+                        .filter_map(|level| {
+                            zen_effort_rank(level).map(|rank| (rank, level.as_str()))
+                        })
+                        .max_by_key(|(rank, _)| *rank)
+                })
+                .map(|(_, level)| level)
+        }
         _ => match effort.as_str() {
             "minimal" => Some("minimal"),
             "low" => Some("low"),
@@ -490,6 +516,19 @@ fn map_reasoning_effort(effort: &str, mode: Option<&str>) -> Option<&'static str
             "max" => Some("max"),
             _ => None,
         },
+    }
+}
+
+fn zen_effort_rank(effort: &str) -> Option<u8> {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Some(0),
+        "low" => Some(1),
+        "medium" => Some(2),
+        "high" => Some(3),
+        "xhigh" => Some(4),
+        "max" => Some(5),
+        "ultra" => Some(6),
+        _ => None,
     }
 }
 
@@ -2251,12 +2290,38 @@ mod tests {
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
         assert_eq!(result["thinking"]["type"], "enabled");
         assert_eq!(result["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn responses_request_to_chat_clamps_or_omits_zen_effort_by_model() {
+        let mut config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("none".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some("zen".to_string()),
+            output_format: Some("reasoning_content".to_string()),
+            effort_levels: Some(vec!["high".to_string(), "max".to_string()]),
+        };
+        let input = json!({
+            "model": "glm-5.2",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        let result =
+            responses_to_chat_completions_with_reasoning(input.clone(), Some(&config)).unwrap();
+        assert_eq!(result["reasoning_effort"], "high");
+
+        config.effort_levels = None;
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+        assert!(result.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -2270,6 +2335,7 @@ mod tests {
             effort_param: Some("reasoning.effort".to_string()),
             effort_value_mode: Some("openrouter".to_string()),
             output_format: Some("auto".to_string()),
+            effort_levels: None,
         };
 
         // max 不在 OpenRouter 枚举内（见 openclaw#77350），必须钳成 xhigh，
@@ -2311,6 +2377,7 @@ mod tests {
             effort_param: Some("reasoning.effort".to_string()),
             effort_value_mode: Some("openrouter".to_string()),
             output_format: Some("auto".to_string()),
+            effort_levels: None,
         };
 
         let input = json!({
@@ -2338,6 +2405,7 @@ mod tests {
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         };
 
         let input = json!({
@@ -2367,6 +2435,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -2389,6 +2458,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();

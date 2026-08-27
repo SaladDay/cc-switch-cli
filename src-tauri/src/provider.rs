@@ -470,6 +470,10 @@ pub struct CodexChatReasoningConfig {
     /// 保留该字段用于与上游持久化 shape 对齐。
     #[serde(rename = "outputFormat", skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
+    /// 运行时字段（不持久化）：当前请求模型声明的合法 effort 档位。
+    /// Zen 模式用它钳制或省略 `reasoning_effort`。
+    #[serde(skip)]
+    pub effort_levels: Option<Vec<String>>,
 }
 
 /// Local proxy request overrides applied after route/protocol transforms.

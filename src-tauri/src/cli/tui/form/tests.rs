@@ -127,6 +127,15 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "FennoAI",
             "PackyCode",
             "DDS",
+            "DeepSeek",
+            "Zhipu GLM",
+            "Zhipu GLM en",
+            "ModelScope",
+            "MiniMax",
+            "Xiaomi MiMo",
+            "Xiaomi MiMo Token Plan (China)",
+            "OpenCode Go",
+            "OpenRouter",
         ]
     );
 
@@ -145,6 +154,14 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "PackyCode",
             "DDS",
             "DeepSeek",
+            "Zhipu GLM",
+            "Zhipu GLM en",
+            "ModelScope",
+            "MiniMax",
+            "Xiaomi MiMo",
+            "Xiaomi MiMo Token Plan (China)",
+            "OpenCode Go",
+            "OpenRouter",
         ]
     );
 
@@ -331,6 +348,270 @@ fn provider_add_form_pi_templates_preserve_upstream_native_settings() {
 }
 
 #[test]
+fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
+    let cases = [
+        (
+            "DeepSeek",
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4-pro",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "Zhipu GLM",
+            "https://open.bigmodel.cn/api/anthropic",
+            "glm-5.1",
+            "glm-5.1",
+            "glm-5.1",
+            "glm-5.1",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "Zhipu GLM en",
+            "https://api.z.ai/api/anthropic",
+            "glm-5.1",
+            "glm-5.1",
+            "glm-5.1",
+            "glm-5.1",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "ModelScope",
+            "https://api-inference.modelscope.cn",
+            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "MiniMax",
+            "https://api.minimaxi.com/anthropic",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "Xiaomi MiMo",
+            "https://api.xiaomimimo.com/anthropic",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "Xiaomi MiMo Token Plan (China)",
+            "https://token-plan-cn.xiaomimimo.com/anthropic",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "OpenCode Go",
+            "https://opencode.ai/zen/go",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
+            ClaudeApiKeyField::ApiKey,
+        ),
+        (
+            "OpenRouter",
+            "https://openrouter.ai/api",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-haiku-4.5",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-opus-5",
+            ClaudeApiKeyField::AuthToken,
+        ),
+    ];
+
+    for (label, base_url, model, haiku, sonnet, opus, key_field) in cases {
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        form.apply_template(template_index_by_label(AppType::Claude, label), &[]);
+        assert_eq!(form.claude_api_key_field, key_field, "{label}");
+
+        let provider = form.to_provider_json_value();
+        let env = &provider["settingsConfig"]["env"];
+        assert_eq!(provider["name"], label, "{label}");
+        assert_eq!(env["ANTHROPIC_BASE_URL"], base_url, "{label}");
+        assert_eq!(env["ANTHROPIC_MODEL"], model, "{label}");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], haiku, "{label}");
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], sonnet, "{label}");
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], opus, "{label}");
+        assert!(provider.get("apiKeyUrl").is_none(), "{label}");
+        assert!(
+            provider["meta"].get("partnerPromotionKey").is_none(),
+            "{label}"
+        );
+    }
+
+    let mut minimax = ProviderAddFormState::new(AppType::Claude);
+    minimax.apply_template(template_index_by_label(AppType::Claude, "MiniMax"), &[]);
+    let minimax = minimax.to_provider_json_value();
+    assert_eq!(
+        minimax["settingsConfig"]["env"]["API_TIMEOUT_MS"],
+        "3000000"
+    );
+    assert_eq!(
+        minimax["settingsConfig"]["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+        1
+    );
+}
+
+#[test]
+fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
+    let cases = [
+        (
+            "DeepSeek",
+            "deepseek",
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "openai_responses",
+            2,
+        ),
+        (
+            "Zhipu GLM",
+            "zhipu_glm",
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "glm-5.2",
+            "openai_chat",
+            1,
+        ),
+        (
+            "Zhipu GLM en",
+            "zhipu_glm_en",
+            "https://api.z.ai/api/coding/paas/v4",
+            "glm-5.2",
+            "openai_chat",
+            1,
+        ),
+        (
+            "ModelScope",
+            "modelscope",
+            "https://api-inference.modelscope.cn/v1",
+            "ZhipuAI/GLM-5.2",
+            "openai_chat",
+            1,
+        ),
+        (
+            "MiniMax",
+            "minimax",
+            "https://api.minimaxi.com/v1",
+            "MiniMax-M3",
+            "openai_responses",
+            1,
+        ),
+        (
+            "Xiaomi MiMo",
+            "xiaomi_mimo",
+            "https://api.xiaomimimo.com/v1",
+            "mimo-v2.5-pro",
+            "openai_responses",
+            2,
+        ),
+        (
+            "Xiaomi MiMo Token Plan (China)",
+            "xiaomi_mimo_token_plan",
+            "https://token-plan-cn.xiaomimimo.com/v1",
+            "mimo-v2.5-pro",
+            "openai_responses",
+            2,
+        ),
+        (
+            "OpenCode Go",
+            "opencode_go",
+            "https://opencode.ai/zen/go/v1",
+            "glm-5.2",
+            "openai_chat",
+            6,
+        ),
+        (
+            "OpenRouter",
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            "gpt-5.6-sol",
+            "openai_responses",
+            0,
+        ),
+    ];
+
+    for (label, provider_name, base_url, model, api_format, catalog_len) in cases {
+        let mut form = ProviderAddFormState::new(AppType::Codex);
+        form.apply_template(template_index_by_label(AppType::Codex, label), &[]);
+        let provider = form.to_provider_json_value();
+        let config = provider["settingsConfig"]["config"]
+            .as_str()
+            .expect("Codex preset config should be text");
+        let models = provider["settingsConfig"]["modelCatalog"]["models"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+
+        assert_eq!(provider["name"], label, "{label}");
+        assert_eq!(provider["meta"]["apiFormat"], api_format, "{label}");
+        assert!(
+            config.contains(&format!("name = \"{provider_name}\"")),
+            "{label}"
+        );
+        assert!(
+            config.contains(&format!("base_url = \"{base_url}\"")),
+            "{label}"
+        );
+        assert!(config.contains(&format!("model = \"{model}\"")), "{label}");
+        assert!(config.contains("wire_api = \"responses\""), "{label}");
+        assert_eq!(models.len(), catalog_len, "{label}");
+        assert!(provider.get("apiKeyUrl").is_none(), "{label}");
+        assert!(
+            provider["meta"].get("partnerPromotionKey").is_none(),
+            "{label}"
+        );
+    }
+
+    let mut deepseek = ProviderAddFormState::new(AppType::Codex);
+    deepseek.apply_template(template_index_by_label(AppType::Codex, "DeepSeek"), &[]);
+    let deepseek = deepseek.to_provider_json_value();
+    assert_eq!(
+        deepseek["settingsConfig"]["modelCatalog"]["models"][0]["reasoningLevels"],
+        json!(["low", "high", "max"])
+    );
+    assert_eq!(
+        deepseek["settingsConfig"]["modelCatalog"]["models"][0]["contextWindow"],
+        1_048_576
+    );
+
+    let mut opencode = ProviderAddFormState::new(AppType::Codex);
+    opencode.apply_template(template_index_by_label(AppType::Codex, "OpenCode Go"), &[]);
+    let opencode = opencode.to_provider_json_value();
+    assert_eq!(
+        opencode["meta"]["codexChatReasoning"]["effortValueMode"],
+        "zen"
+    );
+    assert_eq!(
+        opencode["settingsConfig"]["modelCatalog"]["models"][4]["reasoningLevels"],
+        json!(["low", "high", "max"])
+    );
+
+    let mut minimax = ProviderAddFormState::new(AppType::Codex);
+    minimax.apply_template(template_index_by_label(AppType::Codex, "MiniMax"), &[]);
+    let minimax = minimax.to_provider_json_value();
+    let minimax_model = &minimax["settingsConfig"]["modelCatalog"]["models"][0];
+    assert_eq!(minimax_model["supportsParallelToolCalls"], true);
+    assert_eq!(minimax_model["inputModalities"], json!(["text", "image"]));
+    assert_eq!(
+        minimax_model["baseInstructions"],
+        "You are Codex, a coding agent based on MiniMax-M3. You and the user share the same workspace and collaborate to achieve the user's goals."
+    );
+}
+
+#[test]
 fn cli_provider_templates_match_tui_serializer_output() {
     for (app_type, template, label) in [
         (
@@ -435,8 +716,8 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
     let labels = ProviderAddFormState::new(AppType::Codex).template_labels();
     assert_eq!(
         labels.last().copied(),
-        Some("DeepSeek"),
-        "DeepSeek should stay after all partner presets"
+        Some("OpenRouter"),
+        "migrated built-ins should stay after all partner presets in flat order"
     );
 
     let fields = form.fields();
@@ -450,18 +731,8 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
     assert_eq!(provider["category"], "cn_official");
     assert_eq!(provider["icon"], "deepseek");
     assert_eq!(provider["iconColor"], "#1E88E5");
-    assert_eq!(provider["meta"]["apiFormat"], "openai_chat");
-    assert_eq!(
-        provider["meta"]["codexChatReasoning"],
-        json!({
-            "supportsThinking": true,
-            "supportsEffort": true,
-            "thinkingParam": "thinking",
-            "effortParam": "reasoning_effort",
-            "effortValueMode": "deepseek",
-            "outputFormat": "reasoning_content",
-        })
-    );
+    assert_eq!(provider["meta"]["apiFormat"], "openai_responses");
+    assert!(provider["meta"].get("codexChatReasoning").is_none());
 
     let cfg = provider["settingsConfig"]["config"]
         .as_str()
@@ -485,12 +756,14 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
                 {
                     "model": "deepseek-v4-flash",
                     "displayName": "DeepSeek V4 Flash",
-                    "contextWindow": 1000000,
+                    "contextWindow": 1048576,
+                    "reasoningLevels": ["low", "high", "max"],
                 },
                 {
                     "model": "deepseek-v4-pro",
                     "displayName": "DeepSeek V4 Pro",
-                    "contextWindow": 1000000,
+                    "contextWindow": 1048576,
+                    "reasoningLevels": ["low", "high", "max"],
                 },
             ],
         })
@@ -2067,7 +2340,9 @@ fn provider_edit_form_codex_conflict_preserves_local_routing_storage() {
                 "contextWindow": 200000,
                 "supportsParallelToolCalls": true,
                 "inputModalities": ["text", "image"],
-                "baseInstructions": "Use native Responses."
+                "baseInstructions": "Use native Responses.",
+                "reasoningLevels": ["none", "high"],
+                "defaultReasoningLevel": "high"
             },
             {
                 "model": "gpt-y",
@@ -3912,6 +4187,8 @@ fn codex_config_preview_builder_matches_save_when_enabled_catalog_is_empty() {
         supports_parallel_tool_calls: None,
         input_modalities: Vec::new(),
         base_instructions: String::new(),
+        reasoning_levels: Vec::new(),
+        default_reasoning_level: String::new(),
     }];
 
     let preview_config = form.effective_codex_config_text();

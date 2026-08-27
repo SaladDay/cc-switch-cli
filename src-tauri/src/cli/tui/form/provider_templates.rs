@@ -1,5 +1,6 @@
 use crate::app_config::AppType;
-use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
+use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig, Provider};
+use crate::provider_preset_builtin::{builtin_provider_preset_value, BuiltinProviderPresetId};
 use crate::provider_preset_models::{
     codex_oauth_claude_env, sponsor_hermes_models, sponsor_model_family, sponsor_openclaw_models,
     sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL, CODEX_OAUTH_FAST_MODEL,
@@ -13,22 +14,12 @@ use crate::provider_preset_sponsors::{
 };
 use serde_json::json;
 
+use super::provider_state_loading::populate_form_from_provider;
 use super::{
-    ClaudeApiFormat, CodexModelCatalogField, CodexModelCatalogRow, CodexWireApi, FormMode,
-    GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState, HERMES_DEFAULT_API_MODE,
+    ClaudeApiFormat, CodexModelCatalogField, CodexWireApi, FormMode, GeminiAuthType,
+    PromptCacheRoutingMode, ProviderAddFormState, HERMES_DEFAULT_API_MODE,
     OPENCLAW_DEFAULT_API_PROTOCOL,
 };
-
-const DEEPSEEK_CODEX_CONFIG: &str = r#"model_provider = "custom"
-model = "deepseek-v4-flash"
-model_reasoning_effort = "high"
-disable_response_storage = true
-
-[model_providers.custom]
-name = "deepseek"
-base_url = "https://api.deepseek.com"
-wire_api = "responses"
-requires_openai_auth = true"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderTemplateId {
@@ -36,7 +27,7 @@ enum ProviderTemplateId {
     ClaudeOfficial,
     CodexOAuth,
     OpenAiOfficial,
-    DeepSeek,
+    Builtin(BuiltinProviderPresetId),
     GoogleOAuth,
 }
 
@@ -154,11 +145,83 @@ static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
     },
 ];
 
-static PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS: [ProviderTemplateDef; 1] =
-    [ProviderTemplateDef {
-        id: ProviderTemplateId::DeepSeek,
+static PROVIDER_TEMPLATE_DEFS_CLAUDE_AFTER_SPONSORS: [ProviderTemplateDef; 9] = [
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::DeepSeek),
         label: "DeepSeek",
-    }];
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::ZhipuGlm),
+        label: "Zhipu GLM",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::ZhipuGlmEn),
+        label: "Zhipu GLM en",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::ModelScope),
+        label: "ModelScope",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::MiniMax),
+        label: "MiniMax",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::XiaomiMimo),
+        label: "Xiaomi MiMo",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::XiaomiMimoTokenPlan),
+        label: "Xiaomi MiMo Token Plan (China)",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::OpenCodeGo),
+        label: "OpenCode Go",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::OpenRouter),
+        label: "OpenRouter",
+    },
+];
+
+static PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS: [ProviderTemplateDef; 9] = [
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::DeepSeek),
+        label: "DeepSeek",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::ZhipuGlm),
+        label: "Zhipu GLM",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::ZhipuGlmEn),
+        label: "Zhipu GLM en",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::ModelScope),
+        label: "ModelScope",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::MiniMax),
+        label: "MiniMax",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::XiaomiMimo),
+        label: "Xiaomi MiMo",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::XiaomiMimoTokenPlan),
+        label: "Xiaomi MiMo Token Plan (China)",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::OpenCodeGo),
+        label: "OpenCode Go",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::OpenRouter),
+        label: "OpenRouter",
+    },
+];
 
 static PROVIDER_TEMPLATE_DEFS_GEMINI: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
@@ -214,13 +277,11 @@ pub(super) fn provider_after_sponsor_template_defs(
     app_type: &AppType,
 ) -> &'static [ProviderTemplateDef] {
     match app_type {
+        AppType::Claude => &PROVIDER_TEMPLATE_DEFS_CLAUDE_AFTER_SPONSORS,
         AppType::Codex => &PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS,
-        AppType::Claude
-        | AppType::Gemini
-        | AppType::OpenCode
-        | AppType::Hermes
-        | AppType::OpenClaw
-        | AppType::Pi => &[],
+        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+            &[]
+        }
     }
 }
 
@@ -587,78 +648,8 @@ impl ProviderAddFormState {
                     self.codex_requires_openai_auth = true;
                     self.codex_env_key.set("");
                 }
-                ProviderTemplateId::DeepSeek => {
-                    self.extra = json!({
-                        "category": "cn_official",
-                        "icon": "deepseek",
-                        "iconColor": "#1E88E5",
-                        "meta": {
-                            "apiFormat": "openai_chat",
-                            "codexChatReasoning": {
-                                "supportsThinking": true,
-                                "supportsEffort": true,
-                                "thinkingParam": "thinking",
-                                "effortParam": "reasoning_effort",
-                                "effortValueMode": "deepseek",
-                                "outputFormat": "reasoning_content",
-                            },
-                        },
-                        "settingsConfig": {
-                            "config": DEEPSEEK_CODEX_CONFIG,
-                            "modelCatalog": {
-                                "models": [
-                                    {
-                                        "model": "deepseek-v4-flash",
-                                        "displayName": "DeepSeek V4 Flash",
-                                        "contextWindow": 1000000,
-                                    },
-                                    {
-                                        "model": "deepseek-v4-pro",
-                                        "displayName": "DeepSeek V4 Pro",
-                                        "contextWindow": 1000000,
-                                    },
-                                ],
-                            },
-                        },
-                    });
-                    self.name.set("DeepSeek");
-                    self.website_url.set("https://platform.deepseek.com");
-                    self.codex_api_key.set("");
-                    self.codex_base_url.set("https://api.deepseek.com");
-                    self.codex_model.set("deepseek-v4-flash");
-                    self.codex_wire_api = CodexWireApi::Responses;
-                    self.codex_requires_openai_auth = true;
-                    self.codex_env_key.set("");
-                    self.claude_api_format = ClaudeApiFormat::OpenAiChat;
-                    self.codex_chat_reasoning = CodexChatReasoningConfig {
-                        supports_thinking: Some(true),
-                        supports_effort: Some(true),
-                        thinking_param: Some("thinking".to_string()),
-                        effort_param: Some("reasoning_effort".to_string()),
-                        effort_value_mode: Some("deepseek".to_string()),
-                        output_format: Some("reasoning_content".to_string()),
-                    };
-                    self.codex_model_catalog = vec![
-                        CodexModelCatalogRow {
-                            model: "deepseek-v4-flash".to_string(),
-                            display_name: "DeepSeek V4 Flash".to_string(),
-                            context_window: "1000000".to_string(),
-                            supports_parallel_tool_calls: None,
-                            input_modalities: Vec::new(),
-                            base_instructions: String::new(),
-                        },
-                        CodexModelCatalogRow {
-                            model: "deepseek-v4-pro".to_string(),
-                            display_name: "DeepSeek V4 Pro".to_string(),
-                            context_window: "1000000".to_string(),
-                            supports_parallel_tool_calls: None,
-                            input_modalities: Vec::new(),
-                            base_instructions: String::new(),
-                        },
-                    ];
-                    self.codex_local_routing_field_idx = 0;
-                    self.codex_model_catalog_idx = 0;
-                    self.codex_model_catalog_field = CodexModelCatalogField::Model;
+                ProviderTemplateId::Builtin(preset) => {
+                    self.apply_builtin_provider_preset(preset);
                 }
                 ProviderTemplateId::GoogleOAuth => {
                     self.extra = json!({
@@ -688,6 +679,28 @@ impl ProviderAddFormState {
             );
             self.id.set(id);
         }
+    }
+
+    fn apply_builtin_provider_preset(&mut self, preset: BuiltinProviderPresetId) {
+        let app_type = self.app_type.clone();
+        let Some(provider_value) = builtin_provider_preset_value(&app_type, preset) else {
+            return;
+        };
+        let Ok(provider) = serde_json::from_value::<Provider>(provider_value.clone()) else {
+            return;
+        };
+
+        match app_type {
+            AppType::Claude => self.reset_claude_template_state(),
+            AppType::Codex => self.reset_codex_template_state(),
+            _ => return,
+        }
+        self.extra = provider_value;
+        self.name.set(&provider.name);
+        self.website_url
+            .set(provider.website_url.as_deref().unwrap_or_default());
+        self.notes.set("");
+        populate_form_from_provider(self, &app_type, &provider);
     }
 
     fn apply_sponsor_preset(&mut self, preset: &SponsorProviderPreset) {

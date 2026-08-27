@@ -1606,6 +1606,8 @@ impl ProviderAddFormState {
             supports_parallel_tool_calls: None,
             input_modalities: Vec::new(),
             base_instructions: String::new(),
+            reasoning_levels: Vec::new(),
+            default_reasoning_level: String::new(),
         });
         self.codex_model_catalog_idx = self.codex_model_catalog.len().saturating_sub(1);
         true
@@ -3128,6 +3130,26 @@ pub(crate) fn codex_model_catalog_row_from_value(value: &Value) -> Option<CodexM
         .unwrap_or("")
         .trim()
         .to_string();
+    let reasoning_levels = value
+        .get("reasoningLevels")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("reasoning_levels").and_then(Value::as_array))
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|level| !level.trim().is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let default_reasoning_level = value
+        .get("defaultReasoningLevel")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("default_reasoning_level").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     Some(CodexModelCatalogRow {
         model,
@@ -3136,6 +3158,8 @@ pub(crate) fn codex_model_catalog_row_from_value(value: &Value) -> Option<CodexM
         supports_parallel_tool_calls,
         input_modalities,
         base_instructions,
+        reasoning_levels,
+        default_reasoning_level,
     })
 }
 

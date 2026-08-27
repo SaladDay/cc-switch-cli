@@ -818,15 +818,15 @@ fn add_deepseek_template_preserves_api_format_without_override() {
     )
     .expect("deepseek template add should succeed");
 
-    // The template seeds openai_chat; omitting --api-format must not reset it
-    // to the openai_responses default.
+    // The current upstream template uses the Responses API; omitting
+    // --api-format must preserve that prefilled value.
     let provider = saved_provider(AppType::Codex, "deepseek");
     assert_eq!(
         provider
             .meta
             .as_ref()
             .and_then(|meta| meta.api_format.as_deref()),
-        Some("openai_chat")
+        Some("openai_responses")
     );
 }
 

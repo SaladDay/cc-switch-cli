@@ -9,10 +9,8 @@ use crate::claude_model_config::{
 use crate::cli::i18n::texts;
 use crate::cli::ui::info;
 use crate::error::AppError;
-use crate::provider::{
-    AuthBinding, AuthBindingSource, ClaudeApiKeyField, CodexChatReasoningConfig, Provider,
-    ProviderMeta,
-};
+use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
+use crate::provider_preset_builtin::{builtin_provider_preset_value, BuiltinProviderPresetId};
 use crate::provider_preset_models::{
     codex_oauth_claude_env, sponsor_hermes_models, sponsor_model_family, sponsor_openclaw_models,
     sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL, GEMINI_DEFAULT_MODEL,
@@ -88,17 +86,6 @@ impl ProviderAddTemplate {
         )
     }
 }
-
-const DEEPSEEK_CODEX_CONFIG: &str = r#"model_provider = "custom"
-model = "deepseek-v4-flash"
-model_reasoning_effort = "high"
-disable_response_storage = true
-
-[model_providers.custom]
-name = "deepseek"
-base_url = "https://api.deepseek.com"
-wire_api = "responses"
-requires_openai_auth = true"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderAddTemplateChoice {
@@ -430,15 +417,7 @@ fn template_default_meta(
             ..Default::default()
         }),
         ProviderAddTemplate::Deepseek => Some(ProviderMeta {
-            api_format: Some("openai_chat".to_string()),
-            codex_chat_reasoning: Some(CodexChatReasoningConfig {
-                supports_thinking: Some(true),
-                supports_effort: Some(true),
-                thinking_param: Some("thinking".to_string()),
-                effort_param: Some("reasoning_effort".to_string()),
-                effort_value_mode: Some("deepseek".to_string()),
-                output_format: Some("reasoning_content".to_string()),
-            }),
+            api_format: Some("openai_responses".to_string()),
             ..Default::default()
         }),
         ProviderAddTemplate::GoogleOauth => Some(ProviderMeta {
@@ -541,23 +520,9 @@ fn build_provider_template_settings_config(
 }
 
 fn build_codex_deepseek_settings_config() -> Value {
-    json!({
-        "config": DEEPSEEK_CODEX_CONFIG,
-        "modelCatalog": {
-            "models": [
-                {
-                    "model": "deepseek-v4-flash",
-                    "displayName": "DeepSeek V4 Flash",
-                    "contextWindow": 1000000,
-                },
-                {
-                    "model": "deepseek-v4-pro",
-                    "displayName": "DeepSeek V4 Pro",
-                    "contextWindow": 1000000,
-                },
-            ],
-        },
-    })
+    builtin_provider_preset_value(&AppType::Codex, BuiltinProviderPresetId::DeepSeek)
+        .and_then(|provider| provider.get("settingsConfig").cloned())
+        .unwrap_or_else(|| json!({}))
 }
 
 fn build_sponsor_template_settings_config(
@@ -1816,31 +1781,22 @@ requires_openai_auth = true
                     {
                         "model": "deepseek-v4-flash",
                         "displayName": "DeepSeek V4 Flash",
-                        "contextWindow": 1000000,
+                        "contextWindow": 1048576,
+                        "reasoningLevels": ["low", "high", "max"],
                     },
                     {
                         "model": "deepseek-v4-pro",
                         "displayName": "DeepSeek V4 Pro",
-                        "contextWindow": 1000000,
+                        "contextWindow": 1048576,
+                        "reasoningLevels": ["low", "high", "max"],
                     },
                 ],
             })
         );
 
         let meta = provider.meta.expect("DeepSeek metadata should be present");
-        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
-        let reasoning = meta
-            .codex_chat_reasoning
-            .expect("DeepSeek reasoning metadata should be present");
-        assert_eq!(reasoning.supports_thinking, Some(true));
-        assert_eq!(reasoning.supports_effort, Some(true));
-        assert_eq!(reasoning.thinking_param.as_deref(), Some("thinking"));
-        assert_eq!(reasoning.effort_param.as_deref(), Some("reasoning_effort"));
-        assert_eq!(reasoning.effort_value_mode.as_deref(), Some("deepseek"));
-        assert_eq!(
-            reasoning.output_format.as_deref(),
-            Some("reasoning_content")
-        );
+        assert_eq!(meta.api_format.as_deref(), Some("openai_responses"));
+        assert!(meta.codex_chat_reasoning.is_none());
     }
 
     #[test]

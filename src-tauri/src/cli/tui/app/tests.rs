@@ -13174,6 +13174,20 @@ mod tests {
             })
             .count();
         assert!(builtin_count >= 3, "{rows:?}");
+        let last_builtin_flat = rows
+            .iter()
+            .filter_map(|row| match row {
+                super::super::form::ProviderTemplateRow::Item {
+                    flat_idx,
+                    section: super::super::form::ProviderTemplateSection::BuiltIn,
+                    ..
+                } => Some(*flat_idx),
+                _ => None,
+            })
+            .next_back()
+            .expect("at least one built-in template");
+        let first_sponsor_flat =
+            first_sponsor_flat_idx(&rows).expect("claude exposes sponsor presets");
         assert!(rows.iter().any(|row| matches!(
             row,
             super::super::form::ProviderTemplateRow::Header(
@@ -13184,20 +13198,20 @@ mod tests {
         // Walk from the last built-in row into the sponsor section: the
         // Sponsors header sits between them and must never be selected.
         app.overlay = Overlay::ProviderTemplatePicker {
-            selected: builtin_count - 1,
+            selected: last_builtin_flat,
         };
         let data = UiData::default();
         app.on_key(key(KeyCode::Down), &data);
         let after_down = provider_template_picker_selection(&app);
         assert_eq!(
-            after_down, builtin_count,
+            after_down, first_sponsor_flat,
             "Down must land on the first sponsor, not the header"
         );
 
         app.on_key(key(KeyCode::Up), &data);
         assert_eq!(
             provider_template_picker_selection(&app),
-            builtin_count - 1,
+            last_builtin_flat,
             "Up must skip back over the header"
         );
 
@@ -13223,8 +13237,8 @@ mod tests {
         );
     }
 
-    /// Codex's display order diverges from its flat order: DeepSeek has the
-    /// LAST flat index but renders as the last Built-in row, directly above
+    /// Codex's display order diverges from its flat order: migrated built-ins
+    /// have flat indices after the sponsors but render directly above
     /// the Sponsors header. Navigation must follow display order, so a naive
     /// flat-index ±1 stepping implementation cannot pass this.
     #[test]
@@ -13234,22 +13248,30 @@ mod tests {
         let rows = form.template_picker_rows();
         let labels = form.template_labels();
 
-        let deepseek_flat = labels
+        let last_builtin_flat = rows
             .iter()
-            .position(|label| *label == "DeepSeek")
-            .expect("codex exposes DeepSeek");
+            .filter_map(|row| match row {
+                super::super::form::ProviderTemplateRow::Item {
+                    flat_idx,
+                    section: super::super::form::ProviderTemplateSection::BuiltIn,
+                    ..
+                } => Some(*flat_idx),
+                _ => None,
+            })
+            .next_back()
+            .expect("codex exposes built-in presets");
         let first_sponsor_flat =
             first_sponsor_flat_idx(&rows).expect("codex exposes sponsor presets");
 
         // Precondition: flat order and display order really do disagree here.
         assert_eq!(
-            deepseek_flat,
+            last_builtin_flat,
             labels.len() - 1,
-            "DeepSeek should hold the last flat index"
+            "the last built-in should hold the last flat index"
         );
         assert!(
-            first_sponsor_flat < deepseek_flat,
-            "sponsors precede DeepSeek in flat order"
+            first_sponsor_flat < last_builtin_flat,
+            "sponsors precede migrated built-ins in flat order"
         );
 
         app.form = Some(FormState::ProviderAdd(form));
@@ -13257,25 +13279,24 @@ mod tests {
 
         // Down from the last Built-in row crosses the Sponsors header.
         app.overlay = Overlay::ProviderTemplatePicker {
-            selected: deepseek_flat,
+            selected: last_builtin_flat,
         };
         app.on_key(key(KeyCode::Down), &data);
         assert_eq!(
             provider_template_picker_selection(&app),
             first_sponsor_flat,
-            "Down from DeepSeek must reach the first sponsor, not flat+1"
+            "Down from the last built-in must reach the first sponsor, not flat+1"
         );
 
-        // And Up returns to DeepSeek rather than stepping to flat-1.
+        // And Up returns to the last built-in rather than stepping to flat-1.
         app.on_key(key(KeyCode::Up), &data);
         assert_eq!(
             provider_template_picker_selection(&app),
-            deepseek_flat,
-            "Up from the first sponsor must return to DeepSeek, not flat-1"
+            last_builtin_flat,
+            "Up from the first sponsor must return to the last built-in, not flat-1"
         );
 
-        // DeepSeek is the last display row, so Down past it is a no-op only
-        // after the sponsors are exhausted, never a wrap to flat order.
+        // Basic navigation inside the first Built-in rows stays unchanged.
         app.overlay = Overlay::ProviderTemplatePicker { selected: 0 };
         app.on_key(key(KeyCode::Down), &data);
         assert_eq!(

@@ -419,6 +419,8 @@ pub struct CodexModelCatalogRow {
     pub supports_parallel_tool_calls: Option<bool>,
     pub input_modalities: Vec<String>,
     pub base_instructions: String,
+    pub reasoning_levels: Vec<String>,
+    pub default_reasoning_level: String,
 }
 
 pub(crate) fn parse_codex_model_catalog_context_window(raw: &str) -> Option<u64> {
