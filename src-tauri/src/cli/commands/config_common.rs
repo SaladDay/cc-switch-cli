@@ -173,6 +173,15 @@ fn read_required_text(
     }
 }
 
+fn ensure_common_config_mutation_supported(app_type: &AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Pi) {
+        return Err(AppError::InvalidInput(
+            "Pi does not support common config snippets".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<String>, AppError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -184,7 +193,8 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
         | AppType::Gemini
         | AppType::OpenCode
         | AppType::Hermes
-        | AppType::OpenClaw => {
+        | AppType::OpenClaw
+        | AppType::Pi => {
             let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;
@@ -229,6 +239,7 @@ fn set(
     file: Option<&Path>,
     _apply: bool,
 ) -> Result<(), AppError> {
+    ensure_common_config_mutation_supported(&app_type)?;
     let raw = read_required_text(
         snippet_text,
         file,
@@ -267,6 +278,9 @@ fn extract(
     file: Option<&Path>,
     save: bool,
 ) -> Result<(), AppError> {
+    if save {
+        ensure_common_config_mutation_supported(&app_type)?;
+    }
     let state = get_state()?;
     let extracted = if settings_config_text.is_some() || file.is_some() {
         let raw = read_required_text(
@@ -316,6 +330,7 @@ fn extract(
 }
 
 fn clear(app_type: AppType, _apply: bool) -> Result<(), AppError> {
+    ensure_common_config_mutation_supported(&app_type)?;
     let state = get_state()?;
     ProviderService::set_common_config_snippet(&state, app_type.clone(), None)?;
 
@@ -680,5 +695,20 @@ mod tests {
     #[test]
     fn follow_up_message_is_omitted_for_additive_apps() {
         assert!(follow_up_message(AppType::OpenCode, CommonConfigSnippetAction::Set, "").is_none());
+    }
+
+    #[test]
+    fn pi_common_config_mutations_are_rejected_before_state_access() {
+        for result in [
+            set(AppType::Pi, Some("{}"), None, false),
+            extract(AppType::Pi, None, Some("{}"), None, true),
+            clear(AppType::Pi, false),
+        ] {
+            assert!(matches!(
+                result,
+                Err(AppError::InvalidInput(message))
+                    if message == "Pi does not support common config snippets"
+            ));
+        }
     }
 }

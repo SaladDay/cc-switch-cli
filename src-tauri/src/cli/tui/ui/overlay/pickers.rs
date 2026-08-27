@@ -2345,6 +2345,7 @@ pub(super) fn render_visible_apps_picker_overlay(
             crate::app_config::AppType::OpenCode,
             crate::app_config::AppType::Hermes,
             crate::app_config::AppType::OpenClaw,
+            crate::app_config::AppType::Pi,
         ],
     );
 }
@@ -2371,6 +2372,7 @@ pub(super) fn render_skills_apps_picker_overlay(
             crate::app_config::AppType::Gemini,
             crate::app_config::AppType::OpenCode,
             crate::app_config::AppType::Hermes,
+            crate::app_config::AppType::Pi,
         ],
     );
 }

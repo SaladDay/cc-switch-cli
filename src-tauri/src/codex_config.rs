@@ -45,6 +45,45 @@ impl CodexCatalogToolProfile {
     }
 }
 
+/// Native Responses gateways used by the migrated presets that reject Codex's
+/// hosted web-search tool.
+const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &["xiaomimimo.com", "minimaxi.com"];
+const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] = &["mimo", "minimax"];
+
+fn codex_top_level_model(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<toml::Value>().ok()?;
+    doc.get("model")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
+    if let Some(base_url) = extract_codex_base_url(config_text) {
+        let base_url = base_url.to_ascii_lowercase();
+        if CODEX_WEB_SEARCH_REJECT_HOSTS
+            .iter()
+            .any(|host| base_url.contains(host))
+        {
+            return true;
+        }
+    }
+
+    if let Some(model) = codex_top_level_model(config_text) {
+        let model = model.to_ascii_lowercase();
+        let model = model.rsplit('/').next().unwrap_or(model.as_str());
+        if CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Reserved built-in provider IDs from OpenAI Codex's config/model-provider
 /// catalog. Keep in sync with Codex `RESERVED_MODEL_PROVIDER_IDS` and legacy
 /// removed provider aliases.
@@ -439,6 +478,88 @@ fn codex_catalog_input_modalities(
     modalities.iter().map(|item| (*item).to_string()).collect()
 }
 
+/// Canonical reasoning effort levels Codex understands, with the same
+/// descriptions the official gpt-5.5 template uses. `none` disables thinking.
+const CODEX_REASONING_LEVEL_DESCRIPTIONS: &[(&str, &str)] = &[
+    ("none", "Disable Thinking"),
+    ("minimal", "Minimal reasoning"),
+    ("low", "Fast responses with lighter reasoning"),
+    (
+        "medium",
+        "Balances speed and reasoning depth for everyday tasks",
+    ),
+    ("high", "Greater reasoning depth for complex problems"),
+    ("xhigh", "Extra high reasoning depth for complex problems"),
+    ("max", "Maximum reasoning depth for the hardest problems"),
+    ("ultra", "Ultra reasoning depth"),
+];
+
+fn codex_reasoning_level_description(effort: &str) -> Option<&'static str> {
+    CODEX_REASONING_LEVEL_DESCRIPTIONS
+        .iter()
+        .find(|(candidate, _)| *candidate == effort)
+        .map(|(_, description)| *description)
+}
+
+/// User-declared levels reduced to the canonical efforts Codex understands,
+/// in canonical (lowest → highest) order regardless of declaration order.
+/// Unknown efforts are dropped so a typo can never produce an entry Codex
+/// would reject.
+fn codex_canonical_efforts(levels: &[String]) -> Vec<&str> {
+    CODEX_REASONING_LEVEL_DESCRIPTIONS
+        .iter()
+        .filter(|(effort, _)| levels.iter().any(|candidate| candidate == effort))
+        .map(|(effort, _)| *effort)
+        .collect()
+}
+
+/// Build a `supported_reasoning_levels` array from user-declared effort values.
+fn codex_supported_reasoning_levels(levels: &[String]) -> Value {
+    let entries: Vec<Value> = codex_canonical_efforts(levels)
+        .into_iter()
+        .map(|effort| {
+            let description = codex_reasoning_level_description(effort)
+                .expect("canonical effort always has a description");
+            json!({ "effort": effort, "description": description })
+        })
+        .collect();
+    json!(entries)
+}
+
+/// Apply a per-model reasoning-level override onto a catalog entry. Returns
+/// true when the override was applied (so callers can skip further work).
+/// `template_default` is the base entry's `default_reasoning_level` used as the
+/// fallback when the user did not declare one explicitly.
+fn apply_codex_reasoning_level_override(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    template_default: Option<&str>,
+    spec: &CodexCatalogModelSpec,
+) -> bool {
+    let Some(levels) = spec.reasoning_levels.as_deref() else {
+        return false;
+    };
+    let canonical = codex_canonical_efforts(levels);
+    if canonical.is_empty() {
+        return false;
+    }
+
+    let supported = codex_supported_reasoning_levels(levels);
+    entry_obj.insert("supported_reasoning_levels".to_string(), supported);
+
+    // Explicit value wins. Otherwise retain a still-supported template
+    // default, then fall back to the highest canonical supported level.
+    let default_level = spec
+        .default_reasoning_level
+        .as_deref()
+        .filter(|level| canonical.contains(level))
+        .or_else(|| template_default.filter(|level| canonical.contains(level)))
+        .or_else(|| canonical.last().copied());
+    if let Some(default_level) = default_level {
+        entry_obj.insert("default_reasoning_level".to_string(), json!(default_level));
+    }
+    true
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
@@ -507,6 +628,11 @@ fn codex_catalog_model_entry(
         }
     }
 
+    let template_default = template
+        .get("default_reasoning_level")
+        .and_then(Value::as_str);
+    apply_codex_reasoning_level_override(entry_obj, template_default, spec);
+
     entry
 }
 
@@ -527,6 +653,11 @@ struct CodexCatalogModelSpec {
     /// falls back to the template default when absent. Only consulted for
     /// `NativeResponses`.
     base_instructions: Option<String>,
+    /// Per-row override for the generated catalog's reasoning capabilities.
+    /// Consulted for every profile.
+    reasoning_levels: Option<Vec<String>>,
+    /// Preferred effort within `reasoning_levels`.
+    default_reasoning_level: Option<String>,
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -594,6 +725,27 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(str::to_string);
+        let reasoning_levels = model_config
+            .get("reasoningLevels")
+            .or_else(|| model_config.get("reasoning_levels"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|level| !level.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|levels| !levels.is_empty());
+        let default_reasoning_level = model_config
+            .get("defaultReasoningLevel")
+            .or_else(|| model_config.get("default_reasoning_level"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|level| !level.is_empty())
+            .map(str::to_string);
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
@@ -602,6 +754,8 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             supports_parallel_tool_calls,
             input_modalities,
             base_instructions,
+            reasoning_levels,
+            default_reasoning_level,
         });
     }
 
@@ -805,10 +959,14 @@ pub fn prepare_codex_config_text_with_model_catalog_payload(
 
     if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? {
         let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
-        let config_text = set_codex_web_search_field(
-            &config_text,
-            profile == CodexCatalogToolProfile::Anthropic,
-        )?;
+        let disable_web_search = match profile {
+            CodexCatalogToolProfile::Anthropic => true,
+            CodexCatalogToolProfile::NativeResponses => {
+                codex_native_gateway_rejects_web_search(&config_text)
+            }
+            CodexCatalogToolProfile::ProxyChat => false,
+        };
+        let config_text = set_codex_web_search_field(&config_text, disable_web_search)?;
         Ok(PreparedCodexConfigText {
             config_text,
             model_catalog: Some(catalog),
@@ -2025,6 +2183,50 @@ mod tests {
     }
 
     #[test]
+    fn selected_native_presets_disable_web_search_only_for_reject_gateways() {
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "test-model" }] }
+        });
+        for config in [
+            r#"model_provider = "custom"
+model = "test-model"
+[model_providers.custom]
+base_url = "https://api.minimaxi.com/v1"
+"#,
+            r#"model_provider = "custom"
+model = "mimo-v2.5-pro"
+[model_providers.custom]
+base_url = "https://relay.example.com/v1"
+"#,
+        ] {
+            let prepared = prepare_codex_config_text_with_model_catalog_payload(
+                &settings,
+                config,
+                CodexCatalogToolProfile::NativeResponses,
+            )
+            .expect("prepare reject-gateway config");
+            let parsed: toml::Value = toml::from_str(&prepared.config_text).unwrap();
+            assert_eq!(
+                parsed.get("web_search").and_then(toml::Value::as_str),
+                Some("disabled")
+            );
+        }
+
+        let prepared = prepare_codex_config_text_with_model_catalog_payload(
+            &settings,
+            r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+[model_providers.custom]
+base_url = "https://api.deepseek.com"
+"#,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("prepare capable-gateway config");
+        let parsed: toml::Value = toml::from_str(&prepared.config_text).unwrap();
+        assert!(parsed.get("web_search").is_none());
+    }
+
+    #[test]
     fn extract_base_url_prefers_active_provider_and_ignores_comments() {
         let config = r#"model_provider = 'current'
 
@@ -2561,6 +2763,41 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
+    fn model_catalog_projects_per_model_reasoning_levels_for_every_profile() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{
+                    "model": "glm-5.2",
+                    "reasoningLevels": ["none", "high"],
+                    "defaultReasoningLevel": "none"
+                }]
+            }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let template = json!({
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": []
+        });
+
+        for profile in [
+            CodexCatalogToolProfile::ProxyChat,
+            CodexCatalogToolProfile::NativeResponses,
+            CodexCatalogToolProfile::Anthropic,
+        ] {
+            let catalog = codex_model_catalog_from_specs(&specs, &template, profile);
+            let entry = &catalog["models"][0];
+            assert_eq!(
+                entry["supported_reasoning_levels"],
+                json!([
+                    { "effort": "none", "description": "Disable Thinking" },
+                    { "effort": "high", "description": "Greater reasoning depth for complex problems" }
+                ])
+            );
+            assert_eq!(entry["default_reasoning_level"], json!("none"));
+        }
+    }
+
+    #[test]
     fn native_responses_profile_suppresses_apply_patch_and_keeps_shell() {
         // Native (direct) /responses providers must NOT emit a freeform
         // apply_patch (type=="custom") tool — gateways like MiMo reject it.
@@ -2642,6 +2879,8 @@ experimental_bearer_token = "PROXY_MANAGED"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning_levels: None,
+                default_reasoning_level: None,
             },
             CodexCatalogModelSpec {
                 model: "deepseek/deepseek-v4-pro".to_string(),
@@ -2650,6 +2889,8 @@ experimental_bearer_token = "PROXY_MANAGED"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning_levels: None,
+                default_reasoning_level: None,
             },
             CodexCatalogModelSpec {
                 model: "glm-5.2v".to_string(),
@@ -2658,6 +2899,8 @@ experimental_bearer_token = "PROXY_MANAGED"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning_levels: None,
+                default_reasoning_level: None,
             },
             CodexCatalogModelSpec {
                 model: "deepseek-v4-flash".to_string(),
@@ -2666,6 +2909,8 @@ experimental_bearer_token = "PROXY_MANAGED"
                 supports_parallel_tool_calls: None,
                 input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
                 base_instructions: None,
+                reasoning_levels: None,
+                default_reasoning_level: None,
             },
             CodexCatalogModelSpec {
                 model: "custom-text-alias".to_string(),
@@ -2674,6 +2919,8 @@ experimental_bearer_token = "PROXY_MANAGED"
                 supports_parallel_tool_calls: None,
                 input_modalities: Some(vec!["text".to_string()]),
                 base_instructions: None,
+                reasoning_levels: None,
+                default_reasoning_level: None,
             },
         ];
 
@@ -2744,6 +2991,8 @@ experimental_bearer_token = "PROXY_MANAGED"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning_levels: None,
+            default_reasoning_level: None,
         }];
         // The native template lacks apply_patch_tool_type, so synthesize one to
         // prove ProxyChat leaves it intact (no native stripping).

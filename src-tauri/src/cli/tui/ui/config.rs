@@ -22,7 +22,8 @@ fn settings_section(item: SettingsItem) -> SettingsSection {
         | SettingsItem::VisibleApps
         | SettingsItem::SkillsStorageLocation
         | SettingsItem::SkillsSyncMethod
-        | SettingsItem::OpenClawConfigDir => SettingsSection::Applications,
+        | SettingsItem::OpenClawConfigDir
+        | SettingsItem::PiConfigDir => SettingsSection::Applications,
         SettingsItem::SkipClaudeOnboarding
         | SettingsItem::ClaudePluginIntegration
         | SettingsItem::PreserveCodexOfficialAuth
@@ -3433,6 +3434,7 @@ pub(super) fn render_settings(
     let visible_apps = crate::settings::get_visible_apps();
     let visible_apps_mode = crate::settings::get_visible_apps_settings().mode;
     let openclaw_config_dir = crate::settings::get_settings().openclaw_config_dir;
+    let pi_config_dir = crate::settings::get_settings().pi_config_dir;
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
     let preserve_codex_official_auth = crate::settings::preserve_codex_official_auth_on_switch();
@@ -3496,6 +3498,12 @@ pub(super) fn render_settings(
                 texts::tui_settings_openclaw_config_dir_label().to_string(),
                 openclaw_config_dir.clone().unwrap_or_else(|| {
                     texts::tui_settings_openclaw_config_dir_default_value().to_string()
+                }),
+            ),
+            super::app::SettingsItem::PiConfigDir => (
+                texts::tui_settings_pi_config_dir_label().to_string(),
+                pi_config_dir.clone().unwrap_or_else(|| {
+                    texts::tui_settings_pi_config_dir_default_value().to_string()
                 }),
             ),
             super::app::SettingsItem::ManagedAccounts => (

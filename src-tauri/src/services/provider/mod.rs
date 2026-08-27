@@ -12,6 +12,7 @@ mod gemini_auth;
 mod live;
 pub(crate) mod live_merge;
 mod models;
+mod pi;
 #[cfg(test)]
 mod tests;
 mod usage;
@@ -92,6 +93,13 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 
 /// 供应商相关业务逻辑
 pub struct ProviderService;
+
+/// Result of a provider switch operation, including any non-fatal warnings.
+#[derive(Debug, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchResult {
+    pub warnings: Vec<String>,
+}
 
 fn active_failover_last_provider_error() -> AppError {
     AppError::localized(
@@ -215,7 +223,7 @@ enum PreparedCodexAuthWrite {
 
 impl ProviderService {
     pub fn is_provider_key_app(app_type: &AppType) -> bool {
-        matches!(app_type, AppType::OpenClaw | AppType::Hermes)
+        matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi)
     }
 
     pub fn is_valid_provider_key(value: &str) -> bool {
@@ -326,6 +334,10 @@ impl ProviderService {
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect(),
+            AppType::Pi => crate::pi_config::read_pi_native_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
             _ => HashSet::new(),
         };
         Ok(ids)
@@ -390,6 +402,18 @@ impl ProviderService {
         source_id: &str,
         provider_override: Option<Provider>,
     ) -> Result<Provider, AppError> {
+        if matches!(app_type, AppType::Pi) {
+            let providers = pi::list(state)?;
+            let source = providers.get(source_id).ok_or_else(|| {
+                AppError::InvalidInput(format!("Pi provider '{source_id}' not found"))
+            })?;
+            let mut existing_ids = providers.keys().cloned().collect::<HashSet<_>>();
+            existing_ids.extend(Self::live_provider_ids(&app_type)?);
+            let duplicate =
+                Self::duplicate_provider_with_overrides(source, provider_override, &existing_ids);
+            pi::add(state, duplicate.clone(), false)?;
+            return Ok(duplicate);
+        }
         let app_type_clone = app_type.clone();
         let source_id = source_id.to_string();
         let live_ids = if app_type.is_additive_mode() {
@@ -483,6 +507,49 @@ impl ProviderService {
             auto_query_interval: Some(5),
             coding_plan_provider: Some(coding_plan_provider.to_string()),
         });
+    }
+
+    fn normalize_usage_script_credential_overrides(app_type: &AppType, provider: &mut Provider) {
+        let current_credentials = if matches!(app_type, AppType::Pi) {
+            (
+                crate::pi_config::provider_base_url(&provider.settings_config).unwrap_or_default(),
+                provider
+                    .settings_config
+                    .get("apiKey")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
+        let Some(usage_script) = provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.usage_script.as_mut())
+        else {
+            return;
+        };
+        if usage_script.template_type.as_deref() == Some("token_plan") {
+            return;
+        }
+
+        if usage_script.api_key.as_deref().is_some_and(|candidate| {
+            let candidate = candidate.trim();
+            candidate.is_empty()
+                || (!current_credentials.1.trim().is_empty()
+                    && current_credentials.1.trim() == candidate)
+        }) {
+            usage_script.api_key = None;
+        }
+        if usage_script.base_url.as_deref().is_some_and(|candidate| {
+            let candidate = candidate.trim().trim_end_matches('/');
+            let current = current_credentials.0.trim().trim_end_matches('/');
+            candidate.is_empty() || (!current.is_empty() && current == candidate)
+        }) {
+            usage_script.base_url = None;
+        }
     }
 
     fn is_codex_official_provider(provider: &Provider) -> bool {
@@ -1213,6 +1280,7 @@ impl ProviderService {
                 }
                 state.save()?;
             }
+            AppType::Pi => {}
         }
         Ok(())
     }
@@ -1268,7 +1336,7 @@ impl ProviderService {
                 strict_current_provider_id,
                 old_snippet,
             ),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(()),
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => Ok(()),
         };
 
         match result {
@@ -1390,7 +1458,7 @@ impl ProviderService {
             }
             AppType::Gemini => live_settings.get("env") != provider_settings.get("env"),
             AppType::Claude => live_settings != provider_settings,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
         }
     }
 
@@ -1548,6 +1616,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
             AppType::Hermes => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
+            AppType::Pi => Ok(String::new()),
         }
     }
 
@@ -1882,6 +1951,9 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<IndexMap<String, Provider>, AppError> {
+        if matches!(app_type, AppType::Pi) {
+            return pi::list(state);
+        }
         let config = state.config.read().map_err(AppError::from)?;
         let manager = config
             .get_manager(&app_type)
@@ -1909,6 +1981,9 @@ impl ProviderService {
 
     /// 新增供应商
     pub fn add(state: &AppState, app_type: AppType, provider: Provider) -> Result<bool, AppError> {
+        if matches!(app_type, AppType::Pi) {
+            return pi::add(state, provider, true);
+        }
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
@@ -2004,6 +2079,9 @@ impl ProviderService {
         app_type: AppType,
         provider: Provider,
     ) -> Result<bool, AppError> {
+        if matches!(app_type, AppType::Pi) {
+            return pi::update(state, None, provider);
+        }
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
@@ -2225,6 +2303,7 @@ impl ProviderService {
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
             AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
+            AppType::Pi => unreachable!("Pi uses native provider import"),
         };
 
         let mut provider = Provider::with_id(
@@ -2364,6 +2443,9 @@ impl ProviderService {
                 }
                 crate::openclaw_config::read_openclaw_config()
             }
+            AppType::Pi => Err(AppError::InvalidInput(
+                "Pi providers are read from models.json".to_string(),
+            )),
         }
     }
 
@@ -2395,6 +2477,9 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Pi) {
+            return pi::remove(state, provider_id);
+        }
         if !app_type.is_additive_mode() {
             return Err(AppError::localized(
                 "provider.remove_from_live_config.unsupported",
@@ -2485,6 +2570,7 @@ impl ProviderService {
             AppType::OpenCode => Self::import_opencode_providers_from_live(state),
             AppType::OpenClaw => Self::import_openclaw_providers_from_live(state),
             AppType::Hermes => Self::import_hermes_providers_from_live(state),
+            AppType::Pi => Self::import_pi_providers_from_live(state),
             _ => Self::import_default_config(state, app_type).map(usize::from),
         }
     }
@@ -2760,6 +2846,7 @@ impl ProviderService {
             AppType::OpenCode => unreachable!("additive mode handled above"),
             AppType::Hermes => unreachable!("additive mode handled above"),
             AppType::OpenClaw => unreachable!("additive mode handled above"),
+            AppType::Pi => unreachable!("Pi switch is handled by the native provider service"),
         };
 
         Ok(PostCommitAction {
@@ -2779,6 +2866,9 @@ impl ProviderService {
 
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Pi) {
+            return pi::enable(state, provider_id).map(|_| ());
+        }
         if !app_type.is_additive_mode() {
             let providers = state.db.get_all_providers(app_type.as_str())?;
             providers.get(provider_id).ok_or_else(|| {
@@ -2974,6 +3064,7 @@ impl ProviderService {
                     .map_err(Self::normalize_openclaw_live_write_error)?;
                 Ok(PreparedLiveWrite::OpenClaw { models })
             }
+            AppType::Pi => Ok(PreparedLiveWrite::Noop),
         }
     }
 
@@ -3212,6 +3303,9 @@ impl ProviderService {
             AppType::OpenClaw => Err(AppError::Config(
                 "OpenClaw does not support proxy takeover backups".into(),
             )),
+            AppType::Pi => Err(AppError::Config(
+                "Pi does not support proxy takeover backups".into(),
+            )),
         }
     }
 
@@ -3306,6 +3400,9 @@ impl ProviderService {
                 let config = Self::parse_openclaw_provider_settings(&provider.settings_config)?;
                 Self::validate_openclaw_provider_models(&provider.id, &config)?;
             }
+            AppType::Pi => {
+                crate::pi_config::validate_provider_node(&provider.id, &provider.settings_config)?
+            }
         }
 
         // 🔧 验证并清理 UsageScript 配置（所有应用类型通用）
@@ -3383,7 +3480,22 @@ impl ProviderService {
         )
     }
 
+    pub(crate) fn update_pi_usage_script(
+        state: &AppState,
+        id: &str,
+        script: UsageScript,
+    ) -> Result<bool, AppError> {
+        pi::update_usage_script(state, id, script)
+    }
+
+    pub(crate) fn clear_pi_usage_script(state: &AppState, id: &str) -> Result<bool, AppError> {
+        pi::clear_usage_script(state, id)
+    }
+
     pub fn delete(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Pi) {
+            return pi::delete(state, provider_id);
+        }
         let (local_current_provider, stored_current_provider) = if app_type.is_additive_mode() {
             (None, None)
         } else {
@@ -3491,6 +3603,7 @@ impl ProviderService {
             AppType::OpenClaw => {
                 let _ = provider_snapshot;
             }
+            AppType::Pi => unreachable!("Pi deletion is handled by the native provider service"),
         }
 
         {
@@ -3522,6 +3635,10 @@ impl ProviderService {
 
     pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
         live::import_openclaw_providers_from_live(state)
+    }
+
+    pub fn import_pi_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+        pi::import_from_live(state)
     }
 
     pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {

@@ -587,8 +587,9 @@ fn sync_usage_for_provider(
         AppType::Codex => crate::services::session_usage_codex::sync_codex_usage(db),
         AppType::Gemini => crate::services::session_usage_gemini::sync_gemini_usage(db),
         AppType::OpenCode => crate::services::session_usage_opencode::sync_opencode_usage(db),
+        AppType::Pi => crate::services::session_usage_pi::sync_pi_usage(db),
         other => Err(AppError::InvalidInput(format!(
-            "session usage sync is only supported for claude, codex, gemini, and opencode; got {}",
+            "session usage sync is only supported for claude, codex, gemini, opencode, and pi; got {}",
             other.as_str()
         ))),
     }
@@ -769,7 +770,7 @@ fn parse_scoped_selector(selector: &str) -> Option<(String, String)> {
 
 fn parse_session_provider(value: &str) -> Result<AppType, String> {
     app_type_from_provider_id(value).ok_or_else(|| {
-        format!("unsupported provider '{value}'. Allowed: claude, codex, gemini, opencode, openclaw, hermes")
+        format!("unsupported provider '{value}'. Allowed: claude, codex, gemini, opencode, openclaw, hermes, pi")
     })
 }
 

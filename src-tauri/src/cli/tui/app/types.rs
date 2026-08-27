@@ -4363,6 +4363,14 @@ pub enum ConfirmAction {
     PromptDelete {
         id: String,
     },
+    PiSystemPromptDelete {
+        kind: crate::services::pi_prompt_files::PiPromptFileKind,
+        expected_revision: String,
+    },
+    PiPromptTemplateDelete {
+        slug: String,
+        expected_revision: String,
+    },
     PricingDelete {
         model_id: String,
     },
@@ -4495,7 +4503,14 @@ pub enum TextSubmit {
     SettingsOutboundProxyUsername,
     SettingsOutboundProxyPassword,
     SettingsOpenClawConfigDir,
+    SettingsPiConfigDir,
     SettingsPreferredEditor,
+    PiPromptTemplateCreate,
+    PiPromptTemplateRename {
+        original_slug: String,
+        expected_revision: String,
+        content: String,
+    },
     #[allow(dead_code)]
     SkillsInstallSpec,
     SkillsDiscoverQuery,

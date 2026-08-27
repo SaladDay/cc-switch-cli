@@ -5198,6 +5198,26 @@ pub mod texts {
         "Default (~/.openclaw)"
     }
 
+    pub fn tui_settings_pi_config_dir_label() -> &'static str {
+        if is_chinese() {
+            "Pi 配置目录"
+        } else {
+            "Pi Config Directory"
+        }
+    }
+
+    pub fn tui_settings_pi_config_dir_prompt() -> &'static str {
+        if is_chinese() {
+            "输入 Pi agent 配置目录；留空恢复默认 ~/.pi/agent"
+        } else {
+            "Enter the Pi agent config directory; leave empty to use ~/.pi/agent"
+        }
+    }
+
+    pub fn tui_settings_pi_config_dir_default_value() -> &'static str {
+        "Default (~/.pi/agent)"
+    }
+
     pub fn tui_settings_preferred_editor_label() -> &'static str {
         if is_chinese() {
             "外部编辑器"
@@ -5305,6 +5325,22 @@ pub mod texts {
             "OpenClaw 配置目录已保存。"
         } else {
             "OpenClaw config directory saved."
+        }
+    }
+
+    pub fn tui_toast_pi_config_dir_saved() -> &'static str {
+        if is_chinese() {
+            "Pi 配置目录已保存。"
+        } else {
+            "Pi config directory saved."
+        }
+    }
+
+    pub fn tui_toast_pi_config_dir_import_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("Pi 配置目录已保存，但导入原生供应商失败: {err}")
+        } else {
+            format!("Pi config directory saved, but native provider import failed: {err}")
         }
     }
 
@@ -5742,14 +5778,15 @@ pub mod texts {
         gemini: usize,
         opencode: usize,
         hermes: usize,
+        pi: usize,
     ) -> String {
         if is_chinese() {
             format!(
-                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
+                "Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes} · Pi: {pi}"
             )
         } else {
             format!(
-                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
+                "Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes} · Pi: {pi}"
             )
         }
     }
@@ -9492,6 +9529,32 @@ pub mod texts {
 
     pub fn menu_manage_prompts_variants() -> (&'static str, &'static str) {
         ("💬 Prompts", "💬 提示词")
+    }
+
+    pub fn menu_pi_system_prompts() -> &'static str {
+        let (en, zh) = menu_pi_system_prompts_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_pi_system_prompts_variants() -> (&'static str, &'static str) {
+        ("🧠 System Prompts", "🧠 系统提示词")
+    }
+
+    pub fn menu_pi_prompt_templates() -> &'static str {
+        let (en, zh) = menu_pi_prompt_templates_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_pi_prompt_templates_variants() -> (&'static str, &'static str) {
+        ("📝 Prompt Templates", "📝 提示词模板")
     }
 
     pub fn menu_manage_config() -> &'static str {

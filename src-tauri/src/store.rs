@@ -13,6 +13,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Construct state from an existing database handle.
+    ///
+    /// This mirrors the upstream constructor used by isolated service tests.
+    pub fn new(db: Arc<Database>) -> Self {
+        let config = export_db_to_multi_app_config(&db)
+            .expect("failed to export application state from database");
+        Self::from_parts(db, config).expect("failed to construct application state")
+    }
+
     /// 创建新的应用状态
     pub fn try_new() -> Result<Self, AppError> {
         let app_config_dir = crate::config::get_app_config_dir();
@@ -250,6 +259,14 @@ impl AppState {
             }
             Ok(_) => log::debug!("○ No new OpenClaw providers to import"),
             Err(error) => log::warn!("✗ Failed to import OpenClaw providers: {error}"),
+        }
+
+        match crate::services::provider::ProviderService::import_pi_providers_from_live(self) {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Synchronized {count} Pi provider(s) from models.json");
+            }
+            Ok(_) => log::debug!("○ No Pi providers to synchronize"),
+            Err(error) => log::warn!("✗ Failed to synchronize Pi providers: {error}"),
         }
 
         self.refresh_config_from_db()
@@ -515,6 +532,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
         AppType::OpenCode,
         AppType::Hermes,
         AppType::OpenClaw,
+        AppType::Pi,
     ] {
         let app_key = app.as_str();
         let providers = db.get_all_providers(app_key)?;
@@ -531,6 +549,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
             AppType::OpenCode => config.prompts.opencode.prompts = prompts.into_iter().collect(),
             AppType::Hermes => config.prompts.hermes.prompts = prompts.into_iter().collect(),
             AppType::OpenClaw => config.prompts.openclaw.prompts = prompts.into_iter().collect(),
+            AppType::Pi => config.prompts.pi.prompts = prompts.into_iter().collect(),
         }
 
         // common snippet

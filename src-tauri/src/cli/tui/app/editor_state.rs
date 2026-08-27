@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::Value;
 
 /// Exact soft wrapping is useful for ordinary configuration and prompt lines,
 /// but it must not turn a pathological single physical line into an O(n)
@@ -24,6 +25,15 @@ pub enum EditorSubmit {
     PromptEdit {
         id: String,
     },
+    PiSystemPrompt {
+        kind: crate::services::pi_prompt_files::PiPromptFileKind,
+        expected_revision: String,
+    },
+    PiPromptTemplate {
+        slug: String,
+        original_slug: Option<String>,
+        expected_revision: String,
+    },
     ProviderFormApplyJson,
     ProviderFormApplyOpenClawModels,
     ProviderFormApplyLocalProxyHeaders,
@@ -34,6 +44,7 @@ pub enum EditorSubmit {
     ProviderAdd,
     ProviderEdit {
         id: String,
+        expected_pi_settings_config: Option<Value>,
     },
     PricingEdit {
         model_id: String,

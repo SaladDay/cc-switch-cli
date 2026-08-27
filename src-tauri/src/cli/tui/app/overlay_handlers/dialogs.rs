@@ -97,6 +97,20 @@ impl App {
                     }
                     ConfirmAction::McpDelete { id } => Action::McpDelete { id: id.clone() },
                     ConfirmAction::PromptDelete { id } => Action::PromptDelete { id: id.clone() },
+                    ConfirmAction::PiSystemPromptDelete {
+                        kind,
+                        expected_revision,
+                    } => Action::PiSystemPromptDelete {
+                        kind: *kind,
+                        expected_revision: expected_revision.clone(),
+                    },
+                    ConfirmAction::PiPromptTemplateDelete {
+                        slug,
+                        expected_revision,
+                    } => Action::PiPromptTemplateDelete {
+                        slug: slug.clone(),
+                        expected_revision: expected_revision.clone(),
+                    },
                     ConfirmAction::PricingDelete { model_id } => Action::PricingDelete {
                         model_id: model_id.clone(),
                     },
@@ -430,6 +444,15 @@ impl App {
                 };
                 Action::SetOpenClawConfigDir { path }
             }
+            TextSubmit::SettingsPiConfigDir => {
+                let trimmed = raw.trim().to_string();
+                let path = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                };
+                Action::SetPiConfigDir { path }
+            }
             TextSubmit::SettingsPreferredEditor => {
                 let trimmed = raw.trim().to_string();
                 let command = if trimmed.is_empty() {
@@ -450,6 +473,39 @@ impl App {
                     Some(trimmed)
                 };
                 Action::SetPreferredEditor { command }
+            }
+            TextSubmit::PiPromptTemplateCreate => {
+                if let Err(error) = crate::services::pi_prompt_files::validate_template_slug(&raw) {
+                    self.push_toast(error.to_string(), ToastKind::Warning);
+                    return Action::None;
+                }
+                self.open_editor(
+                    format!("/{raw}"),
+                    EditorKind::Plain,
+                    "# Prompt template\n",
+                    EditorSubmit::PiPromptTemplate {
+                        slug: raw,
+                        original_slug: None,
+                        expected_revision: "missing".to_string(),
+                    },
+                );
+                Action::None
+            }
+            TextSubmit::PiPromptTemplateRename {
+                original_slug,
+                expected_revision,
+                content,
+            } => {
+                if let Err(error) = crate::services::pi_prompt_files::validate_template_slug(&raw) {
+                    self.push_toast(error.to_string(), ToastKind::Warning);
+                    return Action::None;
+                }
+                Action::PiPromptTemplateRename {
+                    original_slug,
+                    new_slug: raw,
+                    expected_revision,
+                    content,
+                }
             }
             TextSubmit::SkillsInstallSpec => {
                 if raw.is_empty() {

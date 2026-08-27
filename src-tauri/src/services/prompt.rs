@@ -5,6 +5,7 @@ use crate::config::write_text_file;
 use crate::error::AppError;
 use crate::prompt::Prompt;
 use crate::prompt_files::prompt_file_path;
+use crate::services::pi_prompt_files::PiAgentsFileGuard;
 use crate::store::AppState;
 
 fn get_unix_timestamp() -> Result<i64, AppError> {
@@ -73,15 +74,22 @@ impl PromptService {
         state: &AppState,
         app: AppType,
     ) -> Result<IndexMap<String, Prompt>, AppError> {
+        if matches!(app, AppType::Pi) {
+            return get_pi_prompts(state);
+        }
         state.db.get_prompts(app.as_str())
     }
 
     pub fn upsert_prompt(
         state: &AppState,
         app: AppType,
-        _id: &str,
+        id: &str,
         prompt: Prompt,
     ) -> Result<(), AppError> {
+        if matches!(app, AppType::Pi) {
+            return upsert_pi_prompt(state, id, prompt);
+        }
+
         let is_enabled = prompt.enabled;
 
         state.db.save_prompt(app.as_str(), &prompt)?;
@@ -95,7 +103,10 @@ impl PromptService {
     }
 
     pub fn delete_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
-        let prompts = state.db.get_prompts(app.as_str())?;
+        if matches!(app, AppType::Pi) {
+            return delete_pi_prompt(state, id);
+        }
+        let prompts = Self::get_prompts(state, app.clone())?;
 
         if let Some(prompt) = prompts.get(id) {
             if prompt.enabled {
@@ -113,7 +124,7 @@ impl PromptService {
         id: &str,
         name: &str,
     ) -> Result<(), AppError> {
-        let prompts = state.db.get_prompts(app.as_str())?;
+        let prompts = Self::get_prompts(state, app.clone())?;
         let Some(existing) = prompts.get(id) else {
             return Err(AppError::InvalidInput(format!("提示词 {id} 不存在")));
         };
@@ -149,7 +160,15 @@ impl PromptService {
             return Err(AppError::InvalidInput("提示词名称不能为空".to_string()));
         }
 
-        let prompts = state.db.get_prompts(app.as_str())?;
+        // Pi persists `enabled = false` in SQLite because the native AGENTS.md
+        // file is the source of truth. Hydrate that live state before editing,
+        // otherwise an ordinary metadata/content edit would look like a
+        // disable request and remove the active file.
+        let prompts = if matches!(app, AppType::Pi) {
+            get_pi_prompts(state)?
+        } else {
+            state.db.get_prompts(app.as_str())?
+        };
         if old_id != new_id && prompts.contains_key(new_id) {
             return Err(AppError::InvalidInput(format!("提示词 ID {new_id} 已存在")));
         }
@@ -170,9 +189,17 @@ impl PromptService {
             prompt.content = content.trim_end().to_string();
         }
         prompt.updated_at = Some(get_unix_timestamp()?);
-        state.db.save_prompt(app.as_str(), &prompt)?;
-        if old_prompt_id != prompt.id {
-            state.db.delete_prompt(app.as_str(), &old_prompt_id)?;
+        if matches!(app, AppType::Pi) {
+            if old_prompt_id == prompt.id {
+                upsert_pi_prompt(state, &prompt.id, prompt.clone())?;
+            } else {
+                rename_pi_prompt(state, &old_prompt_id, prompt.clone())?;
+            }
+        } else {
+            state.db.save_prompt(app.as_str(), &prompt)?;
+            if old_prompt_id != prompt.id {
+                state.db.delete_prompt(app.as_str(), &old_prompt_id)?;
+            }
         }
 
         Ok(prompt)
@@ -231,6 +258,10 @@ impl PromptService {
     }
 
     pub fn enable_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        if matches!(app, AppType::Pi) {
+            return enable_pi_prompt(state, id);
+        }
+
         let app_key = app.as_str();
         let target_path = prompt_file_path(&app)?;
 
@@ -294,6 +325,18 @@ impl PromptService {
     }
 
     pub fn disable_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        if matches!(app, AppType::Pi) {
+            let mut prompt = get_pi_prompts(state)?
+                .get(id)
+                .cloned()
+                .ok_or_else(|| AppError::InvalidInput(format!("提示词 {id} 不存在")))?;
+            if !prompt.enabled {
+                return Err(AppError::InvalidInput(format!("提示词 {id} 未激活")));
+            }
+            prompt.enabled = false;
+            return upsert_pi_prompt(state, id, prompt);
+        }
+
         let app_key = app.as_str();
         let mut prompts = state.db.get_prompts(app_key)?;
 
@@ -316,14 +359,18 @@ impl PromptService {
     }
 
     pub fn import_from_file(state: &AppState, app: AppType) -> Result<String, AppError> {
-        let file_path = prompt_file_path(&app)?;
-
-        if !file_path.exists() {
-            return Err(AppError::Message("提示词文件不存在".to_string()));
-        }
-
-        let content =
-            std::fs::read_to_string(&file_path).map_err(|e| AppError::io(&file_path, e))?;
+        let content = if matches!(app, AppType::Pi) {
+            PiAgentsFileGuard::acquire()?
+                .read()?
+                .content
+                .ok_or_else(|| AppError::Message("提示词文件不存在".to_string()))?
+        } else {
+            let file_path = prompt_file_path(&app)?;
+            if !file_path.exists() {
+                return Err(AppError::Message("提示词文件不存在".to_string()));
+            }
+            std::fs::read_to_string(&file_path).map_err(|e| AppError::io(&file_path, e))?
+        };
         let timestamp = get_unix_timestamp()?;
 
         let id = format!("imported-{timestamp}");
@@ -345,6 +392,9 @@ impl PromptService {
     }
 
     pub fn get_current_file_content(app: AppType) -> Result<Option<String>, AppError> {
+        if matches!(app, AppType::Pi) {
+            return Ok(PiAgentsFileGuard::acquire()?.read()?.content);
+        }
         let file_path = prompt_file_path(&app)?;
         if !file_path.exists() {
             return Ok(None);
@@ -358,6 +408,9 @@ impl PromptService {
         let mut active_prompts = Vec::new();
 
         for app in AppType::all() {
+            if matches!(app, AppType::Pi) {
+                continue;
+            }
             let prompts = state.db.get_prompts(app.as_str())?;
             if let Some(prompt) = select_active_prompt(&prompts) {
                 active_prompts.push((app, prompt.content));
@@ -384,6 +437,185 @@ impl PromptService {
 
         Ok(())
     }
+}
+
+fn pi_active_prompt_id(
+    prompts: &IndexMap<String, Prompt>,
+    live_content: Option<&str>,
+) -> Option<String> {
+    let live_content = live_content?;
+    prompts
+        .iter()
+        .find(|(_, prompt)| prompt.content == live_content)
+        .map(|(id, _)| id.clone())
+}
+
+fn unique_pi_backup_id(prompts: &IndexMap<String, Prompt>, timestamp: i64) -> String {
+    let base = format!("backup-{timestamp}");
+    if !prompts.contains_key(&base) {
+        return base;
+    }
+    for suffix in 2_u64.. {
+        let candidate = format!("{base}-{suffix}");
+        if !prompts.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the backup suffix space is finite only after u64 exhaustion")
+}
+
+fn get_pi_prompts(state: &AppState) -> Result<IndexMap<String, Prompt>, AppError> {
+    let guard = PiAgentsFileGuard::acquire()?;
+    let mut prompts = state.db.get_prompts(AppType::Pi.as_str())?;
+    let snapshot = guard.read()?;
+    let active_id = pi_active_prompt_id(&prompts, snapshot.content.as_deref());
+
+    for (id, prompt) in &mut prompts {
+        prompt.enabled = active_id.as_ref() == Some(id);
+    }
+    Ok(prompts)
+}
+
+fn upsert_pi_prompt(state: &AppState, id: &str, prompt: Prompt) -> Result<(), AppError> {
+    if prompt.id != id {
+        return Err(AppError::InvalidInput(
+            "Pi prompt id does not match the requested id".to_string(),
+        ));
+    }
+
+    let guard = PiAgentsFileGuard::acquire()?;
+    let prompts = state.db.get_prompts(AppType::Pi.as_str())?;
+    let snapshot = guard.read()?;
+    let was_active =
+        pi_active_prompt_id(&prompts, snapshot.content.as_deref()).as_deref() == Some(id);
+    let previous = prompts.get(id).cloned();
+    let requested_active = prompt.enabled;
+    let mut stored = prompt;
+    stored.enabled = false;
+
+    if requested_active && !was_active {
+        return Err(AppError::Conflict(
+            "Pi AGENTS.md changed outside CC Switch; reload before editing it".to_string(),
+        ));
+    }
+
+    persist_pi_prompt_with_native_update(state, id, &stored, previous.as_ref(), || {
+        if requested_active {
+            guard.replace(&snapshot.revision, &stored.content)
+        } else if was_active {
+            guard.delete(&snapshot.revision)
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn persist_pi_prompt_with_native_update(
+    state: &AppState,
+    id: &str,
+    stored: &Prompt,
+    previous: Option<&Prompt>,
+    update_native: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    state.db.save_prompt(AppType::Pi.as_str(), stored)?;
+    if let Err(native_error) = update_native() {
+        let rollback = match previous {
+            Some(previous) => state.db.save_prompt(AppType::Pi.as_str(), previous),
+            None => state.db.delete_prompt(AppType::Pi.as_str(), id),
+        };
+        if let Err(rollback_error) = rollback {
+            return Err(AppError::Message(format!(
+                "Pi prompt update failed ({native_error}); database rollback also failed: {rollback_error}"
+            )));
+        }
+        return Err(native_error);
+    }
+    Ok(())
+}
+
+fn rename_pi_prompt(state: &AppState, old_id: &str, prompt: Prompt) -> Result<(), AppError> {
+    let guard = PiAgentsFileGuard::acquire()?;
+    let prompts = state.db.get_prompts(AppType::Pi.as_str())?;
+    let previous = prompts
+        .get(old_id)
+        .cloned()
+        .ok_or_else(|| AppError::InvalidInput(format!("提示词 {old_id} 不存在")))?;
+    let snapshot = guard.read()?;
+    let was_active =
+        pi_active_prompt_id(&prompts, snapshot.content.as_deref()).as_deref() == Some(old_id);
+    if prompt.enabled && !was_active {
+        return Err(AppError::Conflict(
+            "Pi AGENTS.md changed outside CC Switch; reload before editing it".to_string(),
+        ));
+    }
+
+    let mut stored = prompt;
+    stored.enabled = false;
+    state.db.save_prompt(AppType::Pi.as_str(), &stored)?;
+    if let Err(error) = state.db.delete_prompt(AppType::Pi.as_str(), old_id) {
+        let _ = state.db.delete_prompt(AppType::Pi.as_str(), &stored.id);
+        return Err(error);
+    }
+
+    let native_result = if was_active {
+        guard.replace(&snapshot.revision, &stored.content)
+    } else {
+        Ok(())
+    };
+    if let Err(native_error) = native_result {
+        let restore_old = state.db.save_prompt(AppType::Pi.as_str(), &previous);
+        let remove_new = state.db.delete_prompt(AppType::Pi.as_str(), &stored.id);
+        if let Err(rollback_error) = restore_old.and(remove_new) {
+            return Err(AppError::Message(format!(
+                "Pi prompt rename failed ({native_error}); database rollback also failed: {rollback_error}"
+            )));
+        }
+        return Err(native_error);
+    }
+    Ok(())
+}
+
+fn enable_pi_prompt(state: &AppState, id: &str) -> Result<(), AppError> {
+    let guard = PiAgentsFileGuard::acquire()?;
+    let prompts = state.db.get_prompts(AppType::Pi.as_str())?;
+    let target = prompts
+        .get(id)
+        .cloned()
+        .ok_or_else(|| AppError::InvalidInput(format!("提示词 {id} 不存在")))?;
+    let snapshot = guard.read()?;
+
+    if let Some(content) = snapshot.content.as_ref() {
+        let already_saved = prompts.values().any(|prompt| prompt.content == *content);
+        if !content.trim().is_empty() && !already_saved {
+            let timestamp = get_unix_timestamp()?;
+            let backup = Prompt {
+                id: unique_pi_backup_id(&prompts, timestamp),
+                name: format!(
+                    "原始提示词 {}",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M")
+                ),
+                content: content.clone(),
+                description: Some("自动备份的原始提示词".to_string()),
+                enabled: false,
+                created_at: Some(timestamp),
+                updated_at: Some(timestamp),
+            };
+            state.db.save_prompt(AppType::Pi.as_str(), &backup)?;
+        }
+    }
+
+    guard.replace(&snapshot.revision, &target.content)
+}
+
+fn delete_pi_prompt(state: &AppState, id: &str) -> Result<(), AppError> {
+    let guard = PiAgentsFileGuard::acquire()?;
+    let prompts = state.db.get_prompts(AppType::Pi.as_str())?;
+    let snapshot = guard.read()?;
+    if pi_active_prompt_id(&prompts, snapshot.content.as_deref()).as_deref() == Some(id) {
+        return Err(AppError::InvalidInput("无法删除已启用的提示词".to_string()));
+    }
+    state.db.delete_prompt(AppType::Pi.as_str(), id)?;
+    Ok(())
 }
 
 fn select_active_prompt(prompts: &IndexMap<String, Prompt>) -> Option<Prompt> {
@@ -693,5 +925,187 @@ mod tests {
         .expect_err("duplicate id should fail");
 
         assert!(err.to_string().contains("已存在"));
+    }
+}
+
+#[cfg(test)]
+mod pi_prompt_tests {
+    use super::*;
+    use crate::database::Database;
+    use crate::pi_config::test_support::TestAgentDir;
+    use serial_test::serial;
+    use std::sync::Arc;
+
+    fn prompt(enabled: bool) -> Prompt {
+        Prompt {
+            id: "test-prompt".to_string(),
+            name: "Test prompt".to_string(),
+            content: "managed content".to_string(),
+            description: None,
+            enabled,
+            created_at: Some(1),
+            updated_at: Some(1),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn pi_active_prompt_is_derived_from_agents_file() {
+        let _agent = TestAgentDir::new();
+        let state = AppState::new(Arc::new(
+            Database::memory().expect("create in-memory database"),
+        ));
+        state
+            .db
+            .save_prompt(AppType::Pi.as_str(), &prompt(true))
+            .expect("save prompt");
+
+        let saved = PromptService::get_prompts(&state, AppType::Pi).expect("load prompts");
+        assert!(!saved["test-prompt"].enabled);
+
+        let path = prompt_file_path(&AppType::Pi).expect("prompt path");
+        write_text_file(&path, "managed content").expect("write AGENTS.md");
+        let active = PromptService::get_prompts(&state, AppType::Pi).expect("load prompts");
+        assert!(active["test-prompt"].enabled);
+
+        write_text_file(&path, "external edit").expect("edit AGENTS.md externally");
+        let drifted = PromptService::get_prompts(&state, AppType::Pi).expect("load prompts");
+        assert!(!drifted["test-prompt"].enabled);
+        assert!(
+            PromptService::upsert_prompt(&state, AppType::Pi, "test-prompt", prompt(true),)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read AGENTS.md"),
+            "external edit"
+        );
+
+        write_text_file(&path, "managed content").expect("restore AGENTS.md");
+        PromptService::upsert_prompt(&state, AppType::Pi, "test-prompt", prompt(false))
+            .expect("disable prompt");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn generic_prompt_projection_does_not_rewrite_pi_agents_file() {
+        let _agent = TestAgentDir::new();
+        let state = AppState::new(Arc::new(
+            Database::memory().expect("create in-memory database"),
+        ));
+        state
+            .db
+            .save_prompt(AppType::Pi.as_str(), &prompt(false))
+            .expect("save Pi prompt");
+
+        let path = prompt_file_path(&AppType::Pi).expect("prompt path");
+        write_text_file(&path, "native instructions").expect("write AGENTS.md");
+
+        PromptService::sync_all_active_to_live_best_effort(&state)
+            .expect("sync prompts without projecting Pi");
+
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read AGENTS.md"),
+            "native instructions"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn editing_an_inactive_duplicate_pi_prompt_preserves_agents_file() {
+        let _agent = TestAgentDir::new();
+        let state = AppState::new(Arc::new(
+            Database::memory().expect("create in-memory database"),
+        ));
+        let first = prompt(false);
+        let mut duplicate = first.clone();
+        duplicate.id = "duplicate-prompt".to_string();
+        duplicate.name = "Duplicate prompt".to_string();
+        duplicate.created_at = Some(2);
+        state
+            .db
+            .save_prompt(AppType::Pi.as_str(), &first)
+            .expect("save first prompt");
+        state
+            .db
+            .save_prompt(AppType::Pi.as_str(), &duplicate)
+            .expect("save duplicate prompt");
+        let path = prompt_file_path(&AppType::Pi).expect("prompt path");
+        write_text_file(&path, "managed content").expect("write AGENTS.md");
+
+        let hydrated = PromptService::get_prompts(&state, AppType::Pi).expect("load prompts");
+        assert!(hydrated["test-prompt"].enabled);
+        assert!(!hydrated["duplicate-prompt"].enabled);
+
+        duplicate.content = "edited duplicate".to_string();
+        PromptService::upsert_prompt(&state, AppType::Pi, "duplicate-prompt", duplicate)
+            .expect("edit inactive duplicate");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read AGENTS.md"),
+            "managed content"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn generic_updates_preserve_the_active_pi_prompt_state() {
+        let _agent = TestAgentDir::new();
+        let state = AppState::new(Arc::new(
+            Database::memory().expect("create in-memory database"),
+        ));
+        state
+            .db
+            .save_prompt(AppType::Pi.as_str(), &prompt(false))
+            .expect("save prompt");
+        let path = prompt_file_path(&AppType::Pi).expect("prompt path");
+        write_text_file(&path, "managed content").expect("activate prompt");
+
+        PromptService::update_prompt(
+            &state,
+            AppType::Pi,
+            "test-prompt",
+            "test-prompt",
+            "Edited prompt",
+            None,
+            Some("edited content".to_string()),
+        )
+        .expect("edit active prompt content");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read active prompt"),
+            "edited content"
+        );
+
+        PromptService::update_prompt_metadata(
+            &state,
+            AppType::Pi,
+            "test-prompt",
+            "test-prompt",
+            "Renamed display label",
+            Some("metadata only".to_string()),
+        )
+        .expect("edit active prompt metadata");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read active prompt"),
+            "edited content"
+        );
+        assert!(
+            PromptService::get_prompts(&state, AppType::Pi).expect("hydrate prompts")
+                ["test-prompt"]
+                .enabled
+        );
+    }
+
+    #[test]
+    fn pi_backup_ids_do_not_replace_an_existing_same_second_backup() {
+        let mut prompts = IndexMap::new();
+        let mut first = prompt(false);
+        first.id = "backup-42".to_string();
+        prompts.insert(first.id.clone(), first);
+        let mut second = prompt(false);
+        second.id = "backup-42-2".to_string();
+        prompts.insert(second.id.clone(), second);
+
+        assert_eq!(unique_pi_backup_id(&prompts, 42), "backup-42-3");
     }
 }

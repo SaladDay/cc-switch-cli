@@ -17,6 +17,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::OpenCode => get_opencode_dir(),
         AppType::Hermes => get_hermes_override_dir().unwrap_or_else(default_hermes_dir),
         AppType::OpenClaw => get_openclaw_override_dir().unwrap_or_else(default_openclaw_dir),
+        AppType::Pi => crate::pi_config::get_pi_agent_dir()?,
     };
 
     let filename = match app {
@@ -26,6 +27,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::OpenCode => "AGENTS.md",
         AppType::Hermes => "AGENTS.md",
         AppType::OpenClaw => "AGENTS.md",
+        AppType::Pi => "AGENTS.md",
     };
 
     Ok(base_dir.join(filename))

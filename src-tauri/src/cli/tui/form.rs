@@ -419,6 +419,8 @@ pub struct CodexModelCatalogRow {
     pub supports_parallel_tool_calls: Option<bool>,
     pub input_modalities: Vec<String>,
     pub base_instructions: String,
+    pub reasoning_levels: Vec<String>,
+    pub default_reasoning_level: String,
 }
 
 pub(crate) fn parse_codex_model_catalog_context_window(raw: &str) -> Option<u64> {
@@ -638,6 +640,7 @@ pub struct ProviderAddFormState {
     pub hermes_model_input: TextInput,
     pub hermes_rate_limit_delay: TextInput,
     initial_snapshot: Value,
+    initial_pi_settings_config: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

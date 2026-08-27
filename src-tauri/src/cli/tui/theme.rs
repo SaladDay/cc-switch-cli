@@ -252,6 +252,7 @@ fn accent_rgb(app: &AppType, light: bool) -> (u8, u8, u8) {
             AppType::OpenCode => LIGHT_ORANGE,
             AppType::Hermes => LIGHT_YELLOW,
             AppType::OpenClaw => LIGHT_CORAL,
+            AppType::Pi => LIGHT_CYAN,
         };
     }
 
@@ -262,6 +263,7 @@ fn accent_rgb(app: &AppType, light: bool) -> (u8, u8, u8) {
         AppType::OpenCode => DRACULA_ORANGE,
         AppType::Hermes => DRACULA_YELLOW,
         AppType::OpenClaw => OPENCLAW_CORAL,
+        AppType::Pi => DRACULA_CYAN,
     }
 }
 

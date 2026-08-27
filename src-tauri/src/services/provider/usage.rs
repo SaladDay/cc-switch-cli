@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::app_config::AppType;
@@ -475,6 +476,12 @@ impl ProviderService {
                     )
                 })
                 .map(|s| s.to_string()),
+            AppType::Pi => provider
+                .settings_config
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AppError::InvalidInput("Pi provider API key is missing".to_string()))
+                .map(str::to_string),
         }
     }
 
@@ -555,6 +562,7 @@ impl ProviderService {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string()),
+            AppType::Pi => crate::pi_config::provider_base_url(&provider.settings_config),
         }
     }
 

@@ -50,6 +50,8 @@ impl HelpContent {
 enum HelpTarget {
     Global,
     Sessions,
+    PiSystemPrompts,
+    PiPromptTemplates,
     FailoverQueue,
     PreferredEditor,
     SkillStorageLocation,
@@ -150,8 +152,11 @@ fn current_help_target(app: &App) -> HelpTarget {
         return HelpTarget::Empty;
     }
 
-    if matches!(app.route, super::route::Route::Sessions) {
-        return HelpTarget::Sessions;
+    match app.route {
+        super::route::Route::Sessions => return HelpTarget::Sessions,
+        super::route::Route::PiSystemPrompts => return HelpTarget::PiSystemPrompts,
+        super::route::Route::PiPromptTemplates => return HelpTarget::PiPromptTemplates,
+        _ => {}
     }
 
     if matches!(app.route, super::route::Route::SettingsOutboundProxy) {
@@ -326,6 +331,20 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
             help_lines(
                 "会话始终只显示当前应用，结果由项目范围 × / 搜索共同决定。\n←/→ 切换列表和详情，h/l 是备用键；↑/↓ 逐项移动，PgUp/PgDn 按页移动。p 打开项目选择器；Home/End 在当前会话列表或消息历史中跳到首尾，Shift+←/→ 查看完整目录，Shift+Home/End 直达目录两端。\n详情中的消息按需分页，覆盖完整逻辑历史；为保持响应速度，超长单条正文只显示有界预览。详情内的 / 只过滤当前消息页，保留筛选时仍可用 PgUp/PgDn/Home/End 浏览其他历史页。\nClaude、Codex、Gemini 和 OpenCode 的费用与 token 来自当前仍保留在 proxy_request_logs 中、经有效过滤去重后能以确定性 ID 归属到该会话的本地 usage 记录；Hermes 使用其 state.db 提供的估算。Cost 是根据这些本地可用记录和模型定价得出的尽力估算，不是账单，也不代表历史上曾发生的全部费用。“-”表示没有可归属的 usage、身份有歧义、查询不可用，或存在无法可靠计价的 token 行。Codex 根会话费用不含独立 subagent 线程的费用。\n日志被删除或归档、数据源写入失败、malformed 行、无法归属的代理 Generated ID、尚未触发重查的实时日志及浮点求和误差，都可能让估算与实际费用不同。\n“未知目录”位于项目列表末尾，只包含缺少项目目录的旧会话；精确项目按词法规范化后的完整目录匹配。",
                 "Sessions always show the current app; results combine Project scope × / Search.\nUse ←/→ to switch between the list and details; h/l are aliases. Use ↑/↓ to move one item and PgUp/PgDn to move by a page. Press p to choose a project; Home/End jumps to either end of the active session list or message history, Shift+←/→ reveals the complete directory, and Shift+Home/End jumps to either path end.\nDetail messages are paged on demand across the complete logical history. To stay responsive, an unusually long individual body is shown as a bounded preview. In details, / filters the current message page only; PgUp/PgDn/Home/End still browse other history pages while the filter is retained.\nFor Claude, Codex, Gemini, and OpenCode, Cost and tokens come from locally available usage rows that remain in proxy_request_logs after effective deduplication and can be deterministically attributed to this session. Hermes uses estimates supplied by its state.db. Cost is a best-effort estimate based on these local records and model pricing; it is not a bill and does not represent every historical charge. \"-\" means there is no attributable usage, the identity is ambiguous, the query is unavailable, or at least one token-bearing row cannot be priced reliably. A Codex root session excludes costs from independent subagent threads.\nDeleted or archived logs, source write failures, malformed rows, unattributable proxy Generated IDs, live rows awaiting a requery, and floating-point summation can all make the estimate differ from actual charges.\nUnknown directory is last and contains only legacy sessions without a project directory; exact projects match the complete lexically normalized directory.",
+            ),
+        ),
+        HelpTarget::PiSystemPrompts => HelpContent::new(
+            texts::menu_pi_system_prompts(),
+            help_lines(
+                "这里直接管理 Pi agent 目录中的原生系统提示词文件。APPEND_SYSTEM.md 在 Pi 内置系统提示词后追加内容；SYSTEM.md 完全替换内置系统提示词。Enter 查看，e 编辑，d 删除。\n保存会校验打开编辑器时的文件版本；若 Pi 或其他编辑器已改动文件，本次保存会报冲突，不会覆盖外部修改。删除只影响当前选中的文件。",
+                "This page directly manages Pi's native system-prompt files in the agent directory. APPEND_SYSTEM.md appends to Pi's built-in system prompt; SYSTEM.md replaces it completely. Press Enter to view, e to edit, and d to delete.\nSaving checks the file revision captured when the editor opened. If Pi or another editor changed the file, the save reports a conflict instead of overwriting it. Delete affects only the selected file.",
+            ),
+        ),
+        HelpTarget::PiPromptTemplates => HelpContent::new(
+            texts::menu_pi_prompt_templates(),
+            help_lines(
+                "这里管理 Pi agent 目录 prompts/*.md 中的原生斜杠命令模板；文件名就是 /template 名称。a 新建，Enter 查看，e 编辑，r 重命名，d 删除。\n模板名只能使用安全的单个文件名，不能包含路径分隔符或路径穿越。保存和重命名会校验打开时的文件版本；检测到外部修改时会报冲突。",
+                "This page manages Pi's native slash-command templates under prompts/*.md; the filename is the /template name. Press a to create, Enter to view, e to edit, r to rename, and d to delete.\nTemplate names must be safe single filenames without path separators or traversal. Save and rename check the revision captured on open and report a conflict when an external edit is detected.",
             ),
         ),
         HelpTarget::FailoverQueue => HelpContent::new(
@@ -863,8 +882,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::OpenClawModels => HelpContent::new(
             texts::tui_label_openclaw_models(),
             help_lines(
-                "编辑 OpenClaw 模型列表。这里保存的是该供应商暴露给客户端选择的模型配置。",
-                "Edits OpenClaw model entries. These are the models exposed to the client for this provider.",
+                "编辑 OpenClaw/Pi 模型列表。Pi 表单中可按 f 从原生端点拉取模型。",
+                "Edits OpenClaw/Pi model entries. In a Pi form, press f to fetch from the native endpoint.",
             ),
         ),
         ProviderAddField::OpenCodeModelContextLimit => HelpContent::new(

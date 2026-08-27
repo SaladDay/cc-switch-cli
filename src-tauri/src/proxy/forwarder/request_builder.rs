@@ -133,7 +133,12 @@ impl RequestForwarder {
         headers: &HeaderMap,
         options: ForwardOptions,
     ) -> Result<reqwest::RequestBuilder, ProxyError> {
-        let adapter = get_adapter(app_type);
+        let adapter = get_adapter(app_type).ok_or_else(|| {
+            ProxyError::ConfigError(format!(
+                "{} does not support proxy routing",
+                app_type.as_str()
+            ))
+        })?;
         let is_claude_request = matches!(app_type, AppType::Claude);
         let mut upstream_endpoint = self.router.upstream_endpoint(app_type, provider, endpoint);
         let mut base_url = adapter.extract_base_url(provider)?;

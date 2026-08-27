@@ -28,6 +28,7 @@ pub(super) fn populate_form_from_provider(
         AppType::OpenCode => populate_opencode_form(form, provider),
         AppType::Hermes => populate_hermes_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
+        AppType::Pi => populate_openclaw_form(form, provider),
     }
     form.is_full_url = form.supports_full_url_mode()
         && provider
@@ -458,6 +459,8 @@ fn populate_openclaw_form(form: &mut ProviderAddFormState, provider: &Provider) 
         .and_then(|value| value.as_str())
     {
         form.opencode_npm_package.set(api);
+    } else if matches!(form.app_type, AppType::Pi) {
+        form.opencode_npm_package.set("");
     } else {
         form.opencode_npm_package.set(OPENCLAW_DEFAULT_API_PROTOCOL);
     }

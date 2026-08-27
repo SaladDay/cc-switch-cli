@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-use providers::{claude, codex, gemini, hermes, openclaw, opencode};
+use providers::{claude, codex, gemini, hermes, openclaw, opencode, pi};
 use scan_cache_store::ScanCacheStore;
 
 /// Session metadata as rendered on the Sessions page.
@@ -209,8 +209,8 @@ pub(crate) fn sort_by_recent(sessions: &mut [SessionMeta]) {
 /// Providers in the stable order used by the "all providers" manifest stream.
 /// SQLite-only sources (opencode.db / hermes state.db) are queried inside their
 /// provider module and are intentionally not covered by the file cache.
-pub(crate) const CACHED_PROVIDERS: [&str; 6] = [
-    "codex", "claude", "opencode", "openclaw", "gemini", "hermes",
+pub(crate) const CACHED_PROVIDERS: [&str; 7] = [
+    "codex", "claude", "opencode", "openclaw", "gemini", "hermes", "pi",
 ];
 
 /// Legacy snapshot row cap (one historical 100-row page plus look-ahead).
@@ -250,6 +250,8 @@ pub(crate) fn stream_sessions_for_provider_cancellable(
             .map(|stats| (stats, None)),
         "hermes" => hermes::stream_sessions_cancellable(store, force, on_session, is_cancelled)
             .map(|stats| (stats, None)),
+        "pi" => pi::stream_sessions_cancellable(store, force, on_session, is_cancelled)
+            .map(|stats| (stats, None)),
         _ => Ok((cache::StreamScanStats::default(), None)),
     }
 }
@@ -267,6 +269,11 @@ pub(crate) fn stream_sessions_for_provider_cancellable(
 pub(crate) fn build_fresh_session_manifest(
     scope: &str,
 ) -> Result<paged_manifest::ManifestReader, String> {
+    if scope == "pi" {
+        if let Some(error) = pi::session_discovery_error() {
+            return Err(error);
+        }
+    }
     let manifest_store = paged_manifest::CliManifestStore::open()
         .map_err(|error| format!("failed to open isolated session page workspace: {error}"))?;
 
@@ -437,6 +444,9 @@ fn search_provider_cancellable(
             gemini::search_session_cancellable(meta, needle, is_cancelled)
         }),
         "hermes" => hermes::search_sessions_cancellable(metas, needle, is_cancelled),
+        "pi" => search_file_provider(metas, is_cancelled, |meta| {
+            pi::search_session_cancellable(meta, needle, is_cancelled)
+        }),
         _ => Some(Vec::new()),
     }
 }
@@ -490,6 +500,7 @@ pub(crate) fn load_messages_cancellable(
         "openclaw" => openclaw::load_messages_cancellable(path, is_cancelled),
         "gemini" => gemini::load_messages_cancellable(path, is_cancelled),
         "hermes" => hermes::load_messages_cancellable(path, is_cancelled),
+        "pi" => pi::load_messages_cancellable(path, is_cancelled),
         _ => Err(format!("Unsupported provider: {provider_id}")),
     }
 }
@@ -567,6 +578,7 @@ fn delete_session_with_root(
         "openclaw" => openclaw::delete_session(&validated_root, &validated_source, session_id),
         "gemini" => gemini::delete_session(&validated_root, &validated_source, session_id),
         "hermes" => hermes::delete_session(&validated_root, &validated_source, session_id),
+        "pi" => pi::delete_session(&validated_root, &validated_source, session_id),
         _ => Err(format!("Unsupported provider: {provider_id}")),
     }
 }
@@ -579,6 +591,10 @@ fn provider_root(provider_id: &str) -> Result<PathBuf, String> {
         "openclaw" => crate::openclaw_config::get_openclaw_dir().join("agents"),
         "gemini" => crate::gemini_config::get_gemini_dir().join("tmp"),
         "hermes" => crate::hermes_config::get_hermes_dir().join("sessions"),
+        "pi" => pi::session_roots()
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Pi session root not found".to_string())?,
         _ => return Err(format!("Unsupported provider: {provider_id}")),
     };
 

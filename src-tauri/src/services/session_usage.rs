@@ -377,6 +377,11 @@ pub(crate) fn sync_all_session_usage_unlocked(
         "OpenCode",
         crate::services::session_usage_opencode::sync_opencode_usage(db),
     );
+    merge_sync_step(
+        &mut result,
+        "Pi",
+        crate::services::session_usage_pi::sync_pi_usage(db),
+    );
     if result.imported > 0 {
         crate::usage_events::notify_log_recorded();
     }

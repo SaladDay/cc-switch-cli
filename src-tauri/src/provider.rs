@@ -146,6 +146,7 @@ impl Provider {
                 .get("apiKey")
                 .or_else(|| self.settings_config.get("api_key")),
             AppType::OpenClaw => self.settings_config.get("apiKey"),
+            AppType::Pi => self.settings_config.get("apiKey"),
         };
 
         value
@@ -252,7 +253,7 @@ impl Provider {
             AppType::Claude => "claude",
             AppType::Codex => "codex",
             AppType::Gemini => "gemini",
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => return None,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => return None,
         };
 
         if self.category.as_deref() == Some("official") {
@@ -292,7 +293,7 @@ impl Provider {
                     .is_none_or(|value| value.trim().is_empty());
                 api_key_missing && base_url_missing
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
         };
 
         is_official.then_some(tool)
@@ -469,6 +470,10 @@ pub struct CodexChatReasoningConfig {
     /// 保留该字段用于与上游持久化 shape 对齐。
     #[serde(rename = "outputFormat", skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
+    /// 运行时字段（不持久化）：当前请求模型声明的合法 effort 档位。
+    /// Zen 模式用它钳制或省略 `reasoning_effort`。
+    #[serde(skip)]
+    pub effort_levels: Option<Vec<String>>,
 }
 
 /// Local proxy request overrides applied after route/protocol transforms.

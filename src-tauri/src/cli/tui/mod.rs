@@ -2307,6 +2307,9 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::PromptUpdateMetadata { .. }
         | Action::PromptSave { .. }
         | Action::PromptDelete { .. }
+        | Action::PiSystemPromptDelete { .. }
+        | Action::PiPromptTemplateDelete { .. }
+        | Action::PiPromptTemplateRename { .. }
         | Action::ConfigBackup { .. }
         | Action::ConfigWebDavReset
         | Action::ConfigWebDavSave { .. }
@@ -2324,7 +2327,8 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SetGlobalOutboundProxy { .. }
         | Action::SetProxyAutoFailover { .. }
         | Action::EnableProxyAndAutoFailover { .. }
-        | Action::SetOpenClawConfigDir { .. } => CacheInvalidation::DataReloaded,
+        | Action::SetOpenClawConfigDir { .. }
+        | Action::SetPiConfigDir { .. } => CacheInvalidation::DataReloaded,
     }
 }
 

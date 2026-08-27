@@ -21,13 +21,13 @@ use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
     AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem,
     LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
-    ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchSystem,
-    ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages,
-    SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
-    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
-    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
-    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
-    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchStrategy,
+    ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem,
+    RefreshedMessagePages, SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg,
+    SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg,
+    SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq,
+    UpdateSystem, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq,
+    UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -632,6 +632,8 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             is_full_url,
             api_key,
             custom_user_agent,
+            api_protocol,
+            request_headers,
             codex_oauth,
             codex_oauth_account_id,
             field,
@@ -644,7 +646,11 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
                     .map(|models| models.into_iter().map(|model| model.id).collect())
             })
         } else {
-            let strategy = model_fetch_strategy_for_field(field);
+            let strategy = match api_protocol.as_deref() {
+                Some("anthropic-messages") => ModelFetchStrategy::Anthropic,
+                Some("google-generative-ai") => ModelFetchStrategy::GoogleApiKey,
+                _ => model_fetch_strategy_for_field(field),
+            };
             rt.block_on(async {
                 fetch_provider_models_for_tui(
                     &base_url,
@@ -652,6 +658,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
                     api_key.as_deref(),
                     custom_user_agent.as_deref(),
                     strategy,
+                    request_headers.as_ref(),
                 )
                 .await
             })
@@ -1946,6 +1953,17 @@ fn run_session_scan(
     scan_generation: u64,
     tx: &mpsc::Sender<SessionMsg>,
 ) {
+    if provider_id == "pi" {
+        if let Some(error) = crate::session_manager::providers::pi::session_discovery_error() {
+            let _ = tx.send(SessionMsg::ManifestPublished {
+                request_id,
+                scope_epoch,
+                scope: provider_id,
+                result: Err(error),
+            });
+            return;
+        }
+    }
     let manifest_store = match crate::session_manager::paged_manifest::PagedManifestStore::open() {
         Ok(store) => store,
         Err(error) => {

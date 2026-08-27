@@ -127,6 +127,15 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "FennoAI",
             "PackyCode",
             "DDS",
+            "DeepSeek",
+            "Zhipu GLM",
+            "Zhipu GLM en",
+            "ModelScope",
+            "MiniMax",
+            "Xiaomi MiMo",
+            "Xiaomi MiMo Token Plan (China)",
+            "OpenCode Go",
+            "OpenRouter",
         ]
     );
 
@@ -145,6 +154,14 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "PackyCode",
             "DDS",
             "DeepSeek",
+            "Zhipu GLM",
+            "Zhipu GLM en",
+            "ModelScope",
+            "MiniMax",
+            "Xiaomi MiMo",
+            "Xiaomi MiMo Token Plan (China)",
+            "OpenCode Go",
+            "OpenRouter",
         ]
     );
 
@@ -213,6 +230,384 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
     assert!(
         !openclaw_labels.contains(&"ClaudeAPI"),
         "OpenClaw should not expose Claude-only sponsor presets"
+    );
+}
+
+#[test]
+fn provider_add_form_pi_exposes_only_the_selected_template_scope() {
+    let form = ProviderAddFormState::new(AppType::Pi);
+    assert_eq!(
+        form.template_labels(),
+        vec![
+            "Custom",
+            "DeepSeek",
+            "Zhipu GLM",
+            "Zhipu GLM en",
+            "ModelScope",
+            "MiniMax",
+            "Xiaomi MiMo",
+            "Xiaomi MiMo Token Plan (China)",
+            "OpenCode Go",
+            "OpenRouter",
+            "PackyCode",
+            "AICodeMirror",
+            "FennoAI",
+            "RunAPI",
+            "Qiniu",
+            "Cubence",
+        ]
+    );
+}
+
+#[test]
+fn provider_add_form_pi_picker_uses_family_sections() {
+    let rows = ProviderAddFormState::new(AppType::Pi).template_picker_rows();
+    assert_eq!(
+        rows.first(),
+        Some(&ProviderTemplateRow::Header(
+            ProviderTemplateSection::BuiltIn
+        ))
+    );
+    assert_eq!(
+        rows.get(11),
+        Some(&ProviderTemplateRow::Header(
+            ProviderTemplateSection::Sponsors
+        ))
+    );
+
+    let items = rows
+        .iter()
+        .filter_map(|row| match row {
+            ProviderTemplateRow::Item {
+                flat_idx,
+                label,
+                section,
+            } => Some((*flat_idx, *label, *section)),
+            ProviderTemplateRow::Header(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(items.len(), 16);
+    assert_eq!(items[0], (0, "Custom", ProviderTemplateSection::BuiltIn));
+    assert_eq!(
+        items[9],
+        (9, "OpenRouter", ProviderTemplateSection::BuiltIn)
+    );
+    assert_eq!(
+        items[10],
+        (10, "PackyCode", ProviderTemplateSection::Sponsors)
+    );
+    assert_eq!(
+        items[15],
+        (15, "Cubence", ProviderTemplateSection::Sponsors)
+    );
+}
+
+#[test]
+fn provider_add_form_pi_templates_preserve_upstream_native_settings() {
+    let presets = crate::provider_preset_pi::PI_BUILTIN_PROVIDER_PRESETS
+        .iter()
+        .chain(crate::provider_preset_pi::PI_SPONSOR_PROVIDER_PRESETS.iter());
+
+    for (offset, preset) in presets.enumerate() {
+        let mut form = ProviderAddFormState::new(AppType::Pi);
+        form.apply_template(offset + 1, &[]);
+        let provider = form.to_provider_json_value();
+
+        assert_eq!(provider["id"], preset.provider_key, "{} id", preset.label);
+        assert_eq!(provider["name"], preset.label, "{} name", preset.label);
+        assert_eq!(
+            provider["category"], preset.category,
+            "{} category",
+            preset.label
+        );
+        assert_eq!(provider["icon"], preset.icon, "{} icon", preset.label);
+        assert_eq!(
+            provider["settingsConfig"],
+            preset.settings_config(),
+            "{} native settings",
+            preset.label
+        );
+
+        if let Some(sponsor_id) = preset.sponsor_id {
+            let sponsor = crate::provider_preset_sponsors::sponsor_provider_preset(sponsor_id)
+                .expect("selected Pi sponsor must exist in the CLI sponsor registry");
+            assert_eq!(provider["websiteUrl"], sponsor.website_url);
+            assert_eq!(provider["meta"]["isPartner"], true);
+            assert_eq!(
+                provider["meta"]["partnerPromotionKey"],
+                sponsor.partner_promotion_key
+            );
+        } else {
+            assert_eq!(provider["websiteUrl"], preset.website_url);
+            assert!(provider["meta"].get("isPartner").is_none());
+            if let Some(promotion_key) = preset.partner_promotion_key {
+                assert_eq!(provider["meta"]["partnerPromotionKey"], promotion_key);
+            }
+        }
+    }
+}
+
+#[test]
+fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
+    let cases = [
+        (
+            "DeepSeek",
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4-pro",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "Zhipu GLM",
+            "https://open.bigmodel.cn/api/anthropic",
+            "glm-5.1",
+            "glm-5.1",
+            "glm-5.1",
+            "glm-5.1",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "Zhipu GLM en",
+            "https://api.z.ai/api/anthropic",
+            "glm-5.1",
+            "glm-5.1",
+            "glm-5.1",
+            "glm-5.1",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "ModelScope",
+            "https://api-inference.modelscope.cn",
+            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "MiniMax",
+            "https://api.minimaxi.com/anthropic",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "Xiaomi MiMo",
+            "https://api.xiaomimimo.com/anthropic",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "Xiaomi MiMo Token Plan (China)",
+            "https://token-plan-cn.xiaomimimo.com/anthropic",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            ClaudeApiKeyField::AuthToken,
+        ),
+        (
+            "OpenCode Go",
+            "https://opencode.ai/zen/go",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
+            ClaudeApiKeyField::ApiKey,
+        ),
+        (
+            "OpenRouter",
+            "https://openrouter.ai/api",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-haiku-4.5",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-opus-5",
+            ClaudeApiKeyField::AuthToken,
+        ),
+    ];
+
+    for (label, base_url, model, haiku, sonnet, opus, key_field) in cases {
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        form.apply_template(template_index_by_label(AppType::Claude, label), &[]);
+        assert_eq!(form.claude_api_key_field, key_field, "{label}");
+
+        let provider = form.to_provider_json_value();
+        let env = &provider["settingsConfig"]["env"];
+        assert_eq!(provider["name"], label, "{label}");
+        assert_eq!(env["ANTHROPIC_BASE_URL"], base_url, "{label}");
+        assert_eq!(env["ANTHROPIC_MODEL"], model, "{label}");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], haiku, "{label}");
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], sonnet, "{label}");
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], opus, "{label}");
+        assert!(provider.get("apiKeyUrl").is_none(), "{label}");
+        assert!(
+            provider["meta"].get("partnerPromotionKey").is_none(),
+            "{label}"
+        );
+    }
+
+    let mut minimax = ProviderAddFormState::new(AppType::Claude);
+    minimax.apply_template(template_index_by_label(AppType::Claude, "MiniMax"), &[]);
+    let minimax = minimax.to_provider_json_value();
+    assert_eq!(
+        minimax["settingsConfig"]["env"]["API_TIMEOUT_MS"],
+        "3000000"
+    );
+    assert_eq!(
+        minimax["settingsConfig"]["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+        1
+    );
+}
+
+#[test]
+fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
+    let cases = [
+        (
+            "DeepSeek",
+            "deepseek",
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "openai_responses",
+            2,
+        ),
+        (
+            "Zhipu GLM",
+            "zhipu_glm",
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "glm-5.2",
+            "openai_chat",
+            1,
+        ),
+        (
+            "Zhipu GLM en",
+            "zhipu_glm_en",
+            "https://api.z.ai/api/coding/paas/v4",
+            "glm-5.2",
+            "openai_chat",
+            1,
+        ),
+        (
+            "ModelScope",
+            "modelscope",
+            "https://api-inference.modelscope.cn/v1",
+            "ZhipuAI/GLM-5.2",
+            "openai_chat",
+            1,
+        ),
+        (
+            "MiniMax",
+            "minimax",
+            "https://api.minimaxi.com/v1",
+            "MiniMax-M3",
+            "openai_responses",
+            1,
+        ),
+        (
+            "Xiaomi MiMo",
+            "xiaomi_mimo",
+            "https://api.xiaomimimo.com/v1",
+            "mimo-v2.5-pro",
+            "openai_responses",
+            2,
+        ),
+        (
+            "Xiaomi MiMo Token Plan (China)",
+            "xiaomi_mimo_token_plan",
+            "https://token-plan-cn.xiaomimimo.com/v1",
+            "mimo-v2.5-pro",
+            "openai_responses",
+            2,
+        ),
+        (
+            "OpenCode Go",
+            "opencode_go",
+            "https://opencode.ai/zen/go/v1",
+            "glm-5.2",
+            "openai_chat",
+            6,
+        ),
+        (
+            "OpenRouter",
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            "gpt-5.6-sol",
+            "openai_responses",
+            0,
+        ),
+    ];
+
+    for (label, provider_name, base_url, model, api_format, catalog_len) in cases {
+        let mut form = ProviderAddFormState::new(AppType::Codex);
+        form.apply_template(template_index_by_label(AppType::Codex, label), &[]);
+        let provider = form.to_provider_json_value();
+        let config = provider["settingsConfig"]["config"]
+            .as_str()
+            .expect("Codex preset config should be text");
+        let models = provider["settingsConfig"]["modelCatalog"]["models"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+
+        assert_eq!(provider["name"], label, "{label}");
+        assert_eq!(provider["meta"]["apiFormat"], api_format, "{label}");
+        assert!(
+            config.contains(&format!("name = \"{provider_name}\"")),
+            "{label}"
+        );
+        assert!(
+            config.contains(&format!("base_url = \"{base_url}\"")),
+            "{label}"
+        );
+        assert!(config.contains(&format!("model = \"{model}\"")), "{label}");
+        assert!(config.contains("wire_api = \"responses\""), "{label}");
+        assert_eq!(models.len(), catalog_len, "{label}");
+        assert!(provider.get("apiKeyUrl").is_none(), "{label}");
+        assert!(
+            provider["meta"].get("partnerPromotionKey").is_none(),
+            "{label}"
+        );
+    }
+
+    let mut deepseek = ProviderAddFormState::new(AppType::Codex);
+    deepseek.apply_template(template_index_by_label(AppType::Codex, "DeepSeek"), &[]);
+    let deepseek = deepseek.to_provider_json_value();
+    assert_eq!(
+        deepseek["settingsConfig"]["modelCatalog"]["models"][0]["reasoningLevels"],
+        json!(["low", "high", "max"])
+    );
+    assert_eq!(
+        deepseek["settingsConfig"]["modelCatalog"]["models"][0]["contextWindow"],
+        1_048_576
+    );
+
+    let mut opencode = ProviderAddFormState::new(AppType::Codex);
+    opencode.apply_template(template_index_by_label(AppType::Codex, "OpenCode Go"), &[]);
+    let opencode = opencode.to_provider_json_value();
+    assert_eq!(
+        opencode["meta"]["codexChatReasoning"]["effortValueMode"],
+        "zen"
+    );
+    assert_eq!(
+        opencode["settingsConfig"]["modelCatalog"]["models"][4]["reasoningLevels"],
+        json!(["low", "high", "max"])
+    );
+
+    let mut minimax = ProviderAddFormState::new(AppType::Codex);
+    minimax.apply_template(template_index_by_label(AppType::Codex, "MiniMax"), &[]);
+    let minimax = minimax.to_provider_json_value();
+    let minimax_model = &minimax["settingsConfig"]["modelCatalog"]["models"][0];
+    assert_eq!(minimax_model["supportsParallelToolCalls"], true);
+    assert_eq!(minimax_model["inputModalities"], json!(["text", "image"]));
+    assert_eq!(
+        minimax_model["baseInstructions"],
+        "You are Codex, a coding agent based on MiniMax-M3. You and the user share the same workspace and collaborate to achieve the user's goals."
     );
 }
 
@@ -321,8 +716,8 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
     let labels = ProviderAddFormState::new(AppType::Codex).template_labels();
     assert_eq!(
         labels.last().copied(),
-        Some("DeepSeek"),
-        "DeepSeek should stay after all partner presets"
+        Some("OpenRouter"),
+        "migrated built-ins should stay after all partner presets in flat order"
     );
 
     let fields = form.fields();
@@ -336,18 +731,8 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
     assert_eq!(provider["category"], "cn_official");
     assert_eq!(provider["icon"], "deepseek");
     assert_eq!(provider["iconColor"], "#1E88E5");
-    assert_eq!(provider["meta"]["apiFormat"], "openai_chat");
-    assert_eq!(
-        provider["meta"]["codexChatReasoning"],
-        json!({
-            "supportsThinking": true,
-            "supportsEffort": true,
-            "thinkingParam": "thinking",
-            "effortParam": "reasoning_effort",
-            "effortValueMode": "deepseek",
-            "outputFormat": "reasoning_content",
-        })
-    );
+    assert_eq!(provider["meta"]["apiFormat"], "openai_responses");
+    assert!(provider["meta"].get("codexChatReasoning").is_none());
 
     let cfg = provider["settingsConfig"]["config"]
         .as_str()
@@ -371,12 +756,14 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
                 {
                     "model": "deepseek-v4-flash",
                     "displayName": "DeepSeek V4 Flash",
-                    "contextWindow": 1000000,
+                    "contextWindow": 1048576,
+                    "reasoningLevels": ["low", "high", "max"],
                 },
                 {
                     "model": "deepseek-v4-pro",
                     "displayName": "DeepSeek V4 Pro",
-                    "contextWindow": 1000000,
+                    "contextWindow": 1048576,
+                    "reasoningLevels": ["low", "high", "max"],
                 },
             ],
         })
@@ -1953,7 +2340,9 @@ fn provider_edit_form_codex_conflict_preserves_local_routing_storage() {
                 "contextWindow": 200000,
                 "supportsParallelToolCalls": true,
                 "inputModalities": ["text", "image"],
-                "baseInstructions": "Use native Responses."
+                "baseInstructions": "Use native Responses.",
+                "reasoningLevels": ["none", "high"],
+                "defaultReasoningLevel": "high"
             },
             {
                 "model": "gpt-y",
@@ -3798,6 +4187,8 @@ fn codex_config_preview_builder_matches_save_when_enabled_catalog_is_empty() {
         supports_parallel_tool_calls: None,
         input_modalities: Vec::new(),
         base_instructions: String::new(),
+        reasoning_levels: Vec::new(),
+        default_reasoning_level: String::new(),
     }];
 
     let preview_config = form.effective_codex_config_text();
@@ -6624,6 +7015,36 @@ fn provider_add_form_openclaw_ignores_legacy_api_aliases_when_loading() {
 }
 
 #[test]
+fn provider_add_form_pi_uses_model_url_without_materializing_provider_url() {
+    let provider = Provider::with_id(
+        "pi-model-url".to_string(),
+        "Pi Model URL".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [{
+                "id": "pi-model",
+                "baseUrl": "https://pi-model.example/v1"
+            }]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Pi, &provider);
+    assert!(form.opencode_base_url.value.is_empty());
+    assert_eq!(
+        form.current_provider_base_url(),
+        "https://pi-model.example/v1"
+    );
+
+    let roundtrip = form.to_provider_json_value();
+    assert!(roundtrip["settingsConfig"].get("baseUrl").is_none());
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["baseUrl"],
+        "https://pi-model.example/v1"
+    );
+}
+
+#[test]
 fn provider_add_form_openclaw_ignores_legacy_context_window_alias_when_loading() {
     let provider = Provider::with_id(
         "oclaw1".to_string(),
@@ -7450,4 +7871,150 @@ fn provider_add_form_usage_query_numeric_fields_match_upstream_normalization() {
 
     assert_eq!(script["timeout"], 10);
     assert_eq!(script["autoQueryInterval"], 0);
+}
+
+#[test]
+fn provider_pi_models_editor_value_round_trips_through_form() {
+    let mut form = ProviderAddFormState::new(AppType::Pi);
+    let models = json!([
+        {
+            "id": "primary-model",
+            "name": "Primary Model",
+            "contextWindow": 128000,
+            "futureCapability": { "preserve": true }
+        },
+        { "id": "fallback-model", "name": "Fallback Model" }
+    ]);
+
+    form.apply_openclaw_models_value(models.clone())
+        .expect("Pi models array should apply");
+
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["models"],
+        models
+    );
+}
+
+#[test]
+fn provider_add_form_pi_uses_native_api_default() {
+    let mut form = ProviderAddFormState::new(AppType::Pi);
+    form.name.set("Custom Pi");
+
+    assert_eq!(
+        form.opencode_npm_package.value,
+        crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
+    );
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["api"],
+        "openai-completions"
+    );
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["name"],
+        "Custom Pi"
+    );
+}
+
+#[test]
+fn provider_edit_form_pi_updates_only_a_native_name_that_followed_the_display_name() {
+    let following = Provider::with_id(
+        "following".to_string(),
+        "Original".to_string(),
+        json!({
+            "name": "Original",
+            "api": "openai-completions",
+            "models": [{ "id": "model" }]
+        }),
+        None,
+    );
+    let mut following_form = ProviderAddFormState::from_provider(AppType::Pi, &following);
+    following_form.name.set("Renamed");
+    assert_eq!(
+        following_form.to_provider_json_value()["settingsConfig"]["name"],
+        "Renamed"
+    );
+
+    let independent = Provider::with_id(
+        "independent".to_string(),
+        "Catalog label".to_string(),
+        json!({
+            "name": "Native label",
+            "api": "openai-completions",
+            "models": [{ "id": "model" }]
+        }),
+        None,
+    );
+    let mut independent_form = ProviderAddFormState::from_provider(AppType::Pi, &independent);
+    independent_form.name.set("Renamed catalog label");
+    assert_eq!(
+        independent_form.to_provider_json_value()["settingsConfig"]["name"],
+        "Native label"
+    );
+}
+
+#[test]
+fn provider_add_form_pi_preserves_missing_api_on_existing_partial_node() {
+    let provider = Provider::with_id(
+        "anthropic".to_string(),
+        "Anthropic override".to_string(),
+        json!({
+            "futureField": { "preserve": true },
+            "models": [{ "id": "claude-sonnet" }]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Pi, &provider);
+    assert!(form.opencode_npm_package.value.is_empty());
+    let roundtrip = form.to_provider_json_value();
+    assert!(roundtrip["settingsConfig"].get("api").is_none());
+    assert_eq!(
+        roundtrip["settingsConfig"]["futureField"],
+        json!({ "preserve": true })
+    );
+}
+
+#[test]
+fn provider_add_form_pi_preserves_raw_native_settings_and_names_a_copy() {
+    let settings = json!({
+        "api": "openai-completions",
+        "apiKey": " key-with-native-spacing ",
+        "baseUrl": "https://pi.example/v1",
+        "models": [
+            {
+                "id": "float-context",
+                "contextWindow": 1000000.0,
+                "compat": { "future": true }
+            },
+            {
+                "id": "alias-context",
+                "context_window": 64000,
+                "extension": [1, 2, 3]
+            }
+        ],
+        "unknownNested": { "keep": { "exact": true } }
+    });
+    let provider = Provider::with_id(
+        "native-shape".to_string(),
+        "Native Shape".to_string(),
+        settings.clone(),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Pi, &provider);
+    assert_eq!(form.initial_pi_settings_config(), Some(settings.clone()));
+    assert_eq!(form.to_provider_json_value()["settingsConfig"], settings);
+
+    let copy = ProviderAddFormState::copy_from_provider_with_common_snippet(
+        AppType::Pi,
+        &provider,
+        "",
+        &[provider.id.clone()],
+    );
+    assert_eq!(copy.initial_pi_settings_config(), None);
+    let mut expected_copy = settings;
+    expected_copy["name"] = json!("Native Shape copy");
+    assert_eq!(
+        copy.to_provider_json_value()["settingsConfig"],
+        expected_copy
+    );
 }

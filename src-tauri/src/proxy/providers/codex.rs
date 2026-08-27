@@ -261,15 +261,48 @@ pub fn resolve_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<CodexChatReasoningConfig> {
-    if let Some(config) = provider
+    let mut config = if let Some(config) = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.codex_chat_reasoning.clone())
     {
-        return Some(normalize_codex_chat_reasoning_config(config));
+        normalize_codex_chat_reasoning_config(config)
+    } else {
+        infer_codex_chat_reasoning_config(provider, body)?
+    };
+
+    if config.effort_value_mode.as_deref() == Some("zen") {
+        config.effort_levels = zen_catalog_effort_levels(provider, body);
     }
 
-    infer_codex_chat_reasoning_config(provider, body)
+    Some(config)
+}
+
+fn zen_catalog_effort_levels(provider: &Provider, body: &JsonValue) -> Option<Vec<String>> {
+    let model = body.get("model")?.as_str()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let entries = provider
+        .settings_config
+        .get("modelCatalog")?
+        .get("models")?
+        .as_array()?;
+    let entry = entries.iter().find(|entry| {
+        entry
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(model))
+    })?;
+    let levels = entry
+        .get("reasoningLevels")
+        .or_else(|| entry.get("reasoning_levels"))?
+        .as_array()?
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!levels.is_empty()).then_some(levels)
 }
 
 fn normalize_codex_chat_reasoning_config(
@@ -311,6 +344,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -322,6 +356,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("low_high".to_string()),
             output_format: Some("reasoning".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -333,6 +368,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -344,6 +380,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -355,6 +392,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -366,6 +404,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_details".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -377,6 +416,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -397,6 +437,7 @@ fn infer_aggregator_platform_config(
             effort_param: Some("reasoning.effort".to_string()),
             effort_value_mode: Some("openrouter".to_string()),
             output_format: Some("auto".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -408,6 +449,7 @@ fn infer_aggregator_platform_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -1032,6 +1074,7 @@ wire_api = "chat"
                 effort_param: Some("reasoning.effort".to_string()),
                 effort_value_mode: Some("openrouter".to_string()),
                 output_format: Some("auto".to_string()),
+                effort_levels: None,
             }),
             ..Default::default()
         });
@@ -1045,6 +1088,41 @@ wire_api = "chat"
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("reasoning.effort"));
         assert_eq!(config.effort_value_mode.as_deref(), Some("openrouter"));
+    }
+
+    #[test]
+    fn opencode_go_preset_attaches_reasoning_levels_for_the_requested_model() {
+        let value = crate::provider_preset_builtin::builtin_provider_preset_value(
+            &crate::app_config::AppType::Codex,
+            crate::provider_preset_builtin::BuiltinProviderPresetId::OpenCodeGo,
+        )
+        .expect("OpenCode Go preset");
+        let provider: Provider = serde_json::from_value(value).expect("valid provider preset");
+
+        let glm = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "GLM-5.2" }))
+            .expect("GLM reasoning config");
+        assert_eq!(
+            glm.effort_levels,
+            Some(vec!["high".to_string(), "max".to_string()])
+        );
+
+        let flash = resolve_codex_chat_reasoning_config(
+            &provider,
+            &json!({ "model": "deepseek-v4-flash" }),
+        )
+        .expect("DeepSeek reasoning config");
+        assert_eq!(
+            flash.effort_levels,
+            Some(vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
+        );
+
+        let toggle = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "glm-5.1" }))
+            .expect("toggle-only reasoning config");
+        assert!(toggle.effort_levels.is_none());
     }
 
     #[test]

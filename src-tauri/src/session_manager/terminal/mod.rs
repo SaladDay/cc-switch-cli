@@ -315,9 +315,8 @@ fn build_shell_command(command: &str, cwd: Option<&str>) -> String {
     }
 }
 
-fn shell_escape(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+pub(crate) fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn escape_osascript(value: &str) -> String {
@@ -363,6 +362,14 @@ mod tests {
     }
 
     #[test]
+    fn shell_escape_neutralizes_shell_expansion() {
+        assert_eq!(shell_escape("/tmp/$(id -un)"), "'/tmp/$(id -un)'");
+        assert_eq!(shell_escape("/tmp/`id -un`"), "'/tmp/`id -un`'");
+        assert_eq!(shell_escape("/tmp/$HOME"), "'/tmp/$HOME'");
+        assert_eq!(shell_escape("/tmp/it's"), r"'/tmp/it'\''s'");
+    }
+
+    #[test]
     fn ghostty_uses_working_directory_arg_for_cwd() {
         // cwd should be passed as --working-directory, not embedded in the shell command string
         // This avoids shell expansion of special characters in directory paths
@@ -377,6 +384,6 @@ mod tests {
         );
 
         // Verify shell_escape works correctly for paths with spaces
-        assert_eq!(shell_escape(cwd), "\"/tmp/project dir\"");
+        assert_eq!(shell_escape(cwd), "'/tmp/project dir'");
     }
 }

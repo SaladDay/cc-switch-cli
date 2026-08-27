@@ -27,6 +27,7 @@ fn validate_provider_submit(
     app_type: &AppType,
     provider: &Provider,
     is_edit: bool,
+    expected_pi_settings: Option<&Value>,
 ) -> Option<&'static str> {
     if provider.name.trim().is_empty() {
         return Some(if is_edit {
@@ -50,6 +51,42 @@ fn validate_provider_submit(
             .is_none_or(|base_url| base_url.trim().is_empty())
         {
             return Some(texts::base_url_empty_error());
+        }
+    }
+
+    if matches!(app_type, AppType::Pi) {
+        let settings = &provider.settings_config;
+        let request_url = crate::pi_config::provider_base_url(settings).ok();
+        let unchanged_legacy_url = is_edit
+            && expected_pi_settings
+                .and_then(|expected| crate::pi_config::provider_base_url(expected).ok())
+                == request_url;
+        let valid_base_url = request_url
+            .as_deref()
+            .is_some_and(crate::pi_config::is_valid_request_url);
+        let missing_existing_url = is_edit && request_url.is_none();
+        if !valid_base_url && !unchanged_legacy_url && !missing_existing_url {
+            return Some(texts::base_url_empty_error());
+        }
+        if is_edit {
+            return None;
+        }
+        let api = settings.get("api").and_then(Value::as_str).map(str::trim);
+        let has_model = settings
+            .get("models")
+            .and_then(Value::as_array)
+            .is_some_and(|models| {
+                models.iter().any(|model| {
+                    model
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.trim().is_empty())
+                })
+            });
+        if api.is_none_or(|value| !crate::openclaw_config::OPENCLAW_API_PROTOCOLS.contains(&value))
+            || !has_model
+        {
+            return Some(texts::tui_toast_provider_add_missing_fields());
         }
     }
 
@@ -258,6 +295,15 @@ pub(super) fn submit(
             description,
         } => submit_prompt_create(ctx, id, name, description, content),
         EditorSubmit::PromptEdit { id } => submit_prompt_edit(ctx, id, content),
+        EditorSubmit::PiSystemPrompt {
+            kind,
+            expected_revision,
+        } => submit_pi_system_prompt(ctx, kind, expected_revision, content),
+        EditorSubmit::PiPromptTemplate {
+            slug,
+            original_slug,
+            expected_revision,
+        } => submit_pi_prompt_template(ctx, slug, original_slug, expected_revision, content),
         EditorSubmit::ProviderFormApplyJson => submit_provider_form_apply_json(ctx, content),
         EditorSubmit::ProviderFormApplyOpenClawModels => {
             submit_provider_form_apply_openclaw_models(ctx, content)
@@ -278,7 +324,10 @@ pub(super) fn submit(
             submit_provider_form_apply_codex_config_toml(ctx, content)
         }
         EditorSubmit::ProviderAdd => submit_provider_add(ctx, content),
-        EditorSubmit::ProviderEdit { id } => submit_provider_edit(ctx, id, content),
+        EditorSubmit::ProviderEdit {
+            id,
+            expected_pi_settings_config,
+        } => submit_provider_edit(ctx, id, expected_pi_settings_config, content),
         EditorSubmit::PricingEdit { model_id } => submit_pricing_edit(ctx, model_id, content),
         EditorSubmit::McpAdd => submit_mcp_add(ctx, content),
         EditorSubmit::McpEdit { id } => submit_mcp_edit(ctx, id, content),
@@ -296,6 +345,53 @@ pub(super) fn submit(
         EditorSubmit::ConfigOpenClawTools => submit_openclaw_tools(ctx, content),
         EditorSubmit::ConfigOpenClawAgents => submit_openclaw_agents(ctx, content),
     }
+}
+
+fn submit_pi_system_prompt(
+    ctx: &mut RuntimeActionContext<'_>,
+    kind: crate::services::pi_prompt_files::PiPromptFileKind,
+    expected_revision: String,
+    content: String,
+) -> Result<(), AppError> {
+    crate::services::pi_prompt_files::PiPromptFileService::replace(
+        kind,
+        &expected_revision,
+        &content,
+    )?;
+    ctx.app.editor = None;
+    ctx.app
+        .push_toast(texts::tui_toast_prompt_edit_finished(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_pi_prompt_template(
+    ctx: &mut RuntimeActionContext<'_>,
+    slug: String,
+    original_slug: Option<String>,
+    expected_revision: String,
+    content: String,
+) -> Result<(), AppError> {
+    crate::services::pi_prompt_files::PiPromptTemplateService::upsert(
+        &slug,
+        original_slug.as_deref(),
+        &expected_revision,
+        &content,
+    )?;
+    ctx.app.editor = None;
+    ctx.app
+        .push_toast(texts::tui_toast_prompt_edit_finished(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    if let Some(index) = ctx
+        .data
+        .pi_prompts
+        .templates
+        .iter()
+        .position(|template| template.slug == slug)
+    {
+        ctx.app.pi_prompt_template_idx = index;
+    }
+    Ok(())
 }
 
 fn submit_hermes_memory(
@@ -915,7 +1011,7 @@ fn submit_provider_add(
         _ => None,
     };
 
-    if let Some(message) = validate_provider_submit(&ctx.app.app_type, &provider, false) {
+    if let Some(message) = validate_provider_submit(&ctx.app.app_type, &provider, false, None) {
         ctx.app.push_toast(message, ToastKind::Warning);
         return Ok(());
     }
@@ -977,6 +1073,7 @@ fn submit_provider_add(
 fn submit_provider_edit(
     ctx: &mut RuntimeActionContext<'_>,
     id: String,
+    expected_pi_settings_config: Option<Value>,
     content: String,
 ) -> Result<(), AppError> {
     let mut provider: Provider = match serde_json::from_str(&content) {
@@ -991,7 +1088,12 @@ fn submit_provider_edit(
     };
     provider.id = id.clone();
 
-    if let Some(message) = validate_provider_submit(&ctx.app.app_type, &provider, true) {
+    if let Some(message) = validate_provider_submit(
+        &ctx.app.app_type,
+        &provider,
+        true,
+        expected_pi_settings_config.as_ref(),
+    ) {
         ctx.app.push_toast(message, ToastKind::Warning);
         return Ok(());
     }
@@ -1338,6 +1440,27 @@ mod tests {
             ),
             CommonSnippetFormat::Formatted(_)
         ));
+    }
+
+    #[test]
+    fn pi_edit_accepts_upstream_partial_native_provider_nodes() {
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "openai",
+            "name": "OpenAI",
+            "settingsConfig": { "futureField": true }
+        }))
+        .expect("provider");
+
+        assert_eq!(
+            validate_provider_submit(
+                &AppType::Pi,
+                &provider,
+                true,
+                Some(&provider.settings_config),
+            ),
+            None
+        );
+        assert!(validate_provider_submit(&AppType::Pi, &provider, false, None).is_some());
     }
 
     struct EnvGuard {
@@ -2762,6 +2885,7 @@ mod tests {
         submit_provider_edit(
             &mut ctx,
             "live-only".to_string(),
+            None,
             r#"{
   "id": "live-only",
   "name": "Live Only Imported",
@@ -2845,6 +2969,7 @@ mod tests {
         submit_provider_edit(
             &mut ctx,
             "codex-provider".to_string(),
+            None,
             r#"{
   "id": "codex-provider",
   "name": "Codex Provider",
@@ -2944,6 +3069,7 @@ mod tests {
         submit_provider_edit(
             &mut ctx,
             "live-only".to_string(),
+            None,
             r#"{
   "id": "live-only",
   "name": "Live Only Custom",
@@ -3124,6 +3250,7 @@ mod tests {
         submit_provider_edit(
             &mut ctx,
             "keep".to_string(),
+            None,
             r#"{
   "id": "keep",
   "name": "Keep Invalid",

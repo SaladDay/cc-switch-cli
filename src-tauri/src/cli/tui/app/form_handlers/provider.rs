@@ -1,5 +1,6 @@
 use super::*;
 use crate::ProviderService;
+use serde_json::Value;
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,36 @@ impl App {
                     } else {
                         texts::tui_toast_provider_add_missing_fields().to_string()
                     },
+                ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Pi)
+                && !provider.mode.is_edit()
+                && !crate::pi_config::is_valid_request_url(&provider.current_provider_base_url())
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::OpenCodeBaseUrl),
+                    texts::base_url_empty_error().to_string(),
+                ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Pi)
+                && !provider.mode.is_edit()
+                && !crate::openclaw_config::OPENCLAW_API_PROTOCOLS
+                    .contains(&provider.opencode_npm_package.value.trim())
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::OpenClawApiProtocol),
+                    texts::tui_toast_provider_add_missing_fields().to_string(),
+                ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Pi)
+                && !provider.mode.is_edit()
+                && !provider.openclaw_models.iter().any(|model| {
+                    model
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| !id.trim().is_empty())
+                })
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::OpenClawModels),
+                    texts::tui_toast_provider_add_missing_fields().to_string(),
                 ))
             } else if matches!(provider.app_type, crate::app_config::AppType::Hermes)
                 && !is_valid_hermes_rate_limit_delay(&provider.hermes_rate_limit_delay.value)
@@ -183,7 +214,10 @@ impl App {
         Action::EditorSubmit {
             submit: match &provider.mode {
                 FormMode::Add => EditorSubmit::ProviderAdd,
-                FormMode::Edit { id } => EditorSubmit::ProviderEdit { id: id.clone() },
+                FormMode::Edit { id } => EditorSubmit::ProviderEdit {
+                    id: id.clone(),
+                    expected_pi_settings_config: provider.initial_pi_settings_config(),
+                },
             },
             content,
         }
@@ -288,6 +322,12 @@ impl App {
                 ) =>
             {
                 Some(self.handle_provider_model_fetch(selected))
+            }
+            KeyCode::Char('f') if selected == ProviderAddField::OpenClawModels => {
+                let is_pi = self.form.as_ref().is_some_and(|form| {
+                    matches!(form, FormState::ProviderAdd(provider) if provider.app_type == AppType::Pi)
+                });
+                is_pi.then(|| self.handle_provider_model_fetch(selected))
             }
             KeyCode::Char('f')
                 if matches!(
@@ -1192,6 +1232,8 @@ impl App {
                 .then(|| provider.codex_api_key.value.clone()),
             custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
                 .then(|| provider.custom_user_agent.value.clone()),
+            api_protocol: None,
+            request_headers: None,
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: ProviderAddField::CodexLocalRouting,
@@ -1440,6 +1482,8 @@ impl App {
             api_key: Some(provider.hermes_api_key.value.clone()),
             custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
                 .then(|| provider.custom_user_agent.value.clone()),
+            api_protocol: None,
+            request_headers: None,
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: ProviderAddField::HermesModels,
@@ -1468,7 +1512,7 @@ impl App {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
             return Action::None;
         };
-        let api_key = match selected {
+        let mut api_key = match selected {
             ProviderAddField::CodexModel => (!provider.codex_api_key.value.trim().is_empty())
                 .then(|| provider.codex_api_key.value.clone()),
             ProviderAddField::GeminiModel => (!provider.gemini_api_key.value.trim().is_empty())
@@ -1479,6 +1523,10 @@ impl App {
             }
             ProviderAddField::HermesModels => (!provider.hermes_api_key.value.trim().is_empty())
                 .then(|| provider.hermes_api_key.value.clone()),
+            ProviderAddField::OpenClawModels => {
+                (!provider.opencode_api_key.value.trim().is_empty())
+                    .then(|| provider.opencode_api_key.value.clone())
+            }
             _ => None,
         };
         let base_url = match selected {
@@ -1486,14 +1534,53 @@ impl App {
             ProviderAddField::GeminiModel => provider.gemini_base_url.value.clone(),
             ProviderAddField::OpenCodeModelId => provider.opencode_base_url.value.clone(),
             ProviderAddField::HermesModels => provider.hermes_base_url.value.clone(),
+            ProviderAddField::OpenClawModels if matches!(provider.app_type, AppType::Pi) => {
+                provider.current_provider_base_url()
+            }
+            ProviderAddField::OpenClawModels => provider.opencode_base_url.value.clone(),
             _ => String::new(),
         };
+        let (api_protocol, mut request_headers) =
+            if selected == ProviderAddField::OpenClawModels && provider.app_type == AppType::Pi {
+                let settings = provider.to_provider_json_value()["settingsConfig"].clone();
+                let protocol = settings
+                    .get("api")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let headers = settings
+                    .get("headers")
+                    .and_then(Value::as_object)
+                    .map(|headers| {
+                        headers
+                            .iter()
+                            .filter_map(|(name, value)| {
+                                value
+                                    .as_str()
+                                    .map(|value| (name.clone(), value.to_string()))
+                            })
+                            .collect::<std::collections::BTreeMap<_, _>>()
+                    })
+                    .filter(|headers| !headers.is_empty());
+                (protocol, headers)
+            } else {
+                (None, None)
+            };
+        if api_protocol.as_deref() == Some("anthropic-messages") {
+            if let Some(key) = api_key.take() {
+                request_headers
+                    .get_or_insert_with(std::collections::BTreeMap::new)
+                    .entry("x-api-key".to_string())
+                    .or_insert(key);
+            }
+        }
         Action::ProviderModelFetch {
             base_url,
             is_full_url: provider.is_full_url && matches!(selected, ProviderAddField::CodexModel),
             api_key,
             custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
                 .then(|| provider.custom_user_agent.value.clone()),
+            api_protocol,
+            request_headers,
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: selected,

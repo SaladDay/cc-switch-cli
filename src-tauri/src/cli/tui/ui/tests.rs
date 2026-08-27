@@ -2843,6 +2843,8 @@ fn codex_model_catalog_renders_only_the_selected_large_collection_window() {
             supports_parallel_tool_calls: None,
             input_modalities: Vec::new(),
             base_instructions: String::new(),
+            reasoning_levels: Vec::new(),
+            default_reasoning_level: String::new(),
         })
         .collect();
     form.codex_model_catalog[selected].model = format!("SELECTED-CODEX-{}", "X".repeat(1_000_000));
@@ -3975,10 +3977,12 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
                 primary_model_id: Some("claude-sonnet-4".to_string()),
                 default_model_id: None,
             }],
+            pi_membership_unknown: false,
             loading: false,
         },
         mcp: McpSnapshot::default(),
         prompts: PromptsSnapshot::default(),
+        pi_prompts: Default::default(),
         config: ConfigSnapshot::default(),
         skills: SkillsSnapshot::default(),
         proxy: ProxySnapshot::default(),
@@ -4077,6 +4081,7 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             gemini: false,
             opencode: false,
             hermes: false,
+            pi: false,
         },
         installed_at: 1,
         content_hash: None,
@@ -4575,6 +4580,7 @@ fn header_only_renders_selected_visible_apps() {
         opencode: false,
         hermes: false,
         openclaw: true,
+        pi: false,
     })
     .expect("save visible apps");
 
@@ -4604,6 +4610,7 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
         opencode: true,
         hermes: false,
         openclaw: true,
+        pi: false,
     })
     .expect("save visible apps");
 
@@ -4633,6 +4640,7 @@ fn settings_page_shows_visible_apps_row_value() {
         opencode: false,
         hermes: false,
         openclaw: true,
+        pi: false,
     })
     .expect("save visible apps");
 
@@ -5306,6 +5314,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         },
     };
     app.push_toast(
@@ -5321,6 +5330,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
     );
     assert!(all.contains(AppType::Hermes.as_str()), "{all}");
     assert!(all.contains(AppType::OpenClaw.as_str()), "{all}");
+    assert!(all.contains(AppType::Pi.as_str()), "{all}");
     assert!(
         all.contains(texts::tui_toast_visible_apps_zero_selection_warning()),
         "{all}"
@@ -5344,6 +5354,7 @@ fn visible_apps_picker_uses_space_toggle_key() {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         },
     };
 
@@ -5375,6 +5386,7 @@ fn visible_apps_picker_auto_mode_does_not_append_auto_suffix_to_apps() {
             opencode: true,
             hermes: true,
             openclaw: true,
+            pi: false,
         },
     };
 
@@ -5532,6 +5544,7 @@ fn header_centers_tabs_when_room_allows() {
         opencode: true,
         hermes: true,
         openclaw: true,
+        pi: false,
     })
     .expect("save visible apps");
 
@@ -5577,6 +5590,7 @@ fn header_keeps_title_and_right_badges_visible_without_large_gap_in_chinese() {
         opencode: true,
         hermes: true,
         openclaw: true,
+        pi: false,
     })
     .expect("save visible apps");
 
@@ -6095,6 +6109,7 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 gemini: false,
                 opencode: false,
                 hermes: false,
+                pi: false,
             },
             installed_at: 0,
             content_hash: None,
@@ -7015,13 +7030,14 @@ fn skills_page_renders_sync_method_and_installed_rows() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0, 0)));
+    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0, 0, 0)));
     assert!(!all.contains(texts::tui_header_directory()));
     assert!(all.contains(AppType::Claude.as_str()));
     assert!(all.contains(AppType::Codex.as_str()));
     assert!(all.contains(AppType::Gemini.as_str()));
     assert!(all.contains(AppType::OpenCode.as_str()));
     assert!(all.contains(AppType::Hermes.as_str()));
+    assert!(all.contains(AppType::Pi.as_str()));
     assert!(!all.contains("hello-skill"));
     assert!(all.contains("Hello Skill"));
 }
@@ -7074,7 +7090,7 @@ fn skills_page_empty_state_keeps_summary_and_shows_guidance() {
 
     // The summary bar stays; the blank table body is replaced with the
     // shared empty-state guidance (same style as MCP/Prompts/Providers).
-    assert!(all.contains(&texts::tui_skills_installed_counts(0, 0, 0, 0, 0)));
+    assert!(all.contains(&texts::tui_skills_installed_counts(0, 0, 0, 0, 0, 0)));
     assert!(all.contains(texts::tui_skills_empty_title()));
     assert!(all.contains(texts::tui_skills_empty_subtitle()));
 }
@@ -7134,6 +7150,7 @@ fn skills_page_shows_opencode_summary() {
         gemini: false,
         opencode: true,
         hermes: false,
+        pi: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7160,6 +7177,7 @@ fn skills_page_shows_hermes_column_and_summary() {
         gemini: false,
         opencode: false,
         hermes: true,
+        pi: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7189,6 +7207,7 @@ fn skill_detail_page_shows_opencode_enabled_state() {
         gemini: false,
         opencode: true,
         hermes: false,
+        pi: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7219,6 +7238,7 @@ fn skill_detail_page_shows_hermes_enabled_state() {
         gemini: false,
         opencode: false,
         hermes: true,
+        pi: false,
     };
     data.skills.installed = vec![skill];
 
@@ -13114,6 +13134,28 @@ fn opencode_provider_list_marks_rows_in_config_without_current_marker() {
     let mut data = minimal_data(&app.app_type);
     data.providers.rows[0].is_in_config = true;
     data.providers.rows[0].is_current = false;
+
+    let buf = render(&app, &data);
+    let provider_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Demo Provider"))
+        .expect("provider row rendered");
+
+    assert!(provider_line.contains("+"), "{provider_line}");
+    assert!(!provider_line.contains("*"), "{provider_line}");
+}
+
+#[test]
+fn pi_provider_list_shows_membership_without_exposing_global_default() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Pi));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_in_config = true;
+    data.providers.rows[0].is_default_model = true;
 
     let buf = render(&app, &data);
     let provider_line = (0..buf.area.height)

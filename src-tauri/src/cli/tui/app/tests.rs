@@ -921,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_apps_picker_from_openclaw_targets_hermes_last_visible_row() {
+    fn skills_apps_picker_from_openclaw_targets_pi_last_visible_row() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Skills;
         app.focus = Focus::Content;
@@ -935,7 +935,7 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::SkillsAppsPicker { selected, .. } if *selected == 4
+            Overlay::SkillsAppsPicker { selected, .. } if *selected == 5
         ));
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
@@ -943,12 +943,45 @@ mod tests {
         assert!(matches!(
             &app.overlay,
             Overlay::SkillsAppsPicker { selected, apps, .. }
-                if *selected == 4
+                if *selected == 5
                     && !apps.claude
                     && !apps.codex
                     && !apps.gemini
                     && !apps.opencode
-                    && apps.hermes
+                    && !apps.hermes
+                    && apps.pi
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn visible_apps_picker_can_toggle_pi() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
+            .expect("save visible apps mode");
+        let mut app = App::new(Some(AppType::Pi));
+        app.overlay = Overlay::VisibleAppsPicker {
+            selected: app_type_picker_index(&AppType::Pi),
+            apps: crate::settings::VisibleApps {
+                claude: true,
+                codex: false,
+                gemini: false,
+                opencode: false,
+                hermes: false,
+                openclaw: false,
+                pi: false,
+            },
+        };
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char(' ')), &UiData::default()),
+            Action::None
+        ));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { selected, apps }
+                if *selected == 6 && apps.pi
         ));
     }
 
@@ -1132,6 +1165,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: true,
+            pi: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1157,6 +1191,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: true,
+            pi: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1190,6 +1225,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: true,
+            pi: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Gemini));
@@ -1231,6 +1267,7 @@ mod tests {
             opencode: true,
             hermes: false,
             openclaw: true,
+            pi: false,
         })
         .expect("save visible apps");
 
@@ -1254,6 +1291,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         })
         .expect("save visible apps");
 
@@ -1281,6 +1319,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: true,
+            pi: false,
         })
         .expect("save visible apps");
 
@@ -1304,6 +1343,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         })
         .expect("save visible apps");
 
@@ -2303,6 +2343,8 @@ mod tests {
                 is_full_url: false,
                 api_key: Some(api_key),
                 custom_user_agent: Some(custom_user_agent),
+                api_protocol: None,
+                request_headers: None,
                 codex_oauth: false,
                 codex_oauth_account_id: None,
                 field: ProviderAddField::HermesModels,
@@ -5313,6 +5355,165 @@ mod tests {
         } else {
             panic!("expected ProviderAdd form");
         }
+    }
+
+    #[test]
+    fn provider_pi_models_fetch_uses_native_protocol_and_headers() {
+        let mut app = App::new(Some(AppType::Pi));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let provider = Provider::with_id(
+            "pi-native".to_string(),
+            "Pi Native".to_string(),
+            json!({
+                "apiKey": "pi-secret",
+                "api": "anthropic-messages",
+                "headers": { "X-Custom": "custom-value" },
+                "models": [{
+                    "id": "existing",
+                    "baseUrl": "https://pi.example.test/v1"
+                }]
+            }),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Pi, &provider);
+        form.focus = FormFocus::Fields;
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|field| *field == ProviderAddField::OpenClawModels)
+            .expect("Pi models field");
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data());
+        let Action::ProviderModelFetch {
+            base_url,
+            api_key,
+            api_protocol,
+            request_headers,
+            field,
+            ..
+        } = action
+        else {
+            panic!("expected Pi model fetch action");
+        };
+        assert_eq!(base_url, "https://pi.example.test/v1");
+        assert_eq!(api_key, None, "Anthropic auth is carried by x-api-key");
+        assert_eq!(api_protocol.as_deref(), Some("anthropic-messages"));
+        assert_eq!(field, ProviderAddField::OpenClawModels);
+        let headers = request_headers.expect("native request headers");
+        assert_eq!(
+            headers.get("X-Custom").map(String::as_str),
+            Some("custom-value")
+        );
+        assert_eq!(
+            headers.get("x-api-key").map(String::as_str),
+            Some("pi-secret")
+        );
+    }
+
+    #[test]
+    fn provider_pi_model_fetch_selection_adds_a_model_entry() {
+        let mut app = App::new(Some(AppType::Pi));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Pi,
+        )));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::OpenClawModels,
+            claude_idx: None,
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: vec!["fetched-model".to_string()],
+            filtered_indices: None,
+            filter_incomplete: false,
+            error: None,
+            selected_idx: 0,
+            selection_active: false,
+        };
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data()),
+            Action::None
+        ));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert_eq!(form.openclaw_models, vec![json!({ "id": "fetched-model" })]);
+    }
+
+    #[test]
+    fn pi_system_prompt_edit_uses_the_loaded_native_revision() {
+        let mut app = App::new(Some(AppType::Pi));
+        let mut data = UiData::default();
+        data.pi_prompts.system_files.push((
+            crate::services::pi_prompt_files::PiPromptFileKind::SystemAppend,
+            crate::services::pi_prompt_files::PiPromptFileSnapshot {
+                exists: true,
+                revision: "rev-1".to_string(),
+                content: "Keep answers concise.".to_string(),
+            },
+        ));
+
+        assert!(matches!(
+            app.on_pi_system_prompts_key(key(KeyCode::Char('e')), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.editor.as_ref(),
+            Some(EditorState {
+                initial_text,
+                submit: EditorSubmit::PiSystemPrompt {
+                    kind: crate::services::pi_prompt_files::PiPromptFileKind::SystemAppend,
+                    expected_revision,
+                },
+                ..
+            }) if initial_text == "Keep answers concise." && expected_revision == "rev-1"
+        ));
+    }
+
+    #[test]
+    fn pi_prompt_template_actions_follow_the_family_editor_flow() {
+        let mut app = App::new(Some(AppType::Pi));
+        let mut data = UiData::default();
+        data.pi_prompts
+            .templates
+            .push(crate::services::pi_prompt_files::PiPromptTemplate {
+                slug: "review".to_string(),
+                content: "Review this change.".to_string(),
+                revision: "rev-2".to_string(),
+            });
+
+        assert!(matches!(
+            app.on_pi_prompt_templates_key(key(KeyCode::Char('e')), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.editor.as_ref(),
+            Some(EditorState {
+                initial_text,
+                submit: EditorSubmit::PiPromptTemplate {
+                    slug,
+                    original_slug: Some(original_slug),
+                    expected_revision,
+                },
+                ..
+            }) if initial_text == "Review this change."
+                && slug == "review"
+                && original_slug == "review"
+                && expected_revision == "rev-2"
+        ));
+
+        app.editor = None;
+        app.on_pi_prompt_templates_key(key(KeyCode::Char('a')), &data);
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::PiPromptTemplateCreate,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -11024,6 +11225,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         })
         .expect("save visible apps");
         crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
@@ -11074,6 +11276,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         })
         .expect("save visible apps");
 
@@ -11111,6 +11314,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11149,6 +11353,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11186,6 +11391,7 @@ mod tests {
             opencode: false,
             hermes: false,
             openclaw: false,
+            pi: false,
         };
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = initial.clone();
@@ -12738,6 +12944,28 @@ mod tests {
     }
 
     #[test]
+    fn provider_add_form_pi_requires_a_native_model_before_submit() {
+        let mut app = App::new(Some(AppType::Pi));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut form = ProviderAddFormState::new(AppType::Pi);
+        form.focus = FormFocus::Fields;
+        form.id.set("pi-provider");
+        form.name.set("Pi Provider");
+        form.opencode_base_url.set("https://pi.example.test/v1");
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
+        assert!(matches!(submit, Action::None));
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if form.fields().get(form.field_idx) == Some(&ProviderAddField::OpenClawModels)
+                    && form.main_field_error(ProviderAddField::OpenClawModels).is_some()
+        ));
+    }
+
+    #[test]
     fn provider_add_form_codex_rejects_invalid_anthropic_max_output_tokens() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Providers;
@@ -12946,6 +13174,20 @@ mod tests {
             })
             .count();
         assert!(builtin_count >= 3, "{rows:?}");
+        let last_builtin_flat = rows
+            .iter()
+            .filter_map(|row| match row {
+                super::super::form::ProviderTemplateRow::Item {
+                    flat_idx,
+                    section: super::super::form::ProviderTemplateSection::BuiltIn,
+                    ..
+                } => Some(*flat_idx),
+                _ => None,
+            })
+            .next_back()
+            .expect("at least one built-in template");
+        let first_sponsor_flat =
+            first_sponsor_flat_idx(&rows).expect("claude exposes sponsor presets");
         assert!(rows.iter().any(|row| matches!(
             row,
             super::super::form::ProviderTemplateRow::Header(
@@ -12956,20 +13198,20 @@ mod tests {
         // Walk from the last built-in row into the sponsor section: the
         // Sponsors header sits between them and must never be selected.
         app.overlay = Overlay::ProviderTemplatePicker {
-            selected: builtin_count - 1,
+            selected: last_builtin_flat,
         };
         let data = UiData::default();
         app.on_key(key(KeyCode::Down), &data);
         let after_down = provider_template_picker_selection(&app);
         assert_eq!(
-            after_down, builtin_count,
+            after_down, first_sponsor_flat,
             "Down must land on the first sponsor, not the header"
         );
 
         app.on_key(key(KeyCode::Up), &data);
         assert_eq!(
             provider_template_picker_selection(&app),
-            builtin_count - 1,
+            last_builtin_flat,
             "Up must skip back over the header"
         );
 
@@ -12995,8 +13237,8 @@ mod tests {
         );
     }
 
-    /// Codex's display order diverges from its flat order: DeepSeek has the
-    /// LAST flat index but renders as the last Built-in row, directly above
+    /// Codex's display order diverges from its flat order: migrated built-ins
+    /// have flat indices after the sponsors but render directly above
     /// the Sponsors header. Navigation must follow display order, so a naive
     /// flat-index ±1 stepping implementation cannot pass this.
     #[test]
@@ -13006,22 +13248,30 @@ mod tests {
         let rows = form.template_picker_rows();
         let labels = form.template_labels();
 
-        let deepseek_flat = labels
+        let last_builtin_flat = rows
             .iter()
-            .position(|label| *label == "DeepSeek")
-            .expect("codex exposes DeepSeek");
+            .filter_map(|row| match row {
+                super::super::form::ProviderTemplateRow::Item {
+                    flat_idx,
+                    section: super::super::form::ProviderTemplateSection::BuiltIn,
+                    ..
+                } => Some(*flat_idx),
+                _ => None,
+            })
+            .next_back()
+            .expect("codex exposes built-in presets");
         let first_sponsor_flat =
             first_sponsor_flat_idx(&rows).expect("codex exposes sponsor presets");
 
         // Precondition: flat order and display order really do disagree here.
         assert_eq!(
-            deepseek_flat,
+            last_builtin_flat,
             labels.len() - 1,
-            "DeepSeek should hold the last flat index"
+            "the last built-in should hold the last flat index"
         );
         assert!(
-            first_sponsor_flat < deepseek_flat,
-            "sponsors precede DeepSeek in flat order"
+            first_sponsor_flat < last_builtin_flat,
+            "sponsors precede migrated built-ins in flat order"
         );
 
         app.form = Some(FormState::ProviderAdd(form));
@@ -13029,25 +13279,24 @@ mod tests {
 
         // Down from the last Built-in row crosses the Sponsors header.
         app.overlay = Overlay::ProviderTemplatePicker {
-            selected: deepseek_flat,
+            selected: last_builtin_flat,
         };
         app.on_key(key(KeyCode::Down), &data);
         assert_eq!(
             provider_template_picker_selection(&app),
             first_sponsor_flat,
-            "Down from DeepSeek must reach the first sponsor, not flat+1"
+            "Down from the last built-in must reach the first sponsor, not flat+1"
         );
 
-        // And Up returns to DeepSeek rather than stepping to flat-1.
+        // And Up returns to the last built-in rather than stepping to flat-1.
         app.on_key(key(KeyCode::Up), &data);
         assert_eq!(
             provider_template_picker_selection(&app),
-            deepseek_flat,
-            "Up from the first sponsor must return to DeepSeek, not flat-1"
+            last_builtin_flat,
+            "Up from the first sponsor must return to the last built-in, not flat-1"
         );
 
-        // DeepSeek is the last display row, so Down past it is a no-op only
-        // after the sponsors are exhausted, never a wrap to flat order.
+        // Basic navigation inside the first Built-in rows stays unchanged.
         app.overlay = Overlay::ProviderTemplatePicker { selected: 0 };
         app.on_key(key(KeyCode::Down), &data);
         assert_eq!(
@@ -13499,7 +13748,7 @@ mod tests {
         assert!(matches!(
             action,
             Action::EditorSubmit {
-                submit: EditorSubmit::ProviderEdit { id },
+                submit: EditorSubmit::ProviderEdit { id, .. },
                 content
             } if id == "p1" && content.contains("\"name\": \"Provider Renamed\"")
         ));
@@ -15754,9 +16003,53 @@ mod tests {
         assert!(matches!(
             submit,
             Action::EditorSubmit {
-                submit: EditorSubmit::ProviderEdit { id },
+                submit: EditorSubmit::ProviderEdit { id, .. },
                 content,
             } if id == "p1" && content.contains("Provider One")
+        ));
+    }
+
+    #[test]
+    fn pi_provider_edit_submit_carries_the_opened_native_snapshot() {
+        let mut app = App::new(Some(AppType::Pi));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let settings = json!({
+            "name": "Pi Provider",
+            "api": "anthropic-messages",
+            "baseUrl": "https://example.com",
+            "models": [{ "id": "model-a" }],
+            "futureField": { "preserve": true }
+        });
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "pi-provider".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "pi-provider".to_string(),
+                "Pi Provider".to_string(),
+                settings.clone(),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("model-a".to_string()),
+            default_model_id: None,
+        });
+
+        app.on_key(key(KeyCode::Char('e')), &data);
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(
+            submit,
+            Action::EditorSubmit {
+                submit: EditorSubmit::ProviderEdit {
+                    id,
+                    expected_pi_settings_config: Some(expected),
+                },
+                ..
+            } if id == "pi-provider" && expected == settings
         ));
     }
 

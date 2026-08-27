@@ -121,7 +121,7 @@ impl ProviderAddFormState {
         let is_codex = matches!(app_type, AppType::Codex);
         let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
-            AppType::OpenClaw => OPENCLAW_DEFAULT_API_PROTOCOL,
+            AppType::OpenClaw | AppType::Pi => OPENCLAW_DEFAULT_API_PROTOCOL,
             _ => "@ai-sdk/openai-compatible",
         };
 
@@ -250,6 +250,7 @@ impl ProviderAddFormState {
             hermes_model_input: TextInput::new(""),
             hermes_rate_limit_delay: TextInput::new(""),
             initial_snapshot: Value::Null,
+            initial_pi_settings_config: None,
         };
         let _ = form.refresh_quick_config_from_common_snippet(common_snippet);
         form.capture_initial_snapshot();
@@ -271,6 +272,9 @@ impl ProviderAddFormState {
         };
         form.focus = FormFocus::Fields;
         form.extra = serde_json::to_value(provider).unwrap_or_else(|_| json!({}));
+        if matches!(app_type, AppType::Pi) {
+            form.initial_pi_settings_config = Some(provider.settings_config.clone());
+        }
 
         form.id.set(provider.id.clone());
         form.id_is_manual = true;
@@ -326,6 +330,7 @@ impl ProviderAddFormState {
     ) -> Self {
         let mut form = Self::from_provider_with_common_snippet(app_type, provider, common_snippet);
         form.mode = FormMode::Add;
+        form.initial_pi_settings_config = None;
         form.copy_source_id = Some(provider.id.clone());
         form.id_is_manual = false;
         form.name.set(format!("{} copy", provider.name.trim()));
@@ -370,7 +375,7 @@ impl ProviderAddFormState {
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|env| !env.is_empty()),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
         }
     }
 
@@ -426,7 +431,7 @@ impl ProviderAddFormState {
                     app_type, settings, &snippet,
                 )
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
         }
     }
 
@@ -448,6 +453,12 @@ impl ProviderAddFormState {
 
     pub fn has_unsaved_changes(&self) -> bool {
         self.to_provider_json_value() != self.initial_snapshot
+    }
+
+    pub fn initial_pi_settings_config(&self) -> Option<Value> {
+        (matches!(self.app_type, AppType::Pi) && self.mode.is_edit())
+            .then(|| self.initial_pi_settings_config.clone())
+            .flatten()
     }
 
     pub fn is_id_editable(&self) -> bool {
@@ -478,8 +489,10 @@ impl ProviderAddFormState {
             ProviderAddField::Notes,
         ];
 
-        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw)
-            && self.copy_source_id.is_none()
+        if matches!(
+            self.app_type,
+            AppType::Hermes | AppType::OpenClaw | AppType::Pi
+        ) && self.copy_source_id.is_none()
         {
             fields.insert(0, ProviderAddField::Id);
         }
@@ -558,6 +571,12 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenCodeApiKey);
                 fields.push(ProviderAddField::OpenCodeBaseUrl);
                 fields.push(ProviderAddField::OpenClawUserAgent);
+                fields.push(ProviderAddField::OpenClawModels);
+            }
+            AppType::Pi => {
+                fields.push(ProviderAddField::OpenClawApiProtocol);
+                fields.push(ProviderAddField::OpenCodeApiKey);
+                fields.push(ProviderAddField::OpenCodeBaseUrl);
                 fields.push(ProviderAddField::OpenClawModels);
             }
         }
@@ -1170,7 +1189,11 @@ impl ProviderAddFormState {
                         crate::codex_config::is_codex_remote_compaction_enabled(config);
                 }
             }
-            AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
+            AppType::Gemini
+            | AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi => {}
         }
         Ok(())
     }
@@ -1398,7 +1421,11 @@ impl ProviderAddFormState {
                 !self.is_claude_official_provider() && !self.is_claude_github_copilot_provider()
             }
             AppType::Codex => !self.is_codex_official_provider(),
-            AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::Gemini
+            | AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi => false,
         }
     }
 
@@ -1579,6 +1606,8 @@ impl ProviderAddFormState {
             supports_parallel_tool_calls: None,
             input_modalities: Vec::new(),
             base_instructions: String::new(),
+            reasoning_levels: Vec::new(),
+            default_reasoning_level: String::new(),
         });
         self.codex_model_catalog_idx = self.codex_model_catalog.len().saturating_sub(1);
         true
@@ -2181,6 +2210,10 @@ impl ProviderAddFormState {
             AppType::Gemini => self.gemini_base_url.value.clone(),
             AppType::Hermes => self.hermes_base_url.value.clone(),
             AppType::OpenCode | AppType::OpenClaw => self.opencode_base_url.value.clone(),
+            AppType::Pi => {
+                let provider = self.to_provider_json_value();
+                crate::pi_config::provider_base_url(&provider["settingsConfig"]).unwrap_or_default()
+            }
         }
     }
 
@@ -2192,6 +2225,14 @@ impl ProviderAddFormState {
             );
         }
 
+        if matches!(self.app_type, AppType::Pi) {
+            let base_url = self.current_provider_base_url();
+            return (
+                Self::usage_query_comment_value(&self.opencode_api_key.value),
+                Self::usage_query_comment_value(&base_url),
+            );
+        }
+
         let (api_key, base_url) = match self.app_type {
             AppType::Claude => (&self.claude_api_key.value, &self.claude_base_url.value),
             AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
@@ -2200,6 +2241,7 @@ impl ProviderAddFormState {
             AppType::OpenCode | AppType::OpenClaw => {
                 (&self.opencode_api_key.value, &self.opencode_base_url.value)
             }
+            AppType::Pi => unreachable!("Pi credentials are resolved above"),
         };
         (
             Self::usage_query_comment_value(api_key),
@@ -2449,7 +2491,11 @@ impl ProviderAddFormState {
                 !self.is_claude_official_provider() && !self.is_claude_codex_oauth_provider()
             }
             AppType::Codex => !self.is_codex_official_provider(),
-            AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::Gemini
+            | AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi => false,
         }
     }
 
@@ -2586,6 +2632,7 @@ impl ProviderAddFormState {
         let previous_include_common_config_touched = self.include_common_config_touched;
         let previous_extra = self.extra.clone();
         let previous_initial_snapshot = self.initial_snapshot.clone();
+        let previous_initial_pi_settings_config = self.initial_pi_settings_config.clone();
 
         let mut next = Self::from_provider(self.app_type.clone(), provider);
         let overlay = serde_json::to_value(provider).unwrap_or_else(|_| json!({}));
@@ -2657,6 +2704,7 @@ impl ProviderAddFormState {
             next.id_is_manual = true;
         }
         next.initial_snapshot = previous_initial_snapshot;
+        next.initial_pi_settings_config = previous_initial_pi_settings_config;
 
         *self = next;
     }
@@ -2685,6 +2733,7 @@ impl ProviderAddFormState {
         let previous_include_common_config = self.include_common_config;
         let previous_include_common_config_touched = self.include_common_config_touched;
         let previous_initial_snapshot = self.initial_snapshot.clone();
+        let previous_initial_pi_settings_config = self.initial_pi_settings_config.clone();
 
         let current_value = self.to_provider_json_value();
         if let (Some(current_obj), Some(edited_obj)) =
@@ -2765,6 +2814,7 @@ impl ProviderAddFormState {
             next.id_is_manual = true;
         }
         next.initial_snapshot = previous_initial_snapshot;
+        next.initial_pi_settings_config = previous_initial_pi_settings_config;
 
         *self = next;
         Ok(())
@@ -3003,7 +3053,7 @@ impl ProviderAddFormState {
     }
 
     pub fn apply_openclaw_models_value(&mut self, models_value: Value) -> Result<(), String> {
-        if !matches!(self.app_type, AppType::OpenClaw) {
+        if !matches!(self.app_type, AppType::OpenClaw | AppType::Pi) {
             return Ok(());
         }
         if !models_value.is_array() {
@@ -3080,6 +3130,26 @@ pub(crate) fn codex_model_catalog_row_from_value(value: &Value) -> Option<CodexM
         .unwrap_or("")
         .trim()
         .to_string();
+    let reasoning_levels = value
+        .get("reasoningLevels")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("reasoning_levels").and_then(Value::as_array))
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|level| !level.trim().is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let default_reasoning_level = value
+        .get("defaultReasoningLevel")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("default_reasoning_level").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     Some(CodexModelCatalogRow {
         model,
@@ -3088,6 +3158,8 @@ pub(crate) fn codex_model_catalog_row_from_value(value: &Value) -> Option<CodexM
         supports_parallel_tool_calls,
         input_modalities,
         base_instructions,
+        reasoning_levels,
+        default_reasoning_level,
     })
 }
 

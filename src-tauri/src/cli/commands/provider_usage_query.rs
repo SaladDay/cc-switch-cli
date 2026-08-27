@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand, ValueEnum};
+use serde_json::Value;
 use std::fmt;
 
 use crate::app_config::AppType;
@@ -289,11 +290,15 @@ fn set(app_type: AppType, command: ProviderUsageQuerySetCommand) -> Result<(), A
     apply_template_credentials(&mut script, &template, &command);
     validate_usage_script_for_save(&script)?;
 
-    provider
-        .meta
-        .get_or_insert_with(ProviderMeta::default)
-        .usage_script = Some(script);
-    ProviderService::update(&state, app_type, provider)?;
+    if app_type == AppType::Pi {
+        ProviderService::update_pi_usage_script(&state, &provider.id, script)?;
+    } else {
+        provider
+            .meta
+            .get_or_insert_with(ProviderMeta::default)
+            .usage_script = Some(script);
+        ProviderService::update(&state, app_type, provider)?;
+    }
 
     println!("{}", success("✓ Usage Query configuration updated"));
     Ok(())
@@ -328,6 +333,11 @@ fn validate_usage_template_compatibility(
 
 fn clear(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
+    if app_type == AppType::Pi {
+        ProviderService::clear_pi_usage_script(&state, id)?;
+        println!("{}", success("✓ Usage Query configuration cleared"));
+        return Ok(());
+    }
     let mut provider = find_provider(&state, &app_type, id)?;
     if let Some(meta) = provider.meta.as_mut() {
         meta.usage_script = None;
@@ -731,6 +741,13 @@ fn provider_comment_credentials<'a>(
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
             settings.get("apiKey").and_then(|value| value.as_str()),
+        ),
+        AppType::Pi => (
+            settings
+                .get("baseUrl")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            settings.get("apiKey").and_then(Value::as_str),
         ),
     }
 }

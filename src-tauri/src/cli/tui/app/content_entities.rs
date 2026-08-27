@@ -91,22 +91,36 @@ impl App {
     }
 
     fn open_provider_delete_confirm(&mut self, row: &super::data::ProviderRow) {
+        let mut message = texts::tui_confirm_delete_provider_message(
+            &super::data::provider_display_name(&self.app_type, row),
+            &row.id,
+        );
+        if matches!(self.app_type, AppType::Pi) && row.is_default_model {
+            message.push_str(crate::t!(
+                "\n\nPi currently references this provider as its global default. Deleting it will not rewrite Pi's default setting.",
+                "\n\nPi 当前将此供应商作为全局默认项；删除不会改写 Pi 的默认设置。"
+            ));
+        }
         self.overlay = Overlay::Confirm(ConfirmOverlay {
             title: texts::tui_confirm_delete_provider_title().to_string(),
-            message: texts::tui_confirm_delete_provider_message(
-                &super::data::provider_display_name(&self.app_type, row),
-                &row.id,
-            ),
+            message,
             action: ConfirmAction::ProviderDelete { id: row.id.clone() },
         });
     }
 
     fn open_provider_remove_confirm(&mut self, row: &super::data::ProviderRow) {
+        let mut message = texts::tui_confirm_remove_provider_message(
+            &super::data::provider_display_name(&self.app_type, row),
+        );
+        if matches!(self.app_type, AppType::Pi) && row.is_default_model {
+            message.push_str(crate::t!(
+                "\n\nPi currently references this provider as its global default. Removing it will not rewrite Pi's default setting.",
+                "\n\nPi 当前将此供应商作为全局默认项；移除不会改写 Pi 的默认设置。"
+            ));
+        }
         self.overlay = Overlay::Confirm(ConfirmOverlay {
             title: texts::tui_confirm_remove_provider_title().to_string(),
-            message: texts::tui_confirm_remove_provider_message(
-                &super::data::provider_display_name(&self.app_type, row),
-            ),
+            message,
             action: ConfirmAction::ProviderRemoveFromConfig { id: row.id.clone() },
         });
     }
@@ -223,6 +237,23 @@ impl App {
         let Some(intent) = crate::cli::tui::keymap::providers::intent_for(key.code) else {
             return Action::None;
         };
+
+        if matches!(self.app_type, AppType::Pi)
+            && data.providers.pi_membership_unknown
+            && matches!(
+                intent,
+                Intent::Primary | Intent::Add | Intent::Edit | Intent::Switch | Intent::Delete
+            )
+        {
+            self.push_toast(
+                crate::t!(
+                    "Pi models.json could not be read. Fix or reload it before changing providers.",
+                    "无法读取 Pi models.json；请修复或重新加载后再修改供应商。"
+                ),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        }
 
         match intent {
             Intent::Primary => {
@@ -494,6 +525,163 @@ impl App {
                 )));
                 Action::None
             }
+        }
+    }
+
+    pub(crate) fn on_pi_system_prompts_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        let rows = &data.pi_prompts.system_files;
+        match key.code {
+            KeyCode::Up => {
+                self.pi_system_prompt_idx = self.pi_system_prompt_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                if !rows.is_empty() {
+                    self.pi_system_prompt_idx = (self.pi_system_prompt_idx + 1).min(rows.len() - 1);
+                }
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char('v') => {
+                let Some((kind, snapshot)) = rows.get(self.pi_system_prompt_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::TextView(TextViewState {
+                    title: pi_system_prompt_filename(*kind).to_string(),
+                    lines: snapshot.content.lines().map(str::to_string).collect(),
+                    scroll: 0,
+                    action: None,
+                });
+                Action::None
+            }
+            KeyCode::Char('e') => {
+                let Some((kind, snapshot)) = rows.get(self.pi_system_prompt_idx) else {
+                    return Action::None;
+                };
+                self.open_editor(
+                    pi_system_prompt_filename(*kind),
+                    EditorKind::Plain,
+                    snapshot.content.clone(),
+                    EditorSubmit::PiSystemPrompt {
+                        kind: *kind,
+                        expected_revision: snapshot.revision.clone(),
+                    },
+                );
+                Action::None
+            }
+            KeyCode::Char('d') => {
+                let Some((kind, snapshot)) = rows.get(self.pi_system_prompt_idx) else {
+                    return Action::None;
+                };
+                if !snapshot.exists {
+                    return Action::None;
+                }
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: texts::tui_confirm_delete_prompt_title().to_string(),
+                    message: crate::t!(
+                        format!("Delete {}?", pi_system_prompt_filename(*kind)),
+                        format!("删除 {}？", pi_system_prompt_filename(*kind))
+                    ),
+                    action: ConfirmAction::PiSystemPromptDelete {
+                        kind: *kind,
+                        expected_revision: snapshot.revision.clone(),
+                    },
+                });
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_pi_prompt_templates_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        let rows = &data.pi_prompts.templates;
+        match key.code {
+            KeyCode::Up => {
+                self.pi_prompt_template_idx = self.pi_prompt_template_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                if !rows.is_empty() {
+                    self.pi_prompt_template_idx =
+                        (self.pi_prompt_template_idx + 1).min(rows.len() - 1);
+                }
+                Action::None
+            }
+            KeyCode::Char('a') => {
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::menu_pi_prompt_templates().to_string(),
+                    prompt: if crate::cli::i18n::is_chinese() {
+                        "模板名称（不含 .md）"
+                    } else {
+                        "Template slug (without .md)"
+                    }
+                    .to_string(),
+                    input: TextInput::new(""),
+                    submit: TextSubmit::PiPromptTemplateCreate,
+                });
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char('v') => {
+                let Some(template) = rows.get(self.pi_prompt_template_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::TextView(TextViewState {
+                    title: format!("/{}", template.slug),
+                    lines: template.content.lines().map(str::to_string).collect(),
+                    scroll: 0,
+                    action: None,
+                });
+                Action::None
+            }
+            KeyCode::Char('e') => {
+                let Some(template) = rows.get(self.pi_prompt_template_idx) else {
+                    return Action::None;
+                };
+                self.open_editor(
+                    format!("/{}", template.slug),
+                    EditorKind::Plain,
+                    template.content.clone(),
+                    EditorSubmit::PiPromptTemplate {
+                        slug: template.slug.clone(),
+                        original_slug: Some(template.slug.clone()),
+                        expected_revision: template.revision.clone(),
+                    },
+                );
+                Action::None
+            }
+            KeyCode::Char('r') => {
+                let Some(template) = rows.get(self.pi_prompt_template_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::menu_pi_prompt_templates().to_string(),
+                    prompt: crate::t!("New template slug", "新的模板名称").to_string(),
+                    input: TextInput::new(template.slug.clone()),
+                    submit: TextSubmit::PiPromptTemplateRename {
+                        original_slug: template.slug.clone(),
+                        expected_revision: template.revision.clone(),
+                        content: template.content.clone(),
+                    },
+                });
+                Action::None
+            }
+            KeyCode::Char('d') => {
+                let Some(template) = rows.get(self.pi_prompt_template_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: texts::tui_confirm_delete_prompt_title().to_string(),
+                    message: crate::t!(
+                        format!("Delete /{}?", template.slug),
+                        format!("删除 /{}？", template.slug)
+                    ),
+                    action: ConfirmAction::PiPromptTemplateDelete {
+                        slug: template.slug.clone(),
+                        expected_revision: template.revision.clone(),
+                    },
+                });
+                Action::None
+            }
+            _ => Action::None,
         }
     }
 
@@ -1106,6 +1294,15 @@ impl App {
                 }
             }
         }
+    }
+}
+
+fn pi_system_prompt_filename(
+    kind: crate::services::pi_prompt_files::PiPromptFileKind,
+) -> &'static str {
+    match kind {
+        crate::services::pi_prompt_files::PiPromptFileKind::SystemAppend => "APPEND_SYSTEM.md",
+        crate::services::pi_prompt_files::PiPromptFileKind::SystemOverride => "SYSTEM.md",
     }
 }
 
