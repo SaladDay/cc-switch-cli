@@ -267,6 +267,12 @@ impl Provider {
                 .and_then(Value::as_str)
                 .is_none_or(|value| value.trim().is_empty()),
             AppType::Codex => {
+                let is_opencode_go = self
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .and_then(crate::codex_config::extract_codex_base_url)
+                    .is_some_and(|url| url.to_lowercase().contains("opencode.ai/zen/go"));
                 let api_key_missing = self
                     .settings_config
                     .pointer("/auth/OPENAI_API_KEY")
@@ -278,7 +284,7 @@ impl Provider {
                     .and_then(Value::as_str)
                     .and_then(crate::codex_config::extract_codex_experimental_bearer_token)
                     .is_none_or(|value| value.trim().is_empty());
-                api_key_missing && bearer_token_missing
+                !is_opencode_go && api_key_missing && bearer_token_missing
             }
             AppType::Gemini => {
                 let api_key_missing = self
@@ -339,7 +345,7 @@ pub struct UsageScript {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "autoQueryInterval")]
     pub auto_query_interval: Option<u64>,
-    /// Coding Plan 供应商标识（如 "kimi", "zhipu", "minimax"）
+    /// Coding Plan 供应商标识（如 "kimi", "zhipu", "minimax", "opencode_go"）
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "codingPlanProvider")]
     pub coding_plan_provider: Option<String>,

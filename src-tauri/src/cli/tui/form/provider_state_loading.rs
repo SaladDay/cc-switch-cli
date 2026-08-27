@@ -65,7 +65,7 @@ fn populate_local_proxy_settings_form(form: &mut ProviderAddFormState, provider:
     }
 }
 
-fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provider) {
+pub(super) fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provider) {
     form.usage_query_official_subscription = provider
         .official_subscription_tool(&form.app_type)
         .is_some();

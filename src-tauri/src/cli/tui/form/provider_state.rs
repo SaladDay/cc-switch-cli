@@ -1515,6 +1515,21 @@ impl ProviderAddFormState {
         }
     }
 
+    pub(super) fn reset_usage_query_template_state(&mut self) {
+        self.usage_query_enabled = false;
+        self.usage_query_official_subscription = false;
+        self.usage_query_template = UsageQueryTemplate::General;
+        self.usage_query_api_key.set("");
+        self.usage_query_base_url.set("");
+        self.usage_query_access_token.set("");
+        self.usage_query_user_id.set("");
+        self.usage_query_timeout.set("10");
+        self.usage_query_auto_interval.set("5");
+        self.usage_query_code = Self::USAGE_QUERY_GENERAL_PRESET.to_string();
+        self.usage_query_coding_plan_provider.set("kimi");
+        self.usage_query_touched = false;
+    }
+
     pub fn open_usage_query_page(&mut self) {
         self.refresh_usage_query_provider_kind();
         self.refresh_default_usage_query_template();
@@ -1987,7 +2002,7 @@ impl ProviderAddFormState {
     }
 
     pub fn cycle_usage_query_coding_plan_provider(&mut self) {
-        let options = ["kimi", "zhipu", "minimax"];
+        let options = ["kimi", "zhipu", "minimax", "opencode_go"];
         let current = options
             .iter()
             .position(|value| *value == self.usage_query_coding_plan_provider.value.trim())
@@ -3177,6 +3192,8 @@ pub(crate) fn detect_coding_plan_provider_for_usage_query(base_url: &str) -> Opt
         || url.contains("api.minimax.com")
     {
         Some("minimax")
+    } else if url.contains("opencode.ai/zen/go") {
+        Some("opencode_go")
     } else {
         None
     }

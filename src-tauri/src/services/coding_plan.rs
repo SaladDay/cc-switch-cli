@@ -1,6 +1,6 @@
-//! 国产 Token Plan 额度查询服务
+//! Token Plan / 编程套餐额度查询服务
 //!
-//! 支持 Kimi For Coding、智谱 GLM、MiniMax 的 Token Plan 额度查询。
+//! 支持 Kimi For Coding、智谱 GLM、MiniMax、OpenCode Go 的套餐额度查询。
 //! 复用 subscription 模块的 SubscriptionQuota / QuotaTier 类型。
 
 use super::subscription::{CredentialStatus, QuotaTier, SubscriptionQuota};
@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const TIER_FIVE_HOUR: &str = "five_hour";
 const TIER_WEEKLY_LIMIT: &str = "weekly_limit";
+const TIER_MONTHLY: &str = "monthly";
 
 // ── 供应商检测 ──────────────────────────────────────────────
 
@@ -17,6 +18,10 @@ enum CodingPlanProvider {
     ZhipuEn,
     MiniMaxCn,
     MiniMaxEn,
+    /// OpenCode Go（$10/月订阅，美元额度三时间窗口）。base_url 分两档：
+    /// `https://opencode.ai/zen/go`（Claude 直连 /messages）与
+    /// `https://opencode.ai/zen/go/v1`（Codex/Pi 走 Chat）。
+    OpencodeGo,
 }
 
 fn detect_provider(base_url: &str) -> Option<CodingPlanProvider> {
@@ -31,6 +36,10 @@ fn detect_provider(base_url: &str) -> Option<CodingPlanProvider> {
         Some(CodingPlanProvider::MiniMaxCn)
     } else if url.contains("api.minimax.io") {
         Some(CodingPlanProvider::MiniMaxEn)
+    } else if url.contains("opencode.ai/zen/go") {
+        // 同时覆盖 /zen/go 与 /zen/go/v1；Zen 按量版（/zen/v1）
+        // 没有任何用量/余额 API，刻意不命中。
+        Some(CodingPlanProvider::OpencodeGo)
     } else {
         None
     }
@@ -450,6 +459,123 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
     }
 }
 
+// ── OpenCode Go ─────────────────────────────────────────────
+
+/// 解析 OpenCode Go usage 端点响应为 tier 列表。
+///
+/// 响应形态（上游 `packages/console/app/src/routes/zen/go/v1/usage.ts`）：
+/// `{"usage":{"rolling"|"weekly"|"monthly":{"status":"ok"|"rate-limited",
+/// "percent":0-100 已用整数,"resetsAt":ISO8601}}}`，三窗口对应文档口径
+/// $12/5h、$30/周、$60/月（端点不回传金额，仅百分比）。
+///
+/// 该端点是第一方但未文档化的路由，上线当天就改过一次形态，故逐窗口
+/// 防御解析：缺失或 percent 不可解析的窗口跳过，不整体失败。
+///
+/// `status=="rate-limited"` 时上游已把 percent 钉在 100，无需特判；
+/// percent 为 0 时上游的 `resetsAt` 是「now+窗口时长」的占位值，
+/// 丢弃不展示倒计时。
+fn parse_opencode_go_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
+    const WINDOWS: [(&str, &str); 3] = [
+        ("rolling", TIER_FIVE_HOUR),
+        ("weekly", TIER_WEEKLY_LIMIT),
+        ("monthly", TIER_MONTHLY),
+    ];
+    let Some(usage) = body.get("usage") else {
+        return Vec::new();
+    };
+    let mut tiers = Vec::new();
+    for (key, tier_name) in WINDOWS {
+        let Some(window) = usage.get(key) else {
+            continue;
+        };
+        let Some(percent) = window.get("percent").and_then(parse_f64) else {
+            continue;
+        };
+        let resets_at = if percent > 0.0 {
+            window.get("resetsAt").and_then(extract_reset_time)
+        } else {
+            None
+        };
+        tiers.push(QuotaTier {
+            name: tier_name.to_string(),
+            utilization: percent,
+            resets_at,
+        });
+    }
+    tiers
+}
+
+async fn query_opencode_go(api_key: &str) -> Result<SubscriptionQuota, String> {
+    let client = crate::proxy::http_client::get();
+
+    // 用量端点只认 `Authorization: Bearer`——与推理侧 /messages 只认
+    // x-api-key 正好相反，不能互换。
+    let resp = client
+        .get("https://opencode.ai/zen/go/v1/usage")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => return Err(format!("Network error: {e}")),
+    };
+
+    let status = resp.status();
+    // 403 EntitlementError：key 本身有效（Zen 与 Go 共用同一把 workspace
+    // API key），但该 workspace 没有 Go 订阅——与 401 认证失败分开提示。
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Ok(make_error(
+            "API key is valid but has no OpenCode Go subscription (HTTP 403)".to_string(),
+        ));
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(SubscriptionQuota {
+            tool: "coding_plan".to_string(),
+            credential_status: CredentialStatus::Expired,
+            credential_message: Some("Invalid API key".to_string()),
+            success: false,
+            tiers: vec![],
+            extra_usage: None,
+            error: Some(format!("Authentication failed (HTTP {status})")),
+            queried_at: Some(now_millis()),
+        });
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
+    }
+
+    let raw = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => return Err(format!("Failed to read response: {e}")),
+    };
+    let body: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
+    };
+
+    let tiers = parse_opencode_go_tiers(&body);
+    // 三个窗口一个都没解析出来 = 响应形态不认识（未文档化端点可能再次
+    // 变形），明确报错而不是渲染一张空卡片。
+    if tiers.is_empty() {
+        return Ok(make_error("Unexpected usage response shape".to_string()));
+    }
+
+    Ok(SubscriptionQuota {
+        tool: "coding_plan".to_string(),
+        credential_status: CredentialStatus::Valid,
+        credential_message: None,
+        success: true,
+        tiers,
+        extra_usage: None,
+        error: None,
+        queried_at: Some(now_millis()),
+    })
+}
+
 // ── 公开入口 ────────────────────────────────────────────────
 
 pub async fn get_coding_plan_quota(
@@ -490,6 +616,7 @@ pub async fn get_coding_plan_quota(
         CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => query_zhipu(api_key).await,
         CodingPlanProvider::MiniMaxCn => query_minimax(api_key, true).await,
         CodingPlanProvider::MiniMaxEn => query_minimax(api_key, false).await,
+        CodingPlanProvider::OpencodeGo => query_opencode_go(api_key).await?,
     };
 
     Ok(quota)
@@ -497,8 +624,84 @@ pub async fn get_coding_plan_quota(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_zhipu_token_tiers, TIER_FIVE_HOUR, TIER_WEEKLY_LIMIT};
+    use super::{
+        detect_provider, parse_opencode_go_tiers, parse_zhipu_token_tiers, CodingPlanProvider,
+        TIER_FIVE_HOUR, TIER_MONTHLY, TIER_WEEKLY_LIMIT,
+    };
     use serde_json::json;
+
+    #[test]
+    fn opencode_go_detects_both_base_variants_but_not_zen() {
+        assert!(matches!(
+            detect_provider("https://opencode.ai/zen/go"),
+            Some(CodingPlanProvider::OpencodeGo)
+        ));
+        assert!(matches!(
+            detect_provider("https://opencode.ai/zen/go/v1"),
+            Some(CodingPlanProvider::OpencodeGo)
+        ));
+        assert!(detect_provider("https://opencode.ai/zen/v1").is_none());
+    }
+
+    #[test]
+    fn opencode_go_three_windows_map_to_known_tiers() {
+        let body = json!({
+            "usage": {
+                "rolling": { "status": "ok", "percent": 37, "resetsAt": "2026-08-26T14:12:03.000Z" },
+                "weekly":  { "status": "ok", "percent": 62, "resetsAt": "2026-08-31T00:00:00.000Z" },
+                "monthly": { "status": "rate-limited", "percent": 100, "resetsAt": "2026-09-11T00:00:00.000Z" }
+            }
+        });
+        let tiers = parse_opencode_go_tiers(&body);
+        assert_eq!(tiers.len(), 3);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 37.0);
+        assert_eq!(
+            tiers[0].resets_at.as_deref(),
+            Some("2026-08-26T14:12:03.000Z")
+        );
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 62.0);
+        assert_eq!(tiers[2].name, TIER_MONTHLY);
+        assert_eq!(tiers[2].utilization, 100.0);
+    }
+
+    #[test]
+    fn opencode_go_zero_percent_drops_placeholder_reset_time() {
+        let body = json!({
+            "usage": {
+                "rolling": { "status": "ok", "percent": 0, "resetsAt": "2026-08-26T15:00:00.000Z" }
+            }
+        });
+        let tiers = parse_opencode_go_tiers(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert!(tiers[0].resets_at.is_none());
+    }
+
+    #[test]
+    fn opencode_go_partial_windows_skip_malformed() {
+        let body = json!({
+            "usage": {
+                "rolling": { "status": "ok" },
+                "weekly":  { "status": "ok", "percent": "12" },
+                "monthly": null
+            }
+        });
+        let tiers = parse_opencode_go_tiers(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[0].utilization, 12.0);
+    }
+
+    #[test]
+    fn opencode_go_legacy_flat_shape_returns_empty() {
+        let body = json!({
+            "useBalance": false,
+            "rollingUsage": { "status": "ok", "usagePercent": 37, "resetInSec": 3600 }
+        });
+        assert!(parse_opencode_go_tiers(&body).is_empty());
+    }
 
     #[test]
     fn zhipu_classifies_windows_by_unit_even_when_weekly_resets_first() {

@@ -25,6 +25,27 @@ pub(crate) fn builtin_provider_preset_value(
     }
 }
 
+pub(crate) fn with_opencode_go_usage_script(mut provider: Value) -> Value {
+    let Some(provider_obj) = provider.as_object_mut() else {
+        return provider;
+    };
+    let meta = provider_obj.entry("meta").or_insert_with(|| json!({}));
+    if let Some(meta_obj) = meta.as_object_mut() {
+        meta_obj.entry("usage_script").or_insert_with(|| {
+            json!({
+                "enabled": true,
+                "language": "javascript",
+                "code": "",
+                "timeout": 10,
+                "templateType": "token_plan",
+                "autoQueryInterval": 5,
+                "codingPlanProvider": "opencode_go",
+            })
+        });
+    }
+    provider
+}
+
 #[allow(clippy::too_many_arguments)]
 fn claude_provider(
     name: &str,
@@ -175,7 +196,7 @@ fn claude_provider_preset(preset: BuiltinProviderPresetId) -> Value {
             "#000000",
             None,
         ),
-        OpenCodeGo => claude_provider(
+        OpenCodeGo => with_opencode_go_usage_script(claude_provider(
             "OpenCode Go",
             "https://opencode.ai/go",
             "https://opencode.ai/zen/go",
@@ -188,7 +209,7 @@ fn claude_provider_preset(preset: BuiltinProviderPresetId) -> Value {
             "opencode",
             "#211E1E",
             None,
-        ),
+        )),
         OpenRouter => claude_provider(
             "OpenRouter",
             "https://openrouter.ai",
@@ -438,7 +459,7 @@ fn codex_provider_preset(preset: BuiltinProviderPresetId) -> Value {
                 None,
             )
         }
-        OpenCodeGo => codex_provider(
+        OpenCodeGo => with_opencode_go_usage_script(codex_provider(
             "OpenCode Go",
             "https://opencode.ai/go",
             "opencode_go",
@@ -457,7 +478,7 @@ fn codex_provider_preset(preset: BuiltinProviderPresetId) -> Value {
                 json!({ "model": "mimo-v2.5-pro", "displayName": "MiMo V2.5 Pro", "contextWindow": 1_048_576 }),
             ],
             Some(chat_reasoning("none", true, Some("zen"))),
-        ),
+        )),
         OpenRouter => codex_provider(
             "OpenRouter",
             "https://openrouter.ai",

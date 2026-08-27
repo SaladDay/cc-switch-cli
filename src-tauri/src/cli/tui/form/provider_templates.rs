@@ -1,6 +1,8 @@
 use crate::app_config::AppType;
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig, Provider};
-use crate::provider_preset_builtin::{builtin_provider_preset_value, BuiltinProviderPresetId};
+use crate::provider_preset_builtin::{
+    builtin_provider_preset_value, with_opencode_go_usage_script, BuiltinProviderPresetId,
+};
 use crate::provider_preset_models::{
     codex_oauth_claude_env, sponsor_hermes_models, sponsor_model_family, sponsor_openclaw_models,
     sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL, CODEX_OAUTH_FAST_MODEL,
@@ -14,7 +16,7 @@ use crate::provider_preset_sponsors::{
 };
 use serde_json::json;
 
-use super::provider_state_loading::populate_form_from_provider;
+use super::provider_state_loading::{populate_form_from_provider, populate_usage_query_form};
 use super::{
     ClaudeApiFormat, CodexModelCatalogField, CodexWireApi, FormMode, GeminiAuthType,
     PromptCacheRoutingMode, ProviderAddFormState, HERMES_DEFAULT_API_MODE,
@@ -479,6 +481,7 @@ impl ProviderAddFormState {
         self.clear_text_edit();
         self.id_is_manual = false;
         self.reset_local_proxy_settings_state();
+        self.reset_usage_query_template_state();
         self.is_full_url = false;
         if matches!(self.app_type, AppType::Codex) {
             self.codex_prompt_cache_routing = PromptCacheRoutingMode::Auto;
@@ -864,6 +867,13 @@ impl ProviderAddFormState {
                 "partnerPromotionKey": partner_promotion_key,
             });
         }
+        if settings
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|url| url.to_lowercase().contains("opencode.ai/zen/go"))
+        {
+            extra = with_opencode_go_usage_script(extra);
+        }
 
         self.extra = extra;
         self.id.set(preset.provider_key);
@@ -920,6 +930,18 @@ impl ProviderAddFormState {
             }
             if let Some(max_tokens) = model.get("maxTokens").and_then(serde_json::Value::as_u64) {
                 self.opencode_model_output_limit.set(max_tokens.to_string());
+            }
+        }
+
+        if self.extra.pointer("/meta/usage_script").is_some() {
+            let provider = json!({
+                "id": preset.provider_key,
+                "name": preset.label,
+                "settingsConfig": settings,
+                "meta": self.extra.get("meta"),
+            });
+            if let Ok(provider) = serde_json::from_value::<Provider>(provider) {
+                populate_usage_query_form(self, &provider);
             }
         }
     }

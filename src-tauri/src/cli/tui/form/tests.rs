@@ -7804,6 +7804,56 @@ fn provider_add_form_usage_query_table_fields_hide_script_row() {
 }
 
 #[test]
+fn opencode_go_templates_enable_token_plan_usage_query() {
+    for app_type in [AppType::Claude, AppType::Codex, AppType::Pi] {
+        let mut form = ProviderAddFormState::new(app_type.clone());
+        form.apply_template(
+            template_index_by_label(app_type.clone(), "OpenCode Go"),
+            &[],
+        );
+
+        assert!(form.usage_query_enabled, "{app_type:?}");
+        assert_eq!(
+            form.usage_query_template,
+            UsageQueryTemplate::TokenPlan,
+            "{app_type:?}"
+        );
+        assert_eq!(
+            form.usage_query_coding_plan_provider.value, "opencode_go",
+            "{app_type:?}"
+        );
+
+        let provider = form.to_provider_json_value();
+        let script = &provider["meta"]["usage_script"];
+        assert_eq!(script["enabled"], true, "{app_type:?}");
+        assert_eq!(script["language"], "javascript", "{app_type:?}");
+        assert_eq!(script["code"], "", "{app_type:?}");
+        assert_eq!(script["timeout"], 10, "{app_type:?}");
+        assert_eq!(script["templateType"], "token_plan", "{app_type:?}");
+        assert_eq!(script["autoQueryInterval"], 5, "{app_type:?}");
+        assert_eq!(script["codingPlanProvider"], "opencode_go", "{app_type:?}");
+    }
+}
+
+#[test]
+fn switching_from_opencode_go_template_clears_its_usage_default() {
+    for app_type in [AppType::Claude, AppType::Codex, AppType::Pi] {
+        let mut form = ProviderAddFormState::new(app_type.clone());
+        form.apply_template(
+            template_index_by_label(app_type.clone(), "OpenCode Go"),
+            &[],
+        );
+        form.apply_template(template_index_by_label(app_type, "DeepSeek"), &[]);
+
+        assert!(!form.usage_query_enabled);
+        assert_ne!(form.usage_query_template, UsageQueryTemplate::TokenPlan);
+        assert!(form.to_provider_json_value()["meta"]
+            .get("usage_script")
+            .is_none());
+    }
+}
+
+#[test]
 fn provider_add_form_usage_query_custom_template_includes_dynamic_variable_comments() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     form.claude_base_url.set("https://nowcoding.ai/v1");
