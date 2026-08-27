@@ -2143,6 +2143,19 @@ fn sync_current_to_live_prefers_effective_current_from_local_settings() {
 
     crate::settings::set_current_provider(&AppType::Claude, Some("p2"))
         .expect("set local effective current override");
+    futures::executor::block_on(
+        state.db.save_live_backup(
+            AppType::Claude.as_str(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "token1",
+                    "ANTHROPIC_BASE_URL": "https://claude.one"
+                }
+            })
+            .to_string(),
+        ),
+    )
+    .expect("seed stale live backup");
 
     ProviderService::sync_current_to_live(&state)
         .expect("sync_current_to_live should use effective current provider");
@@ -2161,6 +2174,18 @@ fn sync_current_to_live_prefers_effective_current_from_local_settings() {
         env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
         Some("https://claude.two"),
         "sync_current_to_live should not keep using stale config.current when local settings override it"
+    );
+    let backup = futures::executor::block_on(state.db.get_live_backup(AppType::Claude.as_str()))
+        .expect("read refreshed live backup")
+        .expect("stale live backup remains available");
+    let backup: Value =
+        serde_json::from_str(&backup.original_config).expect("parse refreshed backup");
+    assert_eq!(
+        backup
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2"),
+        "sync_current_to_live should refresh a stale restore backup"
     );
 
     let cfg = state.config.read().expect("read config after sync");
@@ -3747,6 +3772,319 @@ fn provider_update_overwrites_claude_live_for_current_provider() {
 
 #[tokio::test]
 #[serial]
+async fn provider_update_writes_live_and_refreshes_stale_backup() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let original = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-old",
+                "ANTHROPIC_BASE_URL": "https://claude.old"
+            }
+        }),
+        None,
+    );
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), original.clone());
+    }
+
+    write_json_file(&get_claude_settings_path(), &original.settings_config)
+        .expect("seed live settings");
+    let state = state_from_config(config);
+    state
+        .db
+        .save_live_backup(
+            AppType::Claude.as_str(),
+            &serde_json::to_string(&original.settings_config).expect("serialize stale backup"),
+        )
+        .await
+        .expect("seed stale live backup");
+    assert!(!state.proxy_service.is_running().await);
+
+    let updated = Provider::with_id(
+        "p1".to_string(),
+        "First Updated".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-new",
+                "ANTHROPIC_BASE_URL": "https://claude.new"
+            }
+        }),
+        None,
+    );
+    ProviderService::update(&state, AppType::Claude, updated)
+        .expect("update should ignore stale backup ownership");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.new")
+    );
+    let backup = state
+        .db
+        .get_live_backup(AppType::Claude.as_str())
+        .await
+        .expect("read refreshed backup")
+        .expect("stale backup should remain available for restore");
+    let backup: Value =
+        serde_json::from_str(&backup.original_config).expect("parse refreshed backup");
+    assert_eq!(
+        backup
+            .pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.new")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn provider_update_ignores_enabled_flag_without_takeover_evidence() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let original = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-old",
+                "ANTHROPIC_BASE_URL": "https://claude.old"
+            }
+        }),
+        None,
+    );
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), original.clone());
+    }
+
+    write_json_file(&get_claude_settings_path(), &original.settings_config)
+        .expect("seed live settings");
+    let state = state_from_config(config);
+    let mut proxy_config = state
+        .db
+        .get_proxy_config_for_app(AppType::Claude.as_str())
+        .await
+        .expect("read proxy config");
+    proxy_config.enabled = true;
+    state
+        .db
+        .update_proxy_config_for_app(proxy_config)
+        .await
+        .expect("leave stale enabled flag");
+    assert!(!state.proxy_service.is_running().await);
+    assert!(state
+        .db
+        .get_live_backup(AppType::Claude.as_str())
+        .await
+        .expect("read live backup")
+        .is_none());
+
+    let updated = Provider::with_id(
+        "p1".to_string(),
+        "First Updated".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-new",
+                "ANTHROPIC_BASE_URL": "https://claude.new"
+            }
+        }),
+        None,
+    );
+    ProviderService::update(&state, AppType::Claude, updated)
+        .expect("update should ignore an uncorroborated enabled flag");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.new")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn provider_update_waits_for_state_mutation_guard() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let original = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-old",
+                "ANTHROPIC_BASE_URL": "https://claude.old"
+            }
+        }),
+        None,
+    );
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), original.clone());
+    }
+    write_json_file(&get_claude_settings_path(), &original.settings_config)
+        .expect("seed live settings");
+    let state = std::sync::Arc::new(state_from_config(config));
+    let mutation_guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+        .await
+        .expect("acquire simulated daemon mutation guard");
+
+    let updated = Provider::with_id(
+        "p1".to_string(),
+        "First Updated".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token-new",
+                "ANTHROPIC_BASE_URL": "https://claude.new"
+            }
+        }),
+        None,
+    );
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let update_state = state.clone();
+    let worker = std::thread::spawn(move || {
+        ready_tx.send(()).expect("signal update start");
+        let result = ProviderService::update(&update_state, AppType::Claude, updated);
+        result_tx.send(result).expect("send update result");
+    });
+    ready_rx.recv().expect("wait for update worker");
+    assert!(
+        matches!(
+            result_rx.recv_timeout(std::time::Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "provider update must wait while daemon-style state mutation is active"
+    );
+
+    drop(mutation_guard);
+    result_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("update should resume after mutation guard release")
+        .expect("update should succeed");
+    worker.join().expect("join update worker");
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read updated live");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.new")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn common_snippet_update_during_takeover_refreshes_backup_with_new_value() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let provider = with_common_enabled(Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "ANTHROPIC_BASE_URL": "https://claude.example"
+            }
+        }),
+        None,
+    ));
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    config.common_config_snippets.claude =
+        Some(r#"{"includeCoAuthoredBy":true,"env":{"OLD_COMMON":"remove-me"}}"#.to_string());
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), provider.clone());
+    }
+
+    let state = state_from_config(config);
+    let old_backup = ProviderService::build_live_backup_snapshot(
+        &AppType::Claude,
+        &provider,
+        Some(r#"{"includeCoAuthoredBy":true,"env":{"OLD_COMMON":"remove-me"}}"#),
+        true,
+    )
+    .expect("build old effective backup");
+    state
+        .db
+        .save_live_backup(
+            AppType::Claude.as_str(),
+            &serde_json::to_string(&old_backup).expect("serialize old backup"),
+        )
+        .await
+        .expect("seed takeover backup");
+    let takeover_live = json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED",
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721"
+        }
+    });
+    write_json_file(&get_claude_settings_path(), &takeover_live)
+        .expect("seed takeover-owned live settings");
+    assert!(!state.proxy_service.is_running().await);
+
+    ProviderService::set_common_config_snippet(
+        &state,
+        AppType::Claude,
+        Some(r#"{"includeCoAuthoredBy":false}"#.to_string()),
+    )
+    .expect("update common snippet during stopped takeover");
+
+    let backup = state
+        .db
+        .get_live_backup(AppType::Claude.as_str())
+        .await
+        .expect("read refreshed backup")
+        .expect("takeover backup should remain");
+    let backup: Value =
+        serde_json::from_str(&backup.original_config).expect("parse refreshed backup");
+    assert_eq!(
+        backup.get("includeCoAuthoredBy").and_then(Value::as_bool),
+        Some(false),
+        "restore backup must contain the newly saved common config"
+    );
+    assert!(
+        backup.pointer("/env/OLD_COMMON").is_none(),
+        "restore backup must remove fields deleted from the common config"
+    );
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read takeover live");
+    assert_eq!(live, takeover_live, "stopped takeover still owns live");
+}
+
+#[tokio::test]
+#[serial]
 async fn provider_update_keeps_running_claude_takeover_and_refreshes_restore_backup() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
@@ -4065,6 +4403,8 @@ async fn provider_update_uses_live_marker_as_takeover_ownership_when_proxy_is_st
     );
     ProviderService::update(&state, AppType::Claude, updated)
         .expect("update takeover-owned provider while proxy is stopped");
+    ProviderService::sync_current_to_live(&state)
+        .expect("bulk live sync should preserve takeover ownership");
 
     let live: Value = read_json_file(&get_claude_settings_path()).expect("read unchanged live");
     assert_eq!(

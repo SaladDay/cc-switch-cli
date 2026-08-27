@@ -42,6 +42,10 @@ use common::strip_codex_common_config_from_full_text;
 /// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
 /// live 配置，使开关即时生效（无需等下一次切换）。
 pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, AppError> {
+    let _mutation_guard = futures::executor::block_on(
+        crate::services::state_coordination::acquire_restore_mutation_guard(),
+    )
+    .map_err(AppError::Message)?;
     let current_id = ProviderService::current(state, AppType::Codex)?;
     if current_id.is_empty() {
         return Ok(false);
@@ -54,30 +58,12 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
         return Ok(false);
     }
 
-    let has_live_backup =
-        futures::executor::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
-            .ok()
-            .flatten()
-            .is_some();
-    let live_taken_over = state
-        .proxy_service
-        .detect_takeover_in_live_config_for_app(&AppType::Codex);
-    if has_live_backup || live_taken_over {
-        futures::executor::block_on(
-            state
-                .proxy_service
-                .update_live_backup_from_provider(AppType::Codex.as_str(), provider),
-        )
-        .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-        return Ok(true);
-    }
-
     let common_config_snippet = state.db.get_config_snippet(AppType::Codex.as_str())?;
-    ProviderService::write_live_snapshot(
-        &AppType::Codex,
+    let wrote_live = sync_provider_to_live_respecting_takeover(
+        state,
+        AppType::Codex,
         provider,
         common_config_snippet.as_deref(),
-        true,
     )?;
     // 重写 live 会整体替换 config.toml（有意设计），[mcp_servers] 随之丢失，
     // 写完必须立刻从 DB 重新投影启用的 MCP。只投影 Codex 而非
@@ -85,8 +71,12 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
     // 应用 live 损坏会阻断 Codex 的重投影，让刚被清掉的 [mcp_servers]
     // 无人补回。投影失败降级为警告：此时 live 已按新开关状态落盘，
     // 若把错误上抛并回滚设置，会制造“设置=旧值、live=新桶”的会话分裂。
-    if let Err(err) = McpService::sync_enabled_for_app(state, &AppType::Codex) {
-        log::warn!("统一会话开关重写 live 后重投影 Codex MCP 失败（将在下次同步时自愈）: {err}");
+    if wrote_live {
+        if let Err(err) = McpService::sync_enabled_for_app(state, &AppType::Codex) {
+            log::warn!(
+                "统一会话开关重写 live 后重投影 Codex MCP 失败（将在下次同步时自愈）: {err}"
+            );
+        }
     }
     Ok(true)
 }
@@ -166,8 +156,112 @@ struct PostCommitAction {
     common_config_snippet: Option<String>,
     previous_common_config_snippet: Option<String>,
     takeover_active: bool,
+    refresh_stale_backup: bool,
     sync_proxy_live: bool,
     activate_provider: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LiveProjectionOwnership {
+    takeover_active: bool,
+    live_taken_over: bool,
+    refresh_stale_backup: bool,
+}
+
+fn live_projection_ownership(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<LiveProjectionOwnership, AppError> {
+    let has_live_backup =
+        match futures::executor::block_on(state.db.get_live_backup(app_type.as_str())) {
+            Ok(backup) => backup.is_some(),
+            Err(err) => {
+                log::warn!(
+                    "读取 {} Live 备份失败，按无备份处理并继续写入 live 配置: {err}",
+                    app_type.as_str()
+                );
+                false
+            }
+        };
+    let live_taken_over = state
+        .proxy_service
+        .detect_takeover_in_live_config_for_app(app_type);
+    let takeover_enabled =
+        match futures::executor::block_on(state.db.get_proxy_config_for_app(app_type.as_str())) {
+            Ok(config) => config.enabled,
+            Err(err) => {
+                log::warn!(
+                    "读取 {} 代理接管标志失败，按未接管处理并继续写入 live 配置: {err}",
+                    app_type.as_str()
+                );
+                false
+            }
+        };
+    let takeover_active = live_taken_over
+        || (takeover_enabled
+            && has_live_backup
+            && futures::executor::block_on(state.proxy_service.is_running()));
+
+    Ok(LiveProjectionOwnership {
+        takeover_active,
+        live_taken_over,
+        refresh_stale_backup: has_live_backup && !takeover_active,
+    })
+}
+
+fn sync_provider_to_live_respecting_takeover(
+    state: &AppState,
+    app_type: AppType,
+    provider: &Provider,
+    common_config_snippet: Option<&str>,
+) -> Result<bool, AppError> {
+    let _switch_guard =
+        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
+    let ownership = live_projection_ownership(state, &app_type)?;
+
+    if ownership.takeover_active {
+        futures::executor::block_on(
+            state
+                .proxy_service
+                .update_live_backup_from_provider(app_type.as_str(), provider),
+        )
+        .map_err(|err| AppError::Message(format!("更新 Live 备份失败: {err}")))?;
+
+        if futures::executor::block_on(state.proxy_service.is_running()) {
+            let result = match app_type {
+                AppType::Claude => futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .sync_claude_live_from_provider_while_proxy_active(provider),
+                ),
+                AppType::Codex if ownership.live_taken_over => futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .sync_codex_live_from_provider_while_proxy_active(provider),
+                ),
+                _ => Ok(()),
+            };
+            result.map_err(|err| {
+                AppError::Message(format!("同步 {} Live 配置失败: {err}", app_type.as_str()))
+            })?;
+        }
+        return Ok(false);
+    }
+
+    ProviderService::write_live_snapshot(&app_type, provider, common_config_snippet, true)?;
+    if ownership.refresh_stale_backup {
+        if let Err(err) = futures::executor::block_on(
+            state
+                .proxy_service
+                .update_live_backup_from_provider(app_type.as_str(), provider),
+        ) {
+            log::warn!(
+                "刷新 {} 残留 Live 备份失败（不影响本次 live 写入）: {err}",
+                app_type.as_str()
+            );
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Clone)]
@@ -831,13 +925,48 @@ impl ProviderService {
             let previous_backup =
                 futures::executor::block_on(state.db.get_live_backup(action.app_type.as_str()))?
                     .map(|backup| backup.original_config);
-            let backup_snapshot =
-                futures::executor::block_on(state.proxy_service.prepare_live_backup_from_provider(
-                    action.app_type.as_str(),
+            let apply_common_config = action
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.apply_common_config)
+                .unwrap_or(false);
+            let backup_snapshot = Self::build_live_backup_snapshot(
+                &action.app_type,
+                &action.provider,
+                action.common_config_snippet.as_deref(),
+                apply_common_config,
+            )?;
+            let previous_common_config_snippet = action
+                .previous_common_config_snippet
+                .as_deref()
+                .or(action.common_config_snippet.as_deref());
+            let previous_backup_snapshot = action
+                .previous_provider
+                .as_ref()
+                .map(|provider| {
+                    let apply_common_config = provider
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.apply_common_config)
+                        .unwrap_or(false);
+                    Self::build_live_backup_snapshot(
+                        &action.app_type,
+                        provider,
+                        previous_common_config_snippet,
+                        apply_common_config,
+                    )
+                })
+                .transpose()?;
+            let backup_snapshot = futures::executor::block_on(
+                state.proxy_service.prepare_live_backup_from_snapshots(
+                    &action.app_type,
                     &action.provider,
-                    action.previous_provider.as_ref(),
-                ))
-                .map_err(AppError::Message)?;
+                    previous_backup_snapshot.as_ref(),
+                    backup_snapshot,
+                ),
+            )
+            .map_err(AppError::Message)?;
             PreparedPostCommitEffect::ProxyLiveBackup {
                 snapshot: backup_snapshot,
                 previous_backup,
@@ -964,6 +1093,19 @@ impl ProviderService {
                 &prepared.action.app_type,
                 &prepared.action.provider.id,
             )?;
+        }
+        if prepared.action.refresh_stale_backup {
+            if let Err(err) =
+                futures::executor::block_on(state.proxy_service.update_live_backup_from_provider(
+                    prepared.action.app_type.as_str(),
+                    &prepared.action.provider,
+                ))
+            {
+                log::warn!(
+                    "刷新 {} 残留 Live 备份失败（不影响本次 live 写入）: {err}",
+                    prepared.action.app_type.as_str()
+                );
+            }
         }
 
         if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
@@ -1364,6 +1506,8 @@ impl ProviderService {
         app_type: &AppType,
         current_provider_id: Option<&str>,
         takeover_active: bool,
+        live_taken_over: bool,
+        refresh_stale_backup: bool,
         previous_common_config_snippet: Option<String>,
     ) -> Result<Option<PostCommitAction>, AppError> {
         if app_type.is_additive_mode() {
@@ -1379,6 +1523,8 @@ impl ProviderService {
             app_type,
             current_provider_id,
             takeover_active,
+            live_taken_over,
+            refresh_stale_backup,
             previous_common_config_snippet,
         )
     }
@@ -1388,6 +1534,8 @@ impl ProviderService {
         app_type: &AppType,
         current_provider_id: &str,
         takeover_active: bool,
+        live_taken_over: bool,
+        refresh_stale_backup: bool,
         previous_common_config_snippet: Option<String>,
     ) -> Result<Option<PostCommitAction>, AppError> {
         let provider = config
@@ -1400,15 +1548,17 @@ impl ProviderService {
 
         Ok(Some(PostCommitAction {
             app_type: app_type.clone(),
+            previous_provider: Some(provider.clone()),
             provider,
-            previous_provider: None,
             backup: Self::capture_live_snapshot(app_type)?,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
             previous_common_config_snippet,
             takeover_active,
-            sync_proxy_live: false,
+            refresh_stale_backup,
+            sync_proxy_live: (takeover_active && matches!(app_type, AppType::Claude))
+                || (live_taken_over && matches!(app_type, AppType::Codex)),
             activate_provider: false,
         }))
     }
@@ -1806,6 +1956,23 @@ impl ProviderService {
             }
         });
         Self::validate_common_config_snippet(&app_type, normalized_snippet.as_deref())?;
+        let _mutation_guard = if app_type.is_additive_mode() {
+            None
+        } else {
+            Some(
+                futures::executor::block_on(
+                    crate::services::state_coordination::acquire_restore_mutation_guard(),
+                )
+                .map_err(AppError::Message)?,
+            )
+        };
+        let _switch_guard = if app_type.is_additive_mode() {
+            None
+        } else {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        };
 
         // 清空（None）→ 记录 cleared=true，避免下次启动自动重新播种；
         // 设置非空片段 → cleared=false。
@@ -1852,21 +2019,10 @@ impl ProviderService {
             } else {
                 false
             };
-        let takeover_active = if app_type.is_additive_mode() {
-            false
+        let ownership = if app_type.is_additive_mode() {
+            LiveProjectionOwnership::default()
         } else {
-            let is_running = state
-                .proxy_service
-                .is_running_blocking()
-                .map_err(AppError::Message)?;
-            if !is_running {
-                false
-            } else {
-                state
-                    .proxy_service
-                    .is_app_takeover_active_blocking(&app_type)
-                    .map_err(AppError::Message)?
-            }
+            live_projection_ownership(state, &app_type)?
         };
 
         Self::run_transaction_preserving_current_providers(
@@ -1923,7 +2079,9 @@ impl ProviderService {
                     config,
                     &app_type_clone,
                     effective_current_provider.as_deref(),
-                    takeover_active,
+                    ownership.takeover_active,
+                    ownership.live_taken_over,
+                    ownership.refresh_stale_backup,
                     old_snippet,
                 )?;
                 Ok(((), action))
@@ -2062,6 +2220,7 @@ impl ProviderService {
                     common_config_snippet,
                     previous_common_config_snippet: None,
                     takeover_active: false,
+                    refresh_stale_backup: false,
                     sync_proxy_live: false,
                     activate_provider: false,
                 })
@@ -2082,6 +2241,23 @@ impl ProviderService {
         if matches!(app_type, AppType::Pi) {
             return pi::update(state, None, provider);
         }
+        let _mutation_guard = if app_type.is_additive_mode() {
+            None
+        } else {
+            Some(
+                futures::executor::block_on(
+                    crate::services::state_coordination::acquire_restore_mutation_guard(),
+                )
+                .map_err(AppError::Message)?,
+            )
+        };
+        let _switch_guard = if app_type.is_additive_mode() {
+            None
+        } else {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        };
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
@@ -2097,18 +2273,10 @@ impl ProviderService {
                 state.db.get_current_provider(app_type.as_str())?,
             )
         };
-        let (takeover_active, live_taken_over) = if app_type.is_additive_mode() {
-            (false, false)
+        let ownership = if app_type.is_additive_mode() {
+            LiveProjectionOwnership::default()
         } else {
-            let has_live_backup =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            (has_live_backup || live_taken_over, live_taken_over)
+            live_projection_ownership(state, &app_type)?
         };
 
         Self::run_transaction(state, move |config| {
@@ -2222,14 +2390,16 @@ impl ProviderService {
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
-                    sync_mcp: matches!(&app_type_clone, AppType::Codex) && !takeover_active,
+                    sync_mcp: matches!(&app_type_clone, AppType::Codex)
+                        && !ownership.takeover_active,
                     refresh_snapshot: false,
                     common_config_snippet,
                     previous_common_config_snippet: None,
-                    takeover_active,
-                    sync_proxy_live: (takeover_active
+                    takeover_active: ownership.takeover_active,
+                    refresh_stale_backup: ownership.refresh_stale_backup,
+                    sync_proxy_live: (ownership.takeover_active
                         && matches!(&app_type_clone, AppType::Claude))
-                        || (live_taken_over && matches!(&app_type_clone, AppType::Codex)),
+                        || (ownership.live_taken_over && matches!(&app_type_clone, AppType::Codex)),
                     activate_provider: false,
                 })
             } else {
@@ -2705,6 +2875,11 @@ impl ProviderService {
     pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
         use crate::services::mcp::McpService;
 
+        let _mutation_guard = futures::executor::block_on(
+            crate::services::state_coordination::acquire_restore_mutation_guard(),
+        )
+        .map_err(AppError::Message)?;
+
         // 在读锁下收集所有需要的数据，避免持锁写文件
         let snapshots: Vec<(AppType, Provider, Option<String>)> = {
             let guard = state.config.read().map_err(AppError::from)?;
@@ -2764,7 +2939,16 @@ impl ProviderService {
                 continue;
             }
 
-            Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)?;
+            if app_type.is_additive_mode() {
+                Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)?;
+            } else {
+                sync_provider_to_live_respecting_takeover(
+                    state,
+                    app_type.clone(),
+                    provider,
+                    snippet.as_deref(),
+                )?;
+            }
         }
 
         if let Err(e) =
@@ -2819,6 +3003,7 @@ impl ProviderService {
                 common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
                 previous_common_config_snippet: None,
                 takeover_active: false,
+                refresh_stale_backup: false,
                 sync_proxy_live: false,
                 activate_provider: matches!(app_type, AppType::Hermes),
             });
@@ -2859,6 +3044,7 @@ impl ProviderService {
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
             previous_common_config_snippet,
             takeover_active: false,
+            refresh_stale_backup: false,
             sync_proxy_live: false,
             activate_provider: false,
         })

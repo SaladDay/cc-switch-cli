@@ -1,4 +1,4 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -30,33 +30,18 @@ impl Drop for RestoreMutationGuard {
 }
 
 fn open_lock_file(lock_path: &Path) -> io::Result<File> {
-    match OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(lock_path)
-    {
-        Ok(file) => Ok(file),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if let Some(parent) = lock_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(lock_path)
-        }
-        Err(error) => Err(error),
-    }
 }
 
 pub(crate) async fn acquire_restore_mutation_guard() -> Result<RestoreMutationGuard, String> {
     let lock_path = RestoreMutationGuard::lock_path();
     if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent)
+        crate::config::create_managed_config_dir_all(parent)
             .map_err(|error| format!("create state coordination dir failed: {error}"))?;
     }
 

@@ -899,6 +899,7 @@ impl ProxyService {
     }
 
     pub async fn recover_takeovers_on_startup(&self) -> Result<(), String> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
         for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
             if self.has_managed_worker_for_app(&app_type).await {
                 self.reconcile_takeover_for_live_managed_worker(&app_type)
@@ -2265,11 +2266,32 @@ impl ProxyService {
         let previous_backup_snapshot = previous_provider
             .map(|provider| self.build_live_snapshot_from_provider(&app_type, provider))
             .transpose()?;
-        let existing_backup_value = self.load_live_backup_value(&app_type).await?;
-        Self::merge_live_backup_snapshot(
+        self.prepare_live_backup_from_snapshots(
             &app_type,
-            existing_backup_value.as_ref(),
+            provider,
             previous_backup_snapshot.as_ref(),
+            backup_snapshot,
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_live_backup_from_snapshots(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        previous_backup_snapshot: Option<&Value>,
+        backup_snapshot: Value,
+    ) -> Result<Value, String> {
+        if matches!(app_type, AppType::Codex) {
+            return self
+                .prepare_codex_live_backup_replacement(provider, backup_snapshot)
+                .await;
+        }
+        let existing_backup_value = self.load_live_backup_value(app_type).await?;
+        Self::merge_live_backup_snapshot(
+            app_type,
+            existing_backup_value.as_ref(),
+            previous_backup_snapshot,
             backup_snapshot,
         )
     }
@@ -2842,6 +2864,7 @@ impl ProxyService {
         fallback_provider_id: Option<&str>,
         options: EnableTakeoverOptions,
     ) -> Result<(), String> {
+        let _switch_guard = self.switch_locks.lock_for_app(app_type.as_str()).await;
         self.validate_app_proxy_activation(app_type, fallback_provider_id)
             .await?;
 
@@ -2943,6 +2966,7 @@ impl ProxyService {
         app_type: &AppType,
         stop_server_when_last: bool,
     ) -> Result<(), String> {
+        let _switch_guard = self.switch_locks.lock_for_app(app_type.as_str()).await;
         let app_key = app_type.as_str();
         let app_proxy = self
             .db
