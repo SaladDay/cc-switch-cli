@@ -6,8 +6,8 @@ mod codex;
 mod codex_openai_auth_tests;
 mod common;
 mod common_config;
-// The bridge is deliberately not wired into production import/write flows in
-// this stage; the next migration stage consumes it after conformance review.
+// Provider conversion remains staged for later migrations; native import uses
+// only the narrow, read-only projection driver in this stage.
 #[allow(dead_code)]
 mod core_bridge;
 mod endpoints;
@@ -116,6 +116,33 @@ fn current_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn core_native_import_settings(app: &AppType) -> Option<Value> {
+    match core_bridge::native_import_settings(app) {
+        Ok(settings) => Some(settings),
+        Err(error) => {
+            log::debug!(
+                "Core {} import was not compatible with this live config; using the CLI reader: {error}",
+                app.as_str()
+            );
+            None
+        }
+    }
+}
+
+fn read_legacy_gemini_import_settings() -> Result<Value, AppError> {
+    use crate::gemini_config::{env_to_json, get_gemini_settings_path, read_gemini_env};
+
+    let env_json = env_to_json(&read_gemini_env()?);
+    let env = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
+    let settings_path = get_gemini_settings_path();
+    let config = if settings_path.exists() {
+        read_json_file(&settings_path)?
+    } else {
+        json!({})
+    };
+    Ok(json!({ "env": env, "config": config }))
 }
 
 fn detect_coding_plan_provider_id(base_url: &str) -> Option<&'static str> {
@@ -2427,7 +2454,20 @@ impl ProviderService {
         }
 
         let settings_config = match app_type {
-            AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog()?,
+            AppType::Codex => {
+                let mut settings = match core_native_import_settings(&app_type) {
+                    Some(settings) => settings,
+                    None => crate::codex_config::read_codex_live_settings()?,
+                };
+                if let Ok(Some(model_catalog)) =
+                    crate::codex_config::read_codex_model_catalog_simplified_from_live()
+                {
+                    if let Some(object) = settings.as_object_mut() {
+                        object.insert("modelCatalog".to_string(), model_catalog);
+                    }
+                }
+                settings
+            }
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
                 if !settings_path.exists() {
@@ -2442,12 +2482,7 @@ impl ProviderService {
                 v
             }
             AppType::Gemini => {
-                use crate::gemini_config::{
-                    env_to_json, get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
-                };
-
-                // 读取 .env 文件（环境变量）
-                let env_path = get_gemini_env_path();
+                let env_path = crate::gemini_config::get_gemini_env_path();
                 if !env_path.exists() {
                     return Err(AppError::localized(
                         "gemini.live.missing",
@@ -2456,23 +2491,10 @@ impl ProviderService {
                     ));
                 }
 
-                let env_map = read_gemini_env()?;
-                let env_json = env_to_json(&env_map);
-                let env_obj = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
-
-                // 读取 settings.json 文件（MCP 配置等）
-                let settings_path = get_gemini_settings_path();
-                let config_obj = if settings_path.exists() {
-                    read_json_file(&settings_path)?
-                } else {
-                    json!({})
-                };
-
-                // 返回完整结构：{ "env": {...}, "config": {...} }
-                json!({
-                    "env": env_obj,
-                    "config": config_obj
-                })
+                match core_native_import_settings(&app_type) {
+                    Some(settings) => settings,
+                    None => read_legacy_gemini_import_settings()?,
+                }
             }
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),

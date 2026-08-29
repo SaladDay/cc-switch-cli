@@ -6588,6 +6588,62 @@ fn import_default_config_preserves_codex_model_catalog_projection() {
 }
 
 #[test]
+#[serial]
+fn import_default_config_falls_back_to_cli_lenient_formats() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).expect("create ~/.codex");
+    write_json_file(&get_codex_auth_path(), &json!("legacy-auth-shape"))
+        .expect("write legacy auth.json");
+    std::fs::write(get_codex_config_path(), "model = \"gpt-5\"\n").expect("write config.toml");
+
+    std::fs::create_dir_all(crate::gemini_config::get_gemini_dir()).expect("create ~/.gemini");
+    std::fs::write(
+        crate::gemini_config::get_gemini_env_path(),
+        "ignored invalid line\nGEMINI_API_KEY=token\n",
+    )
+    .expect("write lenient Gemini env");
+    write_json_file(
+        &crate::gemini_config::get_gemini_settings_path(),
+        &json!({"theme": "light"}),
+    )
+    .expect("write Gemini settings");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    config.ensure_app(&AppType::Gemini);
+    let state = state_from_config(config);
+
+    ProviderService::import_default_config(&state, AppType::Codex)
+        .expect("fallback imports legacy Codex auth");
+    ProviderService::import_default_config(&state, AppType::Gemini)
+        .expect("fallback imports lenient Gemini env");
+
+    let codex = state
+        .db
+        .get_provider_by_id("default", AppType::Codex.as_str())
+        .expect("read Codex provider")
+        .expect("Codex provider exists");
+    assert_eq!(codex.settings_config["auth"], json!("legacy-auth-shape"));
+
+    let gemini = state
+        .db
+        .get_provider_by_id("default", AppType::Gemini.as_str())
+        .expect("read Gemini provider")
+        .expect("Gemini provider exists");
+    assert_eq!(gemini.settings_config["env"]["GEMINI_API_KEY"], "token");
+    assert_eq!(
+        gemini
+            .settings_config
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|env| env.len()),
+        Some(1)
+    );
+}
+
+#[test]
 fn extract_credentials_returns_expected_values() {
     let provider = Provider::with_id(
         "claude".into(),

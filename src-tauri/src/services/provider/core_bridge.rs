@@ -12,8 +12,8 @@ use std::{
 };
 
 use cc_switch_core::{
-    builtin_app_adapter, AppType as CoreAppType, LiveDocumentSet, LogicalTarget, ObservedDocument,
-    ProviderSnapshot, MAX_OPERATION_CONTENT_BYTES,
+    builtin_app_adapter, AppType as CoreAppType, LiveDocumentSet, LogicalTarget, NativeImportStep,
+    ObservedDocument, ProviderSnapshot, MAX_OPERATION_CONTENT_BYTES,
 };
 
 use crate::{app_config::AppType, error::AppError, provider::Provider};
@@ -59,6 +59,36 @@ pub(super) fn provider_from_snapshot(
         snapshot.settings,
         None,
     ))
+}
+
+/// Drives Core's pure import projection while the CLI retains path and I/O ownership.
+pub(super) fn native_import_settings(app: &AppType) -> Result<serde_json::Value, AppError> {
+    let adapter = builtin_app_adapter(&app.as_core());
+    let mut inventory = CoreDocumentInventory::new(app);
+
+    loop {
+        let step = adapter
+            .project_native_import(&inventory.snapshot()?)
+            .map_err(|error| {
+                AppError::Config(format!(
+                    "Core native import failed for '{}': {error}",
+                    app.as_str()
+                ))
+            })?;
+        match step {
+            NativeImportStep::Observe { target } => inventory.observe(target)?,
+            NativeImportStep::Ready { mut candidates } => {
+                if candidates.len() != 1 {
+                    return Err(AppError::Config(format!(
+                        "Core native import for '{}' returned {} candidates",
+                        app.as_str(),
+                        candidates.len()
+                    )));
+                }
+                return Ok(candidates.remove(0).provider.settings);
+            }
+        }
+    }
 }
 
 /// Incremental, app-scoped inventory used by Core's pure projection APIs.
