@@ -48,20 +48,16 @@ fn parse_unknown_app_returns_localized_error_message() {
 }
 
 #[test]
-fn cli_catalog_follows_core_order_ids_and_modes() {
+fn cli_catalog_preserves_cli_order_with_core_ids_and_modes() {
     let cli_apps = AppType::all().collect::<Vec<_>>();
     let cli_ids = cli_apps.iter().map(AppType::as_str).collect::<Vec<_>>();
-    let expected_ids = builtin_app_registry()
-        .descriptors()
-        .filter_map(|descriptor| match descriptor.app() {
-            CoreAppType::ClaudeDesktop | CoreAppType::GrokBuild => None,
-            _ => Some(descriptor.id()),
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(cli_ids, expected_ids);
+    assert_eq!(
+        cli_ids,
+        vec!["claude", "codex", "gemini", "opencode", "hermes", "openclaw", "pi"]
+    );
     for app in cli_apps {
         let core = CoreAppType::from_str(app.as_str()).expect("CLI app must exist in Core");
+        assert_eq!(app.as_str(), builtin_app_registry().for_app(&core).id());
         assert_eq!(app.is_additive_mode(), core.is_additive_mode());
         let encoded = serde_json::to_string(&app).expect("serialize CLI app");
         assert_eq!(
@@ -98,7 +94,7 @@ fn serde_errors_only_list_cli_supported_apps() {
 
 #[cfg(feature = "cli")]
 #[test]
-fn clap_app_values_follow_core_order() {
+fn clap_app_values_follow_cli_catalog_order() {
     use clap::ValueEnum;
 
     let clap_ids = AppType::value_variants()

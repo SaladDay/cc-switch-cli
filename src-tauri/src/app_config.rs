@@ -297,10 +297,22 @@ pub enum AppType {
     Codex,
     Gemini,
     OpenCode,
-    OpenClaw,
     Hermes,
+    OpenClaw,
     Pi,
 }
+
+// Presentation order is part of the CLI's compatibility contract. Canonical
+// IDs and behavior still come from Core, whose product order may differ.
+static CLI_APP_CATALOG: [AppType; 7] = [
+    AppType::Claude,
+    AppType::Codex,
+    AppType::Gemini,
+    AppType::OpenCode,
+    AppType::Hermes,
+    AppType::OpenClaw,
+    AppType::Pi,
+];
 
 impl AppType {
     pub(crate) fn as_core(&self) -> CoreAppType {
@@ -309,8 +321,8 @@ impl AppType {
             AppType::Codex => CoreAppType::Codex,
             AppType::Gemini => CoreAppType::Gemini,
             AppType::OpenCode => CoreAppType::OpenCode,
-            AppType::OpenClaw => CoreAppType::OpenClaw,
             AppType::Hermes => CoreAppType::Hermes,
+            AppType::OpenClaw => CoreAppType::OpenClaw,
             AppType::Pi => CoreAppType::Pi,
         }
     }
@@ -321,8 +333,8 @@ impl AppType {
             CoreAppType::Codex => Some(AppType::Codex),
             CoreAppType::Gemini => Some(AppType::Gemini),
             CoreAppType::OpenCode => Some(AppType::OpenCode),
-            CoreAppType::OpenClaw => Some(AppType::OpenClaw),
             CoreAppType::Hermes => Some(AppType::Hermes),
+            CoreAppType::OpenClaw => Some(AppType::OpenClaw),
             CoreAppType::Pi => Some(AppType::Pi),
             CoreAppType::ClaudeDesktop | CoreAppType::GrokBuild => None,
         }
@@ -387,13 +399,7 @@ impl AppType {
     }
 
     pub(crate) fn catalog() -> &'static [AppType] {
-        static APPS: std::sync::OnceLock<Vec<AppType>> = std::sync::OnceLock::new();
-        APPS.get_or_init(|| {
-            builtin_app_registry()
-                .descriptors()
-                .filter_map(|descriptor| Self::from_core(descriptor.app()))
-                .collect()
-        })
+        &CLI_APP_CATALOG
     }
 
     pub fn all() -> impl Iterator<Item = AppType> {

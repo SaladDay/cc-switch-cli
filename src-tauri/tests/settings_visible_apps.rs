@@ -14,8 +14,8 @@ mod app_config {
         Codex,
         Gemini,
         OpenCode,
-        OpenClaw,
         Hermes,
+        OpenClaw,
         Pi,
     }
 
@@ -26,8 +26,8 @@ mod app_config {
                 Self::Codex,
                 Self::Gemini,
                 Self::OpenCode,
-                Self::OpenClaw,
                 Self::Hermes,
+                Self::OpenClaw,
                 Self::Pi,
             ]
             .into_iter()
@@ -39,8 +39,8 @@ mod app_config {
                 AppType::Codex => "codex",
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
-                AppType::OpenClaw => "openclaw",
                 AppType::Hermes => "hermes",
+                AppType::OpenClaw => "openclaw",
                 AppType::Pi => "pi",
             }
         }
@@ -407,8 +407,8 @@ fn default_visible_apps_hide_gemini() {
             AppType::Claude,
             AppType::Codex,
             AppType::OpenCode,
-            AppType::OpenClaw,
             AppType::Hermes,
+            AppType::OpenClaw,
             AppType::Pi,
         ]
     );
@@ -724,19 +724,19 @@ fn next_visible_app_wraps_and_skips_hidden_entries() {
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::OpenClaw, 1),
-        Some(AppType::Hermes)
-    );
-    assert_eq!(
-        next_visible_app(&visible, &AppType::Hermes, 1),
         Some(AppType::Claude)
     );
     assert_eq!(
+        next_visible_app(&visible, &AppType::Hermes, 1),
+        Some(AppType::OpenClaw)
+    );
+    assert_eq!(
         next_visible_app(&visible, &AppType::Claude, -1),
-        Some(AppType::Hermes)
+        Some(AppType::OpenClaw)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::Hermes, -1),
-        Some(AppType::OpenClaw)
+        Some(AppType::OpenCode)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::OpenCode, -1),

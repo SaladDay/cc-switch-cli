@@ -11,8 +11,8 @@ mod app_config {
         Codex,
         Gemini,
         OpenCode,
-        OpenClaw,
         Hermes,
+        OpenClaw,
         Pi,
     }
 
@@ -23,8 +23,8 @@ mod app_config {
                 Self::Codex,
                 Self::Gemini,
                 Self::OpenCode,
-                Self::OpenClaw,
                 Self::Hermes,
+                Self::OpenClaw,
                 Self::Pi,
             ]
             .into_iter()
@@ -36,8 +36,8 @@ mod app_config {
                 AppType::Codex => "codex",
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
-                AppType::OpenClaw => "openclaw",
                 AppType::Hermes => "hermes",
+                AppType::OpenClaw => "openclaw",
                 AppType::Pi => "pi",
             }
         }

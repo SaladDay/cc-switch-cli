@@ -854,7 +854,7 @@ mod tests {
 
         assert_eq!(
             display_names,
-            vec!["Claude", "Codex", "Gemini", "OpenCode", "OpenClaw", "Hermes", "Pi"]
+            vec!["Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw", "Pi"]
         );
         assert_eq!(
             LocalTool::all()
