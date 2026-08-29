@@ -6644,6 +6644,68 @@ fn import_default_config_falls_back_to_cli_lenient_formats() {
 }
 
 #[test]
+#[serial]
+fn import_default_config_preserves_codex_missing_live_config_contract() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).expect("create ~/.codex");
+    std::fs::write(get_codex_config_path(), " \n").expect("write blank config.toml");
+
+    assert!(
+        core_bridge::native_import_settings(&AppType::Codex).is_ok(),
+        "fixture must exercise the CLI compatibility gate after Core succeeds"
+    );
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    let state = state_from_config(config);
+
+    ProviderService::import_default_config(&state, AppType::Codex)
+        .expect_err("missing auth plus blank config must remain unimportable");
+    assert!(
+        state
+            .db
+            .get_provider_by_id("default", AppType::Codex.as_str())
+            .expect("read Codex provider")
+            .is_none(),
+        "failed import must not persist a phantom default provider"
+    );
+}
+
+#[test]
+#[serial]
+fn import_default_config_preserves_codex_legacy_toml_acceptance() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).expect("create ~/.codex");
+    std::fs::write(get_codex_config_path(), "label = \"\\e\"\n").expect("write TOML 1.1 config");
+
+    assert!(
+        core_bridge::native_import_settings(&AppType::Codex).is_ok(),
+        "fixture must be accepted by the pinned Core parser"
+    );
+    assert!(
+        crate::codex_config::validate_config_toml("label = \"\\e\"\n").is_err(),
+        "fixture must remain outside the CLI parser's accepted syntax"
+    );
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    let state = state_from_config(config);
+
+    ProviderService::import_default_config(&state, AppType::Codex)
+        .expect_err("Core success must not widen the CLI TOML acceptance contract");
+    assert!(
+        state
+            .db
+            .get_provider_by_id("default", AppType::Codex.as_str())
+            .expect("read Codex provider")
+            .is_none(),
+        "rejected TOML must not be persisted"
+    );
+}
+
+#[test]
 fn extract_credentials_returns_expected_values() {
     let provider = Provider::with_id(
         "claude".into(),

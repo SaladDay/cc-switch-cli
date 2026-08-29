@@ -131,6 +131,22 @@ fn core_native_import_settings(app: &AppType) -> Option<Value> {
     }
 }
 
+fn core_codex_import_settings() -> Option<Value> {
+    let settings = core_native_import_settings(&AppType::Codex)?;
+    let config_text = settings.get("config").and_then(Value::as_str)?;
+
+    if (!crate::codex_config::get_codex_auth_path().exists() && config_text.trim().is_empty())
+        || crate::codex_config::validate_config_toml(config_text).is_err()
+    {
+        log::debug!(
+            "Core Codex import did not satisfy the CLI reader contract; using the CLI reader"
+        );
+        return None;
+    }
+
+    Some(settings)
+}
+
 fn read_legacy_gemini_import_settings() -> Result<Value, AppError> {
     use crate::gemini_config::{env_to_json, get_gemini_settings_path, read_gemini_env};
 
@@ -2455,7 +2471,7 @@ impl ProviderService {
 
         let settings_config = match app_type {
             AppType::Codex => {
-                let mut settings = match core_native_import_settings(&app_type) {
+                let mut settings = match core_codex_import_settings() {
                     Some(settings) => settings,
                     None => crate::codex_config::read_codex_live_settings()?,
                 };
