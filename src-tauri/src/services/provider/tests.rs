@@ -6589,7 +6589,7 @@ fn import_default_config_preserves_codex_model_catalog_projection() {
 
 #[test]
 #[serial]
-fn import_default_config_falls_back_to_cli_lenient_formats() {
+fn import_default_config_preserves_cli_lenient_formats() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
 
@@ -6616,9 +6616,9 @@ fn import_default_config_falls_back_to_cli_lenient_formats() {
     let state = state_from_config(config);
 
     ProviderService::import_default_config(&state, AppType::Codex)
-        .expect("fallback imports legacy Codex auth");
+        .expect("import legacy Codex auth");
     ProviderService::import_default_config(&state, AppType::Gemini)
-        .expect("fallback imports lenient Gemini env");
+        .expect("import lenient Gemini env");
 
     let codex = state
         .db

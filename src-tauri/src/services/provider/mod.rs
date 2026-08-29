@@ -6,8 +6,8 @@ mod codex;
 mod codex_openai_auth_tests;
 mod common;
 mod common_config;
-// Provider conversion remains staged for later migrations; native import uses
-// only the narrow, read-only projection driver in this stage.
+// Provider conversion and the filesystem driver remain staged for later
+// migrations. Production import supplies a CLI-owned in-memory snapshot.
 #[allow(dead_code)]
 mod core_bridge;
 mod endpoints;
@@ -118,51 +118,35 @@ fn current_timestamp() -> i64 {
         .as_millis() as i64
 }
 
-fn core_native_import_settings(app: &AppType) -> Option<Value> {
-    match core_bridge::native_import_settings(app) {
-        Ok(settings) => Some(settings),
+fn core_codex_import_settings(cli_settings: &Value) -> Option<Value> {
+    let auth = cli_settings.get("auth")?;
+    let config = cli_settings.get("config").and_then(Value::as_str)?;
+    let observations = [
+        (
+            cc_switch_core::LogicalTarget::CodexAuth,
+            Some(serde_json::to_vec(auth).ok()?),
+        ),
+        (
+            cc_switch_core::LogicalTarget::CodexConfig,
+            Some(config.as_bytes().to_vec()),
+        ),
+    ];
+
+    match core_bridge::native_import_settings_from_observations(&AppType::Codex, observations) {
+        Ok(projected) => {
+            let mut settings = cli_settings.clone();
+            let object = settings.as_object_mut()?;
+            object.insert("auth".to_string(), projected.get("auth")?.clone());
+            object.insert("config".to_string(), projected.get("config")?.clone());
+            Some(settings)
+        }
         Err(error) => {
             log::debug!(
-                "Core {} import was not compatible with this live config; using the CLI reader: {error}",
-                app.as_str()
+                "Core Codex import was not compatible with the CLI snapshot; keeping the CLI projection: {error}"
             );
             None
         }
     }
-}
-
-fn core_codex_import_settings() -> Option<Value> {
-    let settings = core_native_import_settings(&AppType::Codex)?;
-    let config_text = settings.get("config").and_then(Value::as_str)?;
-    let has_auth_material = settings
-        .get("auth")
-        .and_then(Value::as_object)
-        .is_some_and(|auth| !auth.is_empty());
-
-    if (!has_auth_material && config_text.trim().is_empty())
-        || crate::codex_config::validate_config_toml(config_text).is_err()
-    {
-        log::debug!(
-            "Core Codex import did not satisfy the CLI reader contract; using the CLI reader"
-        );
-        return None;
-    }
-
-    Some(settings)
-}
-
-fn read_legacy_gemini_import_settings() -> Result<Value, AppError> {
-    use crate::gemini_config::{env_to_json, get_gemini_settings_path, read_gemini_env};
-
-    let env_json = env_to_json(&read_gemini_env()?);
-    let env = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
-    let settings_path = get_gemini_settings_path();
-    let config = if settings_path.exists() {
-        read_json_file(&settings_path)?
-    } else {
-        json!({})
-    };
-    Ok(json!({ "env": env, "config": config }))
 }
 
 fn detect_coding_plan_provider_id(base_url: &str) -> Option<&'static str> {
@@ -2475,18 +2459,9 @@ impl ProviderService {
 
         let settings_config = match app_type {
             AppType::Codex => {
-                let mut settings = match core_codex_import_settings() {
-                    Some(settings) => settings,
-                    None => crate::codex_config::read_codex_live_settings()?,
-                };
-                if let Ok(Some(model_catalog)) =
-                    crate::codex_config::read_codex_model_catalog_simplified_from_live()
-                {
-                    if let Some(object) = settings.as_object_mut() {
-                        object.insert("modelCatalog".to_string(), model_catalog);
-                    }
-                }
-                settings
+                let cli_settings =
+                    crate::codex_config::read_codex_live_settings_with_model_catalog()?;
+                core_codex_import_settings(&cli_settings).unwrap_or(cli_settings)
             }
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
@@ -2502,7 +2477,12 @@ impl ProviderService {
                 v
             }
             AppType::Gemini => {
-                let env_path = crate::gemini_config::get_gemini_env_path();
+                use crate::gemini_config::{
+                    env_to_json, get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
+                };
+
+                // 读取 .env 文件（环境变量）
+                let env_path = get_gemini_env_path();
                 if !env_path.exists() {
                     return Err(AppError::localized(
                         "gemini.live.missing",
@@ -2511,10 +2491,23 @@ impl ProviderService {
                     ));
                 }
 
-                match core_native_import_settings(&app_type) {
-                    Some(settings) => settings,
-                    None => read_legacy_gemini_import_settings()?,
-                }
+                let env_map = read_gemini_env()?;
+                let env_json = env_to_json(&env_map);
+                let env_obj = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
+
+                // 读取 settings.json 文件（MCP 配置等）
+                let settings_path = get_gemini_settings_path();
+                let config_obj = if settings_path.exists() {
+                    read_json_file(&settings_path)?
+                } else {
+                    json!({})
+                };
+
+                // 返回完整结构：{ "env": {...}, "config": {...} }
+                json!({
+                    "env": env_obj,
+                    "config": config_obj
+                })
             }
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),

@@ -65,10 +65,6 @@ pub(super) fn provider_from_snapshot(
 pub(super) fn native_import_settings(app: &AppType) -> Result<serde_json::Value, AppError> {
     let adapter = builtin_app_adapter(&app.as_core());
     let mut inventory = CoreDocumentInventory::new(app);
-    if matches!(app, AppType::Codex) {
-        // Preserve the CLI reader's auth-before-config observation order.
-        inventory.observe(LogicalTarget::CodexAuth)?;
-    }
 
     loop {
         let step = adapter
@@ -81,18 +77,52 @@ pub(super) fn native_import_settings(app: &AppType) -> Result<serde_json::Value,
             })?;
         match step {
             NativeImportStep::Observe { target } => inventory.observe(target)?,
-            NativeImportStep::Ready { mut candidates } => {
-                if candidates.len() != 1 {
-                    return Err(AppError::Config(format!(
-                        "Core native import for '{}' returned {} candidates",
-                        app.as_str(),
-                        candidates.len()
-                    )));
-                }
-                return Ok(candidates.remove(0).provider.settings);
+            NativeImportStep::Ready { candidates } => {
+                return single_import_settings(app, candidates)
             }
         }
     }
+}
+
+/// Projects only the supplied host snapshot and never performs additional I/O.
+pub(super) fn native_import_settings_from_observations(
+    app: &AppType,
+    observations: impl IntoIterator<Item = (LogicalTarget, Option<Vec<u8>>)>,
+) -> Result<serde_json::Value, AppError> {
+    let adapter = builtin_app_adapter(&app.as_core());
+    let mut inventory = CoreDocumentInventory::new(app);
+    for (target, contents) in observations {
+        inventory.record_observation(target, contents)?;
+    }
+
+    match adapter
+        .project_native_import(&inventory.snapshot()?)
+        .map_err(|error| {
+            AppError::Config(format!(
+                "Core native import failed for '{}': {error}",
+                app.as_str()
+            ))
+        })? {
+        NativeImportStep::Ready { candidates } => single_import_settings(app, candidates),
+        NativeImportStep::Observe { target } => Err(AppError::Config(format!(
+            "Core native import for '{}' requires {target:?}, which is not in the supplied snapshot",
+            app.as_str()
+        ))),
+    }
+}
+
+fn single_import_settings(
+    app: &AppType,
+    mut candidates: Vec<cc_switch_core::NativeImportCandidate>,
+) -> Result<serde_json::Value, AppError> {
+    if candidates.len() != 1 {
+        return Err(AppError::Config(format!(
+            "Core native import for '{}' returned {} candidates",
+            app.as_str(),
+            candidates.len()
+        )));
+    }
+    Ok(candidates.remove(0).provider.settings)
 }
 
 /// Incremental, app-scoped inventory used by Core's pure projection APIs.
@@ -394,5 +424,35 @@ mod tests {
         assert!(inventory
             .record_observation(LogicalTarget::CodexAuth, None)
             .is_err());
+    }
+
+    #[test]
+    fn supplied_codex_snapshot_is_projected_without_additional_observation() {
+        let settings = native_import_settings_from_observations(
+            &AppType::Codex,
+            [
+                (
+                    LogicalTarget::CodexAuth,
+                    Some(br#"{"OPENAI_API_KEY":"sk-test"}"#.to_vec()),
+                ),
+                (
+                    LogicalTarget::CodexConfig,
+                    Some(b"model = \"gpt-5\"\n".to_vec()),
+                ),
+            ],
+        )
+        .expect("project complete in-memory Codex snapshot");
+
+        assert_eq!(settings["auth"]["OPENAI_API_KEY"], "sk-test");
+        assert_eq!(settings["config"], "model = \"gpt-5\"\n");
+
+        let incomplete = native_import_settings_from_observations(
+            &AppType::Codex,
+            [(LogicalTarget::CodexAuth, Some(b"{}".to_vec()))],
+        )
+        .expect_err("an incomplete supplied snapshot must not trigger filesystem I/O");
+        assert!(incomplete
+            .to_string()
+            .contains("not in the supplied snapshot"));
     }
 }
