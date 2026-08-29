@@ -134,8 +134,12 @@ fn core_native_import_settings(app: &AppType) -> Option<Value> {
 fn core_codex_import_settings() -> Option<Value> {
     let settings = core_native_import_settings(&AppType::Codex)?;
     let config_text = settings.get("config").and_then(Value::as_str)?;
+    let has_auth_material = settings
+        .get("auth")
+        .and_then(Value::as_object)
+        .is_some_and(|auth| !auth.is_empty());
 
-    if (!crate::codex_config::get_codex_auth_path().exists() && config_text.trim().is_empty())
+    if (!has_auth_material && config_text.trim().is_empty())
         || crate::codex_config::validate_config_toml(config_text).is_err()
     {
         log::debug!(

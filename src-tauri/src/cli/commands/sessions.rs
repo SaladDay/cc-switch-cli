@@ -770,10 +770,7 @@ fn parse_scoped_selector(selector: &str) -> Option<(String, String)> {
 
 fn parse_session_provider(value: &str) -> Result<AppType, String> {
     app_type_from_provider_id(value).ok_or_else(|| {
-        format!(
-            "unsupported provider '{value}'. Allowed: {}",
-            AppType::catalog_labels()
-        )
+        format!("unsupported provider '{value}'. Allowed: claude, codex, gemini, opencode, openclaw, hermes, pi")
     })
 }
 
@@ -1105,9 +1102,10 @@ mod tests {
         assert_eq!(parse_session_provider("openclaw"), Ok(AppType::OpenClaw));
         assert_eq!(parse_session_provider("open-claw"), Ok(AppType::OpenClaw));
         let error = parse_session_provider("unknown").expect_err("unknown provider");
-        assert!(error.contains("pi"));
-        assert!(!error.contains("claude-desktop"));
-        assert!(!error.contains("grokbuild"));
+        assert_eq!(
+            error,
+            "unsupported provider 'unknown'. Allowed: claude, codex, gemini, opencode, openclaw, hermes, pi"
+        );
     }
 
     #[test]

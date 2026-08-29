@@ -65,6 +65,10 @@ pub(super) fn provider_from_snapshot(
 pub(super) fn native_import_settings(app: &AppType) -> Result<serde_json::Value, AppError> {
     let adapter = builtin_app_adapter(&app.as_core());
     let mut inventory = CoreDocumentInventory::new(app);
+    if matches!(app, AppType::Codex) {
+        // Preserve the CLI reader's auth-before-config observation order.
+        inventory.observe(LogicalTarget::CodexAuth)?;
+    }
 
     loop {
         let step = adapter

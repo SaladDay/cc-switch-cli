@@ -55,6 +55,13 @@ fn cli_catalog_preserves_cli_order_with_core_ids_and_modes() {
         cli_ids,
         vec!["claude", "codex", "gemini", "opencode", "hermes", "openclaw", "pi"]
     );
+    assert_eq!(
+        cli_apps
+            .iter()
+            .map(AppType::is_additive_mode)
+            .collect::<Vec<_>>(),
+        vec![false, false, false, true, true, true, true]
+    );
     for app in cli_apps {
         let core = CoreAppType::from_str(app.as_str()).expect("CLI app must exist in Core");
         assert_eq!(app.as_str(), builtin_app_registry().for_app(&core).id());
@@ -85,16 +92,15 @@ fn serde_errors_only_list_cli_supported_apps() {
         .expect_err("unknown app must be rejected")
         .to_string();
 
-    assert!(error.contains("unknown"));
-    assert!(error.contains("claude"));
-    assert!(!error.contains("claude-desktop"));
-    assert!(!error.contains("grokbuild"));
+    assert!(error.starts_with(
+        "unknown variant `unknown`, expected one of `claude`, `codex`, `gemini`, `opencode`, `hermes`, `openclaw`, `pi`"
+    ));
     assert!(serde_json::from_str::<AppType>("\" ClAuDe \"").is_err());
 }
 
 #[cfg(feature = "cli")]
 #[test]
-fn clap_app_values_follow_cli_catalog_order() {
+fn clap_app_values_preserve_cli_names_and_order() {
     use clap::ValueEnum;
 
     let clap_ids = AppType::value_variants()
@@ -106,27 +112,39 @@ fn clap_app_values_follow_cli_catalog_order() {
                 .to_string()
         })
         .collect::<Vec<_>>();
-    let registry_ids = AppType::all()
-        .map(|app| app.as_str().to_string())
-        .collect::<Vec<_>>();
-
-    assert_eq!(clap_ids, registry_ids);
+    assert_eq!(
+        clap_ids,
+        [
+            "claude",
+            "codex",
+            "gemini",
+            "open-code",
+            "hermes",
+            "open-claw",
+            "pi",
+        ]
+    );
 }
 
 #[cfg(feature = "cli")]
 #[test]
-fn clap_accepts_core_ids_and_legacy_compound_aliases() {
+fn clap_preserves_compound_app_acceptance_contract() {
     use cc_switch_lib::cli::Cli;
     use clap::Parser;
 
     for (value, expected) in [
-        ("opencode", AppType::OpenCode),
         ("open-code", AppType::OpenCode),
-        ("openclaw", AppType::OpenClaw),
         ("open-claw", AppType::OpenClaw),
     ] {
         let cli = Cli::try_parse_from(["cc-switch", "--app", value])
-            .expect("canonical IDs and legacy Clap names must parse");
+            .expect("legacy Clap app value must parse");
         assert_eq!(cli.app, Some(expected));
+    }
+
+    for value in ["opencode", "openclaw"] {
+        assert!(
+            Cli::try_parse_from(["cc-switch", "--app", value]).is_err(),
+            "Core storage ID must not widen the Clap input contract"
+        );
     }
 }

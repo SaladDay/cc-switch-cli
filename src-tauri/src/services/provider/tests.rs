@@ -6670,6 +6670,12 @@ fn import_default_config_preserves_codex_missing_live_config_contract() {
             .is_none(),
         "failed import must not persist a phantom default provider"
     );
+
+    write_json_file(&get_codex_auth_path(), &json!({})).expect("write empty auth.json");
+    assert!(
+        ProviderService::import_default_config(&state, AppType::Codex)
+            .expect("an existing empty auth file must remain importable")
+    );
 }
 
 #[test]

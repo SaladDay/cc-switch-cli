@@ -291,7 +291,9 @@ use crate::provider::ProviderManager;
 use cc_switch_core::{builtin_app_registry, AppType as CoreAppType};
 
 /// 应用类型
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[serde(rename_all = "lowercase")]
 pub enum AppType {
     Claude,
     Codex,
@@ -303,7 +305,7 @@ pub enum AppType {
 }
 
 // Presentation order is part of the CLI's compatibility contract. Canonical
-// IDs and behavior still come from Core, whose product order may differ.
+// IDs still come from Core, whose product order may differ.
 static CLI_APP_CATALOG: [AppType; 7] = [
     AppType::Claude,
     AppType::Codex,
@@ -354,7 +356,13 @@ impl AppType {
     }
 
     pub fn is_additive_mode(&self) -> bool {
-        self.as_core().is_additive_mode()
+        // This classification still controls CLI-owned write paths. Keep it
+        // exhaustive until those paths migrate, while conformance tests ensure
+        // it remains aligned with Core.
+        matches!(
+            self,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi
+        )
     }
 
     pub fn supports_failover(&self) -> bool {
@@ -420,48 +428,11 @@ impl From<AppType> for CoreAppType {
     }
 }
 
-impl Serialize for AppType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for AppType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::all()
-            .find(|app| app.as_str() == value)
-            .ok_or_else(|| serde::de::Error::custom(Self::unsupported_error(&value)))
-    }
-}
-
 impl TryFrom<CoreAppType> for AppType {
     type Error = AppError;
 
     fn try_from(app: CoreAppType) -> Result<Self, Self::Error> {
         Self::from_core(&app).ok_or_else(|| Self::unsupported_error(app.as_str()))
-    }
-}
-
-#[cfg(feature = "cli")]
-impl clap::ValueEnum for AppType {
-    fn value_variants<'a>() -> &'a [Self] {
-        AppType::catalog()
-    }
-
-    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
-        let value = clap::builder::PossibleValue::new(self.as_str());
-        Some(match self {
-            AppType::OpenCode => value.alias("open-code"),
-            AppType::OpenClaw => value.alias("open-claw"),
-            _ => value,
-        })
     }
 }
 
