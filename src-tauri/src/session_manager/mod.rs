@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+use crate::app_config::AppType;
 use providers::{claude, codex, gemini, hermes, openclaw, opencode, pi};
 use scan_cache_store::ScanCacheStore;
 
@@ -206,12 +207,29 @@ pub(crate) fn sort_by_recent(sessions: &mut [SessionMeta]) {
     });
 }
 
-/// Providers in the stable order used by the "all providers" manifest stream.
+/// Providers in the scan-priority order used by the "all providers" manifest stream.
 /// SQLite-only sources (opencode.db / hermes state.db) are queried inside their
 /// provider module and are intentionally not covered by the file cache.
-pub(crate) const CACHED_PROVIDERS: [&str; 7] = [
-    "codex", "claude", "opencode", "openclaw", "gemini", "hermes", "pi",
-];
+/// This is deliberately not registry presentation order: it controls which
+/// sources can populate a provisional first paint first. IDs still come from
+/// the Core-backed app catalog.
+pub(crate) fn cached_providers() -> &'static [&'static str] {
+    static PROVIDERS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    PROVIDERS.get_or_init(|| {
+        [
+            AppType::Codex,
+            AppType::Claude,
+            AppType::OpenCode,
+            AppType::OpenClaw,
+            AppType::Gemini,
+            AppType::Hermes,
+            AppType::Pi,
+        ]
+        .iter()
+        .map(AppType::as_str)
+        .collect()
+    })
+}
 
 /// Legacy snapshot row cap (one historical 100-row page plus look-ahead).
 /// Current manifests page independently; the value also bounds compatibility
@@ -291,7 +309,7 @@ pub(crate) fn build_fresh_session_manifest(
         .map_err(|error| format!("failed to start isolated session page build: {error}"))?;
     let one_provider = scope;
     let providers: &[&str] = if scope == "all" {
-        &CACHED_PROVIDERS
+        cached_providers()
     } else {
         std::slice::from_ref(&one_provider)
     };
@@ -615,6 +633,46 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
+
+    #[test]
+    fn cached_provider_schedule_uses_the_complete_core_backed_cli_catalog() {
+        let expected_priority = [
+            AppType::Codex,
+            AppType::Claude,
+            AppType::OpenCode,
+            AppType::OpenClaw,
+            AppType::Gemini,
+            AppType::Hermes,
+            AppType::Pi,
+        ]
+        .map(|app| app.as_str());
+        let scheduled = cached_providers()
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let catalog = AppType::all()
+            .map(|app| app.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(cached_providers(), expected_priority.as_slice());
+        assert_eq!(scheduled, catalog);
+        assert_eq!(cached_providers().len(), scheduled.len());
+        assert_eq!(
+            [
+                claude::provider_id(),
+                codex::provider_id(),
+                gemini::provider_id(),
+                opencode::provider_id(),
+                openclaw::provider_id(),
+                hermes::provider_id(),
+                pi::provider_id(),
+            ],
+            AppType::all()
+                .map(|app| app.as_str())
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+    }
 
     #[test]
     fn message_batch_truncates_each_body_on_a_utf8_boundary() {

@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::de::{Error as _, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{sort_by_recent, SessionMeta, CACHED_PROVIDERS, SCAN_CACHE_FIRST_PAINT_LIMIT};
+use super::{cached_providers, sort_by_recent, SessionMeta, SCAN_CACHE_FIRST_PAINT_LIMIT};
 use crate::config::{
     atomic_write, get_app_config_dir, resolve_config_dir_without_following_user_symlinks,
 };
@@ -83,12 +83,12 @@ fn snapshot_purge_lock() -> &'static Mutex<()> {
 }
 
 fn supported_scope(provider_id: &str) -> bool {
-    provider_id == "all" || CACHED_PROVIDERS.contains(&provider_id)
+    provider_id == "all" || cached_providers().contains(&provider_id)
 }
 
 fn row_belongs_to_scope(row: &SessionMeta, provider_id: &str) -> bool {
     if provider_id == "all" {
-        CACHED_PROVIDERS.contains(&row.provider_id.as_str())
+        cached_providers().contains(&row.provider_id.as_str())
     } else {
         row.provider_id == provider_id
     }
@@ -213,7 +213,7 @@ fn persist_authoritative_at(
 
     if provider_id == "all" {
         write_scope(config_dir, "all", rows.iter())?;
-        for scope in CACHED_PROVIDERS {
+        for scope in cached_providers().iter().copied() {
             write_scope(
                 config_dir,
                 scope,
@@ -230,8 +230,8 @@ fn persist_authoritative_at(
     // before its own first 101 rows. Missing scopes leave the last known all
     // snapshot untouched rather than publishing an incomplete global view.
     let mut all_candidates =
-        Vec::with_capacity(CACHED_PROVIDERS.len() * SCAN_CACHE_FIRST_PAINT_LIMIT);
-    for scope in CACHED_PROVIDERS {
+        Vec::with_capacity(cached_providers().len() * SCAN_CACHE_FIRST_PAINT_LIMIT);
+    for scope in cached_providers().iter().copied() {
         let scope_rows = match load_at(config_dir, scope) {
             Ok(rows) => rows,
             Err(error) => {

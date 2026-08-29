@@ -17,7 +17,9 @@ use super::utils::{
     visit_bounded_lines_cancellable_with_status, TITLE_MAX_CHARS,
 };
 
-const PROVIDER_ID: &str = "claude";
+pub(in crate::session_manager) fn provider_id() -> &'static str {
+    crate::app_config::AppType::Claude.as_str()
+}
 
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
@@ -28,7 +30,7 @@ pub(crate) fn stream_sessions_cancellable(
     let root = get_claude_config_dir().join("projects");
     cache::stream_file_provider_cancellable(
         store,
-        PROVIDER_ID,
+        provider_id(),
         force,
         |path| {
             if is_cancelled() {
@@ -171,7 +173,7 @@ pub(crate) fn search_session_cancellable(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: source_path.to_string(),
         snippets,
@@ -352,7 +354,7 @@ fn parse_session_lines(path: &Path, head: &[String], tail: &[String]) -> Option<
     let fallback_time = file_modified_ms(path);
 
     Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: session_id.clone(),
         title,
         summary,

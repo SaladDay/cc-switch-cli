@@ -12,11 +12,7 @@ pub struct VisibleAppsDetection {
 impl Default for VisibleAppsDetection {
     fn default() -> Self {
         Self {
-            installed: CONTROLLED_APPS
-                .iter()
-                .cloned()
-                .map(|app| (app, false))
-                .collect(),
+            installed: controlled_apps().map(|app| (app, false)).collect(),
         }
     }
 }
@@ -34,18 +30,12 @@ pub struct VisibleAppsStartupOutcome {
     pub should_prompt: bool,
 }
 
-const CONTROLLED_APPS: [AppType; 5] = [
-    AppType::Gemini,
-    AppType::OpenCode,
-    AppType::Hermes,
-    AppType::OpenClaw,
-    AppType::Pi,
-];
+fn controlled_apps() -> impl Iterator<Item = AppType> {
+    AppType::all().filter(AppType::supports_visibility_detection)
+}
 
 pub fn detect_visible_app_installation() -> VisibleAppsDetection {
-    let installed = CONTROLLED_APPS
-        .iter()
-        .cloned()
+    let installed = controlled_apps()
         .map(|app| {
             let installed = crate::services::local_env_check::check_tool_installed(&app);
             (app, installed)
@@ -91,7 +81,7 @@ pub fn apply_startup_policy(
         }
     } else {
         let mut hidden_installed_apps = Vec::new();
-        for app in CONTROLLED_APPS {
+        for app in controlled_apps() {
             let installed = detection.is_installed(&app);
             let key = app.as_str().to_string();
             let previous = visible_settings
@@ -199,7 +189,7 @@ fn apply_detection_to_visible_apps(
     detection: &VisibleAppsDetection,
 ) -> Vec<AppType> {
     let mut changed = Vec::new();
-    for app in CONTROLLED_APPS {
+    for app in controlled_apps() {
         let installed = detection.is_installed(&app);
         if visible_apps.is_enabled_for(&app) != installed {
             visible_apps.set_enabled_for(&app, installed);
@@ -223,15 +213,12 @@ fn app_names(apps: &[AppType]) -> String {
 }
 
 fn detection_would_change(apps: &VisibleApps, detection: &VisibleAppsDetection) -> bool {
-    CONTROLLED_APPS
-        .iter()
-        .any(|app| apps.is_enabled_for(app) != detection.is_installed(app))
+    controlled_apps().any(|app| apps.is_enabled_for(&app) != detection.is_installed(&app))
 }
 
 fn detection_string_map(detection: &VisibleAppsDetection) -> HashMap<String, bool> {
-    CONTROLLED_APPS
-        .iter()
-        .map(|app| (app.as_str().to_string(), detection.is_installed(app)))
+    controlled_apps()
+        .map(|app| (app.as_str().to_string(), detection.is_installed(&app)))
         .collect()
 }
 

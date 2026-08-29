@@ -2263,6 +2263,7 @@ pub(super) fn render_mcp_apps_picker_overlay(
     selected: usize,
     apps: &crate::app_config::McpApps,
 ) {
+    let app_types = crate::cli::tui::app::mcp_picker_apps().collect::<Vec<_>>();
     render_apps_picker_overlay(
         frame,
         content_area,
@@ -2271,13 +2272,7 @@ pub(super) fn render_mcp_apps_picker_overlay(
         selected,
         apps,
         "Space",
-        &[
-            crate::app_config::AppType::Claude,
-            crate::app_config::AppType::Codex,
-            crate::app_config::AppType::Gemini,
-            crate::app_config::AppType::OpenCode,
-            crate::app_config::AppType::Hermes,
-        ],
+        &app_types,
     );
 }
 
@@ -2338,15 +2333,7 @@ pub(super) fn render_visible_apps_picker_overlay(
         selected,
         apps,
         "Space",
-        &[
-            crate::app_config::AppType::Claude,
-            crate::app_config::AppType::Codex,
-            crate::app_config::AppType::Gemini,
-            crate::app_config::AppType::OpenCode,
-            crate::app_config::AppType::Hermes,
-            crate::app_config::AppType::OpenClaw,
-            crate::app_config::AppType::Pi,
-        ],
+        crate::app_config::AppType::catalog(),
     );
 }
 
@@ -2358,6 +2345,7 @@ pub(super) fn render_skills_apps_picker_overlay(
     selected: usize,
     apps: &crate::app_config::SkillApps,
 ) {
+    let app_types = crate::cli::tui::app::skill_picker_apps().collect::<Vec<_>>();
     render_apps_picker_overlay(
         frame,
         content_area,
@@ -2366,14 +2354,7 @@ pub(super) fn render_skills_apps_picker_overlay(
         selected,
         apps,
         "Space",
-        &[
-            crate::app_config::AppType::Claude,
-            crate::app_config::AppType::Codex,
-            crate::app_config::AppType::Gemini,
-            crate::app_config::AppType::OpenCode,
-            crate::app_config::AppType::Hermes,
-            crate::app_config::AppType::Pi,
-        ],
+        &app_types,
     );
 }
 

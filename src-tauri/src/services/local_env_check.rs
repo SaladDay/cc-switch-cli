@@ -32,18 +32,13 @@ pub enum LocalTool {
 }
 
 impl LocalTool {
-    pub const ALL: [LocalTool; 7] = [
-        LocalTool::Claude,
-        LocalTool::Codex,
-        LocalTool::Gemini,
-        LocalTool::OpenCode,
-        LocalTool::Hermes,
-        LocalTool::OpenClaw,
-        LocalTool::Pi,
-    ];
-
     pub fn all() -> &'static [LocalTool] {
-        &Self::ALL
+        static TOOLS: OnceLock<Vec<LocalTool>> = OnceLock::new();
+        TOOLS.get_or_init(|| {
+            AppType::all()
+                .map(|app| Self::from_app_type(&app))
+                .collect()
+        })
     }
 
     pub fn display_name(self) -> &'static str {
@@ -91,10 +86,10 @@ impl LocalTool {
     }
 
     fn sort_key(self) -> usize {
-        Self::ALL
+        Self::all()
             .iter()
             .position(|candidate| *candidate == self)
-            .unwrap_or(Self::ALL.len())
+            .unwrap_or(Self::all().len())
     }
 
     pub fn from_app_type(app_type: &AppType) -> Self {
@@ -859,7 +854,14 @@ mod tests {
 
         assert_eq!(
             display_names,
-            vec!["Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw", "Pi"]
+            vec!["Claude", "Codex", "Gemini", "OpenCode", "OpenClaw", "Hermes", "Pi"]
+        );
+        assert_eq!(
+            LocalTool::all()
+                .iter()
+                .map(|tool| tool.binary_name())
+                .collect::<Vec<_>>(),
+            AppType::all().map(|app| app.as_str()).collect::<Vec<_>>()
         );
         assert_eq!(LocalTool::Hermes.binary_name(), "hermes");
         assert_eq!(LocalTool::OpenClaw.binary_name(), "openclaw");

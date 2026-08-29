@@ -17,6 +17,19 @@ mod app_config {
     }
 
     impl AppType {
+        pub fn all() -> impl Iterator<Item = Self> {
+            [
+                Self::Claude,
+                Self::Codex,
+                Self::Gemini,
+                Self::OpenCode,
+                Self::OpenClaw,
+                Self::Hermes,
+                Self::Pi,
+            ]
+            .into_iter()
+        }
+
         pub fn as_str(&self) -> &'static str {
             match self {
                 AppType::Claude => "claude",

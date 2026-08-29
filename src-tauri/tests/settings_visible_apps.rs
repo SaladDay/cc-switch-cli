@@ -20,6 +20,19 @@ mod app_config {
     }
 
     impl AppType {
+        pub fn all() -> impl Iterator<Item = Self> {
+            [
+                Self::Claude,
+                Self::Codex,
+                Self::Gemini,
+                Self::OpenCode,
+                Self::OpenClaw,
+                Self::Hermes,
+                Self::Pi,
+            ]
+            .into_iter()
+        }
+
         pub fn as_str(&self) -> &'static str {
             match self {
                 AppType::Claude => "claude",
@@ -394,8 +407,8 @@ fn default_visible_apps_hide_gemini() {
             AppType::Claude,
             AppType::Codex,
             AppType::OpenCode,
-            AppType::Hermes,
             AppType::OpenClaw,
+            AppType::Hermes,
             AppType::Pi,
         ]
     );
@@ -711,19 +724,19 @@ fn next_visible_app_wraps_and_skips_hidden_entries() {
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::OpenClaw, 1),
-        Some(AppType::Claude)
+        Some(AppType::Hermes)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::Hermes, 1),
-        Some(AppType::OpenClaw)
+        Some(AppType::Claude)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::Claude, -1),
-        Some(AppType::OpenClaw)
+        Some(AppType::Hermes)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::Hermes, -1),
-        Some(AppType::OpenCode)
+        Some(AppType::OpenClaw)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::OpenCode, -1),

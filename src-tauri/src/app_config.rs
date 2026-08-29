@@ -48,23 +48,9 @@ impl McpApps {
 
     /// 获取所有启用的应用列表
     pub fn enabled_apps(&self) -> Vec<AppType> {
-        let mut apps = Vec::new();
-        if self.claude {
-            apps.push(AppType::Claude);
-        }
-        if self.codex {
-            apps.push(AppType::Codex);
-        }
-        if self.gemini {
-            apps.push(AppType::Gemini);
-        }
-        if self.opencode {
-            apps.push(AppType::OpenCode);
-        }
-        if self.hermes {
-            apps.push(AppType::Hermes);
-        }
-        apps
+        AppType::all()
+            .filter(|app| self.is_enabled_for(app))
+            .collect()
     }
 
     /// 检查是否所有应用都未启用
@@ -302,56 +288,174 @@ pub struct PromptRoot {
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
 use crate::error::AppError;
 use crate::provider::ProviderManager;
+use cc_switch_core::{builtin_app_registry, AppType as CoreAppType};
 
 /// 应用类型
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AppType {
     Claude,
     Codex,
     Gemini,
     OpenCode,
-    Hermes,
     OpenClaw,
+    Hermes,
     Pi,
 }
 
 impl AppType {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_core(&self) -> CoreAppType {
         match self {
-            AppType::Claude => "claude",
-            AppType::Codex => "codex",
-            AppType::Gemini => "gemini",
-            AppType::OpenCode => "opencode",
-            AppType::Hermes => "hermes",
-            AppType::OpenClaw => "openclaw",
-            AppType::Pi => "pi",
+            AppType::Claude => CoreAppType::Claude,
+            AppType::Codex => CoreAppType::Codex,
+            AppType::Gemini => CoreAppType::Gemini,
+            AppType::OpenCode => CoreAppType::OpenCode,
+            AppType::OpenClaw => CoreAppType::OpenClaw,
+            AppType::Hermes => CoreAppType::Hermes,
+            AppType::Pi => CoreAppType::Pi,
         }
     }
 
-    pub fn is_additive_mode(&self) -> bool {
-        matches!(
-            self,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi
+    fn from_core(app: &CoreAppType) -> Option<Self> {
+        match app {
+            CoreAppType::Claude => Some(AppType::Claude),
+            CoreAppType::Codex => Some(AppType::Codex),
+            CoreAppType::Gemini => Some(AppType::Gemini),
+            CoreAppType::OpenCode => Some(AppType::OpenCode),
+            CoreAppType::OpenClaw => Some(AppType::OpenClaw),
+            CoreAppType::Hermes => Some(AppType::Hermes),
+            CoreAppType::Pi => Some(AppType::Pi),
+            CoreAppType::ClaudeDesktop | CoreAppType::GrokBuild => None,
+        }
+    }
+
+    fn unsupported_error(value: &str) -> AppError {
+        let allowed = Self::catalog_labels();
+        AppError::localized(
+            "unsupported_app",
+            format!("不支持的应用标识: '{value}'。可选值: {allowed}。"),
+            format!("Unsupported app id: '{value}'. Allowed: {allowed}."),
         )
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        builtin_app_registry().for_app(&self.as_core()).id()
+    }
+
+    pub fn is_additive_mode(&self) -> bool {
+        self.as_core().is_additive_mode()
     }
 
     pub fn supports_failover(&self) -> bool {
         matches!(self, AppType::Claude | AppType::Codex | AppType::Gemini)
     }
 
+    // These product capabilities deliberately remain CLI-owned. Each
+    // exhaustive match forces a decision before a future CLI app can join a
+    // feature merely by appearing in the Core-backed catalog.
+    pub(crate) fn supports_mcp(&self) -> bool {
+        match self {
+            AppType::Claude
+            | AppType::Codex
+            | AppType::Gemini
+            | AppType::OpenCode
+            | AppType::Hermes => true,
+            AppType::OpenClaw | AppType::Pi => false,
+        }
+    }
+
+    pub(crate) fn supports_skills(&self) -> bool {
+        match self {
+            AppType::Claude
+            | AppType::Codex
+            | AppType::Gemini
+            | AppType::OpenCode
+            | AppType::Hermes
+            | AppType::Pi => true,
+            AppType::OpenClaw => false,
+        }
+    }
+
+    pub(crate) fn supports_visibility_detection(&self) -> bool {
+        match self {
+            AppType::Gemini
+            | AppType::OpenCode
+            | AppType::OpenClaw
+            | AppType::Hermes
+            | AppType::Pi => true,
+            AppType::Claude | AppType::Codex => false,
+        }
+    }
+
+    pub(crate) fn catalog() -> &'static [AppType] {
+        static APPS: std::sync::OnceLock<Vec<AppType>> = std::sync::OnceLock::new();
+        APPS.get_or_init(|| {
+            builtin_app_registry()
+                .descriptors()
+                .filter_map(|descriptor| Self::from_core(descriptor.app()))
+                .collect()
+        })
+    }
+
     pub fn all() -> impl Iterator<Item = AppType> {
-        [
-            AppType::Claude,
-            AppType::Codex,
-            AppType::Gemini,
-            AppType::OpenCode,
-            AppType::Hermes,
-            AppType::OpenClaw,
-            AppType::Pi,
-        ]
-        .into_iter()
+        Self::catalog().iter().cloned()
+    }
+
+    pub(crate) fn catalog_labels() -> String {
+        Self::all()
+            .map(|app| app.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl From<AppType> for CoreAppType {
+    fn from(app: AppType) -> Self {
+        app.as_core()
+    }
+}
+
+impl Serialize for AppType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AppType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::all()
+            .find(|app| app.as_str() == value)
+            .ok_or_else(|| serde::de::Error::custom(Self::unsupported_error(&value)))
+    }
+}
+
+impl TryFrom<CoreAppType> for AppType {
+    type Error = AppError;
+
+    fn try_from(app: CoreAppType) -> Result<Self, Self::Error> {
+        Self::from_core(&app).ok_or_else(|| Self::unsupported_error(app.as_str()))
+    }
+}
+
+#[cfg(feature = "cli")]
+impl clap::ValueEnum for AppType {
+    fn value_variants<'a>() -> &'a [Self] {
+        AppType::catalog()
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        let value = clap::builder::PossibleValue::new(self.as_str());
+        Some(match self {
+            AppType::OpenCode => value.alias("open-code"),
+            AppType::OpenClaw => value.alias("open-claw"),
+            _ => value,
+        })
     }
 }
 
@@ -366,24 +470,11 @@ impl FromStr for AppType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let normalized = s.trim().to_lowercase();
-        match normalized.as_str() {
-            "claude" => Ok(AppType::Claude),
-            "codex" => Ok(AppType::Codex),
-            "gemini" => Ok(AppType::Gemini),
-            "opencode" => Ok(AppType::OpenCode),
-            "hermes" => Ok(AppType::Hermes),
-            "openclaw" => Ok(AppType::OpenClaw),
-            "pi" => Ok(AppType::Pi),
-            other => Err(AppError::localized(
-                "unsupported_app",
-                format!(
-                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw, pi。"
-                ),
-                format!(
-                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw, pi."
-                ),
-            )),
-        }
+        normalized
+            .parse::<CoreAppType>()
+            .ok()
+            .and_then(|app| Self::from_core(&app))
+            .ok_or_else(|| Self::unsupported_error(&normalized))
     }
 }
 

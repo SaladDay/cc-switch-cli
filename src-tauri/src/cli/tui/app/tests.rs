@@ -835,6 +835,48 @@ mod tests {
     }
 
     #[test]
+    fn app_picker_mappings_follow_catalog_order_and_local_capabilities() {
+        let catalog = AppType::all().collect::<Vec<_>>();
+        for (index, app_type) in catalog.iter().enumerate() {
+            assert_eq!(app_type_picker_index(app_type), index);
+            assert_eq!(&app_type_for_picker_index(index), app_type);
+        }
+
+        let mcp_apps = mcp_picker_apps().collect::<Vec<_>>();
+        assert_eq!(
+            mcp_apps,
+            vec![
+                AppType::Claude,
+                AppType::Codex,
+                AppType::Gemini,
+                AppType::OpenCode,
+                AppType::Hermes,
+            ]
+        );
+        for (index, app_type) in mcp_apps.iter().enumerate() {
+            assert_eq!(four_app_picker_index(app_type), index);
+            assert_eq!(&mcp_app_type_for_picker_index(index), app_type);
+        }
+
+        let skill_apps = skill_picker_apps().collect::<Vec<_>>();
+        assert_eq!(
+            skill_apps,
+            vec![
+                AppType::Claude,
+                AppType::Codex,
+                AppType::Gemini,
+                AppType::OpenCode,
+                AppType::Hermes,
+                AppType::Pi,
+            ]
+        );
+        for (index, app_type) in skill_apps.iter().enumerate() {
+            assert_eq!(skills_app_picker_index(app_type), index);
+            assert_eq!(&skill_app_type_for_picker_index(index), app_type);
+        }
+    }
+
+    #[test]
     fn skills_apps_picker_space_toggles_selected_app_and_enter_emits_action() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Skills;

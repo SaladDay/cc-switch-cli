@@ -24,7 +24,9 @@ use super::utils::{
     MAX_METADATA_LINE_BYTES, TITLE_MAX_CHARS,
 };
 
-const PROVIDER_ID: &str = "hermes";
+pub(in crate::session_manager) fn provider_id() -> &'static str {
+    crate::app_config::AppType::Hermes.as_str()
+}
 
 fn get_hermes_db_path() -> PathBuf {
     get_hermes_dir().join("state.db")
@@ -72,7 +74,7 @@ pub(crate) fn stream_sessions_cancellable(
     };
     let file_result = cache::stream_file_provider_cancellable(
         store,
-        PROVIDER_ID,
+        provider_id(),
         force,
         |path| {
             if is_cancelled() {
@@ -293,7 +295,7 @@ impl HermesStreamPlan {
                 .flatten()
         });
         Ok(SessionMeta {
-            provider_id: PROVIDER_ID.to_string(),
+            provider_id: provider_id().to_string(),
             session_id: session_id.clone(),
             title,
             summary: None,
@@ -736,7 +738,7 @@ fn parse_jsonl_session_lines(path: &Path, head: &[String], tail: &[String]) -> O
         .map(|value| truncate_summary(value, TITLE_MAX_CHARS));
 
     Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id,
         title: title.or_else(|| first_user_msg.clone()).or(fallback_title),
         summary: first_user_msg,
@@ -888,7 +890,7 @@ fn search_session_jsonl(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: source_path.to_string(),
         snippets,
@@ -958,7 +960,7 @@ fn search_session_sqlite(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: source_path.to_string(),
         snippets,
