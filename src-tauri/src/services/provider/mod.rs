@@ -6,6 +6,10 @@ mod codex;
 mod codex_openai_auth_tests;
 mod common;
 mod common_config;
+// The bridge is deliberately not wired into production import/write flows in
+// this stage; the next migration stage consumes it after conformance review.
+#[allow(dead_code)]
+mod core_bridge;
 mod endpoints;
 mod gemini;
 mod gemini_auth;
