@@ -663,8 +663,8 @@ mod tests {
                 codex::provider_id(),
                 gemini::provider_id(),
                 opencode::provider_id(),
-                openclaw::provider_id(),
                 hermes::provider_id(),
+                openclaw::provider_id(),
                 pi::provider_id(),
             ],
             AppType::all()
