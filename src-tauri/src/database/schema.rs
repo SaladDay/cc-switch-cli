@@ -309,12 +309,16 @@ impl Database {
             let _ = conn.execute("DELETE FROM settings WHERE key = 'current_profile_id'", []);
         }
 
+        // v18 adds byte-cursor state for Claude session logs. NULL keeps the
+        // legacy line-cursor path valid for other importers and older rows.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS session_log_sync (
                 file_path TEXT PRIMARY KEY,
                 last_modified INTEGER NOT NULL,
                 last_line_offset INTEGER NOT NULL DEFAULT 0,
-                last_synced_at INTEGER NOT NULL
+                last_synced_at INTEGER NOT NULL,
+                last_byte_offset INTEGER,
+                last_tail_fingerprint INTEGER
             )",
             [],
         )
@@ -520,6 +524,11 @@ impl Database {
                         log::info!("迁移数据库从 v16 到 v17（添加会话用量持久去重账本）");
                         Self::migrate_v16_to_v17(conn)?;
                         Self::set_user_version(conn, 17)?;
+                    }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（会话日志字节游标列）");
+                        Self::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1644,6 +1653,21 @@ impl Database {
              ON session_usage_dedup(data_source, semantic_id, has_entry_id);",
         )
         .map_err(|error| AppError::Database(format!("创建会话用量去重账本失败: {error}")))?;
+        Ok(())
+    }
+
+    /// v17 -> v18: Claude session-log byte cursor and tail fingerprint.
+    /// Existing rows stay NULL and continue through the legacy line cursor.
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "session_log_sync")? {
+            Self::add_column_if_missing(conn, "session_log_sync", "last_byte_offset", "INTEGER")?;
+            Self::add_column_if_missing(
+                conn,
+                "session_log_sync",
+                "last_tail_fingerprint",
+                "INTEGER",
+            )?;
+        }
         Ok(())
     }
 

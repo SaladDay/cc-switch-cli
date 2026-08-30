@@ -9,9 +9,9 @@
 //!   `S` + 一个逐行回调（解析行、维护状态、收集待写记录），以及各自
 //!   语义的写库阶段（去重规则各 app 不同，刻意不统一）。
 //!
-//! 进度契约：主库 `session_log_sync` 的 `(last_modified, last_line_offset)`
-//! 是权威进度（schema 与上游同步，不可扩展）；sidecar 的
-//! `session_sync_resume` 只是加速提示，校验分三档（见 [`ResumeDecision`]）：
+//! 进度契约：主库 `session_log_sync` 保存与上游共享的权威进度；sidecar 的
+//! `session_sync_resume` 额外保存解析器状态、文件身份和未终结尾部，只作本地
+//! 加速提示。提示校验分三档（见 [`ResumeDecision`]）：
 //! 快照与权威行一致、Unix inode 未变、尾部指纹吻合 → 续传；截断 / Unix inode
 //! 变化 / 指纹失配 → 忽略旧行 offset 全量重扫（去重兜底）；无提示或提示与
 //! 权威行不符（首次运行、整库从别的机器 WebDAV 同步进来等）→ 回退到从字节
@@ -48,6 +48,7 @@ use std::path::Path;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 use crate::services::session_usage::metadata_modified_nanos;
@@ -55,6 +56,9 @@ use crate::session_manager::scan_cache_store::{ScanCacheStore, SyncResumeHint};
 
 /// 尾部指纹窗口：`byte_offset` 前至多这么多字节参与 FNV-1a 指纹。
 const TAIL_HASH_WINDOW: u64 = 64;
+
+/// Upstream v18 fingerprints the 4 KiB immediately before the shared byte cursor.
+const SHARED_TAIL_FINGERPRINT_WINDOW: u64 = 4096;
 
 /// FNV-1a 64 位哈希：无依赖、确定性，用作续传边界的内容指纹。
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -78,6 +82,8 @@ pub(crate) struct JsonlScanOutcome {
     pub line_offset: i64,
     /// 最后一个换行边界处的字节位置。
     pub byte_pos: u64,
+    /// 与上游 v18 `session_log_sync.last_tail_fingerprint` 相同的边界指纹。
+    pub shared_tail_fingerprint: Option<i64>,
     /// 本次使用的文件 mtime 纳秒值。
     pub file_modified: i64,
     /// 换行边界处的状态机序列化快照（不含末尾不完整行的影响）；写进
@@ -287,10 +293,53 @@ fn tail_hash_from_file(file: &mut fs::File, byte_pos: u64) -> Option<i64> {
     Some(fnv1a64(&tail) as i64)
 }
 
+/// Compute the exact fingerprint used by upstream schema v18. The file cursor
+/// is left at `byte_pos`, matching [`tail_hash_from_file`].
+pub(crate) fn shared_tail_fingerprint_from_file(file: &mut fs::File, byte_pos: u64) -> Option<i64> {
+    let window = byte_pos.min(SHARED_TAIL_FINGERPRINT_WINDOW);
+    file.seek(SeekFrom::Start(byte_pos - window)).ok()?;
+    let mut tail = vec![0u8; window as usize];
+    std::io::Read::read_exact(file, &mut tail).ok()?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"claude-session-tail-v1");
+    hasher.update(&tail);
+    let digest = hasher.finalize();
+    Some(i64::from(u32::from_be_bytes(digest[..4].try_into().ok()?)))
+}
+
+/// Build a local resume hint from an upstream v18 byte cursor. The adapter
+/// supplies parser state because it is intentionally absent from the shared
+/// database schema.
+pub(crate) fn resume_hint_from_shared_cursor(
+    file: &mut fs::File,
+    file_path: &str,
+    last_modified: i64,
+    last_line_offset: i64,
+    byte_offset: u64,
+    state: String,
+) -> Option<SyncResumeHint> {
+    let tail_hash = tail_hash_from_file(file, byte_offset)?;
+    let file_identity = file.metadata().ok().and_then(|m| file_identity(&m));
+    Some(SyncResumeHint {
+        file_path: file_path.to_string(),
+        last_modified,
+        last_line_offset,
+        byte_offset: i64::try_from(byte_offset).ok()?,
+        state: Some(state),
+        tail_hash: Some(tail_hash),
+        pending_tail_len: None,
+        pending_tail_hash: None,
+        file_identity,
+    })
+}
+
 /// 增量扫描单个 JSONL 文件。
 ///
 /// 返回 `Ok(None)` 表示文件自上次同步以来未变化（mtime 跳过）；返回
 /// `Ok(Some(outcome))` 表示扫描完成，调用方随后执行自己的写库阶段。
+/// `opened_file` 让已完成语义校验的适配器在扫描时沿用同一文件句柄；普通
+/// 调用传 `None`，保持原有按路径打开行为。
 ///
 /// 回调签名为 `(状态机, 行内容, is_new)`：`is_new == false` 的行只在回退
 /// 路径出现（字节续传命中时历史行根本不会被读到），供需要重放历史行来
@@ -299,6 +348,7 @@ fn tail_hash_from_file(file: &mut fs::File, byte_pos: u64) -> Option<i64> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn scan_jsonl_incremental<S, F>(
     file_path: &Path,
+    opened_file: Option<fs::File>,
     file_mtime: i64,
     last_modified: i64,
     last_offset: i64,
@@ -312,12 +362,20 @@ where
     F: FnMut(&mut S, &str, bool),
 {
     let file_path_str = file_path.to_string_lossy();
+    let mut opened_file = opened_file;
 
     // mtime：优先使用 walk 阶段的值，回退到一次 metadata 读取，
     // 保留“元数据不可读即报错”语义。`fresh_meta` 保留决定（潜在）skip 的那次
     // stat，供 fix 2 的 skip 前身份校验复用——不额外多做一次 IO。
     let mut fresh_meta: Option<fs::Metadata> = None;
-    let mut file_modified = if file_mtime > 0 {
+    let mut file_modified = if let Some(file) = opened_file.as_ref() {
+        let metadata = file
+            .metadata()
+            .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
+        let modified = metadata_modified_nanos(&metadata);
+        fresh_meta = Some(metadata);
+        modified
+    } else if file_mtime > 0 {
         file_mtime
     } else {
         let metadata = fs::metadata(file_path)
@@ -331,7 +389,7 @@ where
     // 追加时，据陈旧的 walk 值会误判"未变化"而跳过本轮刚追加的内容。将要跳过
     // 前重取一次新鲜 mtime 再判定，关闭 walk→处理之间的窗口。重取失败（文件
     // 可能刚被删除）按原值跳过即可，不报错。
-    if file_mtime > 0 && file_modified <= last_modified {
+    if opened_file.is_none() && file_mtime > 0 && file_modified <= last_modified {
         if let Ok(metadata) = fs::metadata(file_path) {
             file_modified = metadata_modified_nanos(&metadata);
             fresh_meta = Some(metadata);
@@ -368,8 +426,12 @@ where
         );
     }
 
-    let mut file =
-        fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
+    let mut file = match opened_file.take() {
+        Some(file) => file,
+        None => {
+            fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?
+        }
+    };
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
 
     // 提示携带的"待确认尾部"（上轮以不完整尾行结束时记录）。只在 Resume
@@ -514,6 +576,7 @@ where
     let file = reader.get_mut();
     let file_identity_val = file.metadata().ok().and_then(|m| file_identity(&m));
     let tail_hash_val = tail_hash_from_file(file, committed_byte_pos);
+    let shared_tail_fingerprint = shared_tail_fingerprint_from_file(file, committed_byte_pos);
 
     log::debug!(
         "[SYNC-DRIVER] 扫描完成 lines={committed_line_offset} bytes={committed_byte_pos} incomplete_tail={saw_incomplete_tail}: {file_path_str}"
@@ -522,6 +585,7 @@ where
     Ok(Some(JsonlScanOutcome {
         line_offset: committed_line_offset,
         byte_pos: committed_byte_pos,
+        shared_tail_fingerprint,
         file_modified: recorded_modified,
         resume_state_json,
         pending_tail_len,
@@ -570,10 +634,12 @@ fn try_converge_stable_tail<S: Serialize>(
             // 前窗口（读毕游标复位到 byte_offset），inode 取自同一 fd，与 outcome 的
             // (line_offset, byte_pos) 严格对应，不写出错配值。
             let tail_hash_val = tail_hash_from_file(file, byte_offset);
+            let shared_tail_fingerprint = shared_tail_fingerprint_from_file(file, byte_offset);
             let file_identity_val = file.metadata().ok().and_then(|m| file_identity(&m));
             Some(JsonlScanOutcome {
                 line_offset: boundary_line_offset,
                 byte_pos: byte_offset,
+                shared_tail_fingerprint,
                 file_modified,
                 resume_state_json: serde_json::to_string(state).ok(),
                 pending_tail_len: None,
@@ -666,6 +732,7 @@ mod tests {
         let mut seen = Vec::new();
         let outcome = scan_jsonl_incremental(
             path,
+            None,
             file_mtime,
             last_modified,
             last_offset,
@@ -692,6 +759,45 @@ mod tests {
         assert_eq!(outcome.out().line_offset, 2);
         assert_eq!(outcome.out().byte_pos, 6);
         assert!(outcome.out().file_modified > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preopened_scan_keeps_validated_file_across_path_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "old-1\nold-2\n").expect("write original");
+        let mut file = fs::File::open(&path).expect("open original");
+        let hint = resume_hint_from_shared_cursor(
+            &mut file,
+            &path.to_string_lossy(),
+            1,
+            1,
+            6,
+            serde_json::to_string(&NoState).expect("serialize state"),
+        )
+        .expect("build hint");
+
+        let replacement = dir.path().join("replacement.jsonl");
+        std::fs::write(&replacement, "replacement\n").expect("write replacement");
+        std::fs::rename(&replacement, &path).expect("replace path");
+
+        let mut seen = Vec::new();
+        let outcome = scan_jsonl_incremental(
+            &path,
+            Some(file),
+            0,
+            1,
+            1,
+            Some(hint),
+            false,
+            NoState::default,
+            |_state, line, is_new| seen.push((line.to_string(), is_new)),
+        )
+        .expect("scan original descriptor")
+        .expect("changed");
+        assert_eq!(seen, vec![("old-2".to_string(), true)]);
+        assert_eq!(outcome.byte_pos, 12);
     }
 
     #[test]

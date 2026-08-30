@@ -2054,6 +2054,46 @@ fn schema_migration_v16_adds_session_usage_dedup_ledger() {
 }
 
 #[test]
+fn schema_migration_v17_adds_claude_byte_cursor_columns() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        "CREATE TABLE session_log_sync (
+            file_path TEXT PRIMARY KEY,
+            last_modified INTEGER NOT NULL,
+            last_line_offset INTEGER NOT NULL DEFAULT 0,
+            last_synced_at INTEGER NOT NULL
+         );
+         INSERT INTO session_log_sync VALUES ('/tmp/a.jsonl', 5, 3, 1);",
+    )
+    .expect("seed v17 cursor table");
+    Database::set_user_version(&conn, 17).expect("set user_version=17");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v17 to current");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        SCHEMA_VERSION
+    );
+    assert!(
+        Database::has_column(&conn, "session_log_sync", "last_byte_offset")
+            .expect("check byte cursor")
+    );
+    assert!(
+        Database::has_column(&conn, "session_log_sync", "last_tail_fingerprint")
+            .expect("check tail fingerprint")
+    );
+    let cursors: (Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT last_byte_offset, last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = '/tmp/a.jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read migrated cursor");
+    assert_eq!(cursors, (None, None));
+}
+
+#[test]
 fn create_tables_migrates_legacy_global_profile_marker_once() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute(

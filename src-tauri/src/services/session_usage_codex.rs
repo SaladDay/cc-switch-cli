@@ -1669,6 +1669,7 @@ fn sync_single_codex_file(
 
     let outcome = scan_jsonl_incremental(
         file_path,
+        None,
         file_modified,
         last_modified,
         last_offset,

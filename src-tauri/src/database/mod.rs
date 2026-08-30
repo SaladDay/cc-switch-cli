@@ -63,7 +63,7 @@ const USAGE_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// 注意：本库 schema 与上游项目同步（WebDAV 亦会整库同步），本仓库不得自行
 /// 加表/加列或提升版本号；本地新增的持久化需求一律放独立 sidecar 存储
 /// （如 session_manager::scan_cache_store）。
-pub(crate) const SCHEMA_VERSION: i32 = 17;
+pub(crate) const SCHEMA_VERSION: i32 = 18;
 
 fn database_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE

@@ -1860,8 +1860,9 @@ mod tests {
             )?;
             conn.execute(
                 "INSERT INTO session_log_sync
-                    (file_path, last_modified, last_line_offset, last_synced_at)
-                 VALUES ('/shared/session.jsonl', 999, 999, 999)",
+                    (file_path, last_modified, last_line_offset, last_synced_at,
+                     last_byte_offset, last_tail_fingerprint)
+                 VALUES ('/shared/session.jsonl', 999, 999, 999, 998, 997)",
                 [],
             )?;
         }
@@ -1900,8 +1901,9 @@ mod tests {
             )?;
             conn.execute(
                 "INSERT INTO session_log_sync
-                    (file_path, last_modified, last_line_offset, last_synced_at)
-                 VALUES ('/shared/session.jsonl', 123, 12, 1000)",
+                    (file_path, last_modified, last_line_offset, last_synced_at,
+                     last_byte_offset, last_tail_fingerprint)
+                 VALUES ('/shared/session.jsonl', 123, 12, 1000, 456, 789)",
                 [],
             )?;
         }
@@ -1963,19 +1965,28 @@ mod tests {
             stream_logs, 1,
             "local stream check logs should be preserved"
         );
-        let local_sync: (i64, i64, i64) = {
+        let local_sync: (i64, i64, i64, i64, i64) = {
             let conn = crate::database::lock_conn!(local_db.conn);
             conn.query_row(
-                "SELECT last_modified, last_line_offset, last_synced_at
+                "SELECT last_modified, last_line_offset, last_synced_at,
+                        last_byte_offset, last_tail_fingerprint
                  FROM session_log_sync
                  WHERE file_path = '/shared/session.jsonl'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )?
         };
         assert_eq!(
             local_sync,
-            (123, 12, 1000),
+            (123, 12, 1000, 456, 789),
             "WebDAV restore must not replace local file progress with a remote device's cursor"
         );
         let semantics: (i64, i64) = {
