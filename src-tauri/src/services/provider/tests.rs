@@ -2198,6 +2198,59 @@ fn sync_current_to_live_prefers_effective_current_from_local_settings() {
 
 #[test]
 #[serial]
+fn direct_claude_sync_preserves_legacy_core_limit_compatibility() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    let settings_path = get_claude_settings_path();
+    std::fs::create_dir_all(settings_path.parent().expect("claude settings parent dir"))
+        .expect("create ~/.claude");
+    let state = state_from_config(MultiAppConfig::default());
+
+    std::fs::write(
+        &settings_path,
+        vec![b'x'; cc_switch_core::MAX_OPERATION_CONTENT_BYTES + 1],
+    )
+    .expect("seed oversized live settings");
+    let small_provider = Provider::with_id(
+        "small".to_string(),
+        "Small".to_string(),
+        json!({"replacement": "small"}),
+        None,
+    );
+    assert!(sync_provider_to_live_respecting_takeover(
+        &state,
+        AppType::Claude,
+        &small_provider,
+        None,
+    )
+    .expect("replace oversized legacy live settings"));
+    let live: Value = read_json_file(&settings_path).expect("read small replacement");
+    assert_eq!(live["replacement"], "small");
+
+    let large_provider = Provider::with_id(
+        "large".to_string(),
+        "Large".to_string(),
+        json!({"legacyPayload": "x".repeat(cc_switch_core::MAX_OPERATION_CONTENT_BYTES)}),
+        None,
+    );
+    assert!(sync_provider_to_live_respecting_takeover(
+        &state,
+        AppType::Claude,
+        &large_provider,
+        None,
+    )
+    .expect("write oversized legacy provider settings"));
+    let bytes = std::fs::read(&settings_path).expect("read oversized replacement");
+    assert!(bytes.len() > cc_switch_core::MAX_OPERATION_CONTENT_BYTES);
+    let live: Value = serde_json::from_slice(&bytes).expect("parse oversized replacement");
+    assert_eq!(
+        live["legacyPayload"].as_str().map(str::len),
+        Some(cc_switch_core::MAX_OPERATION_CONTENT_BYTES)
+    );
+}
+
+#[test]
+#[serial]
 fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());

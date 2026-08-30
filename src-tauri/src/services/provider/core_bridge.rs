@@ -264,9 +264,10 @@ impl OperationHost for CliOperationHost {
 }
 
 /// Uses the shared executor while retaining the CLI's established JSON bytes
-/// and host-owned path and filesystem behavior. The caller must hold the
-/// per-application switch lock; ordinary filesystems cannot exclude writers
-/// that ignore that synchronization protocol.
+/// and host-owned path and filesystem behavior. Legacy inputs that Core cannot
+/// observe within its bound keep the old overwrite behavior before a baseline
+/// is established. The caller must hold the per-application switch lock;
+/// ordinary filesystems cannot exclude writers that ignore that protocol.
 pub(super) fn execute_claude_settings_under_lock(
     settings: &serde_json::Value,
 ) -> Result<(), AppError> {
@@ -275,14 +276,14 @@ pub(super) fn execute_claude_settings_under_lock(
     let target = LogicalTarget::ClaudeSettings;
     let mut host = CliOperationHost;
     let resource = host.resolve(target)?;
-    let original = match host.read(&resource, MAX_OPERATION_CONTENT_BYTES)? {
-        OperationRead::Missing => None,
-        OperationRead::Contents(contents) => Some(contents),
-        OperationRead::TooLarge => {
-            return Err(oversized_live_config_error(
-                &resource,
-                MAX_OPERATION_CONTENT_BYTES,
-            ))
+    if contents.len() > MAX_OPERATION_CONTENT_BYTES {
+        return crate::config::write_json_file(&resource, settings);
+    }
+    let original = match host.read(&resource, MAX_OPERATION_CONTENT_BYTES) {
+        Ok(OperationRead::Missing) => None,
+        Ok(OperationRead::Contents(contents)) => Some(contents),
+        Ok(OperationRead::TooLarge) | Err(_) => {
+            return crate::config::write_json_file(&resource, settings)
         }
     };
     let plan = OperationPlan {
@@ -585,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_operation_host_reports_stale_core_preconditions_without_overwriting() {
+    fn cli_operation_host_compare_exchange_preserves_external_contents() {
         let home = tempfile::tempdir().expect("temporary home");
         let _env = TestEnvGuard::isolated(home.path());
         let target = LogicalTarget::ClaudeSettings;
@@ -593,28 +594,91 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("settings parent"))
             .expect("create settings parent");
         std::fs::write(&path, b"external").expect("seed external edit");
-        let plan = OperationPlan {
-            contract_major: OPERATION_CONTRACT_MAJOR,
-            app_id: CoreAppType::Claude.as_str().to_owned(),
-            writes: vec![PlannedWrite {
-                target,
-                expected: ContentExpectation::for_contents(Some(b"stale")),
-                contents: Some("{}".to_owned()),
-            }],
-        };
         let mut host = CliOperationHost;
 
-        let error = execute_operation_plan(&plan, &mut host).expect_err("stale precondition");
+        let outcome = host
+            .compare_exchange(&path, Some(b"stale"), Some(b"replacement"))
+            .expect("conditional exchange");
 
-        assert!(matches!(
-            error.failure(),
-            OperationFailure::Conflict {
-                target: LogicalTarget::ClaudeSettings
-            }
-        ));
+        assert_eq!(outcome, CompareExchangeOutcome::Conflict);
         assert_eq!(
             std::fs::read(&path).expect("read preserved edit"),
             b"external"
+        );
+    }
+
+    #[test]
+    fn core_executor_falls_back_for_legacy_oversized_claude_inputs() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let path = target_path(LogicalTarget::ClaudeSettings).expect("Claude path");
+        std::fs::create_dir_all(path.parent().expect("settings parent"))
+            .expect("create settings parent");
+        std::fs::write(&path, vec![b'x'; MAX_OPERATION_CONTENT_BYTES + 1])
+            .expect("seed oversized input");
+        let settings = json!({"replacement": true});
+
+        execute_claude_settings_under_lock(&settings).expect("use legacy compatibility writer");
+
+        let expected = serde_json::to_string_pretty(&settings).expect("serialize expected JSON");
+        assert_eq!(
+            std::fs::read(&path).expect("read replacement"),
+            expected.as_bytes()
+        );
+    }
+
+    #[test]
+    fn core_executor_falls_back_for_legacy_oversized_claude_outputs() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let bounded_settings =
+            serde_json::Value::String("x".repeat(MAX_OPERATION_CONTENT_BYTES - 2));
+        let bounded =
+            serde_json::to_string_pretty(&bounded_settings).expect("serialize bounded JSON");
+        assert_eq!(bounded.len(), MAX_OPERATION_CONTENT_BYTES);
+        execute_claude_settings_under_lock(&bounded_settings).expect("execute bounded Core plan");
+
+        let path = target_path(LogicalTarget::ClaudeSettings).expect("Claude path");
+        assert_eq!(
+            std::fs::read(&path).expect("read bounded replacement"),
+            bounded.as_bytes()
+        );
+
+        let settings = serde_json::Value::String("x".repeat(MAX_OPERATION_CONTENT_BYTES));
+
+        execute_claude_settings_under_lock(&settings).expect("use legacy compatibility writer");
+
+        let expected = serde_json::to_string_pretty(&settings).expect("serialize expected JSON");
+        assert!(expected.len() > MAX_OPERATION_CONTENT_BYTES);
+        assert_eq!(
+            std::fs::read(&path).expect("read oversized replacement"),
+            expected.as_bytes()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_executor_preserves_legacy_unreadable_file_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let path = target_path(LogicalTarget::ClaudeSettings).expect("Claude path");
+        std::fs::create_dir_all(path.parent().expect("settings parent"))
+            .expect("create settings parent");
+        std::fs::write(&path, b"old").expect("seed unreadable input");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("remove read permission");
+        let settings = json!({"replacement": true});
+
+        execute_claude_settings_under_lock(&settings).expect("replace unreadable legacy file");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore read permission");
+        let expected = serde_json::to_string_pretty(&settings).expect("serialize expected JSON");
+        assert_eq!(
+            std::fs::read(&path).expect("read replacement"),
+            expected.as_bytes()
         );
     }
 
