@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch"
-version = "5.10.3"
+version = "5.10.4"
 description = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw"
 authors = ["Jason Young", "saladday"]
 license = "MIT"

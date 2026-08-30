@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.4] - 2026-08-30
+
+### Added
+
+- **Pi / First-Class App Support**: Add Pi across CLI and TUI provider management, prompts, MCP, Skills, session history, usage import, configuration, launch, and visibility workflows. Includes [#431](https://github.com/SaladDay/cc-switch-cli/pull/431) and resolves the Pi portion of [#358](https://github.com/SaladDay/cc-switch-cli/issues/358); OMP remains outside this release.
+- **Providers / Built-In Presets**: Add Pi presets and selected upstream built-in Claude and Codex presets for DeepSeek, Zhipu GLM, ModelScope, MiniMax, Xiaomi MiMo, OpenCode Go, and OpenRouter without importing promotional or referral content.
+- **Usage / OpenCode Go**: Query OpenCode Go subscription windows through its token-plan endpoint and expose them through the existing usage-query UI.
+
+### Changed
+
+- **Database / Desktop v3.20.1 Compatibility**: Advance the database from schema v17 to v18 and align Claude session-log synchronization with the upstream byte cursor and SHA-256 tail fingerprint. Legacy line cursors convert without replaying history, including files whose last recorded line has no trailing newline. Truncation and non-append rewrites pin the cursor to the current file end instead of re-importing pruned usage. Fixes [#432](https://github.com/SaladDay/cc-switch-cli/issues/432).
+
+### Fixed
+
+- **Providers / Live Projection**: Keep edits to the active provider projected to its live configuration while preserving takeover and backup ownership rules.
+- **Sessions / TUI Refresh**: Refresh session data when entering the Sessions view so the list does not remain stale after activity outside the TUI.
+- **Pi / Usage Import Performance**: Index Pi session deduplication lookups used during local usage imports.
+
+### Upgrade notes
+
+- The database migrates from schema v17 to v18 after creating the normal pre-migration backup. The migration adds nullable byte-cursor and tail-fingerprint columns without rebuilding usage data.
+- Devices that exchange database snapshots through WebDAV or S3 should all be upgraded before syncing a v18 snapshot. Older releases reject newer database schemas by design.
+- Existing v17 Claude line cursors are converted on the next changed-file scan. The converter follows the upstream byte-counting behavior and does not replay already-counted history.
+- Pi is now available as a managed app. Existing app visibility, provider, prompt, MCP, and Skills settings keep their current values.
+
+### Thanks
+
+Thank you to everyone who reported a problem, tested behavior, followed up in a discussion, or worked on a pull request during this release cycle:
+
+- Pi requests and follow-up: [@dividduang](https://github.com/dividduang), [@moonjoke001](https://github.com/moonjoke001), [@suntory1](https://github.com/suntory1), [@SyaJask](https://github.com/SyaJask), and [@tianzhuwei](https://github.com/tianzhuwei) ([#358](https://github.com/SaladDay/cc-switch-cli/issues/358)).
+- Database compatibility report: [@TheBoYang](https://github.com/TheBoYang) ([#432](https://github.com/SaladDay/cc-switch-cli/issues/432)).
+- Pull requests, implementation, and follow-up work: [@SaladDay](https://github.com/SaladDay) ([#431](https://github.com/SaladDay/cc-switch-cli/pull/431)) and [@ChanthMiao](https://github.com/ChanthMiao) ([#409](https://github.com/SaladDay/cc-switch-cli/pull/409)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and all CC-Switch contributors whose schema-v18 session cursor, provider preset, and compatibility work was adapted here.
+
+Some acknowledged work remains open or was not merged into this release; inclusion here is a thank-you, not a change in its status.
+
 ## [5.10.3] - 2026-08-25
 
 ### Added
