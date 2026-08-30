@@ -186,11 +186,12 @@ fn prepare_claude_launch_with<Resolve>(
 where
     Resolve: FnOnce() -> Result<std::path::PathBuf, AppError>,
 {
-    let settings = ProviderService::build_effective_live_snapshot_from_state(
+    let mut settings = ProviderService::build_effective_live_snapshot_from_state(
         state,
         AppType::Claude,
         provider,
     )?;
+    crate::cli::claude_temp_launch::clear_alternate_claude_auth_field(&mut settings);
     prepare_launch_from_settings_with(&provider.id, &settings, temp_dir, resolve_claude_binary)
 }
 
@@ -203,11 +204,12 @@ fn preview_claude_launch_with<Resolve>(
 where
     Resolve: FnOnce() -> Result<std::path::PathBuf, AppError>,
 {
-    let settings = ProviderService::build_effective_live_snapshot_from_state(
+    let mut settings = ProviderService::build_effective_live_snapshot_from_state(
         state,
         AppType::Claude,
         provider,
     )?;
+    crate::cli::claude_temp_launch::clear_alternate_claude_auth_field(&mut settings);
     preview_launch_from_settings_with(&provider.id, &settings, temp_dir, resolve_claude_binary)
 }
 

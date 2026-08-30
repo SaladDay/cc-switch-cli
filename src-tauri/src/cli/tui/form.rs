@@ -261,6 +261,7 @@ pub enum ProviderAddField {
     ClaudeBaseUrl,
     ClaudeApiFormat,
     ClaudeApiKey,
+    ClaudeAnthropicApiKeyField,
     ClaudeModelConfig,
     ClaudeFallbackModel,
     ClaudeAdvancedDivider,

@@ -403,7 +403,8 @@ impl App {
                 };
                 Action::None
             }
-            ProviderAddField::CodexAnthropicApiKeyField => {
+            ProviderAddField::CodexAnthropicApiKeyField
+            | ProviderAddField::ClaudeAnthropicApiKeyField => {
                 if !matches!(key.code, KeyCode::Enter) {
                     return Action::None;
                 }
