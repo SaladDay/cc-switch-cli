@@ -12,8 +12,10 @@ use std::{
 };
 
 use cc_switch_core::{
-    builtin_app_adapter, AppType as CoreAppType, LiveDocumentSet, LogicalTarget, NativeImportStep,
-    ObservedDocument, ProviderSnapshot, MAX_OPERATION_CONTENT_BYTES,
+    builtin_app_adapter, execute_operation_plan, AppType as CoreAppType, CompareExchangeOutcome,
+    ContentExpectation, LiveDocumentSet, LogicalTarget, NativeImportStep, ObservedDocument,
+    OperationExecutionError, OperationFailure, OperationHost, OperationPlan, OperationRead,
+    PlannedWrite, ProviderSnapshot, MAX_OPERATION_CONTENT_BYTES, OPERATION_CONTRACT_MAJOR,
 };
 
 use crate::{app_config::AppType, error::AppError, provider::Provider};
@@ -219,24 +221,128 @@ pub(super) fn target_path(target: LogicalTarget) -> Result<PathBuf, AppError> {
     }
 }
 
+struct CliOperationHost;
+
+impl OperationHost for CliOperationHost {
+    type Resource = PathBuf;
+    type Error = AppError;
+
+    fn resolve(&mut self, target: LogicalTarget) -> Result<Self::Resource, Self::Error> {
+        target_path(target)
+    }
+
+    fn read(
+        &mut self,
+        resource: &Self::Resource,
+        maximum: usize,
+    ) -> Result<OperationRead, Self::Error> {
+        read_optional_bounded_state(resource, maximum)
+    }
+
+    fn compare_exchange(
+        &mut self,
+        resource: &Self::Resource,
+        expected: Option<&[u8]>,
+        replacement: Option<&[u8]>,
+    ) -> Result<CompareExchangeOutcome, Self::Error> {
+        let current =
+            read_optional_bounded_state(resource, expected.map_or(0, |contents| contents.len()))?;
+        let matches = match current {
+            OperationRead::Missing => expected.is_none(),
+            OperationRead::Contents(contents) => expected == Some(contents.as_slice()),
+            OperationRead::TooLarge => false,
+        };
+        if !matches {
+            return Ok(CompareExchangeOutcome::Conflict);
+        }
+        match replacement {
+            Some(contents) => crate::config::atomic_write(resource, contents),
+            None => crate::config::delete_file(resource),
+        }?;
+        Ok(CompareExchangeOutcome::Applied)
+    }
+}
+
+/// Uses the shared executor while retaining the CLI's established JSON bytes
+/// and host-owned path and filesystem behavior. The caller must hold the
+/// per-application switch lock; ordinary filesystems cannot exclude writers
+/// that ignore that synchronization protocol.
+pub(super) fn execute_claude_settings_under_lock(
+    settings: &serde_json::Value,
+) -> Result<(), AppError> {
+    let contents = serde_json::to_string_pretty(settings)
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    let target = LogicalTarget::ClaudeSettings;
+    let mut host = CliOperationHost;
+    let resource = host.resolve(target)?;
+    let original = match host.read(&resource, MAX_OPERATION_CONTENT_BYTES)? {
+        OperationRead::Missing => None,
+        OperationRead::Contents(contents) => Some(contents),
+        OperationRead::TooLarge => {
+            return Err(oversized_live_config_error(
+                &resource,
+                MAX_OPERATION_CONTENT_BYTES,
+            ))
+        }
+    };
+    let plan = OperationPlan {
+        contract_major: OPERATION_CONTRACT_MAJOR,
+        app_id: CoreAppType::Claude.as_str().to_owned(),
+        writes: vec![PlannedWrite {
+            target,
+            expected: ContentExpectation::for_contents(original.as_deref()),
+            contents: Some(contents),
+        }],
+    };
+
+    execute_operation_plan(&plan, &mut host)
+        .map(drop)
+        .map_err(map_execution_error)
+}
+
+fn map_execution_error(error: OperationExecutionError<AppError>) -> AppError {
+    if error.rollback_failures().is_empty() {
+        if let OperationFailure::Conflict { target } = error.failure() {
+            return AppError::Conflict(format!(
+                "Core live target {target:?} changed while the write was being prepared"
+            ));
+        }
+    }
+    AppError::Message(format!("Core live operation failed: {error}"))
+}
+
 fn read_optional_bounded(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    match read_optional_bounded_state(path, MAX_OPERATION_CONTENT_BYTES)? {
+        OperationRead::Missing => Ok(None),
+        OperationRead::Contents(contents) => Ok(Some(contents)),
+        OperationRead::TooLarge => Err(oversized_live_config_error(
+            path,
+            MAX_OPERATION_CONTENT_BYTES,
+        )),
+    }
+}
+
+fn read_optional_bounded_state(path: &Path, maximum: usize) -> Result<OperationRead, AppError> {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(OperationRead::Missing),
         Err(error) => return Err(AppError::io(path, error)),
     };
     let mut bytes = Vec::new();
-    file.take(MAX_OPERATION_CONTENT_BYTES as u64 + 1)
+    file.take((maximum as u64).saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| AppError::io(path, error))?;
-    if bytes.len() > MAX_OPERATION_CONTENT_BYTES {
-        return Err(AppError::InvalidInput(format!(
-            "Live configuration exceeds the {}-byte Core input limit: {}",
-            MAX_OPERATION_CONTENT_BYTES,
-            path.display()
-        )));
+    if bytes.len() > maximum {
+        return Ok(OperationRead::TooLarge);
     }
-    Ok(Some(bytes))
+    Ok(OperationRead::Contents(bytes))
+}
+
+fn oversized_live_config_error(path: &Path, maximum: usize) -> AppError {
+    AppError::InvalidInput(format!(
+        "Live configuration exceeds the {maximum}-byte Core input limit: {}",
+        path.display()
+    ))
 }
 
 #[cfg(test)]
@@ -454,5 +560,76 @@ mod tests {
         assert!(incomplete
             .to_string()
             .contains("not in the supplied snapshot"));
+    }
+
+    #[test]
+    fn core_executor_keeps_the_cli_claude_json_write_contract() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let path = target_path(LogicalTarget::ClaudeSettings).expect("Claude path");
+        std::fs::create_dir_all(path.parent().expect("settings parent"))
+            .expect("create settings parent");
+        std::fs::write(&path, b"{\"old\":true}").expect("seed Claude settings");
+        let settings = json!({
+            "env": {"ANTHROPIC_AUTH_TOKEN": "secret"},
+            "model": "claude-sonnet"
+        });
+
+        execute_claude_settings_under_lock(&settings).expect("execute Core plan");
+
+        let expected = serde_json::to_string_pretty(&settings).expect("serialize expected JSON");
+        assert_eq!(
+            std::fs::read(&path).expect("read Claude settings"),
+            expected.as_bytes()
+        );
+    }
+
+    #[test]
+    fn cli_operation_host_reports_stale_core_preconditions_without_overwriting() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let target = LogicalTarget::ClaudeSettings;
+        let path = target_path(target).expect("Claude path");
+        std::fs::create_dir_all(path.parent().expect("settings parent"))
+            .expect("create settings parent");
+        std::fs::write(&path, b"external").expect("seed external edit");
+        let plan = OperationPlan {
+            contract_major: OPERATION_CONTRACT_MAJOR,
+            app_id: CoreAppType::Claude.as_str().to_owned(),
+            writes: vec![PlannedWrite {
+                target,
+                expected: ContentExpectation::for_contents(Some(b"stale")),
+                contents: Some("{}".to_owned()),
+            }],
+        };
+        let mut host = CliOperationHost;
+
+        let error = execute_operation_plan(&plan, &mut host).expect_err("stale precondition");
+
+        assert!(matches!(
+            error.failure(),
+            OperationFailure::Conflict {
+                target: LogicalTarget::ClaudeSettings
+            }
+        ));
+        assert_eq!(
+            std::fs::read(&path).expect("read preserved edit"),
+            b"external"
+        );
+    }
+
+    #[test]
+    fn cli_operation_host_reports_oversized_reads_without_returning_partial_bytes() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let path = target_path(LogicalTarget::ClaudeSettings).expect("Claude path");
+        std::fs::create_dir_all(path.parent().expect("settings parent"))
+            .expect("create settings parent");
+        std::fs::write(&path, b"12345").expect("seed oversized input");
+        let mut host = CliOperationHost;
+
+        let observed = host.read(&path, 4).expect("bounded read");
+
+        assert!(matches!(observed, OperationRead::TooLarge));
     }
 }

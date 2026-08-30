@@ -283,7 +283,24 @@ fn sync_provider_to_live_respecting_takeover(
         return Ok(false);
     }
 
-    ProviderService::write_live_snapshot(&app_type, provider, common_config_snippet, true)?;
+    if matches!(app_type, AppType::Claude) {
+        let prepared = ProviderService::prepare_live_snapshot(
+            &app_type,
+            provider,
+            None,
+            common_config_snippet,
+            None,
+            true,
+        )?;
+        match &prepared {
+            PreparedLiveWrite::Claude { settings } => {
+                core_bridge::execute_claude_settings_under_lock(settings)?;
+            }
+            _ => ProviderService::apply_prepared_live_snapshot(&prepared)?,
+        }
+    } else {
+        ProviderService::write_live_snapshot(&app_type, provider, common_config_snippet, true)?;
+    }
     if ownership.refresh_stale_backup {
         if let Err(err) = futures::executor::block_on(
             state
