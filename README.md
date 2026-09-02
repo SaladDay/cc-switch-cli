@@ -735,6 +735,11 @@ src-tauri/src/
 ```
 
 
+## 🔗 Related Projects
+
+- [cc-switch-enhanced (ccse)](https://github.com/Tonystarkw12/cc-switch-enhanced) — A fleet-wide model switcher for AI coding agents, complementary to CC-Switch CLI's deep per-app management. Where CC-Switch CLI manages 7 apps in depth (provider switching, proxy, usage stats), `ccse` takes a lightweight cross-agent approach: one command rewrites model / base URL / API key across 37 coding agents at once, with endpoint verification, automatic snapshots and one-key rollback. Handy when running many agents side by side against aggregator APIs (NewAPI / omniroute / mirrors).
+
+
 ## 🤝 Contributing
 
 Contributions welcome! This fork focuses on CLI functionality.

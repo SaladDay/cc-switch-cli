@@ -737,6 +737,11 @@ src-tauri/src/
 ```
 
 
+## 🔗 相关项目
+
+- [cc-switch-enhanced (ccse)](https://github.com/Tonystarkw12/cc-switch-enhanced) —— 面向 AI 编程助手的"机队级"模型切换器，与 CC-Switch CLI 的单应用深度管理互补。CC-Switch CLI 深度管理 7 个应用（供应商切换、代理、用量统计），ccse 则走轻量跨助手路线：一行命令同时改写 37 个编程助手的模型 / 中转地址 / API key，自带端点校验、自动快照与一键回滚。适合多个助手并行接聚合 API（NewAPI / omniroute / 镜像站）的场景。
+
+
 ## 🤝 贡献
 
 欢迎贡献！本分支专注于 CLI 功能。
