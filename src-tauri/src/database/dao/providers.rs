@@ -5,10 +5,38 @@
 use crate::database::dao::providers_seed::{is_official_seed_id, OFFICIAL_SEEDS};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::provider::{Provider, ProviderMeta};
+use crate::provider::Provider;
+use cc_switch_store::ProviderRow as SharedProviderRow;
 use indexmap::IndexMap;
 use rusqlite::params;
 use std::collections::{HashMap, HashSet};
+
+fn provider_from_shared_row(row: SharedProviderRow) -> Result<Provider, AppError> {
+    let sort_index = match row.sort_index {
+        Some(value) => Some(usize::try_from(value).map_err(|_| {
+            AppError::Database(format!(
+                "provider sort_index is outside the supported range: {value}"
+            ))
+        })?),
+        None => None,
+    };
+
+    Ok(Provider {
+        id: row.id,
+        name: row.name,
+        settings_config: serde_json::from_str(&row.settings_config)
+            .unwrap_or(serde_json::Value::Null),
+        website_url: row.website_url,
+        category: row.category,
+        created_at: row.created_at,
+        sort_index,
+        notes: row.notes,
+        meta: Some(serde_json::from_str(&row.meta).unwrap_or_default()),
+        icon: row.icon,
+        icon_color: row.icon_color,
+        in_failover_queue: row.in_failover_queue != 0,
+    })
+}
 
 impl Database {
     /// 获取指定应用类型的所有供应商
@@ -17,55 +45,13 @@ impl Database {
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
-            "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
-             FROM providers WHERE app_type = ?1
-             ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC"
-        ).map_err(|e| AppError::Database(e.to_string()))?;
-
-        let provider_iter = stmt
-            .query_map(params![app_type], |row| {
-                let id: String = row.get(0)?;
-                let name: String = row.get(1)?;
-                let settings_config_str: String = row.get(2)?;
-                let website_url: Option<String> = row.get(3)?;
-                let category: Option<String> = row.get(4)?;
-                let created_at: Option<i64> = row.get(5)?;
-                let sort_index: Option<usize> = row.get(6)?;
-                let notes: Option<String> = row.get(7)?;
-                let icon: Option<String> = row.get(8)?;
-                let icon_color: Option<String> = row.get(9)?;
-                let meta_str: String = row.get(10)?;
-                let in_failover_queue: bool = row.get(11)?;
-
-                let settings_config =
-                    serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
-                let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
-
-                Ok((
-                    id,
-                    Provider {
-                        id: "".to_string(), // Placeholder, set below
-                        name,
-                        settings_config,
-                        website_url,
-                        category,
-                        created_at,
-                        sort_index,
-                        notes,
-                        meta: Some(meta),
-                        icon,
-                        icon_color,
-                        in_failover_queue,
-                    },
-                ))
-            })
+        let provider_rows = cc_switch_store::read_provider_rows(&conn, Some(app_type))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut providers = IndexMap::new();
-        for provider_res in provider_iter {
-            let (id, mut provider) = provider_res.map_err(|e| AppError::Database(e.to_string()))?;
-            provider.id = id.clone();
+        for row in provider_rows {
+            let mut provider = provider_from_shared_row(row)?;
+            let id = provider.id.clone();
 
             // 加载 endpoints
             let mut stmt_endpoints = conn.prepare(
@@ -131,48 +117,10 @@ impl Database {
         app_type: &str,
     ) -> Result<Option<Provider>, AppError> {
         let conn = lock_conn!(self.conn);
-        let result = conn.query_row(
-            "SELECT name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
-             FROM providers WHERE id = ?1 AND app_type = ?2",
-            params![id, app_type],
-            |row| {
-                let name: String = row.get(0)?;
-                let settings_config_str: String = row.get(1)?;
-                let website_url: Option<String> = row.get(2)?;
-                let category: Option<String> = row.get(3)?;
-                let created_at: Option<i64> = row.get(4)?;
-                let sort_index: Option<usize> = row.get(5)?;
-                let notes: Option<String> = row.get(6)?;
-                let icon: Option<String> = row.get(7)?;
-                let icon_color: Option<String> = row.get(8)?;
-                let meta_str: String = row.get(9)?;
-                let in_failover_queue: bool = row.get(10)?;
-
-                let settings_config = serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
-                let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
-
-                Ok(Provider {
-                    id: id.to_string(),
-                    name,
-                    settings_config,
-                    website_url,
-                    category,
-                    created_at,
-                    sort_index,
-                    notes,
-                    meta: Some(meta),
-                    icon,
-                    icon_color,
-                    in_failover_queue,
-                })
-            },
-        );
-
-        match result {
-            Ok(provider) => Ok(Some(provider)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(AppError::Database(e.to_string())),
-        }
+        cc_switch_store::read_provider_row(&conn, id, app_type)
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .map(provider_from_shared_row)
+            .transpose()
     }
 
     /// 仅获取指定 app 下所有 provider 的 id 集合。
