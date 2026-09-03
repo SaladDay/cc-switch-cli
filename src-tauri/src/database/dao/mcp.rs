@@ -12,55 +12,30 @@ impl Database {
     /// 获取所有 MCP 服务器
     pub fn get_all_mcp_servers(&self) -> Result<IndexMap<String, McpServer>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
-            "SELECT id, name, server_config, description, homepage, docs, tags, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes
-             FROM mcp_servers
-             ORDER BY name ASC, id ASC"
-        ).map_err(|e| AppError::Database(e.to_string()))?;
-
-        let server_iter = stmt
-            .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let name: String = row.get(1)?;
-                let server_config_str: String = row.get(2)?;
-                let description: Option<String> = row.get(3)?;
-                let homepage: Option<String> = row.get(4)?;
-                let docs: Option<String> = row.get(5)?;
-                let tags_str: String = row.get(6)?;
-                let enabled_claude: bool = row.get(7)?;
-                let enabled_codex: bool = row.get(8)?;
-                let enabled_gemini: bool = row.get(9)?;
-                let enabled_opencode: bool = row.get(10)?;
-                let enabled_hermes: bool = row.get(11)?;
-
-                let server = serde_json::from_str(&server_config_str).unwrap_or_default();
-                let tags = serde_json::from_str(&tags_str).unwrap_or_default();
-
-                Ok((
-                    id.clone(),
-                    McpServer {
-                        id,
-                        name,
-                        server,
-                        apps: McpApps {
-                            claude: enabled_claude,
-                            codex: enabled_codex,
-                            gemini: enabled_gemini,
-                            opencode: enabled_opencode,
-                            hermes: enabled_hermes,
-                        },
-                        description,
-                        homepage,
-                        docs,
-                        tags,
-                    },
-                ))
-            })
+        let rows = cc_switch_store::read_mcp_server_rows(&conn)
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut servers = IndexMap::new();
-        for server_res in server_iter {
-            let (id, server) = server_res.map_err(|e| AppError::Database(e.to_string()))?;
+        for row in rows {
+            let server = serde_json::from_str(&row.server_config).unwrap_or_default();
+            let tags = serde_json::from_str(&row.tags).unwrap_or_default();
+            let id = row.id;
+            let server = McpServer {
+                id: id.clone(),
+                name: row.name,
+                server,
+                apps: McpApps {
+                    claude: row.enabled_claude != 0,
+                    codex: row.enabled_codex != 0,
+                    gemini: row.enabled_gemini != 0,
+                    opencode: row.enabled_opencode != 0,
+                    hermes: row.enabled_hermes != 0,
+                },
+                description: row.description,
+                homepage: row.homepage,
+                docs: row.docs,
+                tags,
+            };
             servers.insert(id, server);
         }
         Ok(servers)
