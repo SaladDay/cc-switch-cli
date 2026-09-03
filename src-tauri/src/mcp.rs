@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::app_config::{AppType, McpConfig, MultiAppConfig};
+use crate::app_config::{AppType, McpConfig, McpServer, MultiAppConfig};
 use crate::error::AppError;
 
 /// 基础校验：允许 stdio/http/sse；或省略 type（视为 stdio）。对应必填字段存在
@@ -1287,6 +1287,37 @@ fn remove_mcp_server_from_doc(doc: &mut toml_edit::DocumentMut, id: &str) {
     }
 }
 
+/// Projects the complete managed Codex MCP state into an already prepared
+/// config document without touching the filesystem.
+pub(crate) fn project_managed_servers_to_codex_text(
+    base_text: &str,
+    servers: &HashMap<String, McpServer>,
+) -> Result<String, AppError> {
+    let mut text = base_text.to_string();
+    for server in servers.values() {
+        let mut doc = if text.trim().is_empty() {
+            toml_edit::DocumentMut::new()
+        } else {
+            text.parse::<toml_edit::DocumentMut>()
+                .map_err(|e| AppError::McpValidation(format!("解析 config.toml 失败: {e}")))?
+        };
+
+        if server.apps.is_enabled_for(&AppType::Codex) {
+            if let Some(mcp_item) = doc.get_mut("mcp") {
+                if let Some(table) = mcp_item.as_table_like_mut() {
+                    table.remove("servers");
+                }
+            }
+            let table = json_server_to_toml_table(&server.server)?;
+            upsert_mcp_server_table(&mut doc, &server.id, table)?;
+        } else {
+            remove_mcp_server_from_doc(&mut doc, &server.id);
+        }
+        text = doc.to_string();
+    }
+    Ok(text)
+}
+
 /// 将单个 MCP 服务器同步到 Codex live 配置
 /// 始终使用 Codex 官方格式 [mcp_servers]，并清理可能存在的错误格式 [mcp.servers]
 pub fn sync_single_server_to_codex(
@@ -1716,6 +1747,59 @@ pub fn import_from_hermes(config: &mut MultiAppConfig) -> Result<usize, AppError
 #[cfg(test)]
 mod codex_mcp_tests {
     use super::*;
+
+    fn codex_server(id: &str, enabled: bool) -> McpServer {
+        McpServer {
+            id: id.to_string(),
+            name: id.to_string(),
+            server: json!({
+                "type": "stdio",
+                "command": "npx"
+            }),
+            apps: crate::app_config::McpApps {
+                claude: false,
+                codex: enabled,
+                gemini: false,
+                opencode: false,
+                hermes: false,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn managed_projection_updates_codex_mcp_without_touching_provider_config() {
+        let mut servers = HashMap::new();
+        servers.insert("keep".to_string(), codex_server("keep", true));
+        servers.insert("remove".to_string(), codex_server("remove", false));
+        let projected = project_managed_servers_to_codex_text(
+            r#"model_provider = "vendor"
+
+[model_providers.vendor]
+base_url = "https://example.com/v1"
+
+[mcp_servers.remove]
+command = "old"
+"#,
+            &servers,
+        )
+        .expect("project managed MCP");
+
+        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
+        assert_eq!(parsed["model_provider"].as_str(), Some("vendor"));
+        assert_eq!(
+            parsed["model_providers"]["vendor"]["base_url"].as_str(),
+            Some("https://example.com/v1")
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["keep"]["command"].as_str(),
+            Some("npx")
+        );
+        assert!(parsed["mcp_servers"].get("remove").is_none());
+    }
 
     #[test]
     fn upsert_normalizes_non_table_mcp_servers_without_panicking() {

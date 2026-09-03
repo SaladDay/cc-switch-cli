@@ -186,7 +186,7 @@ struct PostCommitAction {
     provider: Provider,
     previous_provider: Option<Provider>,
     backup: LiveSnapshot,
-    use_core_claude_live: bool,
+    core_live_execution: CoreLiveExecution,
     sync_mcp: bool,
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
@@ -195,6 +195,13 @@ struct PostCommitAction {
     refresh_stale_backup: bool,
     sync_proxy_live: bool,
     activate_provider: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CoreLiveExecution {
+    None,
+    ClaudeAdapter,
+    CodexPrepared,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -331,7 +338,7 @@ struct PostCommitFailure {
 enum PostCommitLiveRollback {
     Snapshot,
     Preserve,
-    CoreClaude(core_bridge::CoreClaudeSettingsReceipt),
+    Core(core_bridge::CoreOperationReceipt),
 }
 
 impl From<AppError> for PostCommitFailure {
@@ -924,7 +931,7 @@ impl ProviderService {
                         config_rollback.and_then(|_| prepared.action.backup.clone().restore())
                     }
                     PostCommitLiveRollback::Preserve => config_rollback,
-                    PostCommitLiveRollback::CoreClaude(receipt) => {
+                    PostCommitLiveRollback::Core(receipt) => {
                         let live_rollback = receipt.rollback();
                         match (config_rollback, live_rollback) {
                             (Ok(()), Ok(())) => Ok(()),
@@ -1047,14 +1054,15 @@ impl ProviderService {
                 .as_ref()
                 .and_then(|meta| meta.apply_common_config)
                 .unwrap_or(false);
-            PreparedPostCommitEffect::Live(Self::prepare_live_snapshot(
+            let live = Self::prepare_live_snapshot(
                 &action.app_type,
                 &action.provider,
                 action.previous_provider.as_ref(),
                 action.common_config_snippet.as_deref(),
                 action.previous_common_config_snippet.as_deref(),
                 apply_common_config,
-            )?)
+            )?;
+            PreparedPostCommitEffect::Live(live)
         };
 
         Ok(PreparedPostCommitAction { action, effect })
@@ -1067,15 +1075,16 @@ impl ProviderService {
         let mut live_rollback = PostCommitLiveRollback::Snapshot;
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
-                if prepared.action.use_core_claude_live {
-                    match live {
+                match prepared.action.core_live_execution {
+                    CoreLiveExecution::None => Self::apply_prepared_live_snapshot(live)?,
+                    CoreLiveExecution::ClaudeAdapter => match live {
                         PreparedLiveWrite::Claude { settings } => {
                             match core_bridge::execute_claude_settings_with_adapter_under_lock(
                                 settings,
                             ) {
                                 Ok(core_bridge::ClaudeSettingsWrite::Compatibility) => {}
                                 Ok(core_bridge::ClaudeSettingsWrite::Core(receipt)) => {
-                                    live_rollback = PostCommitLiveRollback::CoreClaude(receipt);
+                                    live_rollback = PostCommitLiveRollback::Core(receipt);
                                 }
                                 Err(core_bridge::ClaudeSettingsWriteError::Compatibility(
                                     error,
@@ -1099,9 +1108,46 @@ impl ProviderService {
                                 live_rollback: PostCommitLiveRollback::Preserve,
                             });
                         }
-                    }
-                } else {
-                    Self::apply_prepared_live_snapshot(live)?;
+                    },
+                    CoreLiveExecution::CodexPrepared => match live {
+                        PreparedLiveWrite::Codex { .. } => {
+                            let mut projected = live.clone();
+                            let PreparedLiveWrite::Codex { config, .. } = &mut projected else {
+                                unreachable!("Codex write checked above")
+                            };
+                            config.config_text =
+                                McpService::project_enabled_codex_text(state, &config.config_text)
+                                    .map_err(|error| PostCommitFailure {
+                                        error,
+                                        live_rollback: PostCommitLiveRollback::Preserve,
+                                    })?;
+                            match core_bridge::execute_prepared_codex_under_lock(&projected) {
+                                Ok(core_bridge::CodexPreparedWrite::Compatibility) => {
+                                    Self::apply_prepared_live_snapshot(&projected)?;
+                                }
+                                Ok(core_bridge::CodexPreparedWrite::Core(receipt)) => {
+                                    live_rollback = PostCommitLiveRollback::Core(receipt);
+                                }
+                                Err(error) => {
+                                    return Err(PostCommitFailure {
+                                        error,
+                                        live_rollback: PostCommitLiveRollback::Preserve,
+                                    });
+                                }
+                            }
+                        }
+                        PreparedLiveWrite::Noop => {
+                            live_rollback = PostCommitLiveRollback::Preserve;
+                        }
+                        _ => {
+                            return Err(PostCommitFailure {
+                                error: AppError::Config(
+                                    "Core Codex live action contains a non-Codex write".into(),
+                                ),
+                                live_rollback: PostCommitLiveRollback::Preserve,
+                            });
+                        }
+                    },
                 }
                 if prepared.action.activate_provider
                     && matches!(prepared.action.app_type, AppType::Hermes)
@@ -1187,8 +1233,19 @@ impl ProviderService {
         }
 
         if prepared.action.sync_mcp {
-            use crate::services::mcp::McpService;
-            if let Err(error) = McpService::sync_all_enabled(state) {
+            let codex_is_already_projected = matches!(
+                (&prepared.action.core_live_execution, &prepared.effect),
+                (
+                    CoreLiveExecution::CodexPrepared,
+                    PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
+                )
+            );
+            let sync_result = if codex_is_already_projected {
+                McpService::sync_all_enabled_except(state, Some(&AppType::Codex))
+            } else {
+                McpService::sync_all_enabled(state)
+            };
+            if let Err(error) = sync_result {
                 return Err(PostCommitFailure {
                     error,
                     live_rollback,
@@ -1667,7 +1724,7 @@ impl ProviderService {
             previous_provider: Some(provider.clone()),
             provider,
             backup: Self::capture_live_snapshot(app_type)?,
-            use_core_claude_live: false,
+            core_live_execution: CoreLiveExecution::None,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -2330,7 +2387,7 @@ impl ProviderService {
                     provider: provider_to_store.clone(),
                     previous_provider: None,
                     backup,
-                    use_core_claude_live: false,
+                    core_live_execution: CoreLiveExecution::None,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
@@ -2506,7 +2563,7 @@ impl ProviderService {
                     provider: merged,
                     previous_provider,
                     backup,
-                    use_core_claude_live: false,
+                    core_live_execution: CoreLiveExecution::None,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex)
@@ -3121,7 +3178,7 @@ impl ProviderService {
                 provider,
                 previous_provider: None,
                 backup: Self::capture_live_snapshot(app_type)?,
-                use_core_claude_live: false,
+                core_live_execution: CoreLiveExecution::None,
                 sync_mcp: matches!(app_type, AppType::OpenCode),
                 refresh_snapshot: false,
                 common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -3163,7 +3220,11 @@ impl ProviderService {
             provider,
             previous_provider,
             backup,
-            use_core_claude_live: matches!(app_type, AppType::Claude),
+            core_live_execution: match app_type {
+                AppType::Claude => CoreLiveExecution::ClaudeAdapter,
+                AppType::Codex => CoreLiveExecution::CodexPrepared,
+                _ => CoreLiveExecution::None,
+            },
             sync_mcp: true,
             refresh_snapshot: true,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -3181,14 +3242,12 @@ impl ProviderService {
             return pi::enable(state, provider_id).map(|_| ());
         }
 
-        // Keep takeover detection and a normal Core-backed Claude switch in
+        // Keep takeover detection and a normal Core-backed switch in
         // one critical section. Hot switching owns the same lock internally,
         // so release it before handing that branch to ProxyService.
-        let mut switch_guard = if matches!(app_type, AppType::Claude) {
+        let switch_guard = if matches!(app_type, AppType::Claude | AppType::Codex) {
             Some(futures::executor::block_on(
-                state
-                    .proxy_service
-                    .lock_switch_for_app(AppType::Claude.as_str()),
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
             ))
         } else {
             None
@@ -3219,13 +3278,21 @@ impl ProviderService {
             let should_hot_switch = is_app_taken_over || live_taken_over || running_takeover_active;
 
             if should_hot_switch {
-                drop(switch_guard.take());
-                futures::executor::block_on(
-                    state
-                        .proxy_service
-                        .hot_switch_provider(app_type.as_str(), provider_id),
-                )
-                .map_err(|e| AppError::Message(format!("热切换失败: {e}")))?;
+                let result = match switch_guard.as_ref() {
+                    Some(guard) => futures::executor::block_on(
+                        state.proxy_service.hot_switch_provider_under_guard(
+                            app_type.as_str(),
+                            provider_id,
+                            guard,
+                        ),
+                    ),
+                    None => futures::executor::block_on(
+                        state
+                            .proxy_service
+                            .hot_switch_provider(app_type.as_str(), provider_id),
+                    ),
+                };
+                result.map_err(|e| AppError::Message(format!("热切换失败: {e}")))?;
 
                 let mut guard = state.config.write().map_err(AppError::from)?;
                 if let Some(manager) = guard.get_manager_mut(&app_type) {

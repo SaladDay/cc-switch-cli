@@ -13,6 +13,16 @@ fn codex_settings(config: &str) -> Value {
     })
 }
 
+fn codex_settings_with_catalog(config: &str, api_key: &str, model: &str) -> Value {
+    json!({
+        "auth": { "OPENAI_API_KEY": api_key },
+        "config": config,
+        "modelCatalog": {
+            "models": [{ "model": model }]
+        }
+    })
+}
+
 fn with_common_enabled(mut provider: Provider) -> Provider {
     provider
         .meta
@@ -393,7 +403,11 @@ fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState
             with_common_enabled(Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
+                codex_settings_with_catalog(
+                    "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n",
+                    "sk-first",
+                    "gpt-first",
+                ),
                 None,
             )),
         );
@@ -402,7 +416,11 @@ fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState
             with_common_enabled(Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
-                codex_settings("model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"),
+                codex_settings_with_catalog(
+                    "model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n",
+                    "sk-second",
+                    "gpt-second",
+                ),
                 None,
             )),
         );
@@ -450,6 +468,131 @@ command = "npx"
     ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
 
     (temp_home, env, state)
+}
+
+#[test]
+#[serial]
+fn switch_codex_conflict_rolls_back_state_without_overwriting_external_live_edit() {
+    let (_temp_home, _env, state) = setup_switched_codex_state_with_managed_mcp();
+    let external = b"model = \"external\"\n".to_vec();
+    super::core_bridge::replace_before_target_operation_read(
+        cc_switch_core::LogicalTarget::CodexConfig,
+        2,
+        external.clone(),
+    );
+
+    let error = ProviderService::switch(&state, AppType::Codex, "p1")
+        .expect_err("external edit must cause a Core conflict");
+
+    assert!(matches!(error, AppError::Conflict(_)));
+    assert_eq!(
+        std::fs::read(get_codex_config_path()).expect("read preserved external edit"),
+        external
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read rolled-back database current provider")
+            .as_deref(),
+        Some("p2")
+    );
+    assert_eq!(
+        state
+            .config
+            .read()
+            .expect("read rolled-back config")
+            .get_manager(&AppType::Codex)
+            .expect("Codex manager")
+            .current,
+        "p2"
+    );
+}
+
+#[test]
+#[serial]
+fn switch_codex_downstream_mcp_failure_rolls_back_the_complete_core_write() {
+    let (_temp_home, _env, state) = setup_switched_codex_state_with_managed_mcp();
+    let auth_path = get_codex_auth_path();
+    let config_path = get_codex_config_path();
+    let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+    let before_auth = std::fs::read(&auth_path).expect("read original auth");
+    let before_config = std::fs::read(&config_path).expect("read original config");
+    let before_catalog = std::fs::read(&catalog_path).expect("read original catalog");
+
+    let gemini_path = crate::gemini_config::get_gemini_settings_path();
+    std::fs::create_dir_all(gemini_path.parent().expect("Gemini settings parent"))
+        .expect("create Gemini config directory");
+    std::fs::write(&gemini_path, b"not json").expect("seed broken Gemini settings");
+
+    ProviderService::switch(&state, AppType::Codex, "p1")
+        .expect_err("unrelated MCP projection must fail the transaction");
+
+    assert_eq!(
+        std::fs::read(auth_path).expect("read rolled-back auth"),
+        before_auth
+    );
+    assert_eq!(
+        std::fs::read(config_path).expect("read rolled-back config"),
+        before_config
+    );
+    assert_eq!(
+        std::fs::read(catalog_path).expect("read rolled-back catalog"),
+        before_catalog
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read rolled-back database current provider")
+            .as_deref(),
+        Some("p2")
+    );
+    assert_eq!(
+        state
+            .config
+            .read()
+            .expect("read rolled-back config")
+            .get_manager(&AppType::Codex)
+            .expect("Codex manager")
+            .current,
+        "p2"
+    );
+}
+
+#[test]
+#[serial]
+fn switch_codex_oversized_compatibility_write_keeps_managed_mcp() {
+    let (_temp_home, _env, state) = setup_switched_codex_state_with_managed_mcp();
+    let mut provider = state
+        .db
+        .get_provider_by_id("p1", AppType::Codex.as_str())
+        .expect("read provider")
+        .expect("p1 provider");
+    let oversized_config = format!(
+        "padding = \"{}\"\nmodel_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n",
+        "x".repeat(cc_switch_core::MAX_OPERATION_CONTENT_BYTES)
+    );
+    provider.settings_config["config"] = Value::String(oversized_config);
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &provider)
+        .expect("save oversized provider");
+    state
+        .config
+        .write()
+        .expect("write config")
+        .get_manager_mut(&AppType::Codex)
+        .expect("Codex manager")
+        .providers
+        .insert("p1".to_string(), provider);
+
+    ProviderService::switch(&state, AppType::Codex, "p1")
+        .expect("legacy-size compatibility switch");
+
+    let live = std::fs::read_to_string(get_codex_config_path()).expect("read live config");
+    assert!(live.contains("[mcp_servers.my_server]"));
+    assert!(live.len() > cc_switch_core::MAX_OPERATION_CONTENT_BYTES);
 }
 
 fn setup_codex_state_with_broken_other_snapshot() -> (TempDir, EnvGuard, AppState) {
@@ -1480,7 +1623,11 @@ fn switch_claude_conflict_rolls_back_state_without_overwriting_external_live_edi
         "env": {"ANTHROPIC_AUTH_TOKEN": "token1"}
     }));
     let external = vec![b'x'; cc_switch_core::MAX_OPERATION_CONTENT_BYTES + 1];
-    super::core_bridge::replace_before_second_operation_read(external.clone());
+    super::core_bridge::replace_before_target_operation_read(
+        cc_switch_core::LogicalTarget::ClaudeSettings,
+        2,
+        external.clone(),
+    );
 
     let error = ProviderService::switch(&state, AppType::Claude, "p2")
         .expect_err("external edit must cause a Core conflict");

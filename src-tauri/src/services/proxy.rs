@@ -2599,8 +2599,17 @@ impl ProxyService {
         app_type: &str,
         provider_id: &str,
     ) -> Result<HotSwitchOutcome, String> {
-        let _guard = self.switch_locks.lock_for_app(app_type).await;
+        let guard = self.switch_locks.lock_for_app(app_type).await;
+        self.hot_switch_provider_under_guard(app_type, provider_id, &guard)
+            .await
+    }
 
+    pub(crate) async fn hot_switch_provider_under_guard(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        _guard: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<HotSwitchOutcome, String> {
         let app_type_enum = Self::takeover_app_from_str(app_type)?;
         let provider = self
             .db

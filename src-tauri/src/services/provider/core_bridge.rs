@@ -20,6 +20,7 @@ use cc_switch_core::{
     OPERATION_CONTRACT_MAJOR,
 };
 
+use super::{PreparedCodexAuthWrite, PreparedLiveWrite};
 use crate::{app_config::AppType, error::AppError, provider::Provider};
 
 pub(super) fn provider_snapshot(app: &AppType, provider: &Provider) -> ProviderSnapshot {
@@ -225,19 +226,19 @@ pub(super) fn target_path(target: LogicalTarget) -> Result<PathBuf, AppError> {
 
 struct CliOperationHost;
 
-pub(super) struct CoreClaudeSettingsReceipt(OperationReceipt<PathBuf>);
+pub(super) struct CoreOperationReceipt(OperationReceipt<PathBuf>);
 
-impl CoreClaudeSettingsReceipt {
+impl CoreOperationReceipt {
     pub(super) fn rollback(self) -> Result<(), AppError> {
         self.0
             .rollback(&mut CliOperationHost)
-            .map_err(|error| AppError::Message(format!("Core Claude rollback failed: {error}")))
+            .map_err(|error| AppError::Message(format!("Core live rollback failed: {error}")))
     }
 }
 
 pub(super) enum ClaudeSettingsWrite {
     Compatibility,
-    Core(CoreClaudeSettingsReceipt),
+    Core(CoreOperationReceipt),
 }
 
 #[derive(Debug)]
@@ -256,15 +257,23 @@ impl ClaudeSettingsWriteError {
 
 #[cfg(test)]
 std::thread_local! {
-    static TEST_READ_REPLACEMENT: std::cell::RefCell<Option<(usize, Vec<u8>)>> =
+    static TEST_READ_REPLACEMENT: std::cell::RefCell<Option<(PathBuf, usize, Vec<u8>)>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
-pub(super) fn replace_before_second_operation_read(contents: Vec<u8>) {
+pub(super) fn replace_before_target_operation_read(
+    target: LogicalTarget,
+    read_number: usize,
+    contents: Vec<u8>,
+) {
+    assert!(read_number > 0, "operation read number must be positive");
+    let path = target_path(target).expect("test target must resolve");
     TEST_READ_REPLACEMENT.with(|replacement| {
         assert!(
-            replacement.replace(Some((2, contents))).is_none(),
+            replacement
+                .replace(Some((path, read_number, contents)))
+                .is_none(),
             "operation-read replacement already registered"
         );
     });
@@ -286,12 +295,15 @@ impl OperationHost for CliOperationHost {
         #[cfg(test)]
         let replacement = TEST_READ_REPLACEMENT.with(|replacement| {
             let mut replacement = replacement.borrow_mut();
-            let Some((reads_remaining, _)) = replacement.as_mut() else {
+            let Some((target, reads_remaining, _)) = replacement.as_mut() else {
                 return None;
             };
+            if target != resource {
+                return None;
+            }
             *reads_remaining -= 1;
             if *reads_remaining == 0 {
-                replacement.take().map(|(_, contents)| contents)
+                replacement.take().map(|(_, _, contents)| contents)
             } else {
                 None
             }
@@ -390,7 +402,7 @@ fn execute_claude_settings(
     };
 
     execute_operation_plan(&plan, &mut host)
-        .map(|receipt| ClaudeSettingsWrite::Core(CoreClaudeSettingsReceipt(receipt)))
+        .map(|receipt| ClaudeSettingsWrite::Core(CoreOperationReceipt(receipt)))
         .map_err(|error| ClaudeSettingsWriteError::Core(map_execution_error(error)))
 }
 
@@ -439,6 +451,80 @@ fn claude_adapter_plan(
         ));
     }
     Ok(plan)
+}
+
+pub(super) enum CodexPreparedWrite {
+    Compatibility,
+    Core(CoreOperationReceipt),
+}
+
+/// Executes the CLI's established Codex projection through Core's multi-file
+/// executor. Inputs outside Core's bounded contract are left for the caller's
+/// compatibility writer; this function has not written anything in that case.
+pub(super) fn execute_prepared_codex_under_lock(
+    prepared: &PreparedLiveWrite,
+) -> Result<CodexPreparedWrite, AppError> {
+    let PreparedLiveWrite::Codex { auth, config } = prepared else {
+        return Err(AppError::Config(
+            "Core Codex execution requires a prepared Codex write".into(),
+        ));
+    };
+
+    let mut desired = Vec::with_capacity(3);
+    if let Some(catalog) = &config.model_catalog {
+        desired.push((
+            LogicalTarget::CodexModelCatalog,
+            Some(
+                serde_json::to_string_pretty(catalog)
+                    .map_err(|source| AppError::JsonSerialize { source })?,
+            ),
+        ));
+    }
+    match auth {
+        PreparedCodexAuthWrite::Preserve => {}
+        PreparedCodexAuthWrite::Write(auth) => desired.push((
+            LogicalTarget::CodexAuth,
+            Some(
+                serde_json::to_string_pretty(auth)
+                    .map_err(|source| AppError::JsonSerialize { source })?,
+            ),
+        )),
+        PreparedCodexAuthWrite::Delete => desired.push((LogicalTarget::CodexAuth, None)),
+    }
+    desired.push((LogicalTarget::CodexConfig, Some(config.config_text.clone())));
+
+    if desired.iter().any(|(_, contents)| {
+        contents
+            .as_ref()
+            .is_some_and(|contents| contents.len() > MAX_OPERATION_CONTENT_BYTES)
+    }) {
+        return Ok(CodexPreparedWrite::Compatibility);
+    }
+
+    let mut host = CliOperationHost;
+    let mut writes = Vec::with_capacity(desired.len());
+    for (target, contents) in desired {
+        let resource = host.resolve(target)?;
+        let original = match host.read(&resource, MAX_OPERATION_CONTENT_BYTES) {
+            Ok(OperationRead::Missing) => None,
+            Ok(OperationRead::Contents(contents)) => Some(contents),
+            Ok(OperationRead::TooLarge) | Err(_) => return Ok(CodexPreparedWrite::Compatibility),
+        };
+        writes.push(PlannedWrite {
+            target,
+            expected: ContentExpectation::for_contents(original.as_deref()),
+            contents,
+        });
+    }
+
+    let plan = OperationPlan {
+        contract_major: OPERATION_CONTRACT_MAJOR,
+        app_id: CoreAppType::Codex.as_str().to_owned(),
+        writes,
+    };
+    execute_operation_plan(&plan, &mut host)
+        .map(|receipt| CodexPreparedWrite::Core(CoreOperationReceipt(receipt)))
+        .map_err(map_execution_error)
 }
 
 fn map_execution_error(error: OperationExecutionError<AppError>) -> AppError {
@@ -760,6 +846,85 @@ mod tests {
         assert_eq!(
             std::fs::read(&path).expect("read preserved external edit"),
             external
+        );
+    }
+
+    #[test]
+    fn core_executor_writes_prepared_codex_bytes_without_reprojection() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let auth = json!({"OPENAI_API_KEY": "secret"});
+        let catalog = json!({"models": [{"slug": "model-a"}]});
+        let prepared = PreparedLiveWrite::Codex {
+            auth: PreparedCodexAuthWrite::Write(auth.clone()),
+            config: crate::codex_config::PreparedCodexConfigText {
+                config_text: "model = \"model-a\"\n".to_string(),
+                model_catalog: Some(catalog.clone()),
+            },
+        };
+
+        let write = execute_prepared_codex_under_lock(&prepared).expect("execute Core plan");
+        assert!(matches!(write, CodexPreparedWrite::Core(_)));
+        assert_eq!(
+            std::fs::read(crate::codex_config::get_codex_auth_path()).expect("read auth"),
+            serde_json::to_string_pretty(&auth)
+                .expect("serialize auth")
+                .as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(crate::codex_config::get_codex_config_path()).expect("read config"),
+            b"model = \"model-a\"\n"
+        );
+        assert_eq!(
+            std::fs::read(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read catalog"),
+            serde_json::to_string_pretty(&catalog)
+                .expect("serialize catalog")
+                .as_bytes()
+        );
+    }
+
+    #[test]
+    fn core_executor_preserves_codex_auth_when_prepared_to_do_so() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        crate::config::atomic_write(&auth_path, b"oauth-cache").expect("seed auth cache");
+        let prepared = PreparedLiveWrite::Codex {
+            auth: PreparedCodexAuthWrite::Preserve,
+            config: crate::codex_config::PreparedCodexConfigText {
+                config_text: "model = \"model-a\"\n".to_string(),
+                model_catalog: None,
+            },
+        };
+
+        let write = execute_prepared_codex_under_lock(&prepared).expect("execute Core plan");
+        assert!(matches!(write, CodexPreparedWrite::Core(_)));
+        assert_eq!(
+            std::fs::read(auth_path).expect("read auth cache"),
+            b"oauth-cache"
+        );
+    }
+
+    #[test]
+    fn oversized_prepared_codex_write_requests_compatibility_without_writing() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let config_path = crate::codex_config::get_codex_config_path();
+        crate::config::atomic_write(&config_path, b"before").expect("seed config");
+        let prepared = PreparedLiveWrite::Codex {
+            auth: PreparedCodexAuthWrite::Preserve,
+            config: crate::codex_config::PreparedCodexConfigText {
+                config_text: "x".repeat(MAX_OPERATION_CONTENT_BYTES + 1),
+                model_catalog: None,
+            },
+        };
+
+        let write = execute_prepared_codex_under_lock(&prepared).expect("inspect prepared write");
+        assert!(matches!(write, CodexPreparedWrite::Compatibility));
+        assert_eq!(
+            std::fs::read(config_path).expect("read unchanged config"),
+            b"before"
         );
     }
 
