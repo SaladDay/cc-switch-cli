@@ -288,7 +288,9 @@ pub struct PromptRoot {
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
 use crate::error::AppError;
 use crate::provider::ProviderManager;
-use cc_switch_core::{builtin_app_registry, AppType as CoreAppType};
+use cc_switch_core::{
+    builtin_app_registry, AppCapability, AppType as CoreAppType, ProviderConfigurationMode,
+};
 
 /// 应用类型
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -356,12 +358,11 @@ impl AppType {
     }
 
     pub fn is_additive_mode(&self) -> bool {
-        // This classification still controls CLI-owned write paths. Keep it
-        // exhaustive until those paths migrate, while conformance tests ensure
-        // it remains aligned with Core.
         matches!(
-            self,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi
+            builtin_app_registry()
+                .for_app(&self.as_core())
+                .configuration_mode(),
+            ProviderConfigurationMode::Additive
         )
     }
 
@@ -369,30 +370,16 @@ impl AppType {
         matches!(self, AppType::Claude | AppType::Codex | AppType::Gemini)
     }
 
-    // These product capabilities deliberately remain CLI-owned. Each
-    // exhaustive match forces a decision before a future CLI app can join a
-    // feature merely by appearing in the Core-backed catalog.
     pub(crate) fn supports_mcp(&self) -> bool {
-        match self {
-            AppType::Claude
-            | AppType::Codex
-            | AppType::Gemini
-            | AppType::OpenCode
-            | AppType::Hermes => true,
-            AppType::OpenClaw | AppType::Pi => false,
-        }
+        builtin_app_registry()
+            .for_app(&self.as_core())
+            .supports(AppCapability::Mcp)
     }
 
     pub(crate) fn supports_skills(&self) -> bool {
-        match self {
-            AppType::Claude
-            | AppType::Codex
-            | AppType::Gemini
-            | AppType::OpenCode
-            | AppType::Hermes
-            | AppType::Pi => true,
-            AppType::OpenClaw => false,
-        }
+        builtin_app_registry()
+            .for_app(&self.as_core())
+            .supports(AppCapability::Skills)
     }
 
     pub(crate) fn supports_visibility_detection(&self) -> bool {
@@ -959,6 +946,23 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent dir");
         }
         fs::write(path, content).expect("write prompt");
+    }
+
+    #[test]
+    fn app_modes_and_shared_capabilities_follow_core_registry() {
+        for app in AppType::all() {
+            let descriptor = builtin_app_registry().for_app(&app.as_core());
+
+            assert_eq!(
+                app.is_additive_mode(),
+                descriptor.configuration_mode() == ProviderConfigurationMode::Additive
+            );
+            assert_eq!(app.supports_mcp(), descriptor.supports(AppCapability::Mcp));
+            assert_eq!(
+                app.supports_skills(),
+                descriptor.supports(AppCapability::Skills)
+            );
+        }
     }
 
     fn seed_stale_test_home_with_gemini_override(home: &std::path::Path) {
