@@ -12,11 +12,13 @@ use std::{
 };
 
 use cc_switch_core::{
-    builtin_app_adapter, execute_operation_plan, AppType as CoreAppType, CompareExchangeOutcome,
-    ContentExpectation, LiveDocumentSet, LogicalTarget, NativeAction, NativeImportStep,
-    NativePlanContext, NativePlanRequest, NativeProviderAccess, NativeProviderMode,
-    ObservedDocument, OperationExecutionError, OperationFailure, OperationHost, OperationPlan,
-    OperationRead, OperationReceipt, PlannedWrite, ProviderSnapshot, MAX_OPERATION_CONTENT_BYTES,
+    builtin_app_adapter, execute_dependency_ordered_plan, execute_operation_plan,
+    AppType as CoreAppType, CodexDocumentProjection, CompareExchangeOutcome, ContentExpectation,
+    LiveDocumentSet, LogicalTarget, NativeAction, NativeDocumentProjection, NativeImportStep,
+    NativePlanContext, NativePlanError, NativePlanPolicy, NativePlanRequest,
+    NativePolicyPlanRequest, NativeProviderAccess, NativeProviderMode, ObservedDocument,
+    OperationExecutionError, OperationFailure, OperationHost, OperationPlan, OperationRead,
+    OperationReceipt, PlannedWrite, ProviderSnapshot, MAX_OPERATION_CONTENT_BYTES,
     OPERATION_CONTRACT_MAJOR,
 };
 
@@ -458,9 +460,9 @@ pub(super) enum CodexPreparedWrite {
     Core(CoreOperationReceipt),
 }
 
-/// Executes the CLI's established Codex projection through Core's multi-file
-/// executor. Inputs outside Core's bounded contract are left for the caller's
-/// compatibility writer; this function has not written anything in that case.
+/// Executes the CLI's established Codex projection through Core's typed policy
+/// and multi-file executor. Inputs outside Core's contract are left for the
+/// caller's compatibility writer; this function has not written in that case.
 pub(super) fn execute_prepared_codex_under_lock(
     prepared: &PreparedLiveWrite,
 ) -> Result<CodexPreparedWrite, AppError> {
@@ -470,59 +472,93 @@ pub(super) fn execute_prepared_codex_under_lock(
         ));
     };
 
-    let mut desired = Vec::with_capacity(3);
-    if let Some(catalog) = &config.model_catalog {
-        desired.push((
-            LogicalTarget::CodexModelCatalog,
-            Some(
-                serde_json::to_string_pretty(catalog)
-                    .map_err(|source| AppError::JsonSerialize { source })?,
-            ),
-        ));
-    }
-    match auth {
-        PreparedCodexAuthWrite::Preserve => {}
-        PreparedCodexAuthWrite::Write(auth) => desired.push((
-            LogicalTarget::CodexAuth,
-            Some(
-                serde_json::to_string_pretty(auth)
-                    .map_err(|source| AppError::JsonSerialize { source })?,
-            ),
-        )),
-        PreparedCodexAuthWrite::Delete => desired.push((LogicalTarget::CodexAuth, None)),
-    }
-    desired.push((LogicalTarget::CodexConfig, Some(config.config_text.clone())));
-
-    if desired.iter().any(|(_, contents)| {
-        contents
-            .as_ref()
-            .is_some_and(|contents| contents.len() > MAX_OPERATION_CONTENT_BYTES)
-    }) {
+    let auth_contents = match auth {
+        PreparedCodexAuthWrite::Write(auth) => Some(
+            serde_json::to_string_pretty(auth)
+                .map_err(|source| AppError::JsonSerialize { source })?,
+        ),
+        PreparedCodexAuthWrite::Preserve | PreparedCodexAuthWrite::Delete => None,
+    };
+    let catalog_contents = config
+        .model_catalog
+        .as_ref()
+        .map(serde_json::to_string_pretty)
+        .transpose()
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    if [&auth_contents, &catalog_contents]
+        .into_iter()
+        .flatten()
+        .any(|contents| contents.len() > MAX_OPERATION_CONTENT_BYTES)
+        || config.config_text.len() > MAX_OPERATION_CONTENT_BYTES
+    {
         return Ok(CodexPreparedWrite::Compatibility);
     }
 
+    let auth_projection = match auth {
+        PreparedCodexAuthWrite::Preserve => NativeDocumentProjection::Preserve,
+        PreparedCodexAuthWrite::Write(_) => {
+            let Some(contents) = auth_contents.as_deref() else {
+                return Err(AppError::Config(
+                    "Serialized Codex auth is unexpectedly missing".into(),
+                ));
+            };
+            NativeDocumentProjection::Write(contents)
+        }
+        PreparedCodexAuthWrite::Delete => NativeDocumentProjection::Delete,
+    };
+    let catalog_projection = catalog_contents.as_deref().map_or(
+        NativeDocumentProjection::Preserve,
+        NativeDocumentProjection::Write,
+    );
+    let provider = ProviderSnapshot::new(
+        "cli-effective",
+        CoreAppType::Codex,
+        "CLI effective settings",
+        serde_json::json!({}),
+    );
+    let policy = NativePlanPolicy::CodexDocuments(CodexDocumentProjection {
+        auth: auth_projection,
+        config: &config.config_text,
+        model_catalog: catalog_projection,
+    });
+    let adapter = builtin_app_adapter(&CoreAppType::Codex);
+    let targets = adapter
+        .required_native_targets_for_policy(NativeAction::Apply, &provider, &policy)
+        .map_err(|error| {
+            AppError::Config(format!("Core Codex target selection failed: {error}"))
+        })?;
+
     let mut host = CliOperationHost;
-    let mut writes = Vec::with_capacity(desired.len());
-    for (target, contents) in desired {
+    let mut inventory = CoreDocumentInventory::new(&AppType::Codex);
+    for target in targets {
         let resource = host.resolve(target)?;
         let original = match host.read(&resource, MAX_OPERATION_CONTENT_BYTES) {
             Ok(OperationRead::Missing) => None,
             Ok(OperationRead::Contents(contents)) => Some(contents),
             Ok(OperationRead::TooLarge) | Err(_) => return Ok(CodexPreparedWrite::Compatibility),
         };
-        writes.push(PlannedWrite {
-            target,
-            expected: ContentExpectation::for_contents(original.as_deref()),
-            contents,
-        });
+        inventory.record_observation(target, original)?;
     }
-
-    let plan = OperationPlan {
-        contract_major: OPERATION_CONTRACT_MAJOR,
-        app_id: CoreAppType::Codex.as_str().to_owned(),
-        writes,
+    let documents = inventory.snapshot()?;
+    let request = NativePolicyPlanRequest {
+        action: NativeAction::Apply,
+        provider: &provider,
+        documents: &documents,
+        access: NativeProviderAccess::Writable,
+        policy,
     };
-    execute_operation_plan(&plan, &mut host)
+    let plan = match adapter.plan_native_policy(&request) {
+        Ok(plan) => plan,
+        Err(NativePlanError::InputTooLarge { .. } | NativePlanError::InvalidProjection { .. }) => {
+            return Ok(CodexPreparedWrite::Compatibility)
+        }
+        Err(error) => {
+            return Err(AppError::Config(format!(
+                "Core Codex projection failed: {error}"
+            )))
+        }
+    };
+    execute_dependency_ordered_plan(&plan, &mut host)
         .map(|receipt| CodexPreparedWrite::Core(CoreOperationReceipt(receipt)))
         .map_err(map_execution_error)
 }
