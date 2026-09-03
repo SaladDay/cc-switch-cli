@@ -1478,7 +1478,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(4);
+                *selected = (*selected + 1).min(mcp_picker_last_index());
                 Action::None
             }
             KeyCode::Char(' ') => {
@@ -1628,7 +1628,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(5);
+                *selected = (*selected + 1).min(skill_picker_last_index());
                 Action::None
             }
             KeyCode::Char(' ') => {

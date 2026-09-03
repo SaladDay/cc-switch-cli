@@ -1762,10 +1762,14 @@ pub(crate) fn mcp_picker_apps() -> impl Iterator<Item = AppType> {
     crate::services::McpService::supported_mcp_apps()
 }
 
+pub(crate) fn mcp_picker_last_index() -> usize {
+    mcp_picker_apps().count().saturating_sub(1)
+}
+
 pub(crate) fn four_app_picker_index(app_type: &AppType) -> usize {
     mcp_picker_apps()
         .position(|candidate| &candidate == app_type)
-        .unwrap_or(4)
+        .unwrap_or_else(mcp_picker_last_index)
 }
 
 pub(crate) fn mcp_app_type_for_picker_index(index: usize) -> AppType {
@@ -1776,10 +1780,14 @@ pub(crate) fn skill_picker_apps() -> impl Iterator<Item = AppType> {
     crate::services::SkillService::supported_skill_apps()
 }
 
+pub(crate) fn skill_picker_last_index() -> usize {
+    skill_picker_apps().count().saturating_sub(1)
+}
+
 pub(crate) fn skills_app_picker_index(app_type: &AppType) -> usize {
     skill_picker_apps()
         .position(|candidate| &candidate == app_type)
-        .unwrap_or(5)
+        .unwrap_or_else(skill_picker_last_index)
 }
 
 pub(crate) fn skill_app_type_for_picker_index(index: usize) -> AppType {

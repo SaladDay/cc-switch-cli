@@ -857,6 +857,8 @@ mod tests {
             assert_eq!(four_app_picker_index(app_type), index);
             assert_eq!(&mcp_app_type_for_picker_index(index), app_type);
         }
+        assert_eq!(mcp_picker_last_index(), mcp_apps.len().saturating_sub(1));
+        assert_eq!(four_app_picker_index(&AppType::Pi), mcp_picker_last_index());
 
         let skill_apps = skill_picker_apps().collect::<Vec<_>>();
         assert_eq!(
@@ -874,6 +876,14 @@ mod tests {
             assert_eq!(skills_app_picker_index(app_type), index);
             assert_eq!(&skill_app_type_for_picker_index(index), app_type);
         }
+        assert_eq!(
+            skill_picker_last_index(),
+            skill_apps.len().saturating_sub(1)
+        );
+        assert_eq!(
+            skills_app_picker_index(&AppType::OpenClaw),
+            skill_picker_last_index()
+        );
     }
 
     #[test]
