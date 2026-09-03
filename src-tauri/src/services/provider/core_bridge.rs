@@ -13,9 +13,11 @@ use std::{
 
 use cc_switch_core::{
     builtin_app_adapter, execute_operation_plan, AppType as CoreAppType, CompareExchangeOutcome,
-    ContentExpectation, LiveDocumentSet, LogicalTarget, NativeImportStep, ObservedDocument,
-    OperationExecutionError, OperationFailure, OperationHost, OperationPlan, OperationRead,
-    PlannedWrite, ProviderSnapshot, MAX_OPERATION_CONTENT_BYTES, OPERATION_CONTRACT_MAJOR,
+    ContentExpectation, LiveDocumentSet, LogicalTarget, NativeAction, NativeImportStep,
+    NativePlanContext, NativePlanRequest, NativeProviderAccess, NativeProviderMode,
+    ObservedDocument, OperationExecutionError, OperationFailure, OperationHost, OperationPlan,
+    OperationRead, OperationReceipt, PlannedWrite, ProviderSnapshot, MAX_OPERATION_CONTENT_BYTES,
+    OPERATION_CONTRACT_MAJOR,
 };
 
 use crate::{app_config::AppType, error::AppError, provider::Provider};
@@ -223,6 +225,51 @@ pub(super) fn target_path(target: LogicalTarget) -> Result<PathBuf, AppError> {
 
 struct CliOperationHost;
 
+pub(super) struct CoreClaudeSettingsReceipt(OperationReceipt<PathBuf>);
+
+impl CoreClaudeSettingsReceipt {
+    pub(super) fn rollback(self) -> Result<(), AppError> {
+        self.0
+            .rollback(&mut CliOperationHost)
+            .map_err(|error| AppError::Message(format!("Core Claude rollback failed: {error}")))
+    }
+}
+
+pub(super) enum ClaudeSettingsWrite {
+    Compatibility,
+    Core(CoreClaudeSettingsReceipt),
+}
+
+#[derive(Debug)]
+pub(super) enum ClaudeSettingsWriteError {
+    Compatibility(AppError),
+    Core(AppError),
+}
+
+impl ClaudeSettingsWriteError {
+    fn into_error(self) -> AppError {
+        match self {
+            Self::Compatibility(error) | Self::Core(error) => error,
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_READ_REPLACEMENT: std::cell::RefCell<Option<(usize, Vec<u8>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn replace_before_second_operation_read(contents: Vec<u8>) {
+    TEST_READ_REPLACEMENT.with(|replacement| {
+        assert!(
+            replacement.replace(Some((2, contents))).is_none(),
+            "operation-read replacement already registered"
+        );
+    });
+}
+
 impl OperationHost for CliOperationHost {
     type Resource = PathBuf;
     type Error = AppError;
@@ -236,6 +283,24 @@ impl OperationHost for CliOperationHost {
         resource: &Self::Resource,
         maximum: usize,
     ) -> Result<OperationRead, Self::Error> {
+        #[cfg(test)]
+        let replacement = TEST_READ_REPLACEMENT.with(|replacement| {
+            let mut replacement = replacement.borrow_mut();
+            let Some((reads_remaining, _)) = replacement.as_mut() else {
+                return None;
+            };
+            *reads_remaining -= 1;
+            if *reads_remaining == 0 {
+                replacement.take().map(|(_, contents)| contents)
+            } else {
+                None
+            }
+        });
+        #[cfg(test)]
+        if let Some(contents) = replacement {
+            std::fs::write(resource, contents).map_err(|error| AppError::io(resource, error))?;
+        }
+
         read_optional_bounded_state(resource, maximum)
     }
 
@@ -263,50 +328,138 @@ impl OperationHost for CliOperationHost {
     }
 }
 
-/// Uses the shared executor while retaining the CLI's established JSON bytes
-/// and host-owned path and filesystem behavior. Legacy inputs that Core cannot
-/// observe within its bound keep the old overwrite behavior before a baseline
-/// is established. The caller must hold the per-application switch lock;
-/// ordinary filesystems cannot exclude writers that ignore that protocol.
+/// Retains the existing sync-path projection while using Core's executor.
 pub(super) fn execute_claude_settings_under_lock(
     settings: &serde_json::Value,
 ) -> Result<(), AppError> {
+    execute_claude_settings(settings, false)
+        .map(drop)
+        .map_err(ClaudeSettingsWriteError::into_error)
+}
+
+/// Uses Core's Claude adapter and executor for an ordinary provider switch.
+pub(super) fn execute_claude_settings_with_adapter_under_lock(
+    settings: &serde_json::Value,
+) -> Result<ClaudeSettingsWrite, ClaudeSettingsWriteError> {
+    execute_claude_settings(settings, true)
+}
+
+/// Retains the CLI's JSON bytes and host-owned path behavior. Legacy inputs
+/// outside Core's bounds keep the old overwrite behavior. The caller must hold
+/// the per-application switch lock.
+fn execute_claude_settings(
+    settings: &serde_json::Value,
+    use_adapter: bool,
+) -> Result<ClaudeSettingsWrite, ClaudeSettingsWriteError> {
     let contents = serde_json::to_string_pretty(settings)
-        .map_err(|source| AppError::JsonSerialize { source })?;
+        .map_err(|source| ClaudeSettingsWriteError::Core(AppError::JsonSerialize { source }))?;
     let target = LogicalTarget::ClaudeSettings;
     let mut host = CliOperationHost;
-    let resource = host.resolve(target)?;
-    if contents.len() > MAX_OPERATION_CONTENT_BYTES {
-        return crate::config::write_json_file(&resource, settings);
+    let resource = host
+        .resolve(target)
+        .map_err(ClaudeSettingsWriteError::Core)?;
+    if contents.len() > MAX_OPERATION_CONTENT_BYTES
+        || (use_adapter && (!settings.is_object() || contents.len() == MAX_OPERATION_CONTENT_BYTES))
+    {
+        return crate::config::write_json_file(&resource, settings)
+            .map(|_| ClaudeSettingsWrite::Compatibility)
+            .map_err(ClaudeSettingsWriteError::Compatibility);
     }
     let original = match host.read(&resource, MAX_OPERATION_CONTENT_BYTES) {
         Ok(OperationRead::Missing) => None,
         Ok(OperationRead::Contents(contents)) => Some(contents),
         Ok(OperationRead::TooLarge) | Err(_) => {
             return crate::config::write_json_file(&resource, settings)
+                .map(|_| ClaudeSettingsWrite::Compatibility)
+                .map_err(ClaudeSettingsWriteError::Compatibility)
         }
     };
-    let plan = OperationPlan {
-        contract_major: OPERATION_CONTRACT_MAJOR,
-        app_id: CoreAppType::Claude.as_str().to_owned(),
-        writes: vec![PlannedWrite {
-            target,
-            expected: ContentExpectation::for_contents(original.as_deref()),
-            contents: Some(contents),
-        }],
+    let plan = if use_adapter {
+        claude_adapter_plan(settings, &contents, target, original)
+            .map_err(ClaudeSettingsWriteError::Core)?
+    } else {
+        OperationPlan {
+            contract_major: OPERATION_CONTRACT_MAJOR,
+            app_id: CoreAppType::Claude.as_str().to_owned(),
+            writes: vec![PlannedWrite {
+                target,
+                expected: ContentExpectation::for_contents(original.as_deref()),
+                contents: Some(contents),
+            }],
+        }
     };
 
     execute_operation_plan(&plan, &mut host)
-        .map(drop)
-        .map_err(map_execution_error)
+        .map(|receipt| ClaudeSettingsWrite::Core(CoreClaudeSettingsReceipt(receipt)))
+        .map_err(|error| ClaudeSettingsWriteError::Core(map_execution_error(error)))
+}
+
+fn claude_adapter_plan(
+    settings: &serde_json::Value,
+    contents: &str,
+    target: LogicalTarget,
+    original: Option<Vec<u8>>,
+) -> Result<OperationPlan, AppError> {
+    let document = match original {
+        Some(contents) => ObservedDocument::present(target, contents),
+        None => ObservedDocument::missing(target),
+    };
+    let documents = LiveDocumentSet::try_new(CoreAppType::Claude, [document])
+        .map_err(|error| AppError::Config(format!("Invalid Core Claude snapshot: {error}")))?;
+    let provider = ProviderSnapshot::new(
+        "cli-effective",
+        CoreAppType::Claude,
+        "CLI effective settings",
+        settings.clone(),
+    );
+    let request = NativePlanRequest {
+        action: NativeAction::Apply,
+        provider: &provider,
+        documents: &documents,
+        mode: NativeProviderMode::Custom,
+        access: NativeProviderAccess::Writable,
+        context: NativePlanContext::Standard {
+            common_config: None,
+        },
+    };
+    let adapter = builtin_app_adapter(&CoreAppType::Claude);
+    let mut plan = adapter
+        .plan_native(&request)
+        .map_err(|error| AppError::Config(format!("Core Claude projection failed: {error}")))?;
+    let projected = plan
+        .writes
+        .first_mut()
+        .and_then(|write| write.contents.as_mut())
+        .ok_or_else(|| AppError::Config("Core Claude projection did not produce a write".into()))?;
+    if projected.strip_suffix('\n') == Some(contents) {
+        projected.pop();
+    } else if projected.as_str() != contents {
+        return Err(AppError::Config(
+            "Core Claude projection changed the prepared CLI settings".into(),
+        ));
+    }
+    Ok(plan)
 }
 
 fn map_execution_error(error: OperationExecutionError<AppError>) -> AppError {
     if error.rollback_failures().is_empty() {
-        if let OperationFailure::Conflict { target } = error.failure() {
-            return AppError::Conflict(format!(
-                "Core live target {target:?} changed while the write was being prepared"
-            ));
+        match error.failure() {
+            OperationFailure::Conflict { target } => {
+                return AppError::Conflict(format!(
+                    "Core live target {target:?} changed while the write was being prepared"
+                ));
+            }
+            OperationFailure::Read { target, .. } => {
+                return AppError::Conflict(format!(
+                    "Core live target {target:?} could not be re-read after its baseline was established"
+                ));
+            }
+            OperationFailure::ObservedContentTooLarge { target, .. } => {
+                return AppError::Conflict(format!(
+                    "Core live target {target:?} grew beyond the observation limit after its baseline was established"
+                ));
+            }
+            _ => {}
         }
     }
     AppError::Message(format!("Core live operation failed: {error}"))
@@ -564,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn core_executor_keeps_the_cli_claude_json_write_contract() {
+    fn core_adapter_keeps_the_cli_claude_json_write_contract() {
         let home = tempfile::tempdir().expect("temporary home");
         let _env = TestEnvGuard::isolated(home.path());
         let path = target_path(LogicalTarget::ClaudeSettings).expect("Claude path");
@@ -576,12 +729,37 @@ mod tests {
             "model": "claude-sonnet"
         });
 
-        execute_claude_settings_under_lock(&settings).expect("execute Core plan");
+        execute_claude_settings_with_adapter_under_lock(&settings).expect("execute Core plan");
 
         let expected = serde_json::to_string_pretty(&settings).expect("serialize expected JSON");
         assert_eq!(
             std::fs::read(&path).expect("read Claude settings"),
             expected.as_bytes()
+        );
+    }
+
+    #[test]
+    fn core_receipt_rollback_preserves_a_later_external_edit() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let path = target_path(LogicalTarget::ClaudeSettings).expect("Claude path");
+        crate::config::write_json_file(&path, &json!({"model": "before"}))
+            .expect("write original settings");
+
+        let write = execute_claude_settings_with_adapter_under_lock(&json!({"model": "after"}))
+            .expect("execute Core plan");
+        let ClaudeSettingsWrite::Core(receipt) = write else {
+            panic!("bounded object should use the Core executor");
+        };
+        let external = br#"{"model":"external"}"#;
+        std::fs::write(&path, external).expect("write external edit");
+
+        receipt
+            .rollback()
+            .expect_err("guarded rollback must reject the external edit");
+        assert_eq!(
+            std::fs::read(&path).expect("read preserved external edit"),
+            external
         );
     }
 
@@ -652,6 +830,30 @@ mod tests {
         assert!(expected.len() > MAX_OPERATION_CONTENT_BYTES);
         assert_eq!(
             std::fs::read(&path).expect("read oversized replacement"),
+            expected.as_bytes()
+        );
+    }
+
+    #[test]
+    fn core_executor_falls_back_for_exact_limit_claude_object() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let _env = TestEnvGuard::isolated(home.path());
+        let empty = json!({"payload": ""});
+        let overhead = serde_json::to_string_pretty(&empty)
+            .expect("serialize empty object")
+            .len();
+        let settings = json!({
+            "payload": "x".repeat(MAX_OPERATION_CONTENT_BYTES - overhead)
+        });
+        let expected = serde_json::to_string_pretty(&settings).expect("serialize exact-limit JSON");
+        assert_eq!(expected.len(), MAX_OPERATION_CONTENT_BYTES);
+
+        execute_claude_settings_with_adapter_under_lock(&settings)
+            .expect("use exact-limit compatibility writer");
+
+        let path = target_path(LogicalTarget::ClaudeSettings).expect("Claude path");
+        assert_eq!(
+            std::fs::read(&path).expect("read exact-limit replacement"),
             expected.as_bytes()
         );
     }

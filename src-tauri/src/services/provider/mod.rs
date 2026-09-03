@@ -186,6 +186,7 @@ struct PostCommitAction {
     provider: Provider,
     previous_provider: Option<Provider>,
     backup: LiveSnapshot,
+    use_core_claude_live: bool,
     sync_mcp: bool,
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
@@ -320,6 +321,26 @@ fn sync_provider_to_live_respecting_takeover(
 struct PreparedPostCommitAction {
     action: PostCommitAction,
     effect: PreparedPostCommitEffect,
+}
+
+struct PostCommitFailure {
+    error: AppError,
+    live_rollback: PostCommitLiveRollback,
+}
+
+enum PostCommitLiveRollback {
+    Snapshot,
+    Preserve,
+    CoreClaude(core_bridge::CoreClaudeSettingsReceipt),
+}
+
+impl From<AppError> for PostCommitFailure {
+    fn from(error: AppError) -> Self {
+        Self {
+            error,
+            live_rollback: PostCommitLiveRollback::Snapshot,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -887,19 +908,38 @@ impl ProviderService {
         }
 
         if let Some(prepared) = prepared {
-            if let Err(err) = Self::apply_prepared_post_commit_action(state, &prepared) {
-                let rollback_result = match preserved_current_apps {
-                    Some(apps) => Self::rollback_after_failure_preserving_current_providers(
-                        state,
-                        original,
-                        apps,
-                        prepared.action.backup.clone(),
+            if let Err(failure) = Self::apply_prepared_post_commit_action(state, &prepared) {
+                let PostCommitFailure {
+                    error: err,
+                    live_rollback,
+                } = failure;
+                let config_rollback = match preserved_current_apps {
+                    Some(apps) => Self::restore_config_only_preserving_current_providers(
+                        state, original, apps,
                     ),
-                    None => Self::rollback_after_failure(
-                        state,
-                        original,
-                        prepared.action.backup.clone(),
-                    ),
+                    None => Self::restore_config_only(state, original),
+                };
+                let rollback_result = match live_rollback {
+                    PostCommitLiveRollback::Snapshot => {
+                        config_rollback.and_then(|_| prepared.action.backup.clone().restore())
+                    }
+                    PostCommitLiveRollback::Preserve => config_rollback,
+                    PostCommitLiveRollback::CoreClaude(receipt) => {
+                        let live_rollback = receipt.rollback();
+                        match (config_rollback, live_rollback) {
+                            (Ok(()), Ok(())) => Ok(()),
+                            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                            (Err(config_error), Err(live_error)) => Err(AppError::localized(
+                                "post_commit.rollback_parts_failed",
+                                format!(
+                                    "恢复配置失败: {config_error}；恢复 Live 配置失败: {live_error}"
+                                ),
+                                format!(
+                                    "Failed to restore config: {config_error}; failed to restore live config: {live_error}"
+                                ),
+                            )),
+                        }
+                    }
                 };
                 if let Err(rollback_err) = rollback_result {
                     return Err(AppError::localized(
@@ -944,29 +984,6 @@ impl ProviderService {
             *guard = snapshot;
         }
         state.save_preserving_current_providers(preserved_current_apps)
-    }
-
-    fn rollback_after_failure(
-        state: &AppState,
-        snapshot: MultiAppConfig,
-        backup: LiveSnapshot,
-    ) -> Result<(), AppError> {
-        Self::restore_config_only(state, snapshot)?;
-        backup.restore()
-    }
-
-    fn rollback_after_failure_preserving_current_providers(
-        state: &AppState,
-        snapshot: MultiAppConfig,
-        preserved_current_apps: &[AppType],
-        backup: LiveSnapshot,
-    ) -> Result<(), AppError> {
-        Self::restore_config_only_preserving_current_providers(
-            state,
-            snapshot,
-            preserved_current_apps,
-        )?;
-        backup.restore()
     }
 
     fn prepare_post_commit_action(
@@ -1046,10 +1063,46 @@ impl ProviderService {
     fn apply_prepared_post_commit_action(
         state: &AppState,
         prepared: &PreparedPostCommitAction,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), PostCommitFailure> {
+        let mut live_rollback = PostCommitLiveRollback::Snapshot;
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
-                Self::apply_prepared_live_snapshot(live)?;
+                if prepared.action.use_core_claude_live {
+                    match live {
+                        PreparedLiveWrite::Claude { settings } => {
+                            match core_bridge::execute_claude_settings_with_adapter_under_lock(
+                                settings,
+                            ) {
+                                Ok(core_bridge::ClaudeSettingsWrite::Compatibility) => {}
+                                Ok(core_bridge::ClaudeSettingsWrite::Core(receipt)) => {
+                                    live_rollback = PostCommitLiveRollback::CoreClaude(receipt);
+                                }
+                                Err(core_bridge::ClaudeSettingsWriteError::Compatibility(
+                                    error,
+                                )) => return Err(error.into()),
+                                Err(core_bridge::ClaudeSettingsWriteError::Core(error)) => {
+                                    return Err(PostCommitFailure {
+                                        error,
+                                        live_rollback: PostCommitLiveRollback::Preserve,
+                                    });
+                                }
+                            }
+                        }
+                        PreparedLiveWrite::Noop => {
+                            live_rollback = PostCommitLiveRollback::Preserve;
+                        }
+                        _ => {
+                            return Err(PostCommitFailure {
+                                error: AppError::Config(
+                                    "Core Claude live action contains a non-Claude write".into(),
+                                ),
+                                live_rollback: PostCommitLiveRollback::Preserve,
+                            });
+                        }
+                    }
+                } else {
+                    Self::apply_prepared_live_snapshot(live)?;
+                }
                 if prepared.action.activate_provider
                     && matches!(prepared.action.app_type, AppType::Hermes)
                 {
@@ -1125,26 +1178,37 @@ impl ProviderService {
                             "provider.update.proxy_backup_rollback_failed",
                             format!("{sync_error}；恢复 Live 备份失败: {restore_error}"),
                             format!("{sync_error}; failed to restore live backup: {restore_error}"),
-                        ));
+                        )
+                        .into());
                     }
-                    return Err(sync_error);
+                    return Err(sync_error.into());
                 }
             }
         }
 
         if prepared.action.sync_mcp {
             use crate::services::mcp::McpService;
-            McpService::sync_all_enabled(state)?;
+            if let Err(error) = McpService::sync_all_enabled(state) {
+                return Err(PostCommitFailure {
+                    error,
+                    live_rollback,
+                });
+            }
         }
         if !prepared.action.takeover_active
             && prepared.action.refresh_snapshot
             && crate::sync_policy::should_sync_live(&prepared.action.app_type)
         {
-            Self::refresh_provider_snapshot(
+            if let Err(error) = Self::refresh_provider_snapshot(
                 state,
                 &prepared.action.app_type,
                 &prepared.action.provider.id,
-            )?;
+            ) {
+                return Err(PostCommitFailure {
+                    error,
+                    live_rollback,
+                });
+            }
         }
         if prepared.action.refresh_stale_backup {
             if let Err(err) =
@@ -1603,6 +1667,7 @@ impl ProviderService {
             previous_provider: Some(provider.clone()),
             provider,
             backup: Self::capture_live_snapshot(app_type)?,
+            use_core_claude_live: false,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -2265,6 +2330,7 @@ impl ProviderService {
                     provider: provider_to_store.clone(),
                     previous_provider: None,
                     backup,
+                    use_core_claude_live: false,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
@@ -2440,6 +2506,7 @@ impl ProviderService {
                     provider: merged,
                     previous_provider,
                     backup,
+                    use_core_claude_live: false,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex)
@@ -3054,6 +3121,7 @@ impl ProviderService {
                 provider,
                 previous_provider: None,
                 backup: Self::capture_live_snapshot(app_type)?,
+                use_core_claude_live: false,
                 sync_mcp: matches!(app_type, AppType::OpenCode),
                 refresh_snapshot: false,
                 common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -3095,6 +3163,7 @@ impl ProviderService {
             provider,
             previous_provider,
             backup,
+            use_core_claude_live: matches!(app_type, AppType::Claude),
             sync_mcp: true,
             refresh_snapshot: true,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -3111,6 +3180,20 @@ impl ProviderService {
         if matches!(app_type, AppType::Pi) {
             return pi::enable(state, provider_id).map(|_| ());
         }
+
+        // Keep takeover detection and a normal Core-backed Claude switch in
+        // one critical section. Hot switching owns the same lock internally,
+        // so release it before handing that branch to ProxyService.
+        let mut switch_guard = if matches!(app_type, AppType::Claude) {
+            Some(futures::executor::block_on(
+                state
+                    .proxy_service
+                    .lock_switch_for_app(AppType::Claude.as_str()),
+            ))
+        } else {
+            None
+        };
+
         if !app_type.is_additive_mode() {
             let providers = state.db.get_all_providers(app_type.as_str())?;
             providers.get(provider_id).ok_or_else(|| {
@@ -3136,6 +3219,7 @@ impl ProviderService {
             let should_hot_switch = is_app_taken_over || live_taken_over || running_takeover_active;
 
             if should_hot_switch {
+                drop(switch_guard.take());
                 futures::executor::block_on(
                     state
                         .proxy_service
@@ -3179,6 +3263,7 @@ impl ProviderService {
             crate::settings::set_current_provider(&app_type, Some(provider_id))?;
         }
 
+        drop(switch_guard);
         Ok(())
     }
 

@@ -1458,6 +1458,60 @@ fn switch_claude_writes_target_when_live_settings_file_missing() {
 
 #[test]
 #[serial]
+fn switch_claude_keeps_uninitialized_live_directory_absent() {
+    let (_temp_home, _env, state) = setup_claude_switch_preview_state(json!({
+        "env": {"ANTHROPIC_AUTH_TOKEN": "token1"}
+    }));
+    let claude_dir = crate::config::get_claude_config_dir();
+    std::fs::remove_dir_all(&claude_dir).expect("remove initialized Claude directory");
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
+
+    assert!(
+        !claude_dir.exists(),
+        "switching must not initialize Claude when live sync is disabled"
+    );
+}
+
+#[test]
+#[serial]
+fn switch_claude_conflict_rolls_back_state_without_overwriting_external_live_edit() {
+    let (_temp_home, _env, state) = setup_claude_switch_preview_state(json!({
+        "env": {"ANTHROPIC_AUTH_TOKEN": "token1"}
+    }));
+    let external = vec![b'x'; cc_switch_core::MAX_OPERATION_CONTENT_BYTES + 1];
+    super::core_bridge::replace_before_second_operation_read(external.clone());
+
+    let error = ProviderService::switch(&state, AppType::Claude, "p2")
+        .expect_err("external edit must cause a Core conflict");
+
+    assert!(matches!(error, AppError::Conflict(_)));
+    assert_eq!(
+        std::fs::read(get_claude_settings_path()).expect("read preserved external edit"),
+        external
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Claude.as_str())
+            .expect("read rolled-back database current provider")
+            .as_deref(),
+        Some("p1")
+    );
+    assert_eq!(
+        state
+            .config
+            .read()
+            .expect("read rolled-back config")
+            .get_manager(&AppType::Claude)
+            .expect("Claude manager")
+            .current,
+        "p1"
+    );
+}
+
+#[test]
+#[serial]
 fn switch_claude_with_missing_settings_file_creates_target_live_settings() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
