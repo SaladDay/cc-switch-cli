@@ -33,6 +33,7 @@ mod tests;
 
 // DAO 类型导出供外部使用
 pub(crate) use backup::run_sqlite_backup_to_completion;
+pub(crate) use dao::mcp::{McpLiveChange, McpLiveTarget, McpNativeLinkUpdate, McpOwnedServer};
 #[cfg(any(feature = "cli", test))]
 pub(crate) use dao::model_pricing::ModelPricingUpdate;
 pub(crate) use dao::providers_seed::is_official_seed_id;
@@ -674,6 +675,7 @@ impl Database {
 
         db.create_tables()?;
         db.apply_schema_migrations()?;
+        db.ensure_mcp_native_link_schema()?;
         // 存量库若仍是 auto_vacuum=NONE（老版本从未启用增量回收），在此切换到
         // INCREMENTAL 并整库 VACUUM 一次，回收历史累积的空闲页（issue #327：
         // proxy_request_logs 等本地表被 prune 删除后文件从不收缩，导致 WebDAV
@@ -800,6 +802,7 @@ impl Database {
             db_path: None,
         };
         db.create_tables()?;
+        db.ensure_mcp_native_link_schema()?;
         db.ensure_model_pricing_seeded()?;
 
         Ok(db)

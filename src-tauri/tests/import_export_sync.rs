@@ -743,6 +743,64 @@ fn import_from_claude_merges_into_config() {
 }
 
 #[test]
+fn import_from_claude_keeps_core_transport_and_legacy_extensions() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    fs::write(
+        home.join(".claude.json"),
+        json!({
+            "mcpServers": {
+                "remote": {
+                    "url": "https://example.com/sse",
+                    "trust": true,
+                    "enabled": false
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write Claude MCP config");
+
+    let mut config = MultiAppConfig::default();
+    cc_switch_lib::import_from_claude(&mut config).expect("import Claude MCP");
+    let server = &config.mcp.servers.as_ref().unwrap()["remote"].server;
+    assert_eq!(server["type"], "sse");
+    assert_eq!(server["url"], "https://example.com/sse");
+    assert_eq!(server["trust"], true);
+    assert_eq!(server["enabled"], false);
+}
+
+#[test]
+fn legacy_json_imports_keep_loose_container_and_path_errors() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    fs::write(home.join(".claude.json"), r#"{"mcpServers":[]}"#)
+        .expect("write loose Claude container");
+    let mut config = MultiAppConfig::default();
+    assert_eq!(
+        cc_switch_lib::import_from_claude(&mut config).expect("ignore loose Claude container"),
+        0
+    );
+
+    let gemini_dir = home.join(".gemini");
+    fs::create_dir_all(&gemini_dir).expect("create Gemini dir");
+    let gemini_path = gemini_dir.join("settings.json");
+    fs::write(&gemini_path, r#"{"mcpServers":[]}"#).expect("write loose Gemini container");
+    assert_eq!(
+        cc_switch_lib::import_from_gemini(&mut config).expect("ignore loose Gemini container"),
+        0
+    );
+
+    fs::write(&gemini_path, "{\"mcpServers\":").expect("write invalid Gemini JSON");
+    assert!(matches!(
+        cc_switch_lib::import_from_gemini(&mut config),
+        Err(AppError::Json { .. })
+    ));
+}
+
+#[test]
 fn create_backup_skips_missing_file() {
     let _guard = lock_test_mutex();
     reset_test_fs();

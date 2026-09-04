@@ -252,15 +252,6 @@ pub fn prepare_typed_provider_with_base(
     prepare_provider_with_base_deleted_keys(id, base_value, value, &deleted_keys)
 }
 
-pub fn get_mcp_servers() -> Result<Map<String, Value>, AppError> {
-    let config = read_opencode_config()?;
-    Ok(config
-        .get("mcp")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

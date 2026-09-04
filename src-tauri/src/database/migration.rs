@@ -11,11 +11,11 @@ impl Database {
     /// 从 MultiAppConfig 迁移数据到数据库
     pub fn migrate_from_json(&self, config: &MultiAppConfig) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
-        let tx = conn
+        let mut tx = conn
             .transaction()
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        Self::migrate_from_json_tx(&tx, config)?;
+        Self::migrate_from_json_tx(&mut tx, config)?;
 
         tx.commit()
             .map_err(|e| AppError::Database(format!("Commit migration failed: {e}")))?;
@@ -30,11 +30,13 @@ impl Database {
             Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_tables_on_conn(&conn)?;
         Self::apply_schema_migrations_on_conn(&conn)?;
+        cc_switch_store::ensure_mcp_native_link_schema(&mut conn)
+            .map_err(|error| AppError::Database(error.to_string()))?;
 
-        let tx = conn
+        let mut tx = conn
             .transaction()
             .map_err(|e| AppError::Database(e.to_string()))?;
-        Self::migrate_from_json_tx(&tx, config)?;
+        Self::migrate_from_json_tx(&mut tx, config)?;
 
         // 显式 drop transaction 而不提交（内存数据库会被丢弃）
         drop(tx);
@@ -43,7 +45,7 @@ impl Database {
 
     /// 在事务中执行迁移
     fn migrate_from_json_tx(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &mut rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
     ) -> Result<(), AppError> {
         // 1. 迁移 Providers
@@ -119,7 +121,7 @@ impl Database {
 
     /// 迁移 MCP 服务器数据
     fn migrate_mcp_servers(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &mut rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
     ) -> Result<(), AppError> {
         if let Some(servers) = &config.mcp.servers {
@@ -145,6 +147,19 @@ impl Database {
                     ],
                 )
                 .map_err(|e| AppError::Database(format!("Migrate mcp server failed: {e}")))?;
+
+                for (app, enabled) in [
+                    ("claude", server.apps.claude),
+                    ("codex", server.apps.codex),
+                    ("gemini", server.apps.gemini),
+                    ("opencode", server.apps.opencode),
+                    ("hermes", server.apps.hermes),
+                ] {
+                    if enabled {
+                        cc_switch_store::upsert_mcp_native_link(tx, id, app, None)
+                            .map_err(|error| AppError::Database(error.to_string()))?;
+                    }
+                }
             }
         }
         Ok(())

@@ -7,22 +7,31 @@ use std::{
 };
 
 use cc_switch_core::{
-    mcp_config_target, project_mcp_server, project_mcp_servers, replace_mcp_servers,
-    McpConfigTarget, McpServerProjection,
+    builtin_app_adapter, mcp_config_target, project_mcp_server, project_mcp_servers,
+    replace_mcp_servers, McpConfigTarget, McpImport, McpNativeSnapshot, McpServerProjection,
 };
 use serde_json::{Map, Value};
 
 use crate::{
     app_config::{AppType, McpServer},
+    database::{McpLiveChange, McpLiveTarget, McpNativeLinkUpdate, McpOwnedServer},
     error::AppError,
 };
 
 pub(super) fn project_server(app: &AppType, id: &str, server: &Value) -> Result<(), AppError> {
-    project_live(app, id, McpServerProjection::Enable(server)).map(|_| ())
+    project_live(
+        app,
+        id,
+        LiveProjectionIntent::Enable(server),
+        false,
+        false,
+        None,
+    )
+    .map(|_| ())
 }
 
 pub(super) fn remove_server(app: &AppType, id: &str) -> Result<(), AppError> {
-    project_live(app, id, McpServerProjection::Remove).map(|_| ())
+    project_live(app, id, LiveProjectionIntent::Remove, false, false, None).map(|_| ())
 }
 
 pub(super) fn replace_servers(
@@ -35,13 +44,47 @@ pub(super) fn replace_servers(
         .map(|(id, server)| (id.clone(), server.clone()))
         .collect::<Map<_, _>>();
     update_live(app, |contents| {
-        replace_mcp_servers(&core_app, contents, &servers).map_err(core_error)
+        Ok(LiveProjection {
+            document: replace_mcp_servers(&core_app, contents, &servers).map_err(core_error)?,
+            native_snapshots: HashMap::new(),
+        })
     })
     .map(|_| ())
 }
 
 pub(super) struct LiveReceipt {
     writes: Vec<McpFileReceipt>,
+}
+
+pub(super) struct ImportObservation {
+    target: McpConfigTarget,
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+}
+
+impl ImportObservation {
+    pub(super) fn is_current(&self) -> Result<bool, AppError> {
+        Ok(read_target(self.target, &self.path)? == self.contents)
+    }
+}
+
+pub(super) fn observe_imports(
+    app: &AppType,
+) -> Result<(Vec<McpImport>, ImportObservation), AppError> {
+    let core_app = app.as_core();
+    let target = mcp_config_target(&core_app)
+        .ok_or_else(|| AppError::InvalidInput(format!("{} does not support MCP", app.as_str())))?;
+    let path = target_path(target)?;
+    let contents = read_target(target, &path)?;
+    let imports = crate::mcp::import_mcp_servers_compat(app, contents.as_deref())?;
+    Ok((
+        imports,
+        ImportObservation {
+            target,
+            path,
+            contents,
+        },
+    ))
 }
 
 struct McpFileReceipt {
@@ -51,11 +94,31 @@ struct McpFileReceipt {
     after: Vec<u8>,
 }
 
+enum LiveUpdate {
+    Skipped,
+    Managed {
+        write: Option<McpFileReceipt>,
+        native_snapshots: HashMap<String, String>,
+    },
+}
+
+struct LiveProjection {
+    document: Option<String>,
+    native_snapshots: HashMap<String, String>,
+}
+
+#[derive(Clone, Copy)]
+enum LiveProjectionIntent<'a> {
+    Enable(&'a Value),
+    Disable(&'a Value),
+    Remove,
+}
+
 pub(super) fn apply_server_change(
     previous: Option<&McpServer>,
     next: Option<&McpServer>,
-    affected_apps: &[AppType],
-) -> Result<LiveReceipt, AppError> {
+    targets: &[McpLiveTarget],
+) -> Result<McpLiveChange<LiveReceipt>, AppError> {
     let id = next
         .or(previous)
         .expect("an MCP change has a server")
@@ -65,8 +128,10 @@ pub(super) fn apply_server_change(
         cc_switch_core::validate_mcp_server(id, &server.server).map_err(core_error)?;
     }
     let mut receipt = LiveReceipt { writes: Vec::new() };
+    let mut native_links = Vec::new();
     let mut failures = Vec::new();
-    for app in affected_apps {
+    for target in targets {
+        let app = &target.app;
         if let Some(server) = next.filter(|server| server.apps.is_enabled_for(app)) {
             if let Err(error) =
                 cc_switch_core::validate_mcp_server_for_app(&app.as_core(), id, &server.server)
@@ -77,19 +142,43 @@ pub(super) fn apply_server_change(
         }
         let projection = match next {
             Some(server) if server.apps.is_enabled_for(app) => {
-                McpServerProjection::Enable(&server.server)
+                LiveProjectionIntent::Enable(&server.server)
             }
-            Some(server) => McpServerProjection::Disable(&server.server),
-            None => McpServerProjection::Remove,
+            Some(server) => LiveProjectionIntent::Disable(&server.server),
+            None => LiveProjectionIntent::Remove,
         };
-        match project_live(app, id, projection) {
-            Ok(Some(write)) => receipt.writes.push(write),
-            Ok(None) => {}
+        let reject_existing =
+            !target.owned && next.is_some_and(|server| server.apps.is_enabled_for(app));
+        match project_live(
+            app,
+            id,
+            projection,
+            reject_existing,
+            target.owned,
+            target.native_snapshot.as_ref(),
+        ) {
+            Ok(LiveUpdate::Managed {
+                write,
+                mut native_snapshots,
+            }) => {
+                if let Some(write) = write {
+                    receipt.writes.push(write);
+                }
+                native_links.push(McpNativeLinkUpdate {
+                    server_id: id.to_owned(),
+                    app: app.clone(),
+                    native_snapshot_json: native_snapshots.remove(id),
+                });
+            }
+            Ok(LiveUpdate::Skipped) => {}
             Err(error) => failures.push(format!("{}: {error}", app.as_str())),
         }
     }
     if failures.is_empty() {
-        Ok(receipt)
+        Ok(McpLiveChange {
+            receipt,
+            link_updates: native_links,
+        })
     } else {
         let recovery = rollback_writes(receipt).err();
         let error = AppError::Message(format!("MCP live update failed: {}", failures.join("; ")));
@@ -125,9 +214,80 @@ pub(super) fn sync_servers(
     let core_app = app.as_core();
     let changes = server_changes(app, servers);
     update_live(app, |contents| {
-        project_mcp_servers(&core_app, contents, &changes).map_err(core_error)
+        Ok(LiveProjection {
+            document: project_mcp_servers(&core_app, contents, &changes).map_err(core_error)?,
+            native_snapshots: HashMap::new(),
+        })
     })
     .map(|_| ())
+}
+
+pub(super) fn apply_owned_server_sync(
+    app: &AppType,
+    servers: &[McpOwnedServer],
+) -> Result<McpLiveChange<LiveReceipt>, AppError> {
+    if servers.is_empty() {
+        return Ok(McpLiveChange {
+            receipt: LiveReceipt { writes: Vec::new() },
+            link_updates: Vec::new(),
+        });
+    }
+    let core_app = app.as_core();
+    let adapter = builtin_app_adapter(&core_app);
+    let update = update_live(app, |contents| {
+        let observed_snapshots = servers
+            .iter()
+            .map(|target| {
+                adapter
+                    .capture_mcp_native_snapshot(contents, &target.server.id)
+                    .map_err(core_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let native_snapshots = servers
+            .iter()
+            .zip(&observed_snapshots)
+            .filter_map(|(target, observed)| {
+                observed
+                    .as_ref()
+                    .or(target.native_snapshot.as_ref())
+                    .map(|snapshot| {
+                        serialize_snapshot(&target.server.id, snapshot)
+                            .map(|snapshot| (target.server.id.clone(), snapshot))
+                    })
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        let changes = owned_server_changes(app, servers, &observed_snapshots);
+        Ok(LiveProjection {
+            document: project_mcp_servers(&core_app, contents, &changes).map_err(core_error)?,
+            native_snapshots,
+        })
+    })?;
+    let (write, native_snapshots) = match update {
+        LiveUpdate::Managed {
+            write,
+            native_snapshots,
+        } => (write, native_snapshots),
+        LiveUpdate::Skipped => {
+            return Ok(McpLiveChange {
+                receipt: LiveReceipt { writes: Vec::new() },
+                link_updates: Vec::new(),
+            });
+        }
+    };
+    let link_updates = servers
+        .iter()
+        .map(|target| McpNativeLinkUpdate {
+            server_id: target.server.id.clone(),
+            app: app.clone(),
+            native_snapshot_json: native_snapshots.get(&target.server.id).cloned(),
+        })
+        .collect();
+    Ok(McpLiveChange {
+        receipt: LiveReceipt {
+            writes: write.into_iter().collect(),
+        },
+        link_updates,
+    })
 }
 
 fn server_changes<'a>(
@@ -149,41 +309,107 @@ fn server_changes<'a>(
         .collect()
 }
 
+fn owned_server_changes<'a>(
+    app: &AppType,
+    servers: &'a [McpOwnedServer],
+    observed_snapshots: &'a [Option<McpNativeSnapshot>],
+) -> Vec<(&'a str, McpServerProjection<'a>)> {
+    let mut servers = servers.iter().zip(observed_snapshots).collect::<Vec<_>>();
+    servers.sort_by(|(left, _), (right, _)| left.server.id.cmp(&right.server.id));
+    servers
+        .into_iter()
+        .map(|(target, observed_snapshot)| {
+            let server = &target.server;
+            let projection = if server.apps.is_enabled_for(app) {
+                match observed_snapshot
+                    .as_ref()
+                    .or(target.native_snapshot.as_ref())
+                {
+                    Some(snapshot) => McpServerProjection::Restore {
+                        server: &server.server,
+                        snapshot,
+                    },
+                    None => McpServerProjection::Enable(&server.server),
+                }
+            } else {
+                McpServerProjection::Disable(&server.server)
+            };
+            (server.id.as_str(), projection)
+        })
+        .collect()
+}
+
 fn project_live(
     app: &AppType,
     id: &str,
-    projection: McpServerProjection<'_>,
-) -> Result<Option<McpFileReceipt>, AppError> {
+    intent: LiveProjectionIntent<'_>,
+    reject_existing: bool,
+    owned: bool,
+    stored_snapshot: Option<&McpNativeSnapshot>,
+) -> Result<LiveUpdate, AppError> {
     let core_app = app.as_core();
+    let adapter = builtin_app_adapter(&core_app);
     update_live(app, |contents| {
-        project_mcp_server(&core_app, contents, id, projection).map_err(core_error)
+        if reject_existing
+            && adapter
+                .contains_mcp_server(contents, id)
+                .map_err(core_error)?
+        {
+            return Err(AppError::Conflict(format!(
+                "{} already contains an unmanaged MCP server '{id}'",
+                app.as_str()
+            )));
+        }
+        let observed_snapshot = adapter
+            .capture_mcp_native_snapshot(contents, id)
+            .map_err(core_error)?;
+        let snapshot = observed_snapshot.as_ref().or(stored_snapshot);
+        let projection = match (intent, owned, snapshot) {
+            (LiveProjectionIntent::Enable(server), true, Some(snapshot)) => {
+                McpServerProjection::Restore { server, snapshot }
+            }
+            (LiveProjectionIntent::Enable(server), _, _) => McpServerProjection::Enable(server),
+            (LiveProjectionIntent::Disable(server), _, _) => McpServerProjection::Disable(server),
+            (LiveProjectionIntent::Remove, _, _) => McpServerProjection::Remove,
+        };
+        let mut native_snapshots = HashMap::new();
+        if let Some(snapshot) = snapshot {
+            native_snapshots.insert(id.to_owned(), serialize_snapshot(id, snapshot)?);
+        }
+        Ok(LiveProjection {
+            document: project_mcp_server(&core_app, contents, id, projection)
+                .map_err(core_error)?,
+            native_snapshots,
+        })
     })
 }
 
 fn update_live(
     app: &AppType,
-    project: impl Fn(Option<&[u8]>) -> Result<Option<String>, AppError>,
-) -> Result<Option<McpFileReceipt>, AppError> {
+    project: impl Fn(Option<&[u8]>) -> Result<LiveProjection, AppError>,
+) -> Result<LiveUpdate, AppError> {
     if !crate::sync_policy::should_sync_live(app) {
-        return Ok(None);
+        return Ok(LiveUpdate::Skipped);
     }
 
     let core_app = app.as_core();
     let Some(target) = mcp_config_target(&core_app) else {
-        return Ok(None);
+        return Ok(LiveUpdate::Skipped);
     };
     if target == McpConfigTarget::Hermes {
         let path = target_path(target)?;
-        return crate::hermes_config::update_hermes_config_source_with_receipt(&project).map(
-            |receipt| {
-                receipt.map(|(before, after)| McpFileReceipt {
-                    target,
-                    path,
-                    before,
-                    after,
-                })
-            },
-        );
+        return crate::hermes_config::update_hermes_config_source_with_receipt(|contents| {
+            project(contents).map(|projection| projection.document)
+        })
+        .map(|receipt| LiveUpdate::Managed {
+            write: receipt.map(|(before, after)| McpFileReceipt {
+                target,
+                path,
+                before,
+                after,
+            }),
+            native_snapshots: HashMap::new(),
+        });
     }
 
     let path = target_path(target)?;
@@ -197,16 +423,23 @@ fn update_live(
         } else {
             None
         };
-        let Some(projected) = project(contents.as_deref().or(default_contents.as_deref()))? else {
-            return Ok(None);
+        let projection = project(contents.as_deref().or(default_contents.as_deref()))?;
+        let Some(projected) = projection.document else {
+            return Ok(LiveUpdate::Managed {
+                write: None,
+                native_snapshots: projection.native_snapshots,
+            });
         };
         if crate::config::write_file_if_current(&path, contents.as_deref(), projected.as_bytes())? {
-            return Ok(Some(McpFileReceipt {
-                target,
-                path,
-                before: contents,
-                after: projected.into_bytes(),
-            }));
+            return Ok(LiveUpdate::Managed {
+                write: Some(McpFileReceipt {
+                    target,
+                    path,
+                    before: contents,
+                    after: projected.into_bytes(),
+                }),
+                native_snapshots: projection.native_snapshots,
+            });
         }
     }
     Err(AppError::Conflict(format!(
@@ -279,4 +512,12 @@ fn restore_write(write: McpFileReceipt) -> Result<(), AppError> {
 
 fn core_error(error: cc_switch_core::McpConfigError) -> AppError {
     AppError::McpValidation(error.to_string())
+}
+
+fn serialize_snapshot(id: &str, snapshot: &McpNativeSnapshot) -> Result<String, AppError> {
+    serde_json::to_string(snapshot).map_err(|error| {
+        AppError::McpValidation(format!(
+            "failed to store native snapshot for '{id}': {error}"
+        ))
+    })
 }

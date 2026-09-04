@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::app_config::{AppType, McpApps, McpServer, MultiAppConfig};
 use crate::error::AppError;
-use crate::mcp;
 use crate::store::AppState;
 
 mod core_bridge;
@@ -163,16 +162,13 @@ impl McpService {
         state.db.commit_mcp_server_change(
             previous_server,
             next_server,
-            || core_bridge::apply_server_change(previous_server, next_server, affected_apps),
+            affected_apps,
+            |targets| core_bridge::apply_server_change(previous_server, next_server, targets),
             core_bridge::rollback_server_change,
         )
     }
 
     /// 将 MCP 服务器同步到指定应用
-    pub(crate) fn sync_server_to_app(server: &McpServer, app: &AppType) -> Result<(), AppError> {
-        Self::sync_server_to_app_internal(server, app)
-    }
-
     pub(crate) fn project_server_for_app(
         id: &str,
         server: &serde_json::Value,
@@ -192,10 +188,6 @@ impl McpService {
         core_bridge::replace_servers(app, servers)
     }
 
-    fn sync_server_to_app_internal(server: &McpServer, app: &AppType) -> Result<(), AppError> {
-        core_bridge::project_server(app, &server.id, &server.server)
-    }
-
     /// 手动同步所有启用的 MCP 服务器到对应的应用。
     ///
     /// Best-effort：单个应用投影失败不阻断其余应用。各应用的 live 文件互相独立，
@@ -209,15 +201,12 @@ impl McpService {
         state: &AppState,
         excluded: Option<&AppType>,
     ) -> Result<(), AppError> {
-        let config = state.config.read()?;
-        let servers = Self::servers_from_config(&config)?;
-
         let mut failures = Vec::new();
         for app in Self::supported_mcp_apps() {
             if excluded == Some(&app) {
                 continue;
             }
-            if let Err(err) = Self::project_servers_to_app(servers, &app) {
+            if let Err(err) = Self::sync_owned_servers_to_app(state, &app) {
                 log::warn!("同步 MCP 到 {app:?} 失败: {err}");
                 failures.push(format!("{}: {err}", app.as_str()));
             }
@@ -237,17 +226,19 @@ impl McpService {
         state: &AppState,
         base_text: &str,
     ) -> Result<String, AppError> {
-        let config = state.config.read()?;
-        let servers = Self::servers_from_config(&config)?;
-        core_bridge::project_servers(&AppType::Codex, base_text, servers)
+        let servers = state
+            .db
+            .get_owned_mcp_servers(&AppType::Codex)?
+            .into_iter()
+            .map(|target| (target.server.id.clone(), target.server))
+            .collect();
+        core_bridge::project_servers(&AppType::Codex, base_text, &servers)
     }
 
     /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做
     /// 定向重投影，避免把无关应用的失败面牵连进目标应用的关键路径。
     pub fn sync_enabled_for_app(state: &AppState, app: &AppType) -> Result<(), AppError> {
-        let config = state.config.read()?;
-        let servers = Self::servers_from_config(&config)?;
-        Self::project_servers_to_app(servers, app)
+        Self::sync_owned_servers_to_app(state, app)
     }
 
     pub(crate) fn sync_enabled_for_config(
@@ -274,6 +265,14 @@ impl McpService {
         app: &AppType,
     ) -> Result<(), AppError> {
         core_bridge::sync_servers(app, servers)
+    }
+
+    fn sync_owned_servers_to_app(state: &AppState, app: &AppType) -> Result<(), AppError> {
+        state.db.commit_mcp_app_sync(
+            app,
+            |servers| core_bridge::apply_owned_server_sync(app, servers),
+            core_bridge::rollback_server_change,
+        )
     }
 
     // ========================================================================
@@ -313,61 +312,32 @@ impl McpService {
     /// [已废弃] 同步启用的 MCP 到指定应用（兼容旧 API）
     #[deprecated(since = "3.7.0", note = "Use sync_all_enabled instead")]
     pub fn sync_enabled(state: &AppState, app: AppType) -> Result<(), AppError> {
-        let config = state.config.read()?;
-        let servers = Self::servers_from_config(&config)?;
-
-        for server in servers.values() {
-            if server.apps.is_enabled_for(&app) {
-                Self::sync_server_to_app(server, &app)?;
-            }
-        }
-
-        Ok(())
+        Self::sync_owned_servers_to_app(state, &app)
     }
 
     /// 从 Claude 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_claude(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_claude(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_from_app(state, AppType::Claude)
     }
 
     /// 从 Codex 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_codex(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_codex(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_from_app(state, AppType::Codex)
     }
 
     /// 从 Gemini 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_gemini(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_gemini(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_from_app(state, AppType::Gemini)
     }
 
     /// 从 OpenCode 导入 MCP
     pub fn import_from_opencode(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_opencode(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_from_app(state, AppType::OpenCode)
     }
 
     /// 从 Hermes 导入 MCP
     pub fn import_from_hermes(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_hermes(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_from_app(state, AppType::Hermes)
     }
 
     pub fn import_from_supported_apps(state: &AppState) -> Result<usize, AppError> {
@@ -378,5 +348,16 @@ impl McpService {
         total += Self::import_from_opencode(state)?;
         total += Self::import_from_hermes(state)?;
         Ok(total)
+    }
+
+    fn import_from_app(state: &AppState, app: AppType) -> Result<usize, AppError> {
+        let changed = state.db.import_native_mcp_servers(
+            &app,
+            || core_bridge::observe_imports(&app),
+            core_bridge::ImportObservation::is_current,
+        )?;
+        let mut config = state.config.write()?;
+        config.mcp.servers = Some(state.db.get_all_mcp_servers()?.into_iter().collect());
+        Ok(changed)
     }
 }

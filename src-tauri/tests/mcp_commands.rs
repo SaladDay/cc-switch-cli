@@ -107,7 +107,8 @@ fn import_mcp_from_claude_creates_config_and_enables_servers() {
         "mcpServers": {
             "echo": {
                 "type": "stdio",
-                "command": "echo"
+                "command": "echo",
+                "trust": true
             }
         }
     });
@@ -139,6 +140,7 @@ fn import_mcp_from_claude_creates_config_and_enables_servers() {
         entry.apps.claude,
         "imported server should have Claude app enabled"
     );
+    assert_eq!(entry.server["trust"], true);
     drop(guard);
 
     let servers_db = state
@@ -149,6 +151,7 @@ fn import_mcp_from_claude_creates_config_and_enables_servers() {
         servers_db.contains_key("echo"),
         "state.save should persist imported server to db"
     );
+    assert_eq!(servers_db["echo"].server["trust"], true);
 }
 
 #[test]
@@ -224,6 +227,112 @@ fn legacy_sync_wrapper_still_replaces_claude_servers() {
 }
 
 #[test]
+fn disable_refreshes_native_snapshot_before_restore() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let mcp_path = get_claude_mcp_path();
+    fs::write(
+        &mcp_path,
+        json!({
+            "mcpServers": {
+                "snapshot": {"command": "npx", "trust": "v1"}
+            }
+        })
+        .to_string(),
+    )
+    .expect("seed Claude MCP config");
+    let state = state_from_config(MultiAppConfig::default());
+    McpService::import_from_claude(&state).expect("import Claude MCP server");
+
+    fs::write(
+        &mcp_path,
+        json!({
+            "mcpServers": {
+                "snapshot": {"command": 42, "trust": "v2"}
+            }
+        })
+        .to_string(),
+    )
+    .expect("update native-only field");
+    McpService::toggle_app(&state, "snapshot", AppType::Claude, false)
+        .expect("disable Claude MCP server");
+    McpService::toggle_app(&state, "snapshot", AppType::Claude, true)
+        .expect("restore Claude MCP server");
+
+    let live: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(mcp_path).unwrap()).unwrap();
+    assert_eq!(live["mcpServers"]["snapshot"]["trust"], "v2");
+    assert_eq!(live["mcpServers"]["snapshot"]["command"], "npx");
+}
+
+#[test]
+fn enabled_edit_restores_a_missing_owned_claude_entry() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let mcp_path = get_claude_mcp_path();
+    fs::write(
+        &mcp_path,
+        json!({"mcpServers":{"snapshot":{"command":"npx","trust":"kept"}}}).to_string(),
+    )
+    .expect("seed Claude MCP config");
+    let state = state_from_config(MultiAppConfig::default());
+    McpService::import_from_claude(&state).expect("import Claude MCP server");
+
+    fs::write(&mcp_path, "{}").expect("remove owned live entry externally");
+    let mut server = state.config.read().unwrap().mcp.servers.as_ref().unwrap()["snapshot"].clone();
+    server.server["command"] = json!("uvx");
+    McpService::upsert_server(&state, server).expect("edit enabled owned server");
+
+    let live: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(mcp_path).unwrap()).unwrap();
+    assert_eq!(live["mcpServers"]["snapshot"]["command"], "uvx");
+    assert_eq!(live["mcpServers"]["snapshot"]["trust"], "kept");
+}
+
+#[test]
+fn sync_refreshes_native_snapshot_before_restore() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let mcp_path = get_claude_mcp_path();
+    fs::write(
+        &mcp_path,
+        json!({"mcpServers":{"snapshot":{"command":"npx","trust":"v1"}}}).to_string(),
+    )
+    .expect("seed Claude MCP config");
+    let state = state_from_config(MultiAppConfig::default());
+    McpService::import_from_claude(&state).expect("import Claude MCP server");
+    state
+        .config
+        .write()
+        .unwrap()
+        .mcp
+        .servers
+        .as_mut()
+        .unwrap()
+        .get_mut("snapshot")
+        .unwrap()
+        .apps
+        .claude = false;
+    state.save().expect("persist disabled catalog state");
+    fs::write(
+        &mcp_path,
+        json!({"mcpServers":{"snapshot":{"command":"npx","trust":"v2"}}}).to_string(),
+    )
+    .expect("update native-only field");
+
+    McpService::sync_all_enabled(&state).expect("sync disabled managed server");
+    McpService::toggle_app(&state, "snapshot", AppType::Claude, true)
+        .expect("restore Claude MCP server");
+
+    let live: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(mcp_path).unwrap()).unwrap();
+    assert_eq!(live["mcpServers"]["snapshot"]["trust"], "v2");
+}
+
+#[test]
 fn app_sync_validates_the_whole_batch_before_writing() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -233,13 +342,13 @@ fn app_sync_validates_the_whole_batch_before_writing() {
     let original = "model = \"keep\"\n[mcp_servers.existing]\ncommand = \"old\"\n";
     fs::write(&path, original).expect("seed Codex config");
 
-    let mut config = MultiAppConfig::default();
-    config.mcp.servers = Some(HashMap::from([
-        (
-            "a-valid".to_owned(),
+    let state = state_from_config(MultiAppConfig::default());
+    for id in ["a-valid", "z-invalid"] {
+        McpService::upsert_server(
+            &state,
             McpServer {
-                id: "a-valid".to_owned(),
-                name: "Valid".to_owned(),
+                id: id.to_owned(),
+                name: id.to_owned(),
                 server: json!({"command":"npx"}),
                 apps: McpApps {
                     codex: true,
@@ -250,29 +359,111 @@ fn app_sync_validates_the_whole_batch_before_writing() {
                 docs: None,
                 tags: Vec::new(),
             },
-        ),
-        (
-            "z-invalid".to_owned(),
-            McpServer {
-                id: "z-invalid".to_owned(),
-                name: "Invalid".to_owned(),
-                server: json!({"command":"npx","future":null}),
-                apps: McpApps {
-                    codex: true,
-                    ..McpApps::default()
-                },
-                description: None,
-                homepage: None,
-                docs: None,
-                tags: Vec::new(),
-            },
-        ),
-    ]));
-    let state = state_from_config(config);
+        )
+        .expect("create managed Codex server");
+    }
+    state
+        .config
+        .write()
+        .unwrap()
+        .mcp
+        .servers
+        .as_mut()
+        .unwrap()
+        .get_mut("z-invalid")
+        .unwrap()
+        .server = json!({"command":"npx","future":null});
+    state.save().expect("persist invalid test fixture");
+    fs::write(&path, original).expect("restore pre-sync Codex config");
 
     McpService::sync_enabled_for_app(&state, &AppType::Codex)
         .expect_err("invalid second projection must reject the batch");
     assert_eq!(fs::read_to_string(path).unwrap(), original);
+}
+
+#[test]
+fn app_sync_preserves_an_unowned_unparseable_codex_sibling() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    fs::create_dir_all(home.join(".codex")).expect("create Codex dir");
+    let path = cc_switch_lib::get_codex_config_path();
+    fs::write(&path, "mcp_servers = { bad = 1 }\n").expect("seed unowned sibling");
+    let state = state_from_config(MultiAppConfig::default());
+    McpService::upsert_server(
+        &state,
+        McpServer {
+            id: "owned".to_owned(),
+            name: "Owned".to_owned(),
+            server: json!({"command":"npx"}),
+            apps: McpApps {
+                codex: true,
+                ..McpApps::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    )
+    .expect("create managed Codex server");
+    let mut server = state.config.read().unwrap().mcp.servers.as_ref().unwrap()["owned"].clone();
+    server.server["command"] = json!("uvx");
+    state
+        .config
+        .write()
+        .unwrap()
+        .mcp
+        .servers
+        .as_mut()
+        .unwrap()
+        .insert("owned".to_owned(), server);
+    state.save().expect("persist edited catalog row");
+    fs::write(
+        &path,
+        "mcp_servers = { bad = 1, owned = { command = \"old\" } }\n",
+    )
+    .expect("restore native batch fixture");
+
+    McpService::sync_enabled_for_app(&state, &AppType::Codex).expect("sync only the owned entry");
+
+    let live = fs::read_to_string(path).unwrap();
+    assert!(live.contains("bad = 1"));
+    assert!(live.contains("command = \"uvx\""));
+}
+
+#[test]
+fn opencode_and_hermes_imports_keep_loose_container_and_path_errors() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let state = state_from_config(MultiAppConfig::default());
+
+    let opencode_path = home.join(".config/opencode/opencode.json");
+    fs::create_dir_all(opencode_path.parent().unwrap()).expect("create OpenCode dir");
+    fs::write(&opencode_path, r#"{"mcp":[]}"#).expect("write loose OpenCode container");
+    assert_eq!(
+        McpService::import_from_opencode(&state).expect("ignore loose OpenCode container"),
+        0
+    );
+    fs::write(&opencode_path, "{").expect("write invalid OpenCode JSON");
+    assert!(matches!(
+        McpService::import_from_opencode(&state),
+        Err(AppError::Json { .. })
+    ));
+
+    let hermes_path = home.join(".hermes/config.yaml");
+    fs::create_dir_all(hermes_path.parent().unwrap()).expect("create Hermes dir");
+    fs::write(&hermes_path, "mcp_servers: []\n").expect("write loose Hermes container");
+    assert_eq!(
+        McpService::import_from_hermes(&state).expect("ignore loose Hermes container"),
+        0
+    );
+    fs::write(&hermes_path, "mcp_servers: [\n").expect("write invalid Hermes YAML");
+    assert!(matches!(
+        McpService::import_from_hermes(&state),
+        Err(AppError::Config(_))
+    ));
 }
 
 #[test]
@@ -623,6 +814,64 @@ fn upsert_server_skips_live_sync_when_gemini_uninitialized() {
         !home.join(".gemini").exists(),
         "should_sync=auto: upsert should not create ~/.gemini when uninitialized"
     );
+
+    let gemini_dir = home.join(".gemini");
+    fs::create_dir_all(&gemini_dir).expect("initialize Gemini after the skipped write");
+    let settings_path = gemini_dir.join("settings.json");
+    fs::write(
+        &settings_path,
+        json!({"mcpServers":{"gemini-server":{"command":"user-owned"}}}).to_string(),
+    )
+    .expect("seed an unmanaged same-id server");
+
+    McpService::toggle_app(&state, "gemini-server", AppType::Gemini, false)
+        .expect("disable catalog link");
+    McpService::delete_server(&state, "gemini-server").expect("delete catalog server");
+
+    let live: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+    assert_eq!(live["mcpServers"]["gemini-server"]["command"], "user-owned");
+}
+
+#[test]
+fn first_enable_refuses_an_unmanaged_same_id_server() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let mcp_path = get_claude_mcp_path();
+    let original = json!({
+        "mcpServers": {
+            "collision": {"command": "user-owned", "trust": true}
+        }
+    })
+    .to_string();
+    fs::write(&mcp_path, &original).expect("seed unmanaged Claude server");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers.as_mut().unwrap().insert(
+        "collision".into(),
+        McpServer {
+            id: "collision".into(),
+            name: "Collision".into(),
+            server: json!({"command":"managed"}),
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+    let state = state_from_config(config);
+
+    let error = McpService::toggle_app(&state, "collision", AppType::Claude, true)
+        .expect_err("same-id unmanaged server must not be claimed");
+    assert!(error.to_string().contains("unmanaged MCP server"));
+    assert_eq!(fs::read_to_string(&mcp_path).unwrap(), original);
+    assert!(
+        !state.config.read().unwrap().mcp.servers.as_ref().unwrap()["collision"]
+            .apps
+            .claude
+    );
 }
 
 #[test]
@@ -688,6 +937,7 @@ fn upsert_server_disables_app_removes_from_gemini_live() {
     );
 
     let state = state_from_config(config);
+    McpService::import_from_gemini(&state).expect("claim the existing Gemini server");
 
     // 模拟“取消勾选 Gemini”
     let server = McpServer {
@@ -727,7 +977,7 @@ fn upsert_server_disables_app_removes_from_gemini_live() {
 }
 
 #[test]
-fn sync_all_enabled_removes_disabled_gemini_server_from_live_config() {
+fn sync_all_enabled_preserves_an_unowned_gemini_server() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -787,9 +1037,48 @@ fn sync_all_enabled_removes_disabled_gemini_server_from_live_config() {
         .and_then(|v| v.as_object())
         .is_some_and(|mcp_servers| mcp_servers.contains_key("remove_me"));
     assert!(
-        !remove_me_present,
-        "sync_all_enabled should remove disabled Gemini binding from live config, got: {settings_text}"
+        remove_me_present,
+        "unowned native entry changed: {settings_text}"
     );
+}
+
+#[test]
+fn sync_all_enabled_removes_an_owned_disabled_gemini_server() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let gemini_dir = home.join(".gemini");
+    fs::create_dir_all(&gemini_dir).expect("create Gemini dir");
+    let settings_path = gemini_dir.join("settings.json");
+    fs::write(&settings_path, "{}").expect("initialize Gemini settings");
+    let state = state_from_config(MultiAppConfig::default());
+    let server = McpServer {
+        id: "owned".into(),
+        name: "Owned".into(),
+        server: json!({"type":"http","url":"http://localhost:1234"}),
+        apps: McpApps {
+            gemini: true,
+            ..McpApps::default()
+        },
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+    McpService::upsert_server(&state, server).expect("create managed Gemini server");
+    McpService::toggle_app(&state, "owned", AppType::Gemini, false)
+        .expect("disable managed Gemini server");
+    fs::write(
+        &settings_path,
+        json!({"mcpServers":{"owned":{"command":"stale"}}}).to_string(),
+    )
+    .expect("restore a stale managed entry");
+
+    McpService::sync_all_enabled(&state).expect("sync managed servers");
+
+    let live: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+    assert!(live["mcpServers"].get("owned").is_none());
 }
 
 #[test]
@@ -799,11 +1088,38 @@ fn sync_all_enabled_continues_after_another_app_fails() {
     let home = ensure_test_home();
 
     fs::create_dir_all(home.join(".claude")).expect("create Claude dir");
-    fs::write(get_claude_mcp_path(), "{\"mcpServers\":").expect("seed invalid Claude MCP config");
+    fs::write(get_claude_mcp_path(), "{}").expect("initialize Claude MCP config");
 
     let gemini_dir = home.join(".gemini");
     fs::create_dir_all(&gemini_dir).expect("create Gemini dir");
     let gemini_path = gemini_dir.join("settings.json");
+    fs::write(&gemini_path, "{}").expect("initialize Gemini settings");
+
+    let state = state_from_config(MultiAppConfig::default());
+    McpService::upsert_server(
+        &state,
+        McpServer {
+            id: "remove_me".to_string(),
+            name: "Remove Me".to_string(),
+            server: json!({
+                "type": "http",
+                "url": "http://localhost:1234"
+            }),
+            apps: McpApps {
+                claude: true,
+                gemini: true,
+                ..McpApps::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    )
+    .expect("create managed server");
+    McpService::set_apps(&state, "remove_me", McpApps::default()).expect("disable managed server");
+
+    fs::write(get_claude_mcp_path(), "{\"mcpServers\":").expect("seed invalid Claude MCP config");
     fs::write(
         &gemini_path,
         json!({
@@ -816,25 +1132,6 @@ fn sync_all_enabled_continues_after_another_app_fails() {
         .to_string(),
     )
     .expect("seed Gemini settings");
-
-    let mut config = MultiAppConfig::default();
-    config.mcp.servers = Some(HashMap::from([(
-        "remove_me".to_string(),
-        McpServer {
-            id: "remove_me".to_string(),
-            name: "Remove Me".to_string(),
-            server: json!({
-                "type": "http",
-                "url": "http://localhost:1234"
-            }),
-            apps: McpApps::default(),
-            description: None,
-            homepage: None,
-            docs: None,
-            tags: Vec::new(),
-        },
-    )]));
-    let state = state_from_config(config);
 
     let error = McpService::sync_all_enabled(&state)
         .expect_err("the invalid Claude file should be reported");
@@ -898,6 +1195,7 @@ fn upsert_refreshes_a_preserved_disabled_opencode_entry() {
         .unwrap()
         .insert(previous.id.clone(), previous.clone());
     let state = state_from_config(config);
+    McpService::import_from_opencode(&state).expect("claim the disabled OpenCode server");
 
     McpService::upsert_server(
         &state,
@@ -968,7 +1266,7 @@ fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
             "mcp": {
                 "matrix-server": {
                     "type": "remote",
-                    "url": "https://old.example.com/mcp",
+                    "url": "https://example.com/mcp",
                     "enabled": false,
                     "timeout": 30
                 }
@@ -998,6 +1296,9 @@ fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
     );
 
     let state = state_from_config(config);
+    McpService::import_from_opencode(&state).expect("claim the existing OpenCode server");
+    McpService::set_apps(&state, "matrix-server", McpApps::default())
+        .expect("clear imported app state");
 
     let apps = McpApps {
         opencode: true,
@@ -1070,7 +1371,7 @@ fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
 }
 
 #[test]
-fn delete_server_removes_a_stale_gemini_entry_even_when_disabled() {
+fn delete_server_preserves_an_unowned_gemini_entry_when_disabled() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -1112,7 +1413,7 @@ fn delete_server_removes_a_stale_gemini_entry_even_when_disabled() {
     let settings: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&settings_path).expect("read Gemini settings"))
             .expect("parse Gemini settings");
-    assert!(settings["mcpServers"].get("stale-server").is_none());
+    assert_eq!(settings["mcpServers"]["stale-server"]["command"], "old");
     assert_eq!(settings["theme"], "system");
 }
 
@@ -1122,31 +1423,36 @@ fn failed_delete_keeps_the_shared_record_retryable() {
     reset_test_fs();
     let home = ensure_test_home();
     fs::create_dir_all(home.join(".claude")).expect("create Claude dir");
-    fs::write(get_claude_mcp_path(), "{\"mcpServers\":").expect("seed invalid Claude config");
+    fs::write(get_claude_mcp_path(), "{}").expect("initialize Claude config");
 
     let gemini_dir = home.join(".gemini");
     fs::create_dir_all(&gemini_dir).expect("create Gemini dir");
     let gemini_path = gemini_dir.join("settings.json");
+    fs::write(&gemini_path, "{}").expect("initialize Gemini config");
     let original_gemini =
         json!({"mcpServers":{"retryable":{"command":"old","timeout":30,"future":"keep"}}})
             .to_string();
-    fs::write(&gemini_path, &original_gemini).expect("seed Gemini config");
-
-    let mut config = MultiAppConfig::default();
-    config.mcp.servers.as_mut().unwrap().insert(
-        "retryable".into(),
+    let state = state_from_config(MultiAppConfig::default());
+    McpService::upsert_server(
+        &state,
         McpServer {
             id: "retryable".into(),
             name: "Retryable".into(),
             server: json!({"type":"stdio","command":"new"}),
-            apps: McpApps::default(),
+            apps: McpApps {
+                claude: true,
+                gemini: true,
+                ..McpApps::default()
+            },
             description: None,
             homepage: None,
             docs: None,
             tags: Vec::new(),
         },
-    );
-    let state = state_from_config(config);
+    )
+    .expect("create managed server");
+    fs::write(get_claude_mcp_path(), "{\"mcpServers\":").expect("seed invalid Claude config");
+    fs::write(&gemini_path, &original_gemini).expect("seed Gemini config");
 
     McpService::delete_server(&state, "retryable")
         .expect_err("invalid Claude config should stop the delete");

@@ -3,7 +3,7 @@
 //! 包含 Schema 迁移和基本功能的测试。
 
 use super::*;
-use crate::app_config::MultiAppConfig;
+use crate::app_config::{McpApps, McpServer, MultiAppConfig};
 use crate::prompt::Prompt;
 use crate::provider::{Provider, ProviderManager};
 use indexmap::IndexMap;
@@ -2690,6 +2690,57 @@ fn json_migration_imports_opencode_and_openclaw_prompts() {
             .expect("openclaw prompt")
             .content,
         "openclaw content"
+    );
+}
+
+#[test]
+fn json_migration_claims_only_enabled_mcp_relationships() {
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers = Some(HashMap::from([
+        (
+            "enabled".to_owned(),
+            McpServer {
+                id: "enabled".to_owned(),
+                name: "Enabled".to_owned(),
+                server: json!({"command":"npx"}),
+                apps: McpApps {
+                    claude: true,
+                    ..McpApps::default()
+                },
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: Vec::new(),
+            },
+        ),
+        (
+            "disabled".to_owned(),
+            McpServer {
+                id: "disabled".to_owned(),
+                name: "Disabled".to_owned(),
+                server: json!({"command":"npx"}),
+                apps: McpApps::default(),
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: Vec::new(),
+            },
+        ),
+    ]));
+
+    let db = Database::memory().expect("create memory db");
+    db.migrate_from_json(&config).expect("migrate MCP data");
+
+    let conn = db.conn.lock().expect("lock database");
+    assert!(
+        cc_switch_store::read_mcp_native_link(&conn, "enabled", "claude")
+            .expect("read enabled ownership")
+            .is_some()
+    );
+    assert!(
+        cc_switch_store::read_mcp_native_link(&conn, "disabled", "claude")
+            .expect("read disabled ownership")
+            .is_none()
     );
 }
 

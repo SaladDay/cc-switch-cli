@@ -273,7 +273,7 @@ impl Database {
             source: e,
         })?;
         let temp_path = temp_file.path().to_path_buf();
-        let temp_conn =
+        let mut temp_conn =
             Connection::open(&temp_path).map_err(|e| AppError::Database(e.to_string()))?;
 
         // 在建表前把临时库设为增量 auto-vacuum。稍后用 SQLite Backup 把临时库整体
@@ -306,6 +306,8 @@ impl Database {
         // 补齐缺失表/索引并执行迁移
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
+        cc_switch_store::ensure_mcp_native_link_schema(&mut temp_conn)
+            .map_err(|error| AppError::Database(error.to_string()))?;
         Self::validate_imported_schema_contract(&temp_conn)?;
         on_staging_ready()?;
 
@@ -2354,6 +2356,41 @@ mod tests {
             (true, "127.0.0.1".to_string(), 15721, true, false, 9)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn import_old_sql_initializes_mcp_ownership_before_replacing_live_database(
+    ) -> Result<(), AppError> {
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute(
+                "INSERT INTO mcp_servers
+                 (id, name, server_config, enabled_claude)
+                 VALUES ('legacy', 'Legacy', '{\"command\":\"npx\"}', 1)",
+                [],
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+            conn.execute(
+                "DROP TRIGGER cc_switch_mcp_native_links_after_server_delete",
+                [],
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+            conn.execute("DROP TABLE mcp_native_links", [])
+                .map_err(|error| AppError::Database(error.to_string()))?;
+        }
+        let old_sql = remote_db.export_sql_string()?;
+
+        let local_db = Database::memory()?;
+        local_db.import_sql_string(&old_sql)?;
+
+        let conn = crate::database::lock_conn!(local_db.conn);
+        assert!(
+            cc_switch_store::read_mcp_native_link(&conn, "legacy", "claude")
+                .map_err(|error| AppError::Database(error.to_string()))?
+                .is_some()
+        );
         Ok(())
     }
 
