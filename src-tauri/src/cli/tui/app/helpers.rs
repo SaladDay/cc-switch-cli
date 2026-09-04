@@ -1753,46 +1753,49 @@ pub(crate) fn cycle_app_type(current: &AppType, dir: i8) -> Option<AppType> {
 }
 
 pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
-    match app_type {
-        AppType::Claude => 0,
-        AppType::Codex => 1,
-        AppType::Gemini => 2,
-        AppType::OpenCode => 3,
-        AppType::Hermes => 4,
-        AppType::OpenClaw => 5,
-        AppType::Pi => 6,
-    }
+    AppType::all()
+        .position(|candidate| &candidate == app_type)
+        .unwrap_or(0)
+}
+
+pub(crate) fn mcp_picker_apps() -> impl Iterator<Item = AppType> {
+    crate::services::McpService::supported_mcp_apps()
+}
+
+pub(crate) fn mcp_picker_last_index() -> usize {
+    mcp_picker_apps().count().saturating_sub(1)
 }
 
 pub(crate) fn four_app_picker_index(app_type: &AppType) -> usize {
-    app_type_picker_index(app_type).min(4)
+    mcp_picker_apps()
+        .position(|candidate| &candidate == app_type)
+        .unwrap_or_else(mcp_picker_last_index)
+}
+
+pub(crate) fn mcp_app_type_for_picker_index(index: usize) -> AppType {
+    mcp_picker_apps().nth(index).unwrap_or(AppType::Claude)
+}
+
+pub(crate) fn skill_picker_apps() -> impl Iterator<Item = AppType> {
+    crate::services::SkillService::supported_skill_apps()
+}
+
+pub(crate) fn skill_picker_last_index() -> usize {
+    skill_picker_apps().count().saturating_sub(1)
 }
 
 pub(crate) fn skills_app_picker_index(app_type: &AppType) -> usize {
-    match app_type {
-        AppType::Pi | AppType::OpenClaw => 5,
-        _ => app_type_picker_index(app_type),
-    }
+    skill_picker_apps()
+        .position(|candidate| &candidate == app_type)
+        .unwrap_or_else(skill_picker_last_index)
 }
 
 pub(crate) fn skill_app_type_for_picker_index(index: usize) -> AppType {
-    if index == 5 {
-        AppType::Pi
-    } else {
-        app_type_for_picker_index(index)
-    }
+    skill_picker_apps().nth(index).unwrap_or(AppType::Claude)
 }
 
 pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
-    match index {
-        1 => AppType::Codex,
-        2 => AppType::Gemini,
-        3 => AppType::OpenCode,
-        4 => AppType::Hermes,
-        5 => AppType::OpenClaw,
-        6 => AppType::Pi,
-        _ => AppType::Claude,
-    }
+    AppType::all().nth(index).unwrap_or(AppType::Claude)
 }
 
 #[cfg(test)]

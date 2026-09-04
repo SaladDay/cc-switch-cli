@@ -2016,7 +2016,7 @@ fn run_session_scan(
         let mut next_preview_at = 1usize;
         let one_provider = provider_id.as_str();
         let providers: &[&str] = if provider_id == "all" {
-            &crate::session_manager::CACHED_PROVIDERS
+            crate::session_manager::cached_providers()
         } else {
             std::slice::from_ref(&one_provider)
         };

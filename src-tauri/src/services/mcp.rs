@@ -10,14 +10,7 @@ pub struct McpService;
 
 impl McpService {
     pub fn supported_mcp_apps() -> impl Iterator<Item = AppType> {
-        [
-            AppType::Claude,
-            AppType::Codex,
-            AppType::Gemini,
-            AppType::OpenCode,
-            AppType::Hermes,
-        ]
-        .into_iter()
+        AppType::all().filter(AppType::supports_mcp)
     }
 
     /// 获取所有 MCP 服务器（统一结构）

@@ -162,16 +162,8 @@ impl VisibleApps {
     }
 }
 
-fn app_order() -> [AppType; 7] {
-    [
-        AppType::Claude,
-        AppType::Codex,
-        AppType::Gemini,
-        AppType::OpenCode,
-        AppType::Hermes,
-        AppType::OpenClaw,
-        AppType::Pi,
-    ]
+fn app_order() -> Vec<AppType> {
+    AppType::all().collect()
 }
 
 pub fn next_visible_app(

@@ -48,23 +48,9 @@ impl McpApps {
 
     /// 获取所有启用的应用列表
     pub fn enabled_apps(&self) -> Vec<AppType> {
-        let mut apps = Vec::new();
-        if self.claude {
-            apps.push(AppType::Claude);
-        }
-        if self.codex {
-            apps.push(AppType::Codex);
-        }
-        if self.gemini {
-            apps.push(AppType::Gemini);
-        }
-        if self.opencode {
-            apps.push(AppType::OpenCode);
-        }
-        if self.hermes {
-            apps.push(AppType::Hermes);
-        }
-        apps
+        AppType::all()
+            .filter(|app| self.is_enabled_for(app))
+            .collect()
     }
 
     /// 检查是否所有应用都未启用
@@ -302,6 +288,9 @@ pub struct PromptRoot {
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
 use crate::error::AppError;
 use crate::provider::ProviderManager;
+use cc_switch_core::{
+    builtin_app_registry, AppCapability, AppType as CoreAppType, ProviderConfigurationMode,
+};
 
 /// 应用类型
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -317,23 +306,86 @@ pub enum AppType {
     Pi,
 }
 
+// Presentation order is part of the CLI's compatibility contract. Canonical
+// IDs still come from Core, whose product order may differ.
+static CLI_APP_CATALOG: [AppType; 7] = [
+    AppType::Claude,
+    AppType::Codex,
+    AppType::Gemini,
+    AppType::OpenCode,
+    AppType::Hermes,
+    AppType::OpenClaw,
+    AppType::Pi,
+];
+
+static CLI_MCP_APP_CATALOG: [AppType; 5] = [
+    AppType::Claude,
+    AppType::Codex,
+    AppType::Gemini,
+    AppType::OpenCode,
+    AppType::Hermes,
+];
+
+static CLI_SKILL_APP_CATALOG: [AppType; 6] = [
+    AppType::Claude,
+    AppType::Codex,
+    AppType::Gemini,
+    AppType::OpenCode,
+    AppType::Hermes,
+    AppType::Pi,
+];
+
 impl AppType {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_core(&self) -> CoreAppType {
         match self {
-            AppType::Claude => "claude",
-            AppType::Codex => "codex",
-            AppType::Gemini => "gemini",
-            AppType::OpenCode => "opencode",
-            AppType::Hermes => "hermes",
-            AppType::OpenClaw => "openclaw",
-            AppType::Pi => "pi",
+            AppType::Claude => CoreAppType::Claude,
+            AppType::Codex => CoreAppType::Codex,
+            AppType::Gemini => CoreAppType::Gemini,
+            AppType::OpenCode => CoreAppType::OpenCode,
+            AppType::Hermes => CoreAppType::Hermes,
+            AppType::OpenClaw => CoreAppType::OpenClaw,
+            AppType::Pi => CoreAppType::Pi,
         }
+    }
+
+    fn from_core(app: &CoreAppType) -> Option<Self> {
+        match app {
+            CoreAppType::Claude => Some(AppType::Claude),
+            CoreAppType::Codex => Some(AppType::Codex),
+            CoreAppType::Gemini => Some(AppType::Gemini),
+            CoreAppType::OpenCode => Some(AppType::OpenCode),
+            CoreAppType::Hermes => Some(AppType::Hermes),
+            CoreAppType::OpenClaw => Some(AppType::OpenClaw),
+            CoreAppType::Pi => Some(AppType::Pi),
+            CoreAppType::ClaudeDesktop | CoreAppType::GrokBuild => None,
+        }
+    }
+
+    fn unsupported_error(value: &str) -> AppError {
+        let allowed = Self::catalog_labels();
+        AppError::localized(
+            "unsupported_app",
+            format!("不支持的应用标识: '{value}'。可选值: {allowed}。"),
+            format!("Unsupported app id: '{value}'. Allowed: {allowed}."),
+        )
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        builtin_app_registry().for_app(&self.as_core()).id()
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        builtin_app_registry()
+            .for_app(&self.as_core())
+            .display_name()
     }
 
     pub fn is_additive_mode(&self) -> bool {
         matches!(
-            self,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi
+            builtin_app_registry()
+                .for_app(&self.as_core())
+                .configuration_mode(),
+            ProviderConfigurationMode::Additive
         )
     }
 
@@ -341,17 +393,58 @@ impl AppType {
         matches!(self, AppType::Claude | AppType::Codex | AppType::Gemini)
     }
 
+    pub(crate) fn supports_mcp(&self) -> bool {
+        CLI_MCP_APP_CATALOG.contains(self)
+            && builtin_app_registry()
+                .for_app(&self.as_core())
+                .supports(AppCapability::Mcp)
+    }
+
+    pub(crate) fn supports_skills(&self) -> bool {
+        CLI_SKILL_APP_CATALOG.contains(self)
+            && builtin_app_registry()
+                .for_app(&self.as_core())
+                .supports(AppCapability::Skills)
+    }
+
+    pub(crate) fn supports_visibility_detection(&self) -> bool {
+        match self {
+            AppType::Gemini
+            | AppType::OpenCode
+            | AppType::OpenClaw
+            | AppType::Hermes
+            | AppType::Pi => true,
+            AppType::Claude | AppType::Codex => false,
+        }
+    }
+
+    pub(crate) fn catalog() -> &'static [AppType] {
+        &CLI_APP_CATALOG
+    }
+
     pub fn all() -> impl Iterator<Item = AppType> {
-        [
-            AppType::Claude,
-            AppType::Codex,
-            AppType::Gemini,
-            AppType::OpenCode,
-            AppType::Hermes,
-            AppType::OpenClaw,
-            AppType::Pi,
-        ]
-        .into_iter()
+        Self::catalog().iter().cloned()
+    }
+
+    pub(crate) fn catalog_labels() -> String {
+        Self::all()
+            .map(|app| app.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl From<AppType> for CoreAppType {
+    fn from(app: AppType) -> Self {
+        app.as_core()
+    }
+}
+
+impl TryFrom<CoreAppType> for AppType {
+    type Error = AppError;
+
+    fn try_from(app: CoreAppType) -> Result<Self, Self::Error> {
+        Self::from_core(&app).ok_or_else(|| Self::unsupported_error(app.as_str()))
     }
 }
 
@@ -366,24 +459,9 @@ impl FromStr for AppType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let normalized = s.trim().to_lowercase();
-        match normalized.as_str() {
-            "claude" => Ok(AppType::Claude),
-            "codex" => Ok(AppType::Codex),
-            "gemini" => Ok(AppType::Gemini),
-            "opencode" => Ok(AppType::OpenCode),
-            "hermes" => Ok(AppType::Hermes),
-            "openclaw" => Ok(AppType::OpenClaw),
-            "pi" => Ok(AppType::Pi),
-            other => Err(AppError::localized(
-                "unsupported_app",
-                format!(
-                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw, pi。"
-                ),
-                format!(
-                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw, pi."
-                ),
-            )),
-        }
+        Self::all()
+            .find(|app| app.as_str() == normalized)
+            .ok_or_else(|| Self::unsupported_error(&normalized))
     }
 }
 
@@ -891,6 +969,33 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent dir");
         }
         fs::write(path, content).expect("write prompt");
+    }
+
+    #[test]
+    fn app_modes_and_shared_capabilities_follow_core_registry() {
+        for app in AppType::all() {
+            let descriptor = builtin_app_registry().for_app(&app.as_core());
+
+            assert_eq!(
+                app.is_additive_mode(),
+                descriptor.configuration_mode() == ProviderConfigurationMode::Additive
+            );
+            assert!(!app.supports_mcp() || descriptor.supports(AppCapability::Mcp));
+            assert!(!app.supports_skills() || descriptor.supports(AppCapability::Skills));
+        }
+
+        assert_eq!(
+            AppType::all()
+                .filter(AppType::supports_mcp)
+                .collect::<Vec<_>>(),
+            CLI_MCP_APP_CATALOG
+        );
+        assert_eq!(
+            AppType::all()
+                .filter(AppType::supports_skills)
+                .collect::<Vec<_>>(),
+            CLI_SKILL_APP_CATALOG
+        );
     }
 
     fn seed_stale_test_home_with_gemini_override(home: &std::path::Path) {

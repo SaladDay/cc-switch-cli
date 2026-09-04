@@ -11,20 +11,33 @@ mod app_config {
         Codex,
         Gemini,
         OpenCode,
-        OpenClaw,
         Hermes,
+        OpenClaw,
         Pi,
     }
 
     impl AppType {
+        pub fn all() -> impl Iterator<Item = Self> {
+            [
+                Self::Claude,
+                Self::Codex,
+                Self::Gemini,
+                Self::OpenCode,
+                Self::Hermes,
+                Self::OpenClaw,
+                Self::Pi,
+            ]
+            .into_iter()
+        }
+
         pub fn as_str(&self) -> &'static str {
             match self {
                 AppType::Claude => "claude",
                 AppType::Codex => "codex",
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
-                AppType::OpenClaw => "openclaw",
                 AppType::Hermes => "hermes",
+                AppType::OpenClaw => "openclaw",
                 AppType::Pi => "pi",
             }
         }

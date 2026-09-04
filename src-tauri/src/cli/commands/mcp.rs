@@ -104,32 +104,28 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
 
     // 创建表格
     let mut table = create_table();
-    table.set_header(vec![
-        "ID", "Name", "Claude", "Codex", "Gemini", "OpenCode", "Hermes", "Tags",
-    ]);
+    let mut header = vec!["ID".to_string(), "Name".to_string()];
+    header.extend(McpService::supported_mcp_apps().map(|app| app.display_name().to_string()));
+    header.push("Tags".to_string());
+    table.set_header(header);
 
     // 按 ID 排序
     let mut server_list: Vec<_> = servers.into_iter().collect();
     server_list.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     for (id, server) in server_list {
-        let claude_marker = if server.apps.claude { "✓" } else { " " };
-        let codex_marker = if server.apps.codex { "✓" } else { " " };
-        let gemini_marker = if server.apps.gemini { "✓" } else { " " };
-        let opencode_marker = if server.apps.opencode { "✓" } else { " " };
-        let hermes_marker = if server.apps.hermes { "✓" } else { " " };
         let tags = server.tags.join(", ");
 
-        let row = vec![
-            id.clone(),
-            server.name.clone(),
-            claude_marker.to_string(),
-            codex_marker.to_string(),
-            gemini_marker.to_string(),
-            opencode_marker.to_string(),
-            hermes_marker.to_string(),
-            tags,
-        ];
+        let mut row = vec![id.clone(), server.name.clone()];
+        row.extend(McpService::supported_mcp_apps().map(|app| {
+            if server.apps.is_enabled_for(&app) {
+                "✓"
+            } else {
+                " "
+            }
+            .to_string()
+        }));
+        row.push(tags);
 
         table.add_row(row);
     }
@@ -159,36 +155,12 @@ fn delete_server(id: &str) -> Result<(), AppError> {
     println!("ID:   {}", id);
     println!("Name: {}", server.name);
 
-    let enabled_apps: Vec<&str> = vec![
-        if server.apps.claude {
-            Some("Claude")
-        } else {
-            None
-        },
-        if server.apps.codex {
-            Some("Codex")
-        } else {
-            None
-        },
-        if server.apps.gemini {
-            Some("Gemini")
-        } else {
-            None
-        },
-        if server.apps.opencode {
-            Some("OpenCode")
-        } else {
-            None
-        },
-        if server.apps.hermes {
-            Some("Hermes")
-        } else {
-            None
-        },
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let enabled_apps = server
+        .apps
+        .enabled_apps()
+        .iter()
+        .map(AppType::display_name)
+        .collect::<Vec<_>>();
 
     if !enabled_apps.is_empty() {
         println!("Enabled for: {}", enabled_apps.join(", "));

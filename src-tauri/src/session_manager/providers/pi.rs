@@ -19,7 +19,9 @@ use super::utils::{
     truncate_summary, TITLE_MAX_CHARS,
 };
 
-const PROVIDER_ID: &str = "pi";
+pub(in crate::session_manager) fn provider_id() -> &'static str {
+    crate::app_config::AppType::Pi.as_str()
+}
 pub(crate) const MAX_TREE_ENTRIES: usize = 500_000;
 const MAX_TREE_ID_BYTES: usize = 256;
 pub(crate) const MAX_SESSION_BYTES: u64 = 128 * 1024 * 1024;
@@ -286,7 +288,7 @@ fn stream_sessions_from_resolution_cancellable(
 
     cache::stream_file_provider_cancellable(
         store,
-        PROVIDER_ID,
+        provider_id(),
         force,
         |path| {
             if is_cancelled() {
@@ -525,7 +527,7 @@ fn search_session_with_layout_cancellable(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: meta.source_path.clone()?,
         snippets,
@@ -624,7 +626,7 @@ fn parse_session_cancellable(
         .map(|message| truncate_summary(message, 160))
         .filter(|message| !message.is_empty());
     Ok(Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: header.id,
         title,
         summary: summary_text,

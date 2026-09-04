@@ -298,7 +298,12 @@ pub(super) fn render_common_snippet_picker_overlay(
     theme: &theme::Theme,
     selected: usize,
 ) {
-    let labels = ["Claude", "Codex", "Gemini", "OpenCode"];
+    let apps = [
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::OpenCode,
+    ];
     let body = overlay_frame(
         frame,
         content_area,
@@ -311,14 +316,14 @@ pub(super) fn render_common_snippet_picker_overlay(
         ],
         OverlaySize::FitRows {
             width: 48,
-            body_rows: labels.len() as u16,
+            body_rows: apps.len() as u16,
         },
         overlay_border_style(theme, false),
     );
 
-    let items = labels
+    let items = apps
         .iter()
-        .map(|label| ListItem::new(Line::from(Span::raw(label.to_string()))));
+        .map(|app| ListItem::new(Line::from(Span::raw(app.display_name()))));
 
     let list = List::new(items)
         .highlight_style(selection_style(theme))

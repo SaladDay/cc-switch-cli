@@ -3,15 +3,23 @@ use std::str::FromStr;
 use crate::app_config::AppType;
 use crate::error::AppError;
 
-pub(crate) fn supported_app_target_labels() -> &'static str {
-    "claude, codex, gemini, opencode, hermes, pi"
+pub(crate) fn supported_app_target_labels() -> String {
+    supported_app_target_labels_for("Skills")
 }
 
-fn supported_app_target_labels_for(feature: &str) -> &'static str {
+fn supported_app_target_labels_for(feature: &str) -> String {
+    AppType::all()
+        .filter(|app| app_supports_target_feature(app, feature))
+        .map(|app| app.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn app_supports_target_feature(app: &AppType, feature: &str) -> bool {
     if feature.eq_ignore_ascii_case("MCP") {
-        "claude, codex, gemini, opencode, hermes"
+        app.supports_mcp()
     } else {
-        supported_app_target_labels()
+        app.supports_skills()
     }
 }
 
@@ -66,16 +74,15 @@ fn parse_app_target(value: &str, feature: &str) -> Result<AppType, AppError> {
         ))
     })?;
 
-    if matches!(app, AppType::OpenClaw) {
+    if !app_supports_target_feature(&app, feature) {
+        let qualifier = if matches!(app, AppType::OpenClaw) {
+            " yet"
+        } else {
+            ""
+        };
         return Err(AppError::InvalidInput(format!(
-            "{feature} does not support openclaw yet. Supported apps: {}",
-            supported_app_target_labels_for(feature)
-        )));
-    }
-
-    if matches!(app, AppType::Pi) && feature.eq_ignore_ascii_case("MCP") {
-        return Err(AppError::InvalidInput(format!(
-            "{feature} does not support pi. Supported apps: {}",
+            "{feature} does not support {}{qualifier}. Supported apps: {}",
+            app.as_str(),
             supported_app_target_labels_for(feature)
         )));
     }
@@ -136,5 +143,33 @@ mod tests {
         let error = parse_app_targets(&["pi".to_string()], "MCP")
             .expect_err("Pi must not be an MCP target");
         assert!(error.to_string().contains("does not support pi"));
+    }
+
+    #[test]
+    fn target_labels_follow_cli_owned_capability_subsets() {
+        assert_eq!(
+            supported_app_target_labels_for("MCP"),
+            "claude, codex, gemini, opencode, hermes"
+        );
+        assert_eq!(
+            supported_app_target_labels(),
+            "claude, codex, gemini, opencode, hermes, pi"
+        );
+    }
+
+    #[test]
+    fn target_admission_follows_cli_owned_capability_subsets() {
+        for feature in ["MCP", "Skills"] {
+            for app in AppType::all() {
+                let expected = app_supports_target_feature(&app, feature);
+                let app_id = app.as_str();
+                let accepted = parse_app_targets(&[app_id.to_string()], feature).is_ok();
+
+                assert_eq!(
+                    accepted, expected,
+                    "{app_id} admission must follow its {feature} capability"
+                );
+            }
+        }
     }
 }

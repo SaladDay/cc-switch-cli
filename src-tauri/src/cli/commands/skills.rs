@@ -234,27 +234,25 @@ fn list_installed() -> Result<(), AppError> {
     }
 
     let mut table = create_table();
-    table.set_header(vec![
-        "Directory",
-        "Name",
-        "Claude",
-        "Codex",
-        "Gemini",
-        "OpenCode",
-        "Hermes",
-        "Pi",
-    ]);
+    let supported_apps = SkillService::supported_skill_apps().collect::<Vec<_>>();
+    let mut header = vec!["Directory".to_string(), "Name".to_string()];
+    header.extend(
+        supported_apps
+            .iter()
+            .map(|app| app.display_name().to_string()),
+    );
+    table.set_header(header);
     for skill in skills {
-        table.add_row(vec![
-            skill.directory,
-            skill.name,
-            if skill.apps.claude { "✓" } else { " " }.to_string(),
-            if skill.apps.codex { "✓" } else { " " }.to_string(),
-            if skill.apps.gemini { "✓" } else { " " }.to_string(),
-            if skill.apps.opencode { "✓" } else { " " }.to_string(),
-            if skill.apps.hermes { "✓" } else { " " }.to_string(),
-            if skill.apps.pi { "✓" } else { " " }.to_string(),
-        ]);
+        let mut row = vec![skill.directory, skill.name];
+        row.extend(supported_apps.iter().map(|app| {
+            if skill.apps.is_enabled_for(app) {
+                "✓"
+            } else {
+                " "
+            }
+            .to_string()
+        }));
+        table.add_row(row);
     }
 
     println!("{}", table);

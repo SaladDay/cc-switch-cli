@@ -525,15 +525,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
 
     let mut config = MultiAppConfig::default();
 
-    for app in [
-        AppType::Claude,
-        AppType::Codex,
-        AppType::Gemini,
-        AppType::OpenCode,
-        AppType::Hermes,
-        AppType::OpenClaw,
-        AppType::Pi,
-    ] {
+    for app in AppType::all() {
         let app_key = app.as_str();
         let providers = db.get_all_providers(app_key)?;
         let current = db.get_current_provider(app_key)?.unwrap_or_default();
@@ -580,14 +572,7 @@ fn persist_multi_app_config_to_db_preserving_current_providers(
         .map(crate::app_config::AppType::as_str)
         .collect::<std::collections::HashSet<_>>();
 
-    for app in [
-        AppType::Claude,
-        AppType::Codex,
-        AppType::Gemini,
-        AppType::OpenCode,
-        AppType::Hermes,
-        AppType::OpenClaw,
-    ] {
+    for app in AppType::all().filter(|app| !matches!(app, AppType::Pi)) {
         let app_key = app.as_str();
         let manager = config.get_manager(&app);
 

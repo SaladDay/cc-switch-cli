@@ -60,15 +60,7 @@ where
 }
 
 pub(crate) fn app_display_name(app_type: &AppType) -> &'static str {
-    match app_type {
-        AppType::Claude => "Claude",
-        AppType::Codex => "Codex",
-        AppType::Gemini => "Gemini",
-        AppType::OpenCode => "OpenCode",
-        AppType::Hermes => "Hermes",
-        AppType::OpenClaw => "OpenClaw",
-        AppType::Pi => "Pi",
-    }
+    app_type.display_name()
 }
 
 pub(crate) fn queue_managed_proxy_action(

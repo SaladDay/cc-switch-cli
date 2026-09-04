@@ -28,7 +28,9 @@ use super::utils::{
     visit_bounded_lines_cancellable_with_status, with_sqlite_cancellation, TITLE_MAX_CHARS,
 };
 
-const PROVIDER_ID: &str = "codex";
+pub(in crate::session_manager) fn provider_id() -> &'static str {
+    crate::app_config::AppType::Codex.as_str()
+}
 const CODEX_SESSION_INDEX_FILENAME: &str = "session_index.jsonl";
 #[cfg(not(test))]
 // Title candidates are much smaller than SessionMeta rows. A wider spill
@@ -372,7 +374,7 @@ impl CodexTitleEnricher {
 
 impl IdentityRowEnricher for CodexTitleEnricher {
     fn enrich(&mut self, row: &mut SessionMeta) {
-        if row.provider_id != PROVIDER_ID {
+        if row.provider_id != provider_id() {
             return;
         }
         if let Some((session_id, title)) = &self.active {
@@ -643,7 +645,7 @@ fn stream_sessions_in_config_dir_cancellable(
 ) -> Result<cache::StreamScanStats, cache::StreamScanStop> {
     cache::stream_file_provider_cancellable(
         store,
-        PROVIDER_ID,
+        provider_id(),
         force,
         |path| {
             if is_cancelled() {
@@ -820,7 +822,7 @@ pub(crate) fn search_session_cancellable(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: source_path.to_string(),
         snippets,
@@ -976,7 +978,7 @@ fn parse_session_lines(path: &Path, head: &[String], tail: &[String]) -> Option<
     let fallback_time = file_modified_ms(path);
 
     Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: session_id.clone(),
         title,
         summary,
@@ -1168,7 +1170,7 @@ mod tests {
         assert!(workspace.exists());
 
         let mut index_only = SessionMeta {
-            provider_id: PROVIDER_ID.to_string(),
+            provider_id: provider_id().to_string(),
             session_id: "index-only".to_string(),
             title: Some("JSONL title".to_string()),
             ..SessionMeta::default()
@@ -1177,7 +1179,7 @@ mod tests {
         assert_eq!(index_only.title.as_deref(), Some("Latest index title"));
 
         let mut default_only = SessionMeta {
-            provider_id: PROVIDER_ID.to_string(),
+            provider_id: provider_id().to_string(),
             session_id: "thread-default".to_string(),
             title: Some("JSONL title".to_string()),
             ..SessionMeta::default()
@@ -1187,7 +1189,7 @@ mod tests {
 
         for source in ["active.jsonl", "archived.jsonl"] {
             let mut shared = SessionMeta {
-                provider_id: PROVIDER_ID.to_string(),
+                provider_id: provider_id().to_string(),
                 session_id: "thread-shared".to_string(),
                 title: Some("JSONL title".to_string()),
                 source_path: Some(source.to_string()),

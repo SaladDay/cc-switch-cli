@@ -20,7 +20,9 @@ use super::utils::{
     with_sqlite_cancellation, MAX_METADATA_FILE_BYTES, MAX_METADATA_LINE_BYTES,
 };
 
-const PROVIDER_ID: &str = "opencode";
+pub(in crate::session_manager) fn provider_id() -> &'static str {
+    crate::app_config::AppType::OpenCode.as_str()
+}
 
 /// Return the OpenCode base directory (`$XDG_DATA_HOME/opencode`).
 ///
@@ -82,7 +84,7 @@ pub(crate) fn stream_sessions_cancellable(
     };
     let file_result = cache::stream_file_provider_cancellable(
         store,
-        PROVIDER_ID,
+        provider_id(),
         force,
         move |path| parse_session_cancellable(&storage_for_parse, path, is_cancelled),
         is_cacheable,
@@ -260,7 +262,7 @@ fn decode_sqlite_meta(row: &rusqlite::Row<'_>, db_display: &str) -> rusqlite::Re
         Some(title)
     };
     Ok(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: session_id.clone(),
         title: display_title.clone(),
         summary: display_title,
@@ -1015,7 +1017,7 @@ fn search_session_files(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: source_path.to_string(),
         snippets,
@@ -1132,7 +1134,7 @@ fn search_session_sqlite(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: source_path.to_string(),
         snippets,
@@ -1320,7 +1322,7 @@ fn parse_session_cancellable(
         return Err(cache::StreamScanStop::Cancelled);
     }
     Ok(Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: session_id.clone(),
         title: display_title,
         summary,
@@ -1383,7 +1385,7 @@ fn parse_session_lightweight(
             .filter(|summary| Some(summary) != display_title.as_ref())
     };
     SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: session_id.clone(),
         title: display_title,
         summary,
@@ -1744,7 +1746,7 @@ mod tests {
             Some(&conn),
             ":memory:",
             SessionMeta {
-                provider_id: PROVIDER_ID.to_string(),
+                provider_id: provider_id().to_string(),
                 session_id: "ses_1".to_string(),
                 ..SessionMeta::default()
             },
@@ -1760,7 +1762,7 @@ mod tests {
             Some(&conn),
             ":memory:",
             SessionMeta {
-                provider_id: PROVIDER_ID.to_string(),
+                provider_id: provider_id().to_string(),
                 session_id: "json-only".to_string(),
                 ..SessionMeta::default()
             },

@@ -1,4 +1,4 @@
-use crate::app_config::{AppType, McpApps};
+use crate::app_config::McpApps;
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 use crate::services::McpService;
@@ -52,13 +52,7 @@ pub(super) fn set_apps(
     let mut skipped: Vec<&str> = Vec::new();
     let mut changed = false;
 
-    for app_type in [
-        AppType::Claude,
-        AppType::Codex,
-        AppType::Gemini,
-        AppType::OpenCode,
-        AppType::Hermes,
-    ] {
+    for app_type in McpService::supported_mcp_apps() {
         let next_enabled = apps.is_enabled_for(&app_type);
         if before.is_enabled_for(&app_type) == next_enabled {
             continue;

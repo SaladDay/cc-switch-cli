@@ -26,7 +26,9 @@ use super::utils::{
     visit_bounded_lines_cancellable_with_status, TITLE_MAX_CHARS,
 };
 
-const PROVIDER_ID: &str = "openclaw";
+pub(in crate::session_manager) fn provider_id() -> &'static str {
+    crate::app_config::AppType::OpenClaw.as_str()
+}
 
 // `sessions.json` is optional decoration, so it must never dominate a session
 // scan. A scanner retains at most one small index per parser worker, and each
@@ -55,7 +57,7 @@ pub(crate) fn stream_sessions_cancellable(
     let display_names = DisplayNameIndexCache::new();
     cache::stream_file_provider_cancellable(
         store,
-        PROVIDER_ID,
+        provider_id(),
         force,
         |path| parse_meta_authoritative(path, &display_names, is_cancelled),
         |_| true,
@@ -451,7 +453,7 @@ pub(crate) fn search_session_cancellable(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: source_path.to_string(),
         snippets,
@@ -619,7 +621,7 @@ fn parse_session_lines(
     let summary = summary.map(|text| truncate_summary(&text, 160));
 
     Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: session_id.clone(),
         title,
         summary,

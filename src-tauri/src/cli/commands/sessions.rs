@@ -1101,7 +1101,11 @@ mod tests {
         assert_eq!(parse_session_provider("open-code"), Ok(AppType::OpenCode));
         assert_eq!(parse_session_provider("openclaw"), Ok(AppType::OpenClaw));
         assert_eq!(parse_session_provider("open-claw"), Ok(AppType::OpenClaw));
-        assert!(parse_session_provider("unknown").is_err());
+        let error = parse_session_provider("unknown").expect_err("unknown provider");
+        assert_eq!(
+            error,
+            "unsupported provider 'unknown'. Allowed: claude, codex, gemini, opencode, openclaw, hermes, pi"
+        );
     }
 
     #[test]

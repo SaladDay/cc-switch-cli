@@ -16,7 +16,9 @@ use super::utils::{
     read_to_string_cancellable, truncate_summary, MAX_METADATA_FILE_BYTES, MAX_METADATA_LINE_BYTES,
 };
 
-const PROVIDER_ID: &str = "gemini";
+pub(in crate::session_manager) fn provider_id() -> &'static str {
+    crate::app_config::AppType::Gemini.as_str()
+}
 
 pub(crate) fn stream_sessions_cancellable(
     store: Option<&ScanCacheStore>,
@@ -27,7 +29,7 @@ pub(crate) fn stream_sessions_cancellable(
     let tmp_dir = crate::gemini_config::get_gemini_dir().join("tmp");
     cache::stream_file_provider_cancellable(
         store,
-        PROVIDER_ID,
+        provider_id(),
         force,
         |path| parse_meta_cancellable(path, is_cancelled),
         |_| true,
@@ -208,7 +210,7 @@ fn parse_session_lightweight(path: &Path, prefix: &str) -> SessionMeta {
                 .map(|value| truncate_summary(value, 160))
         });
     SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: session_id.clone(),
         title: title.clone(),
         summary: title,
@@ -388,7 +390,7 @@ pub(crate) fn search_session_cancellable(
         return None;
     }
     Some(SessionSearchHit {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: meta.session_id.clone(),
         source_path: source_path.to_string(),
         snippets,
@@ -456,7 +458,7 @@ fn parse_session_data(path: &Path, data: &str) -> Option<SessionMeta> {
     let source_path = path.to_string_lossy().to_string();
 
     Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id().to_string(),
         session_id: session_id.clone(),
         title: title.clone(),
         summary: title,

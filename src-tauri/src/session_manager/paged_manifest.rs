@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{SessionMeta, CACHED_PROVIDERS};
+use super::{cached_providers, SessionMeta};
 use crate::config::{
     atomic_write, get_app_config_dir, resolve_config_dir_without_following_user_symlinks,
     write_json_file,
@@ -2440,7 +2440,7 @@ fn same_identity(a: &SessionMeta, b: &SessionMeta) -> bool {
 }
 
 fn validate_scope(scope: &str) -> Result<(), ManifestError> {
-    if scope == "all" || CACHED_PROVIDERS.contains(&scope) {
+    if scope == "all" || cached_providers().contains(&scope) {
         Ok(())
     } else {
         Err(ManifestError::UnsupportedScope(scope.to_string()))
@@ -2448,7 +2448,7 @@ fn validate_scope(scope: &str) -> Result<(), ManifestError> {
 }
 
 fn row_belongs_to_scope(row: &SessionMeta, scope: &str) -> bool {
-    CACHED_PROVIDERS.contains(&row.provider_id.as_str())
+    cached_providers().contains(&row.provider_id.as_str())
         && (scope == "all" || row.provider_id == scope)
 }
 
