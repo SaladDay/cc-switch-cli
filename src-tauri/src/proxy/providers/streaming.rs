@@ -481,7 +481,16 @@ pub fn create_anthropic_sse_stream(
                                     legacy_function_name = Some(name.clone());
                                 }
 
-                                if function_call.name.is_some() || function_call.arguments.is_some() {
+                                let has_legacy_function_payload = function_call
+                                    .name
+                                    .as_deref()
+                                    .is_some_and(|name| !name.is_empty())
+                                    || function_call
+                                        .arguments
+                                        .as_deref()
+                                        .is_some_and(|arguments| !arguments.is_empty());
+
+                                if has_legacy_function_payload {
                                     if let Some(index) = current_non_tool_block_index.take() {
                                         let event = json!({
                                             "type": "content_block_stop",
@@ -1191,6 +1200,26 @@ mod tests {
             merged.contains("你好！很高兴见到你，有什么可以帮你的吗？"),
             "正文应完整拼接，实际得到: {merged}"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_legacy_function_call_does_not_emit_tool_use() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"glm-5.3-flash\",\"choices\":[{\"delta\":{\"content\":\"ok\",\"function_call\":null}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"glm-5.3-flash\",\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"\",\"arguments\":\"\"}},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        assert!(!events.iter().any(|event| {
+            event["type"] == "content_block_start"
+                && event["content_block"]["type"] == "tool_use"
+        }));
+        assert!(events.iter().any(|event| {
+            event["type"] == "message_delta"
+                && event["delta"]["stop_reason"] == "end_turn"
+        }));
+        assert!(events.iter().any(|event| event["type"] == "message_stop"));
     }
 
     #[tokio::test]
