@@ -511,6 +511,7 @@ dependencies = [
  "brotli",
  "bytes",
  "cc-switch-core",
+ "cc-switch-store",
  "chrono",
  "clap",
  "clap_complete",
@@ -570,7 +571,7 @@ dependencies = [
 [[package]]
 name = "cc-switch-core"
 version = "0.1.0"
-source = "git+https://github.com/SaladDay/cc-switch-core?rev=be61686f5aff18a59c314843ebdbd581a567d58f#be61686f5aff18a59c314843ebdbd581a567d58f"
+source = "git+https://github.com/SaladDay/cc-switch-core?rev=e2c3f61ad5d20ffbec93926b2135f66586b59ca1#e2c3f61ad5d20ffbec93926b2135f66586b59ca1"
 dependencies = [
  "http",
  "json-five",
@@ -585,6 +586,19 @@ dependencies = [
  "toml_edit 0.25.4+spec-1.1.0",
  "unicode-casefold",
  "unicode-normalization",
+ "windows-sys 0.61.1",
+]
+
+[[package]]
+name = "cc-switch-store"
+version = "0.1.0"
+source = "git+https://github.com/SaladDay/cc-switch-core?rev=e2c3f61ad5d20ffbec93926b2135f66586b59ca1#e2c3f61ad5d20ffbec93926b2135f66586b59ca1"
+dependencies = [
+ "cc-switch-core",
+ "libc",
+ "rusqlite",
+ "sha2",
+ "thiserror 2.0.17",
  "windows-sys 0.61.1",
 ]
 
