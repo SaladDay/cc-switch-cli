@@ -2249,6 +2249,89 @@ fn mcp_schema_contains_every_core_registry_selection() {
 }
 
 #[test]
+fn skill_schema_contains_every_core_registry_selection() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+    for column in cc_switch_core::skill_catalog_columns() {
+        assert!(
+            Database::has_column(&conn, "skills", column.as_str()).expect("inspect Skill schema"),
+            "missing Core Skill selection column {}",
+            column.as_str()
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn file_skill_schema_upgrade_preserves_host_contract() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+    let conn = Connection::open(&db_path).expect("open database");
+    Database::create_tables_on_conn(&conn).expect("create host schema");
+    Database::apply_schema_migrations_on_conn(&conn).expect("mark host schema current");
+    conn.execute_batch(
+        "ALTER TABLE skills ADD COLUMN host_note TEXT DEFAULT 'keep';
+         CREATE INDEX idx_skills_host_note ON skills(host_note);
+         CREATE TRIGGER audit_skill_host_note AFTER UPDATE OF host_note ON skills
+         BEGIN SELECT 1; END;
+         INSERT INTO skills (
+             id, name, description, directory, repo_owner, repo_name, repo_branch,
+             readme_url, enabled_grokbuild, installed_at, content_hash, updated_at,
+             host_note
+         ) VALUES (
+             'poisoned', 'Poisoned', 'preserve', '../../outside', 'owner', 'repo',
+             'branch', 'https://example.invalid/readme', 1, 17, 'hash', 23, 'host'
+         );",
+    )
+    .expect("seed host Skill contract");
+    let version = Database::get_user_version(&conn).expect("read host schema version");
+    drop(conn);
+
+    let db = Database::init().expect("initialize file database");
+    let conn = db.conn.lock().expect("lock database");
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read preserved schema version"),
+        version
+    );
+    for column in cc_switch_core::skill_catalog_columns() {
+        assert!(
+            Database::has_column(&conn, "skills", column.as_str()).expect("inspect Skill schema"),
+            "missing Core Skill selection column {}",
+            column.as_str()
+        );
+    }
+    let preserved: String = conn
+        .query_row(
+            "SELECT description || '|' || directory || '|' || repo_owner || '|' ||
+                    repo_name || '|' || repo_branch || '|' || readme_url || '|' ||
+                    enabled_grokbuild || '|' || installed_at || '|' || content_hash || '|' ||
+                    updated_at || '|' || host_note
+             FROM skills WHERE id = 'poisoned'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read preserved Skill row");
+    assert_eq!(
+        preserved,
+        "preserve|../../outside|owner|repo|branch|https://example.invalid/readme|1|17|hash|23|host"
+    );
+    assert!(index_exists(&conn, "idx_skills_host_note"));
+    let trigger_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'trigger' AND name = 'audit_skill_host_note'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check host trigger");
+    assert!(trigger_exists);
+}
+
+#[test]
 fn mcp_dao_rejects_suppressed_existing_writes_but_allows_missing_delete() {
     let db = Database::memory().expect("create memory db");
     let mut server = McpServer {
