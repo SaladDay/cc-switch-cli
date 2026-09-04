@@ -120,6 +120,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Codex",
             "AICodeMirror",
             "ClaudeAPI",
+            "PatewayAI",
             "Cubence",
             "OpenModel",
             "RunAPI",
@@ -146,6 +147,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "OpenAI Official",
             "AICodeMirror",
+            "PatewayAI",
             "Cubence",
             "OpenModel",
             "RunAPI",
@@ -619,6 +621,8 @@ fn cli_provider_templates_match_tui_serializer_output() {
             ProviderAddTemplate::ClaudeOfficial,
             "Claude Official",
         ),
+        (AppType::Claude, ProviderAddTemplate::Patewayai, "PatewayAI"),
+        (AppType::Codex, ProviderAddTemplate::Patewayai, "PatewayAI"),
         (AppType::Claude, ProviderAddTemplate::CodexOauth, "Codex"),
         (
             AppType::Codex,
@@ -2950,6 +2954,28 @@ fn provider_add_form_aicodemirror_template_claude_sets_partner_meta_and_base_url
         .is_none());
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
+}
+
+#[test]
+fn provider_add_form_patewayai_template_uses_api_key_auth_and_upstream_base_url() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+
+    form.apply_template(template_index_by_label(AppType::Claude, "PatewayAI"), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "PatewayAI");
+    assert_eq!(provider["websiteUrl"], "https://pateway.ai");
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
+        "https://api.pateway.ai"
+    );
+    assert_eq!(form.claude_api_key_field, ClaudeApiKeyField::ApiKey);
+    assert!(provider["settingsConfig"]["env"]
+        .get("ANTHROPIC_API_KEY")
+        .is_none());
+    assert_eq!(provider["meta"]["apiKeyField"], "ANTHROPIC_API_KEY");
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "patewayai");
 }
 
 #[test]

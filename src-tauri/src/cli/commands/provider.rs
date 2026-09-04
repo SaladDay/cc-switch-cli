@@ -1327,6 +1327,7 @@ fn build_add_settings_config(
     args: &AddProviderArgs,
     raw_config: Option<&serde_json::Value>,
     current: Option<&serde_json::Value>,
+    current_meta: Option<&ProviderMeta>,
     provider_name: &str,
     prompt_result: &mut Option<SettingsConfigPromptResult>,
 ) -> Result<serde_json::Value, AppError> {
@@ -1355,7 +1356,13 @@ fn build_add_settings_config(
                 .ok_or_else(|| add_missing_field_error("--base-url"))?;
             let api_key = non_empty(args.api_key.clone())
                 .ok_or_else(|| add_missing_field_error("--api-key"))?;
-            let field = args.api_key_field.unwrap_or(ClaudeApiKeyField::AuthToken);
+            let field = args.api_key_field.unwrap_or_else(|| {
+                current
+                    .map(|settings| {
+                        ClaudeApiKeyField::from_meta_and_settings(current_meta, settings)
+                    })
+                    .unwrap_or(ClaudeApiKeyField::AuthToken)
+            });
             let model_fields = args.claude_model_fields();
             let settings = build_claude_settings_config_from_prompt(
                 current,
@@ -1578,6 +1585,7 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
             &args,
             raw_config.as_ref(),
             None,
+            None,
             &name,
             &mut settings_prompt_result,
         )?;
@@ -1618,6 +1626,7 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
                 &args,
                 raw_config.as_ref(),
                 Some(&current),
+                provider.meta.as_ref(),
                 &name,
                 &mut settings_prompt_result,
             )?;
@@ -2196,6 +2205,7 @@ mod tests {
             },
             None,
             None,
+            None,
             "Custom Codex",
             &mut prompt_result,
         )
@@ -2212,6 +2222,7 @@ mod tests {
                 api_key: Some("sk-gemini".to_string()),
                 ..Default::default()
             },
+            None,
             None,
             None,
             "Custom Gemini",
@@ -2235,6 +2246,7 @@ mod tests {
                     api_format: Some(api_format.to_string()),
                     ..Default::default()
                 },
+                None,
                 None,
                 None,
                 "Custom Pi",

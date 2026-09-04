@@ -53,6 +53,18 @@ AICodeMirror also offers an exclusive benefit to users of the CC-Switch CLI proj
   </tr>
   <tr>
     <td width="180">
+      <a href="https://pateway.ai/?ch=18fxbjo">
+        <img src="assets/partners/logos/pateway.png" alt="PatewayAI" width="150">
+      </a>
+    </td>
+    <td>
+      PatewayAI is an API relay service tailored for seasoned AI developers. It offers full‑fledged support for Claude and Codex model families. All models are sourced from high‑quality official channels with no diluted or counterfeit outputs. Transparent billing details are available for full traceability.<br/>
+      Enjoy rates as low as 95% off official pricing. Sign up via <a href="https://pateway.ai/?ch=18fxbjo">this link</a> to receive trial credits, and stay tuned for periodic promotional campaigns to earn free credits.<br/>
+      The platform also delivers enterprise‑grade concurrency capacity, a dedicated admin dashboard, formal contracts and invoicing support. Earn up to $150 in mutual referral bonuses.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
         <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
       </a>

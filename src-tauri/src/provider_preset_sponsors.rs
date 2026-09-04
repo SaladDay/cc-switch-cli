@@ -7,6 +7,7 @@ pub(crate) struct SponsorProviderPreset {
     pub(crate) register_url: &'static str,
     pub(crate) promo_code: &'static str,
     pub(crate) partner_promotion_key: &'static str,
+    pub(crate) claude_api_key_field: ClaudeApiKeyField,
     pub(crate) claude_base_url: &'static str,
     pub(crate) codex_base_url: &'static str,
     pub(crate) gemini_base_url: &'static str,
@@ -23,6 +24,7 @@ pub(crate) const CLAUDE_API: SponsorProviderPreset = SponsorProviderPreset {
     register_url: "https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii",
     promo_code: "",
     partner_promotion_key: "claudeapi",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://gw.apito.ai",
     codex_base_url: "",
     gemini_base_url: "",
@@ -39,6 +41,7 @@ pub(crate) const PACKY_CODE: SponsorProviderPreset = SponsorProviderPreset {
     register_url: "https://www.packyapi.com/register?aff=cc-switch-cli",
     promo_code: "cc-switch-cli",
     partner_promotion_key: "packycode",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://www.packyapi.ai",
     codex_base_url: "https://www.packyapi.ai/v1",
     gemini_base_url: "https://www.packyapi.ai",
@@ -55,6 +58,7 @@ pub(crate) const CUBENCE: SponsorProviderPreset = SponsorProviderPreset {
     register_url: "https://cubence.com/signup?code=SC3M1CAH&source=ccscli",
     promo_code: "CCSCLI",
     partner_promotion_key: "cubence",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://api.cubence.com",
     codex_base_url: "https://api.cubence.com/v1",
     gemini_base_url: "https://api.cubence.com",
@@ -71,6 +75,7 @@ pub(crate) const OPENMODEL: SponsorProviderPreset = SponsorProviderPreset {
     register_url: "https://www.openmodel.ai/?ref=JGDNqZl8",
     promo_code: "",
     partner_promotion_key: "openmodel",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://api.openmodel.ai",
     codex_base_url: "https://api.openmodel.ai/v1",
     gemini_base_url: "https://api.openmodel.ai",
@@ -87,6 +92,7 @@ pub(crate) const RUN_API: SponsorProviderPreset = SponsorProviderPreset {
     register_url: "https://runapi.co/register?aff=kTlB",
     promo_code: "",
     partner_promotion_key: "runapi",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://runapi.co",
     codex_base_url: "https://runapi.co/v1",
     gemini_base_url: "",
@@ -103,12 +109,30 @@ pub(crate) const AI_CODE_MIRROR: SponsorProviderPreset = SponsorProviderPreset {
     register_url: "https://www.aicodemirror.ai/register?invitecode=77V9EA",
     promo_code: "",
     partner_promotion_key: "aicodemirror",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://api.aicodemirror.ai/api/claudecode",
     codex_base_url: "https://api.aicodemirror.ai/api/codex/backend-api/codex",
     gemini_base_url: "https://api.aicodemirror.ai/api/gemini",
     opencode_base_url: "https://api.aicodemirror.ai/api/claudecode",
     openclaw_base_url: "https://api.aicodemirror.ai/api/claudecode",
     hermes_base_url: "https://api.aicodemirror.ai/api/claudecode",
+};
+
+pub(crate) const PATEWAY_AI: SponsorProviderPreset = SponsorProviderPreset {
+    id: "patewayai",
+    provider_name: "PatewayAI",
+    chip_label: "* PatewayAI",
+    website_url: "https://pateway.ai",
+    register_url: "https://pateway.ai/?ch=18fxbjo",
+    promo_code: "",
+    partner_promotion_key: "patewayai",
+    claude_api_key_field: ClaudeApiKeyField::ApiKey,
+    claude_base_url: "https://api.pateway.ai",
+    codex_base_url: "https://api.pateway.ai/v1",
+    gemini_base_url: "",
+    opencode_base_url: "",
+    openclaw_base_url: "",
+    hermes_base_url: "",
 };
 
 pub(crate) const DDS: SponsorProviderPreset = SponsorProviderPreset {
@@ -119,6 +143,7 @@ pub(crate) const DDS: SponsorProviderPreset = SponsorProviderPreset {
     register_url: "https://ddshub.short.gy/ccscli",
     promo_code: "",
     partner_promotion_key: "dds",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://www.ddshub.cc",
     codex_base_url: "https://www.ddshub.cc",
     gemini_base_url: "",
@@ -135,6 +160,7 @@ pub(crate) const QINIU: SponsorProviderPreset = SponsorProviderPreset {
     register_url: "https://s.qiniu.com/FVfiEb",
     promo_code: "",
     partner_promotion_key: "qiniu",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://api.qnaigc.com",
     codex_base_url: "https://api.qnaigc.com/bypass/openai/v1",
     gemini_base_url: "https://api.qnaigc.com/bypass/vertex",
@@ -152,6 +178,7 @@ pub(crate) const FENNO: SponsorProviderPreset = SponsorProviderPreset {
         "https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y",
     promo_code: "",
     partner_promotion_key: "fenno",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
     claude_base_url: "https://api.fenno.ai",
     codex_base_url: "https://api.fenno.ai",
     gemini_base_url: "",
@@ -160,9 +187,10 @@ pub(crate) const FENNO: SponsorProviderPreset = SponsorProviderPreset {
     hermes_base_url: "https://api.fenno.ai/v1",
 };
 
-pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 9] = [
+pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 10] = [
     AI_CODE_MIRROR,
     CLAUDE_API,
+    PATEWAY_AI,
     PACKY_CODE,
     CUBENCE,
     OPENMODEL,
@@ -172,9 +200,10 @@ pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 9] = [
     FENNO,
 ];
 
-const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 9] = [
+const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 10] = [
     AI_CODE_MIRROR,
     CLAUDE_API,
+    PATEWAY_AI,
     CUBENCE,
     OPENMODEL,
     RUN_API,
@@ -183,8 +212,9 @@ const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 9] = [
     PACKY_CODE,
     DDS,
 ];
-const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 8] = [
+const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 9] = [
     AI_CODE_MIRROR,
+    PATEWAY_AI,
     CUBENCE,
     OPENMODEL,
     RUN_API,
@@ -292,6 +322,19 @@ mod tests {
     }
 
     #[test]
+    fn patewayai_uses_cli_promotion_url_and_upstream_provider_settings() {
+        assert_eq!(PATEWAY_AI.website_url, "https://pateway.ai");
+        assert_eq!(PATEWAY_AI.register_url, "https://pateway.ai/?ch=18fxbjo");
+        assert_eq!(PATEWAY_AI.claude_api_key_field, ClaudeApiKeyField::ApiKey);
+        assert_eq!(PATEWAY_AI.claude_base_url, "https://api.pateway.ai");
+        assert_eq!(PATEWAY_AI.codex_base_url, "https://api.pateway.ai/v1");
+        assert!(PATEWAY_AI.gemini_base_url.is_empty());
+        assert!(PATEWAY_AI.opencode_base_url.is_empty());
+        assert!(PATEWAY_AI.hermes_base_url.is_empty());
+        assert!(PATEWAY_AI.openclaw_base_url.is_empty());
+    }
+
+    #[test]
     fn additive_apps_share_one_sponsor_support_matrix() {
         let expected = [
             "aicodemirror",
@@ -332,3 +375,4 @@ mod tests {
     }
 }
 use crate::app_config::AppType;
+use crate::provider::ClaudeApiKeyField;
