@@ -293,12 +293,16 @@ impl Database {
             in_failover_queue,
         )?;
 
-        if existing.is_some() {
-            let outcome = cc_switch_store::update_provider_row(&mut tx, &shared_provider)
-                .map_err(shared_store_error)?;
+        if let Some(existing) = existing.as_ref() {
+            let outcome = cc_switch_store::update_provider_row_if_unchanged(
+                &mut tx,
+                existing.source_fingerprint(),
+                &shared_provider,
+            )
+            .map_err(shared_store_error)?;
             require_applied(outcome, "update")?;
         } else {
-            let outcome = cc_switch_store::insert_provider(&mut tx, &shared_provider)
+            let outcome = cc_switch_store::insert_provider_if_absent(&mut tx, &shared_provider)
                 .map_err(shared_store_error)?;
             require_applied(outcome, "insert")?;
 
@@ -322,6 +326,8 @@ impl Database {
         let mut conn = lock_conn!(self.conn);
         let mut tx =
             cc_switch_store::begin_immediate_transaction(&mut conn).map_err(shared_store_error)?;
+        let target =
+            cc_switch_store::read_provider_row(&tx, id, app_type).map_err(shared_store_error)?;
         let (takeover_enabled, auto_failover_enabled, queued_count, deleting_queued, target_exists): (
             bool,
             bool,
@@ -362,8 +368,34 @@ impl Database {
             ));
         }
 
-        let outcome =
-            cc_switch_store::delete_provider(&mut tx, id, app_type).map_err(shared_store_error)?;
+        if target_exists {
+            // The strict shared delete rejects implicit side effects. Remove CLI-owned
+            // dependents explicitly so the outer transaction retains the old cascade behavior.
+            for table in [
+                "provider_endpoints",
+                "provider_health",
+                "proxy_failover_live_snapshots",
+            ] {
+                tx.execute(
+                    &format!(
+                        "DELETE FROM {table}
+                         WHERE provider_id COLLATE BINARY = ?1 AND app_type COLLATE BINARY = ?2"
+                    ),
+                    params![id, app_type],
+                )
+                .map_err(|error| AppError::Database(error.to_string()))?;
+            }
+        }
+        let outcome = match target.as_ref() {
+            Some(target) => cc_switch_store::delete_provider_if_unchanged(
+                &mut tx,
+                id,
+                app_type,
+                target.source_fingerprint(),
+            )
+            .map_err(shared_store_error)?,
+            None => ProviderWriteOutcome::NotApplied,
+        };
         if target_exists {
             require_applied(outcome, "delete")?;
         }
@@ -379,21 +411,35 @@ impl Database {
             cc_switch_store::begin_immediate_transaction(&mut conn).map_err(shared_store_error)?;
         let providers =
             cc_switch_store::read_provider_rows(&tx, Some(app_type)).map_err(shared_store_error)?;
-        let target_exists = providers.iter().any(|provider| provider.id == id);
+        let target = providers.iter().find(|provider| provider.id == id);
 
         for provider in providers
             .iter()
             .filter(|provider| provider.is_current != 0 && provider.id != id)
         {
-            let outcome =
-                cc_switch_store::set_provider_current(&mut tx, &provider.id, app_type, false)
-                    .map_err(shared_store_error)?;
+            let outcome = cc_switch_store::set_provider_current_if_unchanged(
+                &mut tx,
+                &provider.id,
+                app_type,
+                provider.source_fingerprint(),
+                false,
+            )
+            .map_err(shared_store_error)?;
             require_applied(outcome, "current-provider reset")?;
         }
 
-        let outcome = cc_switch_store::set_provider_current(&mut tx, id, app_type, true)
-            .map_err(shared_store_error)?;
-        if target_exists {
+        let outcome = match target {
+            Some(target) => cc_switch_store::set_provider_current_if_unchanged(
+                &mut tx,
+                id,
+                app_type,
+                target.source_fingerprint(),
+                true,
+            )
+            .map_err(shared_store_error)?,
+            None => ProviderWriteOutcome::NotApplied,
+        };
+        if target.is_some() {
             require_applied(outcome, "current-provider selection")?;
         }
 
@@ -413,17 +459,20 @@ impl Database {
         let mut conn = lock_conn!(self.conn);
         let mut tx =
             cc_switch_store::begin_immediate_transaction(&mut conn).map_err(shared_store_error)?;
-        let target_exists = cc_switch_store::read_provider_row(&tx, provider_id, app_type)
-            .map_err(shared_store_error)?
-            .is_some();
-        let outcome = cc_switch_store::update_provider_settings_config(
-            &mut tx,
-            provider_id,
-            app_type,
-            &settings_config,
-        )
-        .map_err(shared_store_error)?;
-        if target_exists {
+        let target = cc_switch_store::read_provider_row(&tx, provider_id, app_type)
+            .map_err(shared_store_error)?;
+        let outcome = match target.as_ref() {
+            Some(target) => cc_switch_store::update_provider_settings_config_if_unchanged(
+                &mut tx,
+                provider_id,
+                app_type,
+                target.source_fingerprint(),
+                &settings_config,
+            )
+            .map_err(shared_store_error)?,
+            None => ProviderWriteOutcome::NotApplied,
+        };
+        if target.is_some() {
             require_applied(outcome, "settings update")?;
         }
         tx.commit()
@@ -555,6 +604,28 @@ mod tests {
         }
 
         db.delete_provider("claude", "missing")?;
+        Ok(())
+    }
+
+    #[test]
+    fn delete_provider_removes_cli_owned_dependents() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.save_provider("claude", &provider("deleted"))?;
+        db.add_custom_endpoint("claude", "deleted", "https://edge.example.com")?;
+
+        db.delete_provider("claude", "deleted")?;
+
+        assert!(db.get_provider_by_id("deleted", "claude")?.is_none());
+        let conn = lock_conn!(db.conn);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM provider_endpoints
+                 WHERE provider_id = 'deleted' AND app_type = 'claude'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            0
+        );
         Ok(())
     }
 
