@@ -324,21 +324,25 @@ impl OperationHost for CliOperationHost {
         expected: Option<&[u8]>,
         replacement: Option<&[u8]>,
     ) -> Result<CompareExchangeOutcome, Self::Error> {
-        let current =
-            read_optional_bounded_state(resource, expected.map_or(0, |contents| contents.len()))?;
-        let matches = match current {
-            OperationRead::Missing => expected.is_none(),
-            OperationRead::Contents(contents) => expected == Some(contents.as_slice()),
-            OperationRead::TooLarge => false,
-        };
-        if !matches {
-            return Ok(CompareExchangeOutcome::Conflict);
-        }
-        match replacement {
-            Some(contents) => crate::config::atomic_write(resource, contents),
-            None => crate::config::delete_file(resource),
-        }?;
-        Ok(CompareExchangeOutcome::Applied)
+        crate::config::with_live_config_update_lock(|| {
+            let current = read_optional_bounded_state(
+                resource,
+                expected.map_or(0, |contents| contents.len()),
+            )?;
+            let matches = match current {
+                OperationRead::Missing => expected.is_none(),
+                OperationRead::Contents(contents) => expected == Some(contents.as_slice()),
+                OperationRead::TooLarge => false,
+            };
+            if !matches {
+                return Ok(CompareExchangeOutcome::Conflict);
+            }
+            match replacement {
+                Some(contents) => crate::config::atomic_write(resource, contents),
+                None => crate::config::delete_file(resource),
+            }?;
+            Ok(CompareExchangeOutcome::Applied)
+        })
     }
 }
 

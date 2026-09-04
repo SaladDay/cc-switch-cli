@@ -73,6 +73,7 @@ pub use deeplink::{
 };
 pub use error::AppError;
 pub use import_export::export_config_to_file;
+#[allow(deprecated)]
 pub use mcp::{
     import_from_claude, import_from_codex, import_from_gemini, remove_server_from_claude,
     remove_server_from_codex, remove_server_from_gemini, sync_enabled_to_claude,

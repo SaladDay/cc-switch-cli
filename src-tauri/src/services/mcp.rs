@@ -5,6 +5,8 @@ use crate::error::AppError;
 use crate::mcp;
 use crate::store::AppState;
 
+mod core_bridge;
+
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
 pub struct McpService;
 
@@ -32,64 +34,61 @@ impl McpService {
 
     /// 添加或更新 MCP 服务器
     pub fn upsert_server(state: &AppState, server: McpServer) -> Result<(), AppError> {
-        let (server_id, apps_to_remove) = {
-            let mut cfg = state.config.write()?;
+        cc_switch_core::validate_mcp_server(&server.id, &server.server)
+            .map_err(|error| AppError::McpValidation(error.to_string()))?;
+        let mut cfg = state.config.write()?;
+        let previous_server = cfg
+            .mcp
+            .servers
+            .as_ref()
+            .and_then(|servers| servers.get(&server.id))
+            .cloned();
+        let affected_apps = Self::supported_mcp_apps()
+            .filter(|app| {
+                server.apps.is_enabled_for(app)
+                    || previous_server
+                        .as_ref()
+                        .is_some_and(|previous| previous.apps.is_enabled_for(app))
+                    || previous_server.is_some()
+                        && cc_switch_core::mcp_app_contract(&app.as_core())
+                            .is_some_and(|contract| contract.preserves_disabled_entry())
+            })
+            .collect::<Vec<_>>();
 
-            let servers = cfg.mcp.servers.get_or_insert_with(HashMap::new);
-            let server_id = server.id.clone();
-
-            let apps_to_remove = servers
-                .get(&server_id)
-                .map(|existing| {
-                    existing
-                        .apps
-                        .enabled_apps()
-                        .into_iter()
-                        .filter(|app| !server.apps.is_enabled_for(app))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            // 插入或更新
-            servers.insert(server_id.clone(), server.clone());
-
-            (server_id, apps_to_remove)
-        };
-
-        state.save()?;
-
-        // 如果是更新：对“由启用变为禁用”的应用，清理对应 live 配置
-        for app in apps_to_remove {
-            Self::remove_server_from_app(state, &server_id, &app)?;
-        }
-
-        // 同步到各个启用的应用
-        Self::sync_server_to_apps(state, &server)?;
-
+        Self::commit_server_change(
+            state,
+            previous_server.as_ref(),
+            Some(&server),
+            &affected_apps,
+        )?;
+        cfg.mcp
+            .servers
+            .get_or_insert_with(HashMap::new)
+            .insert(server.id.clone(), server);
         Ok(())
     }
 
     /// 删除 MCP 服务器
     pub fn delete_server(state: &AppState, id: &str) -> Result<bool, AppError> {
-        let server = {
-            let mut cfg = state.config.write()?;
+        let mut cfg = state.config.write()?;
+        let server = cfg
+            .mcp
+            .servers
+            .as_ref()
+            .and_then(|servers| servers.get(id))
+            .cloned();
 
-            if let Some(servers) = &mut cfg.mcp.servers {
-                servers.remove(id)
-            } else {
-                None
-            }
+        let Some(server) = server else {
+            return Ok(false);
         };
-
-        if let Some(server) = server {
-            state.save()?;
-
-            // 从所有应用的 live 配置中移除
-            Self::remove_server_from_all_apps(state, id, &server)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let affected_apps = Self::supported_mcp_apps().collect::<Vec<_>>();
+        Self::commit_server_change(state, Some(&server), None, &affected_apps)?;
+        cfg.mcp
+            .servers
+            .as_mut()
+            .expect("server map exists")
+            .remove(id);
+        Ok(true)
     }
 
     /// 切换指定应用的启用状态
@@ -99,146 +98,102 @@ impl McpService {
         app: AppType,
         enabled: bool,
     ) -> Result<(), AppError> {
-        let server = {
-            let mut cfg = state.config.write()?;
-
-            if let Some(servers) = &mut cfg.mcp.servers {
-                if let Some(server) = servers.get_mut(server_id) {
-                    server.apps.set_enabled_for(&app, enabled);
-                    Some(server.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+        let mut cfg = state.config.write()?;
+        let Some(previous_server) = cfg
+            .mcp
+            .servers
+            .as_ref()
+            .and_then(|servers| servers.get(server_id))
+            .cloned()
+        else {
+            return Ok(());
         };
-
-        if let Some(server) = server {
-            state.save()?;
-
-            // 同步到对应应用
-            if enabled {
-                Self::sync_server_to_app(state, &server, &app)?;
-            } else {
-                Self::remove_server_from_app(state, server_id, &app)?;
-            }
+        if previous_server.apps.is_enabled_for(&app) == enabled {
+            return Ok(());
         }
+        let mut server = previous_server.clone();
+        server.apps.set_enabled_for(&app, enabled);
+        Self::commit_server_change(state, Some(&previous_server), Some(&server), &[app])?;
+        cfg.mcp
+            .servers
+            .as_mut()
+            .expect("server map exists")
+            .insert(server_id.to_owned(), server);
 
         Ok(())
     }
 
     /// Replace the full supported-app matrix for one MCP server.
     pub fn set_apps(state: &AppState, server_id: &str, apps: McpApps) -> Result<bool, AppError> {
-        let (server, changes) = {
-            let mut cfg = state.config.write()?;
-
-            let Some(servers) = &mut cfg.mcp.servers else {
-                return Ok(false);
-            };
-            let Some(server) = servers.get_mut(server_id) else {
-                return Ok(false);
-            };
-
-            let before = server.apps.clone();
-            server.apps = apps;
-            let server = server.clone();
-            let changes = Self::supported_mcp_apps()
-                .filter_map(|app| {
-                    let before_enabled = before.is_enabled_for(&app);
-                    let after_enabled = server.apps.is_enabled_for(&app);
-                    (before_enabled != after_enabled).then_some((app, after_enabled))
-                })
-                .collect::<Vec<_>>();
-
-            (server, changes)
+        let mut cfg = state.config.write()?;
+        let Some(previous_server) = cfg
+            .mcp
+            .servers
+            .as_ref()
+            .and_then(|servers| servers.get(server_id))
+            .cloned()
+        else {
+            return Ok(false);
         };
-
-        state.save()?;
-
-        for (app, enabled) in changes {
-            if enabled {
-                Self::sync_server_to_app(state, &server, &app)?;
-            } else {
-                Self::remove_server_from_app(state, server_id, &app)?;
-            }
+        let before = previous_server.apps.clone();
+        if before == apps {
+            return Ok(true);
         }
+        let mut server = previous_server.clone();
+        server.apps = apps;
+        let changed_apps = Self::supported_mcp_apps()
+            .filter(|app| before.is_enabled_for(app) != server.apps.is_enabled_for(app))
+            .collect::<Vec<_>>();
 
+        Self::commit_server_change(state, Some(&previous_server), Some(&server), &changed_apps)?;
+        cfg.mcp
+            .servers
+            .as_mut()
+            .expect("server map exists")
+            .insert(server_id.to_owned(), server);
         Ok(true)
     }
 
-    /// 将 MCP 服务器同步到所有启用的应用
-    fn sync_server_to_apps(state: &AppState, server: &McpServer) -> Result<(), AppError> {
-        let cfg = state.config.read()?;
-
-        for app in server.apps.enabled_apps() {
-            Self::sync_server_to_app_internal(&cfg, server, &app)?;
-        }
-
-        Ok(())
+    fn commit_server_change(
+        state: &AppState,
+        previous_server: Option<&McpServer>,
+        next_server: Option<&McpServer>,
+        affected_apps: &[AppType],
+    ) -> Result<(), AppError> {
+        state.db.commit_mcp_server_change(
+            previous_server,
+            next_server,
+            || core_bridge::apply_server_change(previous_server, next_server, affected_apps),
+            core_bridge::rollback_server_change,
+        )
     }
 
     /// 将 MCP 服务器同步到指定应用
-    fn sync_server_to_app(
-        state: &AppState,
-        server: &McpServer,
-        app: &AppType,
-    ) -> Result<(), AppError> {
-        let cfg = state.config.read()?;
-        Self::sync_server_to_app_internal(&cfg, server, app)
+    pub(crate) fn sync_server_to_app(server: &McpServer, app: &AppType) -> Result<(), AppError> {
+        Self::sync_server_to_app_internal(server, app)
     }
 
-    fn sync_server_to_app_internal(
-        cfg: &MultiAppConfig,
-        server: &McpServer,
-        app: &AppType,
-    ) -> Result<(), AppError> {
-        match app {
-            AppType::Claude => {
-                mcp::sync_single_server_to_claude(cfg, &server.id, &server.server)?;
-            }
-            AppType::Codex => {
-                mcp::sync_single_server_to_codex(cfg, &server.id, &server.server)?;
-            }
-            AppType::Gemini => {
-                mcp::sync_single_server_to_gemini(cfg, &server.id, &server.server)?;
-            }
-            AppType::OpenCode => {
-                mcp::sync_single_server_to_opencode(cfg, &server.id, &server.server)?;
-            }
-            AppType::Hermes => {
-                mcp::sync_single_server_to_hermes(cfg, &server.id, &server.server)?;
-            }
-            AppType::OpenClaw => {}
-            AppType::Pi => {}
-        }
-        Ok(())
-    }
-
-    /// 从所有曾启用过该服务器的应用中移除
-    fn remove_server_from_all_apps(
-        state: &AppState,
+    pub(crate) fn project_server_for_app(
         id: &str,
-        server: &McpServer,
+        server: &serde_json::Value,
+        app: &AppType,
     ) -> Result<(), AppError> {
-        // 从所有曾启用的应用中移除
-        for app in server.apps.enabled_apps() {
-            Self::remove_server_from_app(state, id, &app)?;
-        }
-        Ok(())
+        core_bridge::project_server(app, id, server)
     }
 
-    fn remove_server_from_app(_state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
-        match app {
-            AppType::Claude => mcp::remove_server_from_claude(id)?,
-            AppType::Codex => mcp::remove_server_from_codex(id)?,
-            AppType::Gemini => mcp::remove_server_from_gemini(id)?,
-            AppType::OpenCode => mcp::remove_server_from_opencode(id)?,
-            AppType::Hermes => mcp::remove_server_from_hermes(id)?,
-            AppType::OpenClaw => {}
-            AppType::Pi => {}
-        }
-        Ok(())
+    pub(crate) fn remove_server_from_app(id: &str, app: &AppType) -> Result<(), AppError> {
+        core_bridge::remove_server(app, id)
+    }
+
+    pub(crate) fn replace_servers_for_app(
+        servers: &HashMap<String, serde_json::Value>,
+        app: &AppType,
+    ) -> Result<(), AppError> {
+        core_bridge::replace_servers(app, servers)
+    }
+
+    fn sync_server_to_app_internal(server: &McpServer, app: &AppType) -> Result<(), AppError> {
+        core_bridge::project_server(app, &server.id, &server.server)
     }
 
     /// 手动同步所有启用的 MCP 服务器到对应的应用。
@@ -254,14 +209,15 @@ impl McpService {
         state: &AppState,
         excluded: Option<&AppType>,
     ) -> Result<(), AppError> {
-        let servers = Self::get_all_servers(state)?;
+        let config = state.config.read()?;
+        let servers = Self::servers_from_config(&config)?;
 
         let mut failures = Vec::new();
         for app in Self::supported_mcp_apps() {
             if excluded == Some(&app) {
                 continue;
             }
-            if let Err(err) = Self::project_servers_to_app(state, &servers, &app) {
+            if let Err(err) = Self::project_servers_to_app(servers, &app) {
                 log::warn!("同步 MCP 到 {app:?} 失败: {err}");
                 failures.push(format!("{}: {err}", app.as_str()));
             }
@@ -281,31 +237,43 @@ impl McpService {
         state: &AppState,
         base_text: &str,
     ) -> Result<String, AppError> {
-        let servers = Self::get_all_servers(state)?;
-        mcp::project_managed_servers_to_codex_text(base_text, &servers)
+        let config = state.config.read()?;
+        let servers = Self::servers_from_config(&config)?;
+        core_bridge::project_servers(&AppType::Codex, base_text, servers)
     }
 
     /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做
     /// 定向重投影，避免把无关应用的失败面牵连进目标应用的关键路径。
     pub fn sync_enabled_for_app(state: &AppState, app: &AppType) -> Result<(), AppError> {
-        let servers = Self::get_all_servers(state)?;
-        Self::project_servers_to_app(state, &servers, app)
+        let config = state.config.read()?;
+        let servers = Self::servers_from_config(&config)?;
+        Self::project_servers_to_app(servers, app)
+    }
+
+    pub(crate) fn sync_enabled_for_config(
+        config: &MultiAppConfig,
+        app: &AppType,
+    ) -> Result<(), AppError> {
+        Self::project_servers_to_app(Self::servers_from_config(config)?, app)
+    }
+
+    fn servers_from_config(
+        config: &MultiAppConfig,
+    ) -> Result<&HashMap<String, McpServer>, AppError> {
+        config.mcp.servers.as_ref().ok_or_else(|| {
+            AppError::localized(
+                "mcp.old_structure",
+                "检测到旧版 MCP 结构，请重启应用完成迁移",
+                "Old MCP structure detected, please restart app to complete migration",
+            )
+        })
     }
 
     fn project_servers_to_app(
-        state: &AppState,
         servers: &HashMap<String, McpServer>,
         app: &AppType,
     ) -> Result<(), AppError> {
-        for server in servers.values() {
-            if server.apps.is_enabled_for(app) {
-                Self::sync_server_to_app(state, server, app)?;
-            } else {
-                Self::remove_server_from_app(state, &server.id, app)?;
-            }
-        }
-
-        Ok(())
+        core_bridge::sync_servers(app, servers)
     }
 
     // ========================================================================
@@ -345,11 +313,12 @@ impl McpService {
     /// [已废弃] 同步启用的 MCP 到指定应用（兼容旧 API）
     #[deprecated(since = "3.7.0", note = "Use sync_all_enabled instead")]
     pub fn sync_enabled(state: &AppState, app: AppType) -> Result<(), AppError> {
-        let servers = Self::get_all_servers(state)?;
+        let config = state.config.read()?;
+        let servers = Self::servers_from_config(&config)?;
 
         for server in servers.values() {
             if server.apps.is_enabled_for(&app) {
-                Self::sync_server_to_app(state, server, &app)?;
+                Self::sync_server_to_app(server, &app)?;
             }
         }
 

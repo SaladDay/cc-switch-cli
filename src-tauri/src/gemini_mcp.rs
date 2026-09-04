@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::atomic_write;
 use crate::error::AppError;
 use crate::gemini_config::get_gemini_settings_path;
 
@@ -28,15 +27,6 @@ fn read_json_value(path: &Path) -> Result<Value, AppError> {
     let content = fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
     let value: Value = serde_json::from_str(&content).map_err(|e| AppError::json(path, e))?;
     Ok(value)
-}
-
-fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-    let json =
-        serde_json::to_string_pretty(value).map_err(|e| AppError::JsonSerialize { source: e })?;
-    atomic_write(path, json.as_bytes())
 }
 
 /// 读取 Gemini MCP 配置文件的完整 JSON 文本
@@ -89,109 +79,4 @@ pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>
     }
 
     Ok(servers)
-}
-
-/// 将给定的启用 MCP 服务器映射写入到 Gemini settings.json 的 mcpServers 字段
-/// 仅覆盖 mcpServers，其他字段保持不变
-pub fn set_mcp_servers_map(
-    servers: &std::collections::HashMap<String, Value>,
-) -> Result<(), AppError> {
-    let path = user_config_path();
-    let mut root = if path.exists() {
-        read_json_value(&path)?
-    } else {
-        serde_json::json!({})
-    };
-
-    // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
-    let mut out: Map<String, Value> = Map::new();
-    for (id, spec) in servers.iter() {
-        let mut obj = if let Some(map) = spec.as_object() {
-            map.clone()
-        } else {
-            return Err(AppError::McpValidation(format!(
-                "MCP 服务器 '{id}' 不是对象"
-            )));
-        };
-
-        // 提取 server 字段（如果存在）
-        if let Some(server_val) = obj.remove("server") {
-            let server_obj = server_val.as_object().cloned().ok_or_else(|| {
-                AppError::McpValidation(format!("MCP 服务器 '{id}' server 字段不是对象"))
-            })?;
-            obj = server_obj;
-        }
-
-        // Gemini CLI 格式转换：
-        // - Gemini 不使用 "type" 字段（从字段名推断传输类型）
-        // - HTTP 使用 "httpUrl" 字段，SSE 使用 "url" 字段
-        let transport_type = obj.get("type").and_then(|v| v.as_str());
-        if transport_type == Some("http") {
-            // HTTP streaming: 将 "url" 重命名为 "httpUrl"
-            if let Some(url_value) = obj.remove("url") {
-                obj.insert("httpUrl".to_string(), url_value);
-            }
-        }
-        // SSE 保持 "url" 字段不变
-
-        // Timeout conversion:
-        // - CC-Switch/Codex/Claude may use startup_timeout_* / tool_timeout_*.
-        // - Gemini CLI uses a single timeout field (ms).
-        // Derive Gemini timeout by taking the maximum of:
-        //   - existing `timeout` (if any)
-        //   - startup timeout (default 10s)
-        //   - tool timeout (default 60s)
-        const DEFAULT_STARTUP_MS: u64 = 10_000;
-        const DEFAULT_TOOL_MS: u64 = 60_000;
-
-        let existing_timeout_ms = obj
-            .get("timeout")
-            .and_then(|val| val.as_u64().or_else(|| val.as_f64().map(|f| f as u64)));
-
-        let extract_timeout =
-            |obj: &mut Map<String, Value>, key: &str, multiplier: u64| -> Option<u64> {
-                obj.remove(key).and_then(|val| {
-                    val.as_u64()
-                        .map(|n| n.saturating_mul(multiplier))
-                        .or_else(|| val.as_f64().map(|f| (f * multiplier as f64) as u64))
-                })
-            };
-
-        let startup_ms = extract_timeout(&mut obj, "startup_timeout_sec", 1000)
-            .or_else(|| extract_timeout(&mut obj, "startup_timeout_ms", 1))
-            .unwrap_or(DEFAULT_STARTUP_MS);
-        let tool_ms = extract_timeout(&mut obj, "tool_timeout_sec", 1000)
-            .or_else(|| extract_timeout(&mut obj, "tool_timeout_ms", 1))
-            .unwrap_or(DEFAULT_TOOL_MS);
-
-        let derived_timeout_ms = startup_ms.max(tool_ms);
-        let final_timeout_ms = existing_timeout_ms.unwrap_or(0).max(derived_timeout_ms);
-        obj.insert(
-            "timeout".to_string(),
-            Value::Number(final_timeout_ms.into()),
-        );
-
-        // 移除 UI 辅助字段和 type 字段（Gemini 不需要）
-        obj.remove("type");
-        obj.remove("enabled");
-        obj.remove("source");
-        obj.remove("id");
-        obj.remove("name");
-        obj.remove("description");
-        obj.remove("tags");
-        obj.remove("homepage");
-        obj.remove("docs");
-
-        out.insert(id.clone(), Value::Object(obj));
-    }
-
-    {
-        let obj = root
-            .as_object_mut()
-            .ok_or_else(|| AppError::Config("~/.gemini/settings.json 根必须是对象".into()))?;
-        obj.insert("mcpServers".into(), Value::Object(out));
-    }
-
-    write_json_value(&path, &root)?;
-    Ok(())
 }

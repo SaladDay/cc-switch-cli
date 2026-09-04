@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -286,74 +286,4 @@ pub fn validate_command_in_path(cmd: &str) -> Result<bool, AppError> {
         }
     }
     Ok(false)
-}
-
-/// 读取 ~/.claude.json 中的 mcpServers 映射
-pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>, AppError> {
-    let path = user_config_path();
-    if !path.exists() {
-        return Ok(std::collections::HashMap::new());
-    }
-
-    let root = read_json_value(&path)?;
-    let servers = root
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
-
-    Ok(servers)
-}
-
-/// 将给定的启用 MCP 服务器映射写入到用户级 ~/.claude.json 的 mcpServers 字段
-/// 仅覆盖 mcpServers，其他字段保持不变
-pub fn set_mcp_servers_map(
-    servers: &std::collections::HashMap<String, Value>,
-) -> Result<(), AppError> {
-    let path = user_config_path();
-    let mut root = if path.exists() {
-        read_json_value(&path)?
-    } else {
-        serde_json::json!({})
-    };
-
-    // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
-    let mut out: Map<String, Value> = Map::new();
-    for (id, spec) in servers.iter() {
-        let mut obj = if let Some(map) = spec.as_object() {
-            map.clone()
-        } else {
-            return Err(AppError::McpValidation(format!(
-                "MCP 服务器 '{id}' 不是对象"
-            )));
-        };
-
-        if let Some(server_val) = obj.remove("server") {
-            let server_obj = server_val.as_object().cloned().ok_or_else(|| {
-                AppError::McpValidation(format!("MCP 服务器 '{id}' server 字段不是对象"))
-            })?;
-            obj = server_obj;
-        }
-
-        obj.remove("enabled");
-        obj.remove("source");
-        obj.remove("id");
-        obj.remove("name");
-        obj.remove("description");
-        obj.remove("tags");
-        obj.remove("homepage");
-        obj.remove("docs");
-
-        out.insert(id.clone(), Value::Object(obj));
-    }
-
-    {
-        let obj = root
-            .as_object_mut()
-            .ok_or_else(|| AppError::Config("~/.claude.json 根必须是对象".into()))?;
-        obj.insert("mcpServers".into(), Value::Object(out));
-    }
-
-    write_json_value(&path, &root)?;
-    Ok(())
 }

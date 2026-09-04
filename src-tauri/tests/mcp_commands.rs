@@ -184,6 +184,98 @@ fn import_mcp_from_claude_invalid_json_preserves_state() {
 }
 
 #[test]
+#[allow(deprecated)]
+fn legacy_sync_wrapper_still_replaces_claude_servers() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    fs::create_dir_all(home.join(".claude")).expect("create Claude dir");
+    fs::write(
+        get_claude_mcp_path(),
+        json!({
+            "mcpServers": {
+                "bad": 42,
+                "stale": {"command":"old"},
+                "legacy": {"command":"old","trust":true}
+            }
+        })
+        .to_string(),
+    )
+    .expect("seed Claude config");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.claude.servers.insert(
+        "legacy".to_owned(),
+        json!({
+            "enabled": true,
+            "server": {"type":"stdio","command":"npx"}
+        }),
+    );
+    cc_switch_lib::sync_enabled_to_claude(&config).expect("sync legacy MCP config");
+
+    let live: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(get_claude_mcp_path()).expect("read Claude config"),
+    )
+    .expect("parse Claude config");
+    assert!(live["mcpServers"].get("bad").is_none());
+    assert!(live["mcpServers"].get("stale").is_none());
+    assert_eq!(live["mcpServers"]["legacy"]["command"], "npx");
+    assert_eq!(live["mcpServers"]["legacy"]["trust"], true);
+}
+
+#[test]
+fn app_sync_validates_the_whole_batch_before_writing() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    fs::create_dir_all(home.join(".codex")).expect("create Codex dir");
+    let path = cc_switch_lib::get_codex_config_path();
+    let original = "model = \"keep\"\n[mcp_servers.existing]\ncommand = \"old\"\n";
+    fs::write(&path, original).expect("seed Codex config");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers = Some(HashMap::from([
+        (
+            "a-valid".to_owned(),
+            McpServer {
+                id: "a-valid".to_owned(),
+                name: "Valid".to_owned(),
+                server: json!({"command":"npx"}),
+                apps: McpApps {
+                    codex: true,
+                    ..McpApps::default()
+                },
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: Vec::new(),
+            },
+        ),
+        (
+            "z-invalid".to_owned(),
+            McpServer {
+                id: "z-invalid".to_owned(),
+                name: "Invalid".to_owned(),
+                server: json!({"command":"npx","future":null}),
+                apps: McpApps {
+                    codex: true,
+                    ..McpApps::default()
+                },
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: Vec::new(),
+            },
+        ),
+    ]));
+    let state = state_from_config(config);
+
+    McpService::sync_enabled_for_app(&state, &AppType::Codex)
+        .expect_err("invalid second projection must reject the batch");
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
+}
+
+#[test]
 fn import_mcp_from_gemini_imports_http_and_sse_servers() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -445,42 +537,6 @@ fn set_mcp_enabled_for_codex_writes_remote_headers_once_as_http_headers() {
     assert!(
         !toml_text.contains("[mcp_servers.remote-headers.headers]"),
         "codex config should not also write legacy headers table, got: {toml_text}"
-    );
-}
-
-#[test]
-fn codex_single_server_sync_preserves_invalid_live_config() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let home = ensure_test_home();
-
-    let codex_dir = home.join(".codex");
-    fs::create_dir_all(&codex_dir).expect("create codex dir");
-    let config_path = codex_dir.join("config.toml");
-    let invalid = b"model = \"gpt-5\"\n[broken\n";
-    fs::write(&config_path, invalid).expect("seed invalid Codex config");
-
-    let error = cc_switch_lib::sync_single_server_to_codex(
-        &MultiAppConfig::default(),
-        "remote",
-        &json!({
-            "type": "http",
-            "url": "https://example.com/mcp",
-            "headers": {
-                "Authorization": "Bearer token"
-            }
-        }),
-    )
-    .expect_err("invalid config must abort the write");
-
-    assert!(
-        matches!(&error, AppError::McpValidation(message) if message.contains("解析 config.toml 失败")),
-        "unexpected error: {error:?}"
-    );
-    assert_eq!(
-        fs::read(&config_path).expect("read Codex config after failed sync"),
-        invalid,
-        "failed parsing must leave the complete live config unchanged"
     );
 }
 
@@ -801,6 +857,102 @@ fn sync_all_enabled_continues_after_another_app_fails() {
 }
 
 #[test]
+fn upsert_refreshes_a_preserved_disabled_opencode_entry() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let opencode_dir = home.join(".config").join("opencode");
+    fs::create_dir_all(&opencode_dir).expect("create OpenCode dir");
+    let path = opencode_dir.join("opencode.json");
+    fs::write(
+        &path,
+        json!({
+            "mcp": {
+                "disabled": {
+                    "type":"local",
+                    "command":["old"],
+                    "enabled":false,
+                    "timeout":30
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("seed OpenCode config");
+
+    let previous = McpServer {
+        id: "disabled".to_owned(),
+        name: "Disabled".to_owned(),
+        server: json!({"command":"old"}),
+        apps: McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+    let mut config = MultiAppConfig::default();
+    config
+        .mcp
+        .servers
+        .as_mut()
+        .unwrap()
+        .insert(previous.id.clone(), previous.clone());
+    let state = state_from_config(config);
+
+    McpService::upsert_server(
+        &state,
+        McpServer {
+            server: json!({"command":"new"}),
+            ..previous
+        },
+    )
+    .expect("update disabled server");
+
+    let live: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(live["mcp"]["disabled"]["command"], json!(["new"]));
+    assert_eq!(live["mcp"]["disabled"]["enabled"], false);
+    assert_eq!(live["mcp"]["disabled"]["timeout"], 30);
+}
+
+#[test]
+fn upsert_new_server_does_not_touch_disabled_apps() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    fs::create_dir_all(home.join(".claude")).expect("create Claude dir");
+    let opencode_dir = home.join(".config").join("opencode");
+    fs::create_dir_all(&opencode_dir).expect("create OpenCode dir");
+    let opencode_path = opencode_dir.join("opencode.json");
+    fs::write(&opencode_path, "{").expect("seed invalid unrelated OpenCode config");
+    let state = state_from_config(MultiAppConfig::default());
+
+    McpService::upsert_server(
+        &state,
+        McpServer {
+            id: "claude-only".to_owned(),
+            name: "Claude only".to_owned(),
+            server: json!({"command":"npx"}),
+            apps: McpApps {
+                claude: true,
+                ..McpApps::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    )
+    .expect("unrelated disabled app must not block a new server");
+
+    assert_eq!(fs::read_to_string(opencode_path).unwrap(), "{");
+    let claude: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(get_claude_mcp_path()).expect("read Claude config"),
+    )
+    .expect("parse Claude config");
+    assert_eq!(claude["mcpServers"]["claude-only"]["command"], "npx");
+}
+
+#[test]
 fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -809,7 +961,22 @@ fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
     let opencode_dir = home.join(".config").join("opencode");
     fs::create_dir_all(&opencode_dir).expect("create opencode dir");
     let opencode_path = opencode_dir.join("opencode.json");
-    fs::write(&opencode_path, json!({ "mcp": {} }).to_string()).expect("seed opencode config");
+    fs::write(
+        &opencode_path,
+        json!({
+            "theme": "system",
+            "mcp": {
+                "matrix-server": {
+                    "type": "remote",
+                    "url": "https://old.example.com/mcp",
+                    "enabled": false,
+                    "timeout": 30
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("seed opencode config");
 
     let mut config = MultiAppConfig::default();
     config.mcp.servers = Some(HashMap::new());
@@ -870,6 +1037,11 @@ fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
             .is_some_and(|mcp| mcp.contains_key("matrix-server")),
         "enabling OpenCode should write the live MCP config, got: {opencode_text}"
     );
+    let projected_server = &opencode_json["mcp"]["matrix-server"];
+    assert_eq!(projected_server["type"], "remote");
+    assert_eq!(projected_server["enabled"], true);
+    assert_eq!(projected_server["timeout"], 30);
+    assert_eq!(opencode_json["theme"], "system");
 
     assert!(
         McpService::set_apps(&state, "matrix-server", McpApps::default())
@@ -880,11 +1052,174 @@ fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
     let opencode_text = fs::read_to_string(&opencode_path).expect("read opencode config");
     let opencode_json: serde_json::Value =
         serde_json::from_str(&opencode_text).expect("parse opencode config");
+    assert_eq!(opencode_json["mcp"]["matrix-server"]["enabled"], false);
+    assert_eq!(opencode_json["mcp"]["matrix-server"]["timeout"], 30);
+    assert_eq!(opencode_json["theme"], "system");
+
+    assert!(McpService::delete_server(&state, "matrix-server").expect("delete server"));
+    let opencode_text = fs::read_to_string(&opencode_path).expect("read deleted config");
+    let opencode_json: serde_json::Value =
+        serde_json::from_str(&opencode_text).expect("parse deleted config");
     assert!(
         opencode_json
             .get("mcp")
             .and_then(|mcp| mcp.as_object())
             .is_none_or(|mcp| !mcp.contains_key("matrix-server")),
-        "disabling OpenCode should remove the live MCP config, got: {opencode_text}"
+        "deleting the shared server should remove the native entry, got: {opencode_text}"
+    );
+}
+
+#[test]
+fn delete_server_removes_a_stale_gemini_entry_even_when_disabled() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let gemini_dir = home.join(".gemini");
+    fs::create_dir_all(&gemini_dir).expect("create Gemini dir");
+    let settings_path = gemini_dir.join("settings.json");
+    fs::write(
+        &settings_path,
+        json!({
+            "theme": "system",
+            "mcpServers": {
+                "stale-server": {
+                    "command": "old"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("seed Gemini settings");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers.as_mut().unwrap().insert(
+        "stale-server".into(),
+        McpServer {
+            id: "stale-server".into(),
+            name: "Stale server".into(),
+            server: json!({"type": "stdio", "command": "new"}),
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+    let state = state_from_config(config);
+
+    assert!(McpService::delete_server(&state, "stale-server").expect("delete server"));
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&settings_path).expect("read Gemini settings"))
+            .expect("parse Gemini settings");
+    assert!(settings["mcpServers"].get("stale-server").is_none());
+    assert_eq!(settings["theme"], "system");
+}
+
+#[test]
+fn failed_delete_keeps_the_shared_record_retryable() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    fs::create_dir_all(home.join(".claude")).expect("create Claude dir");
+    fs::write(get_claude_mcp_path(), "{\"mcpServers\":").expect("seed invalid Claude config");
+
+    let gemini_dir = home.join(".gemini");
+    fs::create_dir_all(&gemini_dir).expect("create Gemini dir");
+    let gemini_path = gemini_dir.join("settings.json");
+    let original_gemini =
+        json!({"mcpServers":{"retryable":{"command":"old","timeout":30,"future":"keep"}}})
+            .to_string();
+    fs::write(&gemini_path, &original_gemini).expect("seed Gemini config");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers.as_mut().unwrap().insert(
+        "retryable".into(),
+        McpServer {
+            id: "retryable".into(),
+            name: "Retryable".into(),
+            server: json!({"type":"stdio","command":"new"}),
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+    let state = state_from_config(config);
+
+    McpService::delete_server(&state, "retryable")
+        .expect_err("invalid Claude config should stop the delete");
+    assert!(
+        state
+            .config
+            .read()
+            .unwrap()
+            .mcp
+            .servers
+            .as_ref()
+            .unwrap()
+            .contains_key("retryable"),
+        "a failed delete must remain retryable in memory"
+    );
+    assert!(
+        state
+            .db
+            .get_all_mcp_servers()
+            .unwrap()
+            .contains_key("retryable"),
+        "a failed delete must remain retryable in the shared database"
+    );
+    assert_eq!(
+        fs::read_to_string(&gemini_path).expect("read rolled-back Gemini config"),
+        original_gemini,
+        "a failed multi-app delete must restore the exact native bytes"
+    );
+
+    fs::write(get_claude_mcp_path(), "{}").expect("repair Claude config");
+    assert!(McpService::delete_server(&state, "retryable").expect("retry delete"));
+    let gemini: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(gemini_path).unwrap()).unwrap();
+    assert!(gemini["mcpServers"].get("retryable").is_none());
+}
+
+#[test]
+fn failed_toggle_does_not_commit_the_enabled_state() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let opencode_dir = home.join(".config").join("opencode");
+    fs::create_dir_all(&opencode_dir).expect("create OpenCode dir");
+    fs::write(opencode_dir.join("opencode.json"), "{}").expect("seed OpenCode config");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers.as_mut().unwrap().insert(
+        "unsupported-cwd".into(),
+        McpServer {
+            id: "unsupported-cwd".into(),
+            name: "Unsupported cwd".into(),
+            server: json!({"type":"stdio","command":"echo","cwd":"/tmp"}),
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+    let state = state_from_config(config);
+
+    McpService::toggle_app(&state, "unsupported-cwd", AppType::OpenCode, true)
+        .expect_err("OpenCode must reject cwd");
+    let memory = state.config.read().unwrap();
+    assert!(
+        !memory.mcp.servers.as_ref().unwrap()["unsupported-cwd"]
+            .apps
+            .opencode
+    );
+    drop(memory);
+    assert!(
+        !state.db.get_all_mcp_servers().unwrap()["unsupported-cwd"]
+            .apps
+            .opencode
     );
 }

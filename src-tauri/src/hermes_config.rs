@@ -31,7 +31,10 @@
 //!     args: ["-y", "@modelcontextprotocol/server-filesystem"]
 //! ```
 
-use crate::config::{atomic_write, create_managed_config_dir_all, get_app_config_dir, home_dir};
+use crate::config::{
+    atomic_write, create_managed_config_dir_all, get_app_config_dir, home_dir,
+    replace_file_if_current_locked, with_live_config_update_lock,
+};
 use crate::error::AppError;
 use crate::services::provider::live_merge;
 use crate::settings::{effective_backup_retain_count, get_hermes_override_dir};
@@ -134,6 +137,62 @@ pub fn write_hermes_config_source(source: &str) -> Result<(), AppError> {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
     atomic_write(&path, source.as_bytes())
+}
+
+/// Update the complete Hermes document while holding the same lock used by
+/// section writers. The caller owns the pure document transformation.
+pub(crate) fn update_hermes_config_source_with_receipt<F>(
+    updater: F,
+) -> Result<Option<(Option<Vec<u8>>, Vec<u8>)>, AppError>
+where
+    F: Fn(Option<&[u8]>) -> Result<Option<String>, AppError>,
+{
+    let _guard = hermes_write_lock().lock().map_err(|error| {
+        AppError::Config(format!("Failed to acquire Hermes write lock: {error}"))
+    })?;
+    for _ in 0..4 {
+        let current = read_hermes_config_source()?;
+        let Some(projected) = updater(current.as_deref().map(str::as_bytes))? else {
+            return Ok(None);
+        };
+        if current.as_deref() == Some(projected.as_str()) {
+            return Ok(None);
+        }
+        let applied = with_live_config_update_lock(|| {
+            if read_hermes_config_source()? != current {
+                return Ok(false);
+            }
+            if let Some(current) = current.as_deref().filter(|current| !current.is_empty()) {
+                create_hermes_backup(current)?;
+            }
+            replace_file_if_current_locked(
+                &get_hermes_config_path(),
+                current.as_deref().map(str::as_bytes),
+                Some(projected.as_bytes()),
+            )
+        })?;
+        if applied {
+            return Ok(Some((
+                current.map(String::into_bytes),
+                projected.into_bytes(),
+            )));
+        }
+    }
+    Err(AppError::Conflict(
+        "Hermes config kept changing while it was being updated".to_owned(),
+    ))
+}
+
+pub(crate) fn restore_hermes_config_source_if_current(
+    expected: &[u8],
+    previous: Option<&[u8]>,
+) -> Result<bool, AppError> {
+    let _guard = hermes_write_lock().lock().map_err(|error| {
+        AppError::Config(format!("Failed to acquire Hermes write lock: {error}"))
+    })?;
+    with_live_config_update_lock(|| {
+        replace_file_if_current_locked(&get_hermes_config_path(), Some(expected), previous)
+    })
 }
 
 /// Read the Hermes config file as `serde_yaml::Value`. Returns an empty

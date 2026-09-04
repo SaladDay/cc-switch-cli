@@ -337,7 +337,7 @@ impl ConfigService {
             common_config_snippet.as_deref(),
             apply_common_config,
         )?;
-        crate::mcp::sync_enabled_to_codex(config)?;
+        super::mcp::McpService::sync_enabled_for_config(config, &AppType::Codex)?;
 
         let auth_path = crate::codex_config::get_codex_auth_path();
         let auth_after = if auth_path.exists() {

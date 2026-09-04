@@ -288,9 +288,7 @@ pub struct PromptRoot {
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
 use crate::error::AppError;
 use crate::provider::ProviderManager;
-use cc_switch_core::{
-    builtin_app_registry, AppCapability, AppType as CoreAppType, ProviderConfigurationMode,
-};
+use cc_switch_core::{builtin_app_registry, AppType as CoreAppType, ProviderConfigurationMode};
 
 /// 应用类型
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -373,13 +371,15 @@ impl AppType {
     pub(crate) fn supports_mcp(&self) -> bool {
         builtin_app_registry()
             .for_app(&self.as_core())
-            .supports(AppCapability::Mcp)
+            .mcp_contract()
+            .is_some()
     }
 
     pub(crate) fn supports_skills(&self) -> bool {
         builtin_app_registry()
             .for_app(&self.as_core())
-            .supports(AppCapability::Skills)
+            .skill_contract()
+            .is_some()
     }
 
     pub(crate) fn supports_visibility_detection(&self) -> bool {
@@ -957,11 +957,8 @@ mod tests {
                 app.is_additive_mode(),
                 descriptor.configuration_mode() == ProviderConfigurationMode::Additive
             );
-            assert_eq!(app.supports_mcp(), descriptor.supports(AppCapability::Mcp));
-            assert_eq!(
-                app.supports_skills(),
-                descriptor.supports(AppCapability::Skills)
-            );
+            assert_eq!(app.supports_mcp(), descriptor.mcp_contract().is_some());
+            assert_eq!(app.supports_skills(), descriptor.skill_contract().is_some());
         }
     }
 

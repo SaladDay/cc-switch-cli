@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::error::AppError;
 use crate::i18n::texts;
@@ -311,6 +312,82 @@ pub fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), AppErr
 /// 原子写入文本文件（用于 TOML/纯文本）
 pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     atomic_write(path, data.as_bytes())
+}
+
+fn live_config_update_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub(crate) fn with_live_config_update_lock<T>(
+    operation: impl FnOnce() -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let _guard = live_config_update_lock()
+        .lock()
+        .map_err(|error| AppError::Config(format!("Live config write lock failed: {error}")))?;
+    operation()
+}
+
+/// Writes only when the file still matches the bytes observed by the caller.
+pub(crate) fn write_file_if_current(
+    path: &Path,
+    expected: Option<&[u8]>,
+    data: &[u8],
+) -> Result<bool, AppError> {
+    replace_file_if_current(path, expected, Some(data))
+}
+
+pub(crate) fn replace_file_if_current(
+    path: &Path,
+    expected: Option<&[u8]>,
+    replacement: Option<&[u8]>,
+) -> Result<bool, AppError> {
+    with_live_config_update_lock(|| replace_file_if_current_locked(path, expected, replacement))
+}
+
+pub(crate) fn replace_file_if_current_locked(
+    path: &Path,
+    expected: Option<&[u8]>,
+    replacement: Option<&[u8]>,
+) -> Result<bool, AppError> {
+    let current = read_optional_file(path)?;
+    if current.as_deref() != expected {
+        return Ok(false);
+    }
+    let result = match replacement {
+        Some(data) => atomic_write(path, data),
+        None if current.is_some() => {
+            fs::remove_file(path).map_err(|error| AppError::io(path, error))
+        }
+        None => Ok(()),
+    };
+    if let Err(error) = result {
+        let observed = read_optional_file(path)?;
+        if observed != current {
+            let recovery = match current {
+                Some(contents) => atomic_write(path, &contents),
+                None if observed.is_some() => {
+                    fs::remove_file(path).map_err(|source| AppError::io(path, source))
+                }
+                None => Ok(()),
+            };
+            if let Err(recovery) = recovery {
+                return Err(AppError::Message(format!(
+                    "{error}; failed to restore the previous file: {recovery}"
+                )));
+            }
+        }
+        return Err(error);
+    }
+    Ok(true)
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    match fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::io(path, error)),
+    }
 }
 
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
@@ -777,6 +854,51 @@ mod tests {
                 None => unsafe { env::remove_var(&self.key) },
             }
         }
+    }
+
+    #[test]
+    fn guarded_write_rejects_a_file_changed_after_read() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let path = temp.path().join("config.json");
+        fs::write(&path, b"observed").expect("seed observed contents");
+        let observed = fs::read(&path).expect("read observed contents");
+        fs::write(&path, b"external edit").expect("simulate external edit");
+
+        assert!(
+            !write_file_if_current(&path, Some(&observed), b"projected").expect("guarded write")
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"external edit");
+
+        assert!(
+            write_file_if_current(&path, Some(b"external edit"), b"projected")
+                .expect("matching guarded write")
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"projected");
+    }
+
+    #[test]
+    fn guarded_write_serializes_competing_writers() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let path = temp.path().join("config.json");
+        fs::write(&path, b"observed").expect("seed observed contents");
+        let start = Arc::new(Barrier::new(3));
+        let writers = [b"first".as_slice(), b"second".as_slice()].map(|replacement| {
+            let path = path.clone();
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                write_file_if_current(&path, Some(b"observed"), replacement)
+                    .expect("competing guarded write")
+            })
+        });
+        start.wait();
+        let outcomes = writers.map(|writer| writer.join().expect("writer thread"));
+
+        assert_eq!(outcomes.into_iter().filter(|applied| *applied).count(), 1);
+        let final_contents = fs::read(&path).unwrap();
+        assert!(final_contents == b"first" || final_contents == b"second");
     }
 
     struct SettingsGuard {

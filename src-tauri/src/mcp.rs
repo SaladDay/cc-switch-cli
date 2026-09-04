@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::app_config::{AppType, McpConfig, McpServer, MultiAppConfig};
+use crate::app_config::{AppType, McpConfig, MultiAppConfig};
 use crate::error::AppError;
 
 /// 基础校验：允许 stdio/http/sse；或省略 type（视为 stdio）。对应必填字段存在
@@ -187,44 +187,89 @@ pub fn normalize_servers_for(config: &mut MultiAppConfig, app: &AppType) -> usiz
     normalize_server_keys(servers)
 }
 
-fn extract_server_spec(entry: &Value) -> Result<Value, AppError> {
-    let obj = entry
-        .as_object()
-        .ok_or_else(|| AppError::McpValidation("MCP 服务器条目必须为 JSON 对象".into()))?;
-    let server = obj
-        .get("server")
-        .ok_or_else(|| AppError::McpValidation("MCP 服务器条目缺少 server 字段".into()))?;
-
-    if !server.is_object() {
-        return Err(AppError::McpValidation(
-            "MCP 服务器 server 字段必须为 JSON 对象".into(),
-        ));
-    }
-
-    Ok(server.clone())
+fn collect_enabled_legacy_servers(config: &McpConfig) -> HashMap<String, Value> {
+    config
+        .servers
+        .iter()
+        .filter_map(|(id, entry)| {
+            if !entry
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            entry
+                .get("server")
+                .filter(|server| server.is_object())
+                .cloned()
+                .map(|server| (id.clone(), server))
+        })
+        .collect()
 }
 
-/// 返回已启用的 MCP 服务器（过滤 enabled==true）
-fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
-    let mut out = HashMap::new();
-    for (id, entry) in cfg.servers.iter() {
-        let enabled = entry
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !enabled {
-            continue;
-        }
-        match extract_server_spec(entry) {
-            Ok(spec) => {
-                out.insert(id.clone(), spec);
-            }
-            Err(err) => {
-                log::warn!("跳过无效的 MCP 条目 '{id}': {err}");
-            }
-        }
-    }
-    out
+fn sync_enabled_compat(config: &MultiAppConfig, app: &AppType) -> Result<(), AppError> {
+    crate::services::McpService::replace_servers_for_app(
+        &collect_enabled_legacy_servers(config.mcp_for(app)),
+        app,
+    )
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn sync_enabled_to_claude(config: &MultiAppConfig) -> Result<(), AppError> {
+    sync_enabled_compat(config, &AppType::Claude)
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn sync_enabled_to_codex(config: &MultiAppConfig) -> Result<(), AppError> {
+    sync_enabled_compat(config, &AppType::Codex)
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn sync_enabled_to_gemini(config: &MultiAppConfig) -> Result<(), AppError> {
+    sync_enabled_compat(config, &AppType::Gemini)
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn sync_single_server_to_claude(
+    _config: &MultiAppConfig,
+    id: &str,
+    server_spec: &Value,
+) -> Result<(), AppError> {
+    crate::services::McpService::project_server_for_app(id, server_spec, &AppType::Claude)
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn sync_single_server_to_codex(
+    _config: &MultiAppConfig,
+    id: &str,
+    server_spec: &Value,
+) -> Result<(), AppError> {
+    crate::services::McpService::project_server_for_app(id, server_spec, &AppType::Codex)
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn sync_single_server_to_gemini(
+    _config: &MultiAppConfig,
+    id: &str,
+    server_spec: &Value,
+) -> Result<(), AppError> {
+    crate::services::McpService::project_server_for_app(id, server_spec, &AppType::Gemini)
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn remove_server_from_claude(id: &str) -> Result<(), AppError> {
+    crate::services::McpService::remove_server_from_app(id, &AppType::Claude)
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
+    crate::services::McpService::remove_server_from_app(id, &AppType::Codex)
+}
+
+#[deprecated(since = "5.10.4", note = "Use McpService APIs instead")]
+pub fn remove_server_from_gemini(id: &str) -> Result<(), AppError> {
+    crate::services::McpService::remove_server_from_app(id, &AppType::Gemini)
 }
 
 #[allow(dead_code)] // v3.7.0: 旧的分应用 API，保留用于未来可能的迁移
@@ -332,15 +377,6 @@ pub fn set_enabled_flag_for(
     }
 
     Ok(true)
-}
-
-/// 将 config.json 中 enabled==true 的项投影写入 ~/.claude.json
-pub fn sync_enabled_to_claude(config: &MultiAppConfig) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Claude) {
-        return Ok(());
-    }
-    let enabled = collect_enabled_servers(&config.mcp.claude);
-    crate::claude_mcp::set_mcp_servers_map(&enabled)
 }
 
 /// 从 ~/.claude.json 导入 mcpServers 到统一结构（v3.7.0+）
@@ -658,86 +694,6 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
     Ok(changed_total)
 }
 
-/// 将 config.json 中 Codex 的 enabled==true 项以 TOML 形式写入 ~/.codex/config.toml
-///
-/// 格式策略：
-/// - 唯一正确格式：[mcp_servers] 顶层表（Codex 官方标准）
-/// - 自动清理错误格式：[mcp.servers]（如果存在）
-/// - 读取现有 config.toml；若语法无效则报错，不尝试覆盖
-/// - 仅更新 `mcp_servers` 表，保留其它键
-/// - 仅写入启用项；无启用项时清理 mcp_servers 表
-pub fn sync_enabled_to_codex(config: &MultiAppConfig) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Codex) {
-        return Ok(());
-    }
-    use toml_edit::{Item, Table};
-
-    // 1) 收集启用项（Codex 维度）
-    let enabled = collect_enabled_servers(&config.mcp.codex);
-
-    // 2) 读取现有 config.toml 文本；保持无效 TOML 的错误返回（不覆盖文件）
-    let base_text = crate::codex_config::read_and_validate_codex_config_text()?;
-
-    // 3) 使用 toml_edit 解析（允许空文件）
-    let mut doc = if base_text.trim().is_empty() {
-        toml_edit::DocumentMut::default()
-    } else {
-        base_text
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| AppError::McpValidation(format!("解析 config.toml 失败: {e}")))?
-    };
-
-    // 4) 清理可能存在的错误格式 [mcp.servers]
-    if let Some(mcp_item) = doc.get_mut("mcp") {
-        if let Some(tbl) = mcp_item.as_table_like_mut() {
-            if tbl.contains_key("servers") {
-                log::warn!("检测到错误的 MCP 格式 [mcp.servers]，正在清理并迁移到 [mcp_servers]");
-                tbl.remove("servers");
-            }
-        }
-    }
-
-    // 5) 构造目标 servers 表（稳定的键顺序）
-    if enabled.is_empty() {
-        // 无启用项：移除 mcp_servers 表
-        doc.as_table_mut().remove("mcp_servers");
-    } else {
-        // 构建 servers 表
-        let mut servers_tbl = Table::new();
-        let mut ids: Vec<_> = enabled.keys().cloned().collect();
-        ids.sort();
-        for id in ids {
-            let spec = enabled.get(&id).expect("spec must exist");
-            // 复用通用转换函数（已包含扩展字段支持）
-            match json_server_to_toml_table(spec) {
-                Ok(table) => {
-                    servers_tbl[&id[..]] = Item::Table(table);
-                }
-                Err(err) => {
-                    log::error!("跳过无效的 MCP 服务器 '{id}': {err}");
-                }
-            }
-        }
-        // 使用唯一正确的格式：[mcp_servers]
-        doc["mcp_servers"] = Item::Table(servers_tbl);
-    }
-
-    // 6) 写回（仅改 TOML，不触碰 auth.json）；toml_edit 会尽量保留未改区域的注释/空白/顺序
-    let new_text = doc.to_string();
-    let path = crate::codex_config::get_codex_config_path();
-    crate::config::write_text_file(&path, &new_text)?;
-    Ok(())
-}
-
-/// 将 config.json 中 enabled==true 的项投影写入 ~/.gemini/settings.json
-pub fn sync_enabled_to_gemini(config: &MultiAppConfig) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Gemini) {
-        return Ok(());
-    }
-    let enabled = collect_enabled_servers(&config.mcp.gemini);
-    crate::gemini_mcp::set_mcp_servers_map(&enabled)
-}
-
 /// 从 ~/.gemini/settings.json 导入 mcpServers 到统一结构（v3.7.0+）
 /// 已存在的服务器将启用 Gemini 应用，不覆盖其他字段和应用状态
 pub fn import_from_gemini(config: &mut MultiAppConfig) -> Result<usize, AppError> {
@@ -803,56 +759,6 @@ pub fn import_from_gemini(config: &mut MultiAppConfig) -> Result<usize, AppError
     }
 
     Ok(changed)
-}
-
-/// OpenCode MCP: CC Switch 统一格式 → OpenCode 格式
-fn convert_to_opencode_mcp_spec(spec: &Value) -> Result<Value, AppError> {
-    let obj = spec
-        .as_object()
-        .ok_or_else(|| AppError::McpValidation("MCP spec must be a JSON object".into()))?;
-
-    let typ = obj.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    let mut result = serde_json::Map::new();
-
-    match typ {
-        "stdio" => {
-            result.insert("type".into(), json!("local"));
-
-            let cmd = obj.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let mut command = vec![json!(cmd)];
-            if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
-                command.extend(args.iter().cloned());
-            }
-            result.insert("command".into(), Value::Array(command));
-
-            if let Some(env) = obj.get("env") {
-                if env.is_object() && !env.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                    result.insert("environment".into(), env.clone());
-                }
-            }
-            result.insert("enabled".into(), json!(true));
-        }
-        "sse" | "http" => {
-            result.insert("type".into(), json!("remote"));
-            if let Some(url) = obj.get("url") {
-                result.insert("url".into(), url.clone());
-            }
-            if let Some(headers) = obj.get("headers") {
-                if headers.is_object() && !headers.as_object().map(|o| o.is_empty()).unwrap_or(true)
-                {
-                    result.insert("headers".into(), headers.clone());
-                }
-            }
-            result.insert("enabled".into(), json!(true));
-        }
-        other => {
-            return Err(AppError::McpValidation(format!(
-                "Unknown MCP type: {other}"
-            )));
-        }
-    }
-
-    Ok(Value::Object(result))
 }
 
 /// OpenCode MCP: OpenCode 格式 → CC Switch 统一格式
@@ -975,562 +881,13 @@ pub fn import_from_opencode(config: &mut MultiAppConfig) -> Result<usize, AppErr
 }
 
 // ============================================================================
-// v3.7.0 新增：单个服务器同步和删除函数
-// ============================================================================
-
-/// 将单个 MCP 服务器同步到 Claude live 配置
-pub fn sync_single_server_to_claude(
-    _config: &MultiAppConfig,
-    id: &str,
-    server_spec: &Value,
-) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Claude) {
-        return Ok(());
-    }
-    // 读取现有的 MCP 配置
-    let current = crate::claude_mcp::read_mcp_servers_map()?;
-
-    // 创建新的 HashMap，包含现有的所有服务器 + 当前要同步的服务器
-    let mut updated = current;
-    updated.insert(id.to_string(), server_spec.clone());
-
-    // 写回
-    crate::claude_mcp::set_mcp_servers_map(&updated)
-}
-
-/// 从 Claude live 配置中移除单个 MCP 服务器
-pub fn remove_server_from_claude(id: &str) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Claude) {
-        return Ok(());
-    }
-    // 读取现有的 MCP 配置
-    let mut current = crate::claude_mcp::read_mcp_servers_map()?;
-
-    // 移除指定服务器
-    current.remove(id);
-
-    // 写回
-    crate::claude_mcp::set_mcp_servers_map(&current)
-}
-
-/// 通用 JSON 值到 TOML 值转换器（支持简单类型和浅层嵌套）
-///
-/// 支持的类型转换：
-/// - String → TOML String
-/// - Number (i64) → TOML Integer
-/// - Number (f64) → TOML Float
-/// - Boolean → TOML Boolean
-/// - Array[简单类型] → TOML Array
-/// - Object → TOML Inline Table (仅字符串值)
-///
-/// 不支持的类型（返回 None）：
-/// - null
-/// - 深度嵌套对象
-/// - 混合类型数组
-fn json_value_to_toml_item(value: &Value, field_name: &str) -> Option<toml_edit::Item> {
-    use toml_edit::{Array, InlineTable, Item};
-
-    match value {
-        Value::String(s) => Some(toml_edit::value(s.as_str())),
-
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Some(toml_edit::value(i))
-            } else if let Some(f) = n.as_f64() {
-                Some(toml_edit::value(f))
-            } else {
-                log::warn!("跳过字段 '{field_name}': 无法转换的数字类型 {n}");
-                None
-            }
-        }
-
-        Value::Bool(b) => Some(toml_edit::value(*b)),
-
-        Value::Array(arr) => {
-            // 只支持简单类型的数组（字符串、数字、布尔）
-            let mut toml_arr = Array::default();
-            let mut all_same_type = true;
-
-            for item in arr {
-                match item {
-                    Value::String(s) => toml_arr.push(s.as_str()),
-                    Value::Number(n) if n.is_i64() => toml_arr.push(n.as_i64().unwrap()),
-                    Value::Number(n) if n.is_f64() => toml_arr.push(n.as_f64().unwrap()),
-                    Value::Bool(b) => toml_arr.push(*b),
-                    _ => {
-                        all_same_type = false;
-                        break;
-                    }
-                }
-            }
-
-            if all_same_type && !toml_arr.is_empty() {
-                Some(Item::Value(toml_edit::Value::Array(toml_arr)))
-            } else {
-                log::warn!("跳过字段 '{field_name}': 不支持的数组类型（混合类型或嵌套结构）");
-                None
-            }
-        }
-
-        Value::Object(obj) => {
-            // 只支持浅层对象（所有值都是字符串）→ TOML Inline Table
-            let mut inline_table = InlineTable::new();
-            let mut all_strings = true;
-
-            for (k, v) in obj {
-                if let Some(s) = v.as_str() {
-                    // InlineTable 需要 Value 类型，toml_edit::value() 返回 Item，需要提取内部的 Value
-                    inline_table.insert(k, s.into());
-                } else {
-                    all_strings = false;
-                    break;
-                }
-            }
-
-            if all_strings && !inline_table.is_empty() {
-                Some(Item::Value(toml_edit::Value::InlineTable(inline_table)))
-            } else {
-                log::warn!("跳过字段 '{field_name}': 对象值包含非字符串类型，建议使用子表语法");
-                None
-            }
-        }
-
-        Value::Null => {
-            log::debug!("跳过字段 '{field_name}': TOML 不支持 null 值");
-            None
-        }
-    }
-}
-
-/// Helper: 将 JSON MCP 服务器规范转换为 toml_edit::Table
-///
-/// 策略：
-/// 1. 核心字段（type, command, args, url, headers, env, cwd）使用强类型处理
-/// 2. 扩展字段（timeout、retry 等）通过白名单列表自动转换
-/// 3. 其他未知字段使用通用转换器尝试转换
-fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError> {
-    use toml_edit::{Array, Item, Table};
-
-    let mut t = Table::new();
-    let typ = spec.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    t["type"] = toml_edit::value(typ);
-
-    // 定义核心字段（已在下方处理，跳过通用转换）
-    let core_fields = match typ {
-        "stdio" => vec!["type", "command", "args", "env", "cwd"],
-        "http" | "sse" => vec!["type", "url", "headers", "http_headers"],
-        _ => vec!["type"],
-    };
-
-    // 定义扩展字段白名单（Codex 常见可选字段）
-    let extended_fields = [
-        // 通用字段
-        "timeout",
-        "timeout_ms",
-        "startup_timeout_ms",
-        "startup_timeout_sec",
-        "connection_timeout",
-        "read_timeout",
-        "debug",
-        "log_level",
-        "disabled",
-        // stdio 特有
-        "shell",
-        "encoding",
-        "working_dir",
-        "restart_on_exit",
-        "max_restart_count",
-        // http/sse 特有
-        "retry_count",
-        "max_retry_attempts",
-        "retry_delay",
-        "cache_tools_list",
-        "verify_ssl",
-        "insecure",
-        "proxy",
-    ];
-
-    // 1. 处理核心字段（强类型）
-    match typ {
-        "stdio" => {
-            let cmd = spec.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            t["command"] = toml_edit::value(cmd);
-
-            if let Some(args) = spec.get("args").and_then(|v| v.as_array()) {
-                let mut arr_v = Array::default();
-                for a in args.iter().filter_map(|x| x.as_str()) {
-                    arr_v.push(a);
-                }
-                if !arr_v.is_empty() {
-                    t["args"] = Item::Value(toml_edit::Value::Array(arr_v));
-                }
-            }
-
-            if let Some(cwd) = spec.get("cwd").and_then(|v| v.as_str()) {
-                if !cwd.trim().is_empty() {
-                    t["cwd"] = toml_edit::value(cwd);
-                }
-            }
-
-            if let Some(env) = spec.get("env").and_then(|v| v.as_object()) {
-                let mut env_tbl = Table::new();
-                for (k, v) in env.iter() {
-                    if let Some(s) = v.as_str() {
-                        env_tbl[&k[..]] = toml_edit::value(s);
-                    }
-                }
-                if !env_tbl.is_empty() {
-                    t["env"] = Item::Table(env_tbl);
-                }
-            }
-        }
-        "http" | "sse" => {
-            let url = spec.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            t["url"] = toml_edit::value(url);
-
-            if let Some(headers) = spec.get("headers").and_then(|v| v.as_object()) {
-                let mut h_tbl = Table::new();
-                for (k, v) in headers.iter() {
-                    if let Some(s) = v.as_str() {
-                        h_tbl[&k[..]] = toml_edit::value(s);
-                    }
-                }
-                if !h_tbl.is_empty() {
-                    t["http_headers"] = Item::Table(h_tbl);
-                }
-            }
-        }
-        _ => {}
-    }
-
-    // 2. 处理扩展字段和其他未知字段
-    if let Some(obj) = spec.as_object() {
-        for (key, value) in obj {
-            // 跳过已处理的核心字段
-            if core_fields.contains(&key.as_str()) {
-                continue;
-            }
-
-            // 尝试使用通用转换器
-            if let Some(toml_item) = json_value_to_toml_item(value, key) {
-                t[&key[..]] = toml_item;
-
-                // 未知扩展字段同样可能携带 token / secret，只记录字段名。
-                if extended_fields.contains(&key.as_str()) {
-                    log::debug!("已转换扩展字段 '{key}'（值已省略）");
-                } else {
-                    log::debug!("已转换自定义字段 '{key}'（值已省略）");
-                }
-            }
-        }
-    }
-
-    Ok(t)
-}
-
-/// 把单个 MCP server 表写入 `[mcp_servers]`，并保证该键是表。
-///
-/// `config.toml` 允许用户手工编辑。若 `mcp_servers` 是 inline table，
-/// `as_table_mut` 会误判为不可用；若它是标量，直接通过 IndexMut 写入会 panic。
-/// 与上游保持一致，在一个 doc 级辅助函数中统一处理这两种情况。
-fn upsert_mcp_server_table(
-    doc: &mut toml_edit::DocumentMut,
-    id: &str,
-    table: toml_edit::Table,
-) -> Result<(), AppError> {
-    if doc
-        .get_mut("mcp_servers")
-        .and_then(toml_edit::Item::as_table_like_mut)
-        .is_none()
-    {
-        if doc.get("mcp_servers").is_some_and(|item| !item.is_none()) {
-            log::warn!("config.toml 的 mcp_servers 不是表，已重置为空表");
-        }
-        doc["mcp_servers"] = toml_edit::table();
-    }
-
-    let servers = doc
-        .get_mut("mcp_servers")
-        .and_then(toml_edit::Item::as_table_like_mut)
-        .ok_or_else(|| AppError::McpValidation("config.toml 的 mcp_servers 不是表".to_string()))?;
-    servers.insert(id, toml_edit::Item::Table(table));
-    Ok(())
-}
-
-/// 从 `[mcp_servers]` 和历史错误格式 `[mcp.servers]` 中删除单个服务器。
-///
-/// 使用 `as_table_like_mut` 同时支持普通表与合法的 inline table，避免界面
-/// 报告删除成功但 live 配置仍保留该服务器。
-fn remove_mcp_server_from_doc(doc: &mut toml_edit::DocumentMut, id: &str) {
-    if let Some(item) = doc.get_mut("mcp_servers") {
-        let user_authored = !item.is_none();
-        match item.as_table_like_mut() {
-            Some(mcp_servers) => {
-                mcp_servers.remove(id);
-            }
-            None if user_authored => {
-                log::warn!("config.toml 的 mcp_servers 不是表，无法删除服务器 '{id}'");
-            }
-            None => {}
-        }
-    }
-
-    if let Some(mcp_table) = doc.get_mut("mcp").and_then(|item| item.as_table_like_mut()) {
-        if let Some(servers) = mcp_table
-            .get_mut("servers")
-            .and_then(|item| item.as_table_like_mut())
-        {
-            if servers.remove(id).is_some() {
-                log::warn!("从错误的 MCP 格式 [mcp.servers] 中清理了服务器 '{id}'");
-            }
-        }
-    }
-}
-
-/// Projects the complete managed Codex MCP state into an already prepared
-/// config document without touching the filesystem.
-pub(crate) fn project_managed_servers_to_codex_text(
-    base_text: &str,
-    servers: &HashMap<String, McpServer>,
-) -> Result<String, AppError> {
-    let mut text = base_text.to_string();
-    for server in servers.values() {
-        let mut doc = if text.trim().is_empty() {
-            toml_edit::DocumentMut::new()
-        } else {
-            text.parse::<toml_edit::DocumentMut>()
-                .map_err(|e| AppError::McpValidation(format!("解析 config.toml 失败: {e}")))?
-        };
-
-        if server.apps.is_enabled_for(&AppType::Codex) {
-            if let Some(mcp_item) = doc.get_mut("mcp") {
-                if let Some(table) = mcp_item.as_table_like_mut() {
-                    table.remove("servers");
-                }
-            }
-            let table = json_server_to_toml_table(&server.server)?;
-            upsert_mcp_server_table(&mut doc, &server.id, table)?;
-        } else {
-            remove_mcp_server_from_doc(&mut doc, &server.id);
-        }
-        text = doc.to_string();
-    }
-    Ok(text)
-}
-
-/// 将单个 MCP 服务器同步到 Codex live 配置
-/// 始终使用 Codex 官方格式 [mcp_servers]，并清理可能存在的错误格式 [mcp.servers]
-pub fn sync_single_server_to_codex(
-    _config: &MultiAppConfig,
-    id: &str,
-    server_spec: &Value,
-) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Codex) {
-        return Ok(());
-    }
-    // 读取现有的 config.toml
-    let config_path = crate::codex_config::get_codex_config_path();
-
-    let mut doc = if config_path.exists() {
-        let content =
-            std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-        // 解析失败必须报错而不是用空文档顶替：写回空文档会把用户
-        // config.toml 里的其它段落（model/model_providers/注释等）整体清空。
-        content
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| AppError::McpValidation(format!("解析 config.toml 失败: {e}")))?
-    } else {
-        toml_edit::DocumentMut::new()
-    };
-
-    // 清理可能存在的错误格式 [mcp.servers]
-    if let Some(mcp_item) = doc.get_mut("mcp") {
-        if let Some(tbl) = mcp_item.as_table_like_mut() {
-            if tbl.contains_key("servers") {
-                log::warn!("检测到错误的 MCP 格式 [mcp.servers]，正在清理并迁移到 [mcp_servers]");
-                tbl.remove("servers");
-            }
-        }
-    }
-
-    // 将 JSON 服务器规范转换为 TOML 表
-    let toml_table = json_server_to_toml_table(server_spec)?;
-    upsert_mcp_server_table(&mut doc, id, toml_table)?;
-
-    // 写回文件
-    let new_text = doc.to_string();
-    crate::config::write_text_file(&config_path, &new_text)?;
-
-    Ok(())
-}
-
-/// 从 Codex live 配置中移除单个 MCP 服务器
-/// 从正确的 [mcp_servers] 表中删除，同时清理可能存在于错误位置 [mcp.servers] 的数据
-pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Codex) {
-        return Ok(());
-    }
-    let config_path = crate::codex_config::get_codex_config_path();
-
-    if !config_path.exists() {
-        return Ok(()); // 文件不存在，无需删除
-    }
-
-    let content =
-        std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-
-    // 尝试解析现有配置，如果失败则直接返回（无法删除不存在的内容）
-    let mut doc = match content.parse::<toml_edit::DocumentMut>() {
-        Ok(doc) => doc,
-        Err(e) => {
-            log::warn!("解析 Codex config.toml 失败: {e}，跳过删除操作");
-            return Ok(());
-        }
-    };
-
-    remove_mcp_server_from_doc(&mut doc, id);
-
-    // 写回文件
-    let new_text = doc.to_string();
-    crate::config::write_text_file(&config_path, &new_text)?;
-
-    Ok(())
-}
-
-/// 将单个 MCP 服务器同步到 Gemini live 配置
-pub fn sync_single_server_to_gemini(
-    _config: &MultiAppConfig,
-    id: &str,
-    server_spec: &Value,
-) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Gemini) {
-        return Ok(());
-    }
-
-    // 读取现有的 MCP 配置
-    let current = crate::gemini_mcp::read_mcp_servers_map()?;
-
-    // 创建新的 HashMap，包含现有的所有服务器 + 当前要同步的服务器
-    let mut updated = current;
-    updated.insert(id.to_string(), server_spec.clone());
-
-    // 写回
-    crate::gemini_mcp::set_mcp_servers_map(&updated)
-}
-
-/// 从 Gemini live 配置中移除单个 MCP 服务器
-pub fn remove_server_from_gemini(id: &str) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Gemini) {
-        return Ok(());
-    }
-
-    // 读取现有的 MCP 配置
-    let mut current = crate::gemini_mcp::read_mcp_servers_map()?;
-
-    // 移除指定服务器
-    current.remove(id);
-
-    // 写回
-    crate::gemini_mcp::set_mcp_servers_map(&current)
-}
-
-/// 将单个 MCP 服务器同步到 OpenCode live 配置
-pub fn sync_single_server_to_opencode(
-    _config: &MultiAppConfig,
-    id: &str,
-    server_spec: &Value,
-) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::OpenCode) {
-        return Ok(());
-    }
-
-    let spec = convert_to_opencode_mcp_spec(server_spec)?;
-    crate::opencode_config::set_mcp_server(id, spec)
-}
-
-/// 从 OpenCode live 配置中移除单个 MCP 服务器
-pub fn remove_server_from_opencode(id: &str) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::OpenCode) {
-        return Ok(());
-    }
-
-    crate::opencode_config::remove_mcp_server(id)
-}
-
-// ============================================================================
-// Hermes MCP sync / remove / import
+// Hermes MCP import
 // ============================================================================
 //
 // Behavioural notes (aligned with upstream `mcp/hermes.rs`):
 // - Hermes has NO explicit `type` field; it infers `stdio` from `command`
 //   and `http` from `url`.
-// - Hermes carries extra per-server fields: `enabled` / `timeout` /
-//   `connect_timeout` / `tools` / `sampling` / `roots` / `auth`. These are
-//   preserved on merge-on-write and stripped on import.
-
-/// Hermes-private fields preserved on write and stripped on import.
-const HERMES_EXTRA_FIELDS: &[&str] = &[
-    "enabled",
-    "timeout",
-    "connect_timeout",
-    "tools",
-    "sampling",
-    "roots",
-    "auth",
-];
-
-fn should_sync_hermes_mcp() -> bool {
-    crate::hermes_config::get_hermes_dir().exists()
-}
-
-/// Convert CC Switch's unified MCP format to the Hermes YAML shape.
-fn convert_to_hermes_mcp_spec(spec: &Value) -> Result<Value, AppError> {
-    let obj = spec
-        .as_object()
-        .ok_or_else(|| AppError::McpValidation("MCP spec must be a JSON object".into()))?;
-
-    let typ = obj.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    let mut result = serde_json::Map::new();
-
-    match typ {
-        "stdio" => {
-            if let Some(command) = obj.get("command") {
-                result.insert("command".into(), command.clone());
-            }
-            if let Some(args) = obj.get("args") {
-                if args.is_array() && !args.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-                    result.insert("args".into(), args.clone());
-                }
-            }
-            if let Some(env) = obj.get("env") {
-                if env.is_object() && !env.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                    result.insert("env".into(), env.clone());
-                }
-            }
-        }
-        "sse" | "http" => {
-            if let Some(url) = obj.get("url") {
-                result.insert("url".into(), url.clone());
-            }
-            if let Some(headers) = obj.get("headers") {
-                if headers.is_object() && !headers.as_object().map(|o| o.is_empty()).unwrap_or(true)
-                {
-                    result.insert("headers".into(), headers.clone());
-                }
-            }
-        }
-        other => {
-            return Err(AppError::McpValidation(format!(
-                "Unknown MCP type: {other}"
-            )));
-        }
-    }
-
-    // Hermes expects an explicit `enabled` flag; default to true on write.
-    result.insert("enabled".into(), json!(true));
-
-    Ok(Value::Object(result))
-}
+// - Hermes-specific fields are stripped on import.
 
 /// Convert Hermes YAML shape back to CC Switch's unified format, stripping
 /// Hermes-private fields on the import path.
@@ -1575,80 +932,6 @@ fn convert_from_hermes_mcp_spec(id: &str, spec: &Value) -> Result<Value, AppErro
     }
 
     Ok(Value::Object(result))
-}
-
-/// Merge: core fields come from `new_spec`, Hermes-specific fields are
-/// preserved from `existing`.
-fn merge_hermes_spec(existing: &Value, new_spec: &Value) -> Value {
-    let mut result = serde_json::Map::new();
-
-    if let Some(existing_obj) = existing.as_object() {
-        for &field in HERMES_EXTRA_FIELDS {
-            if let Some(val) = existing_obj.get(field) {
-                result.insert(field.to_string(), val.clone());
-            }
-        }
-    }
-
-    if let Some(new_obj) = new_spec.as_object() {
-        for (key, val) in new_obj {
-            if HERMES_EXTRA_FIELDS.contains(&key.as_str()) && result.contains_key(key) {
-                continue; // Existing Hermes-private fields win.
-            }
-            result.insert(key.clone(), val.clone());
-        }
-    }
-
-    Value::Object(result)
-}
-
-/// Sync a single MCP server to the Hermes live config using
-/// merge-on-write semantics (preserves Hermes-private fields).
-pub fn sync_single_server_to_hermes(
-    _config: &MultiAppConfig,
-    id: &str,
-    server_spec: &Value,
-) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Hermes) {
-        return Ok(());
-    }
-    if !should_sync_hermes_mcp() {
-        return Ok(());
-    }
-
-    let hermes_spec = convert_to_hermes_mcp_spec(server_spec)?;
-    let id_owned = id.to_string();
-
-    crate::hermes_config::update_mcp_servers_yaml(|servers| {
-        let id_yaml = serde_yaml::Value::String(id_owned.clone());
-
-        let merged_json = if let Some(existing_yaml) = servers.get(&id_yaml) {
-            let existing_json = crate::hermes_config::yaml_to_json(existing_yaml)?;
-            merge_hermes_spec(&existing_json, &hermes_spec)
-        } else {
-            hermes_spec.clone()
-        };
-
-        let merged_yaml_value = crate::hermes_config::json_to_yaml(&merged_json)?;
-        servers.insert(id_yaml, merged_yaml_value);
-        Ok(())
-    })
-}
-
-/// Remove a single MCP server from the Hermes live config.
-pub fn remove_server_from_hermes(id: &str) -> Result<(), AppError> {
-    if !crate::sync_policy::should_sync_live(&AppType::Hermes) {
-        return Ok(());
-    }
-    if !should_sync_hermes_mcp() {
-        return Ok(());
-    }
-
-    let id_owned = id.to_string();
-    crate::hermes_config::update_mcp_servers_yaml(|servers| {
-        servers.remove(serde_yaml::Value::String(id_owned.clone()));
-        Ok(())
-    })
 }
 
 /// Import MCP servers from the Hermes `mcp_servers:` section into the
@@ -1745,239 +1028,8 @@ pub fn import_from_hermes(config: &mut MultiAppConfig) -> Result<usize, AppError
 }
 
 #[cfg(test)]
-mod codex_mcp_tests {
-    use super::*;
-
-    fn codex_server(id: &str, enabled: bool) -> McpServer {
-        McpServer {
-            id: id.to_string(),
-            name: id.to_string(),
-            server: json!({
-                "type": "stdio",
-                "command": "npx"
-            }),
-            apps: crate::app_config::McpApps {
-                claude: false,
-                codex: enabled,
-                gemini: false,
-                opencode: false,
-                hermes: false,
-            },
-            description: None,
-            homepage: None,
-            docs: None,
-            tags: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn managed_projection_updates_codex_mcp_without_touching_provider_config() {
-        let mut servers = HashMap::new();
-        servers.insert("keep".to_string(), codex_server("keep", true));
-        servers.insert("remove".to_string(), codex_server("remove", false));
-        let projected = project_managed_servers_to_codex_text(
-            r#"model_provider = "vendor"
-
-[model_providers.vendor]
-base_url = "https://example.com/v1"
-
-[mcp_servers.remove]
-command = "old"
-"#,
-            &servers,
-        )
-        .expect("project managed MCP");
-
-        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
-        assert_eq!(parsed["model_provider"].as_str(), Some("vendor"));
-        assert_eq!(
-            parsed["model_providers"]["vendor"]["base_url"].as_str(),
-            Some("https://example.com/v1")
-        );
-        assert_eq!(
-            parsed["mcp_servers"]["keep"]["command"].as_str(),
-            Some("npx")
-        );
-        assert!(parsed["mcp_servers"].get("remove").is_none());
-    }
-
-    #[test]
-    fn upsert_normalizes_non_table_mcp_servers_without_panicking() {
-        for malformed in [
-            "mcp_servers = \"x\"\n",
-            "mcp_servers = []\n",
-            "mcp_servers = 42\n",
-        ] {
-            let mut doc = malformed
-                .parse::<toml_edit::DocumentMut>()
-                .expect("fixture parses");
-            let table = json_server_to_toml_table(&json!({
-                "type": "stdio",
-                "command": "npx"
-            }))
-            .expect("server table");
-
-            upsert_mcp_server_table(&mut doc, "echo", table)
-                .unwrap_or_else(|error| panic!("upsert must not fail for {malformed:?}: {error}"));
-
-            let servers = doc
-                .get("mcp_servers")
-                .and_then(toml_edit::Item::as_table_like)
-                .expect("mcp_servers must be normalized to a table");
-            assert!(servers.contains_key("echo"));
-        }
-    }
-
-    #[test]
-    fn upsert_preserves_existing_servers_in_a_valid_table() {
-        let mut doc = "[mcp_servers.keep]\ncommand = \"keep\"\n"
-            .parse::<toml_edit::DocumentMut>()
-            .expect("fixture parses");
-        let table = json_server_to_toml_table(&json!({
-            "type": "stdio",
-            "command": "npx"
-        }))
-        .expect("server table");
-
-        upsert_mcp_server_table(&mut doc, "added", table).expect("upsert");
-
-        let servers = doc
-            .get("mcp_servers")
-            .and_then(toml_edit::Item::as_table_like)
-            .expect("table");
-        assert!(servers.contains_key("keep"), "existing server must survive");
-        assert!(servers.contains_key("added"));
-    }
-
-    #[test]
-    fn upsert_preserves_existing_servers_in_an_inline_table() {
-        let mut doc = "mcp_servers = { keep = { command = \"keep\" } }\n"
-            .parse::<toml_edit::DocumentMut>()
-            .expect("fixture parses");
-        let table = json_server_to_toml_table(&json!({
-            "type": "stdio",
-            "command": "npx"
-        }))
-        .expect("server table");
-
-        upsert_mcp_server_table(&mut doc, "added", table).expect("upsert");
-
-        let servers = doc
-            .get("mcp_servers")
-            .and_then(toml_edit::Item::as_table_like)
-            .expect("inline table");
-        assert!(servers.contains_key("keep"), "existing server must survive");
-        assert!(servers.contains_key("added"));
-    }
-
-    #[test]
-    fn remove_deletes_from_inline_table_form_too() {
-        let mut doc = "mcp_servers = { drop = { command = \"x\" }, keep = { command = \"y\" } }\n"
-            .parse::<toml_edit::DocumentMut>()
-            .expect("fixture parses");
-
-        remove_mcp_server_from_doc(&mut doc, "drop");
-
-        let servers = doc
-            .get("mcp_servers")
-            .and_then(toml_edit::Item::as_table_like)
-            .expect("mcp_servers must still be table-like");
-        assert!(!servers.contains_key("drop"));
-        assert!(servers.contains_key("keep"), "siblings must survive");
-    }
-
-    #[test]
-    fn remove_is_a_noop_on_non_table_mcp_servers() {
-        let mut doc = "mcp_servers = 42\n"
-            .parse::<toml_edit::DocumentMut>()
-            .expect("fixture parses");
-
-        remove_mcp_server_from_doc(&mut doc, "whatever");
-
-        assert_eq!(doc.to_string(), "mcp_servers = 42\n");
-    }
-
-    #[test]
-    fn http_headers_are_only_written_to_codex_http_headers() {
-        let table = json_server_to_toml_table(&json!({
-            "type": "http",
-            "url": "https://mcp.example.com",
-            "headers": {
-                "Authorization": "Bearer top-secret",
-                "X-Api-Key": "also-secret"
-            },
-            "timeout": 30
-        }))
-        .expect("server table");
-
-        let headers = table
-            .get("http_headers")
-            .and_then(toml_edit::Item::as_table)
-            .expect("Codex http_headers table should be written");
-        assert_eq!(
-            headers
-                .get("Authorization")
-                .and_then(toml_edit::Item::as_str),
-            Some("Bearer top-secret")
-        );
-        assert!(
-            table.get("headers").is_none(),
-            "legacy headers must not be emitted a second time"
-        );
-        assert_eq!(
-            table.get("timeout").and_then(toml_edit::Item::as_integer),
-            Some(30)
-        );
-    }
-}
-
-#[cfg(test)]
 mod hermes_mcp_tests {
     use super::*;
-
-    #[test]
-    fn convert_stdio_to_hermes() {
-        let spec = json!({
-            "type": "stdio",
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
-            "env": { "HOME": "/Users/test" }
-        });
-        let result = convert_to_hermes_mcp_spec(&spec).unwrap();
-        assert!(result.get("type").is_none());
-        assert_eq!(result["command"], "npx");
-        assert_eq!(result["args"][0], "-y");
-        assert_eq!(result["env"]["HOME"], "/Users/test");
-        assert_eq!(result["enabled"], true);
-    }
-
-    #[test]
-    fn convert_sse_to_hermes() {
-        let spec = json!({
-            "type": "sse",
-            "url": "https://example.com/mcp",
-            "headers": { "Authorization": "Bearer xxx" }
-        });
-        let result = convert_to_hermes_mcp_spec(&spec).unwrap();
-        assert!(result.get("type").is_none());
-        assert_eq!(result["url"], "https://example.com/mcp");
-        assert_eq!(result["headers"]["Authorization"], "Bearer xxx");
-        assert_eq!(result["enabled"], true);
-    }
-
-    #[test]
-    fn convert_stdio_empty_collections_are_omitted() {
-        let spec = json!({
-            "type": "stdio",
-            "command": "node",
-            "args": [],
-            "env": {}
-        });
-        let result = convert_to_hermes_mcp_spec(&spec).unwrap();
-        assert_eq!(result["command"], "node");
-        assert!(result.get("args").is_none());
-        assert!(result.get("env").is_none());
-    }
 
     #[test]
     fn convert_from_hermes_stdio_strips_extras() {
@@ -2023,50 +1075,5 @@ mod hermes_mcp_tests {
     fn convert_from_hermes_missing_endpoint_errors() {
         let spec = json!({ "enabled": true, "timeout": 30 });
         assert!(convert_from_hermes_mcp_spec("bad", &spec).is_err());
-    }
-
-    #[test]
-    fn merge_preserves_hermes_extra_fields() {
-        let existing = json!({
-            "command": "old-cmd",
-            "args": ["old-arg"],
-            "enabled": true,
-            "timeout": 30,
-            "connect_timeout": 10,
-            "tools": { "include": ["read_file"] },
-            "sampling": { "enabled": true }
-        });
-        let new_spec = json!({
-            "command": "new-cmd",
-            "args": ["new-arg"],
-            "env": { "KEY": "value" },
-            "enabled": true
-        });
-        let merged = merge_hermes_spec(&existing, &new_spec);
-        assert_eq!(merged["command"], "new-cmd");
-        assert_eq!(merged["args"][0], "new-arg");
-        assert_eq!(merged["env"]["KEY"], "value");
-        assert_eq!(merged["timeout"], 30);
-        assert_eq!(merged["connect_timeout"], 10);
-        assert_eq!(merged["tools"]["include"][0], "read_file");
-        assert_eq!(merged["sampling"]["enabled"], true);
-    }
-
-    #[test]
-    fn merge_preserves_auth_field_on_roundtrip() {
-        let existing = json!({
-            "url": "https://mcp.example.com",
-            "auth": "oauth",
-            "enabled": true
-        });
-        let new_spec = json!({
-            "url": "https://mcp.example.com/updated",
-            "headers": { "X-Trace": "abc" },
-            "enabled": true
-        });
-        let merged = merge_hermes_spec(&existing, &new_spec);
-        assert_eq!(merged["url"], "https://mcp.example.com/updated");
-        assert_eq!(merged["headers"]["X-Trace"], "abc");
-        assert_eq!(merged["auth"], "oauth");
     }
 }
