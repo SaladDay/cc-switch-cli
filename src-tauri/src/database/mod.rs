@@ -674,6 +674,7 @@ impl Database {
 
         db.create_tables()?;
         db.apply_schema_migrations()?;
+        db.ensure_shared_mcp_schema()?;
         // 存量库若仍是 auto_vacuum=NONE（老版本从未启用增量回收），在此切换到
         // INCREMENTAL 并整库 VACUUM 一次，回收历史累积的空闲页（issue #327：
         // proxy_request_logs 等本地表被 prune 删除后文件从不收缩，导致 WebDAV
@@ -800,9 +801,16 @@ impl Database {
             db_path: None,
         };
         db.create_tables()?;
+        db.ensure_shared_mcp_schema()?;
         db.ensure_model_pricing_seeded()?;
 
         Ok(db)
+    }
+
+    fn ensure_shared_mcp_schema(&self) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        cc_switch_store::ensure_mcp_server_schema(&mut conn)
+            .map_err(|error| AppError::Database(error.to_string()))
     }
 
     /// 检查 MCP 服务器表是否为空

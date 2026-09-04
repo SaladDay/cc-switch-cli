@@ -3,7 +3,7 @@
 //! 包含 Schema 迁移和基本功能的测试。
 
 use super::*;
-use crate::app_config::MultiAppConfig;
+use crate::app_config::{McpApps, McpServer, MultiAppConfig};
 use crate::prompt::Prompt;
 use crate::provider::{Provider, ProviderManager};
 use indexmap::IndexMap;
@@ -2183,12 +2183,14 @@ fn mcp_dao_roundtrip_preserves_unknown_grokbuild_enablement() {
 
     {
         let conn = db.conn.lock().expect("lock conn");
+        conn.execute("ALTER TABLE mcp_servers ADD COLUMN host_extension TEXT", [])
+            .expect("add host extension");
         conn.execute(
             "INSERT INTO mcp_servers (
                 id, name, server_config, tags,
                 enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild,
-                enabled_opencode, enabled_hermes
-            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 1, 0, 1)",
+                enabled_opencode, enabled_hermes, host_extension
+            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 1, 0, 1, 'keep')",
             params![
                 "remote-hermes",
                 "Remote Hermes",
@@ -2215,20 +2217,103 @@ fn mcp_dao_roundtrip_preserves_unknown_grokbuild_enablement() {
     server.description = Some("updated".to_string());
     db.save_mcp_server(&server).expect("save mcp server");
 
-    let hidden_enablement: (i64, i64) = {
+    let hidden_values: (i64, i64, String) = {
         let conn = db.conn.lock().expect("lock conn");
         conn.query_row(
-            "SELECT enabled_grokbuild, enabled_hermes FROM mcp_servers WHERE id = 'remote-hermes'",
+            "SELECT enabled_grokbuild, enabled_hermes, host_extension
+             FROM mcp_servers WHERE id = 'remote-hermes'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("read hidden enablement after save")
     };
     assert_eq!(
-        hidden_enablement,
-        (1, 1),
-        "save should preserve hidden flags"
+        hidden_values,
+        (1, 1, "keep".to_owned()),
+        "save should preserve hidden flags and host extensions"
     );
+}
+
+#[test]
+fn mcp_schema_contains_every_core_registry_selection() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+    for column in cc_switch_core::mcp_catalog_columns() {
+        assert!(
+            Database::has_column(&conn, "mcp_servers", column.as_str())
+                .expect("inspect MCP schema"),
+            "missing Core MCP selection column {}",
+            column.as_str()
+        );
+    }
+}
+
+#[test]
+fn mcp_dao_rejects_suppressed_existing_writes_but_allows_missing_delete() {
+    let db = Database::memory().expect("create memory db");
+    let mut server = McpServer {
+        id: "guarded".to_owned(),
+        name: "Guarded".to_owned(),
+        server: json!({"command": "echo"}),
+        apps: McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+    db.save_mcp_server(&server).expect("save MCP fixture");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute_batch(
+            "ALTER TABLE mcp_servers ADD COLUMN host_extension TEXT DEFAULT 'keep';
+             CREATE TRIGGER rewrite_mcp_host_field AFTER UPDATE ON mcp_servers
+             WHEN OLD.id = 'guarded'
+             BEGIN
+                 UPDATE mcp_servers SET host_extension = 'rewritten' WHERE id = NEW.id;
+             END;",
+        )
+        .expect("create update trigger");
+    }
+
+    server.description = Some("changed".to_owned());
+    assert!(db.save_mcp_server(&server).is_err());
+    assert_eq!(
+        db.get_all_mcp_servers()
+            .expect("read MCP servers")
+            .get("guarded")
+            .and_then(|server| server.description.as_deref()),
+        None
+    );
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        assert_eq!(
+            conn.query_row(
+                "SELECT host_extension FROM mcp_servers WHERE id = 'guarded'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read host extension"),
+            "keep"
+        );
+    }
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute_batch(
+            "DROP TRIGGER rewrite_mcp_host_field;
+             CREATE TRIGGER suppress_mcp_delete BEFORE DELETE ON mcp_servers
+             WHEN OLD.id = 'guarded'
+             BEGIN SELECT RAISE(IGNORE); END;",
+        )
+        .expect("create delete trigger");
+    }
+    assert!(db.delete_mcp_server("guarded").is_err());
+    assert!(db
+        .get_all_mcp_servers()
+        .expect("read MCP servers")
+        .contains_key("guarded"));
+    db.delete_mcp_server("missing")
+        .expect("deleting a missing MCP server remains successful");
 }
 
 #[test]
