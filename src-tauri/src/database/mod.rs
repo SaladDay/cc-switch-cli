@@ -809,9 +809,13 @@ impl Database {
 
     fn ensure_shared_core_catalog_schemas(&self) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
-        cc_switch_store::ensure_mcp_server_schema(&mut conn)
+        Self::ensure_shared_core_catalog_schemas_on_conn(&mut conn)
+    }
+
+    fn ensure_shared_core_catalog_schemas_on_conn(conn: &mut Connection) -> Result<(), AppError> {
+        cc_switch_store::ensure_mcp_server_schema(conn)
             .map_err(|error| AppError::Database(error.to_string()))?;
-        cc_switch_store::ensure_skill_schema(&mut conn)
+        cc_switch_store::ensure_skill_schema(conn)
             .map_err(|error| AppError::Database(error.to_string()))
     }
 

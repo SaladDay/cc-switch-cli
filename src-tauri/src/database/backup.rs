@@ -273,7 +273,7 @@ impl Database {
             source: e,
         })?;
         let temp_path = temp_file.path().to_path_buf();
-        let temp_conn =
+        let mut temp_conn =
             Connection::open(&temp_path).map_err(|e| AppError::Database(e.to_string()))?;
 
         // 在建表前把临时库设为增量 auto-vacuum。稍后用 SQLite Backup 把临时库整体
@@ -307,6 +307,7 @@ impl Database {
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
         Self::validate_imported_schema_contract(&temp_conn)?;
+        Self::ensure_shared_core_catalog_schemas_on_conn(&mut temp_conn)?;
         on_staging_ready()?;
 
         let backup_file_guard = lock_backup_file_operations()?;
@@ -2372,6 +2373,36 @@ mod tests {
                 .get::<_, i64>(0))?,
             0
         );
+        Ok(())
+    }
+
+    #[test]
+    fn import_upgrades_legacy_catalog_schemas_before_replacing_live_database(
+    ) -> Result<(), AppError> {
+        let legacy = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&legacy)?;
+        Database::apply_schema_migrations_on_conn(&legacy)?;
+        assert!(!Database::has_column(&legacy, "skills", "enabled_pi")?);
+        let sql = Database::dump_sql(&legacy, None)?;
+
+        let local_db = Database::memory()?;
+        local_db.import_sql_string(&sql)?;
+
+        let conn = crate::database::lock_conn!(local_db.conn);
+        for column in cc_switch_core::mcp_catalog_columns() {
+            assert!(
+                Database::has_column(&conn, "mcp_servers", column.as_str())?,
+                "missing Core MCP column {} after import",
+                column.as_str()
+            );
+        }
+        for column in cc_switch_core::skill_catalog_columns() {
+            assert!(
+                Database::has_column(&conn, "skills", column.as_str())?,
+                "missing Core Skill column {} after import",
+                column.as_str()
+            );
+        }
         Ok(())
     }
 
