@@ -3275,6 +3275,37 @@ impl Database {
         Ok(true)
     }
 
+    pub(super) fn ensure_skill_host_metadata_columns(conn: &Connection) -> Result<(), AppError> {
+        conn.execute("SAVEPOINT cli_skill_metadata_schema", [])
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let result = (|| {
+            for (column, definition) in [
+                ("repo_owner", "TEXT"),
+                ("repo_name", "TEXT"),
+                ("repo_branch", "TEXT DEFAULT 'main'"),
+                ("readme_url", "TEXT"),
+                ("installed_at", "INTEGER NOT NULL DEFAULT 0"),
+                ("content_hash", "TEXT"),
+                ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+            ] {
+                Self::add_column_if_missing(conn, "skills", column, definition)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn
+                .execute("RELEASE cli_skill_metadata_schema", [])
+                .map(|_| ())
+                .map_err(|error| AppError::Database(error.to_string())),
+            Err(error) => {
+                conn.execute("ROLLBACK TO cli_skill_metadata_schema", [])
+                    .ok();
+                conn.execute("RELEASE cli_skill_metadata_schema", []).ok();
+                Err(error)
+            }
+        }
+    }
+
     fn repair_proxy_request_logs_columns(conn: &Connection) -> Result<(), AppError> {
         if !Self::table_exists(conn, "proxy_request_logs")? {
             return Ok(());

@@ -21,7 +21,7 @@ use tokio::time::timeout;
 use crate::app_config::AppType;
 pub use crate::app_config::{InstalledSkill, SkillApps, UnmanagedSkill};
 use crate::config::{create_managed_config_dir_all, get_app_config_dir, write_json_file};
-use crate::database::Database;
+use crate::database::{Database, LEGACY_PI_SKILL_BACKFILL_SETTING};
 use crate::error::{format_skill_error, AppError};
 
 const SKILLS_INDEX_VERSION: u32 = 1;
@@ -833,10 +833,15 @@ impl SkillService {
 
     fn load_index_from_db(db: &Database) -> Result<SkillsIndex, AppError> {
         let repos = db.get_skill_repos()?;
-        let mut installed = db.get_all_installed_skills()?;
-        for skill in installed.values_mut() {
-            skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+        if db
+            .get_setting(LEGACY_PI_SKILL_BACKFILL_SETTING)?
+            .is_some_and(|value| value == "true")
+        {
+            db.backfill_legacy_pi_skill_selections(|directory| {
+                Self::skill_exists_in_app(directory, &AppType::Pi)
+            })?;
         }
+        let installed = db.get_all_installed_skills()?;
         let skills: HashMap<String, InstalledSkill> = installed
             .into_values()
             .map(|skill| (skill.directory.clone(), skill))
@@ -2670,11 +2675,10 @@ impl SkillService {
     /// Update one repository-backed Skill after an explicit user action.
     async fn update_skill(&self, skill_id: &str) -> Result<SkillUpdateOutcome, AppError> {
         let db = Database::init()?;
-        let mut skill = db
+        let skill = db
             .get_installed_skill(skill_id)?
             .ok_or_else(|| AppError::Message(format!("Skill not found: {skill_id}")))?;
         let directory = Self::require_valid_directory(&skill.directory)?;
-        skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
 
         let (owner, name) = match (&skill.repo_owner, &skill.repo_name) {
             (Some(owner), Some(name)) => (owner.clone(), name.clone()),
@@ -2715,10 +2719,9 @@ impl SkillService {
         // Remote I/O and inspection are complete. Serialize SSOT staging, the
         // final replacement, metadata write, and app refresh as one mutation.
         let _state_guard = skill_state_write_guard();
-        let mut current = db.get_installed_skill(skill_id)?.ok_or_else(|| {
+        let current = db.get_installed_skill(skill_id)?.ok_or_else(|| {
             AppError::Message(format!("Skill was removed during update: {skill_id}"))
         })?;
-        current.apps.pi = Self::skill_exists_in_app(&current.directory, &AppType::Pi);
         if current.directory != skill.directory
             || current.repo_owner != skill.repo_owner
             || current.repo_name != skill.repo_name
@@ -3072,6 +3075,11 @@ impl SkillService {
 
     pub fn uninstall(directory_or_id: &str) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
+        let db = Database::init()?;
+        if db.delete_malformed_skill_by_id(directory_or_id)? {
+            log::warn!("Skill {directory_or_id} 的存储行无法解码，已跳过文件清理并按 id 删除记录");
+            return Ok(());
+        }
         let index = Self::load_index_unlocked()?;
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
             return Err(AppError::Message(format!(
@@ -3112,7 +3120,6 @@ impl SkillService {
             }
         }
 
-        let db = Database::init()?;
         let _ = db.delete_skill(&record.id)?;
         Ok(())
     }
@@ -4567,6 +4574,86 @@ mod tests {
                 .expect("query removed Skill")
                 .is_none(),
             "poisoned database row must be deleted"
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_a_malformed_row_by_exact_id() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init().expect("initialize isolated database");
+        let healthy = poisoned_skill("healthy-id", "malformed");
+        db.save_skill(&healthy)
+            .expect("save colliding healthy Skill");
+        let healthy_directory = SkillService::get_ssot_dir()
+            .expect("resolve Skill store")
+            .join(&healthy.directory);
+        fs::create_dir_all(&healthy_directory).expect("create healthy Skill directory");
+        fs::write(healthy_directory.join("SKILL.md"), "healthy")
+            .expect("write healthy Skill manifest");
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute(
+                "INSERT INTO skills (id, name, description, directory)
+                 VALUES ('malformed', 'Malformed', x'80', 'broken')",
+                [],
+            )
+            .expect("insert malformed row");
+        }
+
+        SkillService::uninstall("malformed").expect("delete malformed row by id");
+
+        let conn = db.conn.lock().expect("lock database");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM skills WHERE id = 'malformed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count malformed rows"),
+            0
+        );
+        drop(conn);
+        assert!(
+            db.get_installed_skill(&healthy.id)
+                .expect("read healthy Skill")
+                .is_some(),
+            "exact malformed id must win over a healthy directory collision"
+        );
+        assert!(healthy_directory.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_pi_selection_is_backfilled_once_from_existing_deployment() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        let db = Database::init().expect("initialize isolated database");
+        let skill = poisoned_skill("legacy", "legacy");
+        db.save_skill(&skill).expect("save legacy Skill");
+        db.set_setting(LEGACY_PI_SKILL_BACKFILL_SETTING, "true")
+            .expect("mark Pi backfill pending");
+        let pi_skill = SkillService::get_app_skills_dir(&AppType::Pi)
+            .expect("resolve Pi Skills")
+            .join("legacy");
+        fs::create_dir_all(&pi_skill).expect("create existing Pi deployment");
+
+        let index = SkillService::load_index_from_database(&db).expect("load and backfill index");
+
+        assert!(index.skills["legacy"].apps.pi);
+        assert!(
+            db.get_installed_skill("legacy")
+                .expect("read persisted Skill")
+                .expect("legacy Skill exists")
+                .apps
+                .pi
+        );
+        assert_eq!(
+            db.get_setting(LEGACY_PI_SKILL_BACKFILL_SETTING)
+                .expect("read migration marker")
+                .as_deref(),
+            Some("false")
         );
     }
 

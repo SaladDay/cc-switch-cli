@@ -56,6 +56,46 @@ use std::time::Duration;
 const DB_BACKUP_RETAIN: usize = 10;
 const USAGE_ROLLUP_RETAIN_DAYS: i64 = 30;
 const USAGE_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
+pub(crate) const LEGACY_PI_SKILL_BACKFILL_SETTING: &str = "skills_pi_catalog_backfill_pending";
+
+fn sqlite_error_is_conflict(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(
+            rusqlite::ErrorCode::DatabaseBusy
+                | rusqlite::ErrorCode::DatabaseLocked
+                | rusqlite::ErrorCode::ConstraintViolation
+        )
+    )
+}
+
+pub(crate) fn shared_store_error(error: cc_switch_store::SharedStoreError) -> AppError {
+    let is_conflict = matches!(
+        &error,
+        cc_switch_store::SharedStoreError::ProviderWrite { .. }
+            | cc_switch_store::SharedStoreError::McpServerWrite { .. }
+            | cc_switch_store::SharedStoreError::McpNativeLinkWrite { .. }
+            | cc_switch_store::SharedStoreError::McpTransactionConflict
+            | cc_switch_store::SharedStoreError::SkillCatalogWrite { .. }
+    ) || matches!(
+        &error,
+        cc_switch_store::SharedStoreError::Database(source)
+            if sqlite_error_is_conflict(source)
+    );
+    if is_conflict {
+        AppError::Conflict(error.to_string())
+    } else {
+        AppError::Database(error.to_string())
+    }
+}
+
+pub(crate) fn sqlite_write_error(error: rusqlite::Error) -> AppError {
+    if sqlite_error_is_conflict(&error) {
+        AppError::Conflict(error.to_string())
+    } else {
+        AppError::Database(error.to_string())
+    }
+}
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
@@ -815,8 +855,33 @@ impl Database {
     fn ensure_shared_core_catalog_schemas_on_conn(conn: &mut Connection) -> Result<(), AppError> {
         cc_switch_store::ensure_mcp_server_schema(conn)
             .map_err(|error| AppError::Database(error.to_string()))?;
+        let pi_backfill_initialized = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",
+                [LEGACY_PI_SKILL_BACKFILL_SETTING],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        if !pi_backfill_initialized {
+            let has_legacy_skills = Self::table_exists(conn, "skills")?
+                && conn
+                    .query_row("SELECT EXISTS(SELECT 1 FROM skills)", [], |row| {
+                        row.get::<_, bool>(0)
+                    })
+                    .map_err(|error| AppError::Database(error.to_string()))?;
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+                (
+                    LEGACY_PI_SKILL_BACKFILL_SETTING,
+                    if has_legacy_skills { "true" } else { "false" },
+                ),
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        }
         cc_switch_store::ensure_skill_schema(conn)
-            .map_err(|error| AppError::Database(error.to_string()))
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        Self::ensure_skill_host_metadata_columns(conn)?;
+        Ok(())
     }
 
     /// 检查 MCP 服务器表是否为空

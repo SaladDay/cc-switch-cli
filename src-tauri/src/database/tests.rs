@@ -2259,6 +2259,104 @@ fn skill_schema_contains_every_core_registry_selection() {
             column.as_str()
         );
     }
+    assert_eq!(
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [LEGACY_PI_SKILL_BACKFILL_SETTING],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("read fresh-database Pi backfill marker"),
+        "false"
+    );
+}
+
+#[test]
+fn existing_core_minimal_skill_schema_is_extended_and_marks_pi_backfill_once() {
+    let db = Database::memory().expect("create memory db");
+    let mut conn = db.conn.lock().expect("lock conn");
+    let legacy_selections = cc_switch_core::skill_catalog_columns()
+        .map(|column| {
+            format!(
+                ", \"{}\" BOOLEAN NOT NULL DEFAULT 0",
+                column.as_str().replace('"', "\"\"")
+            )
+        })
+        .collect::<String>();
+    conn.execute_batch(&format!(
+        "DELETE FROM settings WHERE key = '{LEGACY_PI_SKILL_BACKFILL_SETTING}';
+         DROP TABLE skills;
+         CREATE TABLE skills (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL,
+             description TEXT,
+             directory TEXT NOT NULL
+             {legacy_selections}
+         );
+         INSERT INTO skills (id, name, directory)
+         VALUES ('legacy', 'Legacy', 'legacy');"
+    ))
+    .expect("create legacy Core-owned Skill schema");
+
+    Database::ensure_shared_core_catalog_schemas_on_conn(&mut conn)
+        .expect("extend Core schema for CLI");
+
+    for column in cc_switch_core::skill_catalog_columns() {
+        assert!(
+            Database::has_column(&conn, "skills", column.as_str())
+                .expect("inspect Core Skill selection"),
+            "missing Core Skill selection column {}",
+            column.as_str()
+        );
+    }
+    for host_column in [
+        "repo_owner",
+        "repo_name",
+        "repo_branch",
+        "readme_url",
+        "installed_at",
+        "content_hash",
+        "updated_at",
+    ] {
+        assert!(
+            Database::has_column(&conn, "skills", host_column).expect("inspect CLI Skill metadata"),
+            "missing CLI Skill metadata column {host_column}"
+        );
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [LEGACY_PI_SKILL_BACKFILL_SETTING],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("read legacy Pi backfill marker"),
+        "true"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT name || '|' || directory FROM skills WHERE id = 'legacy'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("read preserved Skill row"),
+        "Legacy|legacy"
+    );
+    conn.execute(
+        "UPDATE settings SET value = 'false' WHERE key = ?1",
+        [LEGACY_PI_SKILL_BACKFILL_SETTING],
+    )
+    .expect("complete Pi backfill");
+    Database::ensure_shared_core_catalog_schemas_on_conn(&mut conn)
+        .expect("reopen migrated Core schema");
+    assert_eq!(
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [LEGACY_PI_SKILL_BACKFILL_SETTING],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("read completed Pi backfill marker"),
+        "false",
+        "completed one-time backfill must not be rearmed"
+    );
 }
 
 #[test]
@@ -2359,7 +2457,10 @@ fn mcp_dao_rejects_suppressed_existing_writes_but_allows_missing_delete() {
     }
 
     server.description = Some("changed".to_owned());
-    assert!(db.save_mcp_server(&server).is_err());
+    assert!(matches!(
+        db.save_mcp_server(&server),
+        Err(AppError::Conflict(_))
+    ));
     assert_eq!(
         db.get_all_mcp_servers()
             .expect("read MCP servers")
@@ -2390,7 +2491,10 @@ fn mcp_dao_rejects_suppressed_existing_writes_but_allows_missing_delete() {
         )
         .expect("create delete trigger");
     }
-    assert!(db.delete_mcp_server("guarded").is_err());
+    assert!(matches!(
+        db.delete_mcp_server("guarded"),
+        Err(AppError::Conflict(_))
+    ));
     assert!(db
         .get_all_mcp_servers()
         .expect("read MCP servers")

@@ -3,7 +3,7 @@
 //! 提供 MCP 服务器的 CRUD 操作。
 
 use crate::app_config::{AppType, McpApps, McpServer};
-use crate::database::{lock_conn, Database};
+use crate::database::{lock_conn, shared_store_error, sqlite_write_error, Database};
 use crate::error::AppError;
 use cc_switch_store::{
     McpServerCatalogValues, McpServerFields, McpServerRow as SharedMcpServerRow,
@@ -11,14 +11,10 @@ use cc_switch_store::{
 };
 use indexmap::IndexMap;
 
-fn shared_store_error(error: cc_switch_store::SharedStoreError) -> AppError {
-    AppError::Database(error.to_string())
-}
-
 fn require_applied(outcome: McpServerWriteOutcome, action: &str) -> Result<(), AppError> {
     match outcome {
         McpServerWriteOutcome::Applied => Ok(()),
-        McpServerWriteOutcome::NotApplied => Err(AppError::Database(format!(
+        McpServerWriteOutcome::NotApplied => Err(AppError::Conflict(format!(
             "MCP server {action} was not applied"
         ))),
     }
@@ -107,9 +103,7 @@ impl Database {
         }
         .map_err(shared_store_error)?;
         require_applied(outcome, "save")?;
-        transaction
-            .commit()
-            .map_err(|error| AppError::Database(error.to_string()))?;
+        transaction.commit().map_err(sqlite_write_error)?;
         Ok(())
     }
 
@@ -126,9 +120,7 @@ impl Database {
                     .map_err(shared_store_error)?;
             require_applied(outcome, "delete")?;
         }
-        transaction
-            .commit()
-            .map_err(|error| AppError::Database(error.to_string()))?;
+        transaction.commit().map_err(sqlite_write_error)?;
         Ok(())
     }
 }

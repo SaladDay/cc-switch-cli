@@ -3,7 +3,7 @@
 //! 提供供应商（Provider）的 CRUD 操作。
 
 use crate::database::dao::providers_seed::{is_official_seed_id, OFFICIAL_SEEDS};
-use crate::database::{lock_conn, Database};
+use crate::database::{lock_conn, shared_store_error, sqlite_write_error, Database};
 use crate::error::AppError;
 use crate::provider::Provider;
 use cc_switch_store::{
@@ -13,14 +13,10 @@ use indexmap::IndexMap;
 use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 
-fn shared_store_error(error: cc_switch_store::SharedStoreError) -> AppError {
-    AppError::Database(error.to_string())
-}
-
 fn require_applied(outcome: ProviderWriteOutcome, action: &str) -> Result<(), AppError> {
     match outcome {
         ProviderWriteOutcome::Applied => Ok(()),
-        ProviderWriteOutcome::NotApplied => Err(AppError::Database(format!(
+        ProviderWriteOutcome::NotApplied => Err(AppError::Conflict(format!(
             "provider {action} was not applied"
         ))),
     }
@@ -91,8 +87,9 @@ impl Database {
         &self,
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
-        let conn = lock_conn!(self.conn);
-        let provider_rows = cc_switch_store::read_provider_rows(&conn, Some(app_type))
+        let mut conn = lock_conn!(self.conn);
+        let transaction = conn.transaction().map_err(sqlite_write_error)?;
+        let provider_rows = cc_switch_store::read_provider_rows(&transaction, Some(app_type))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut providers = IndexMap::new();
@@ -101,7 +98,7 @@ impl Database {
             let id = provider.id.clone();
 
             // 加载 endpoints
-            let mut stmt_endpoints = conn.prepare(
+            let mut stmt_endpoints = transaction.prepare(
                 "SELECT url, added_at FROM provider_endpoints WHERE provider_id = ?1 AND app_type = ?2 ORDER BY added_at ASC, url ASC"
             ).map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -134,6 +131,7 @@ impl Database {
             providers.insert(id, provider);
         }
 
+        transaction.commit().map_err(sqlite_write_error)?;
         Ok(providers)
     }
 
@@ -317,7 +315,7 @@ impl Database {
             }
         }
 
-        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        tx.commit().map_err(sqlite_write_error)?;
         Ok(())
     }
 
@@ -368,26 +366,8 @@ impl Database {
             ));
         }
 
-        if target_exists {
-            // The strict shared delete rejects implicit side effects. Remove CLI-owned
-            // dependents explicitly so the outer transaction retains the old cascade behavior.
-            for table in [
-                "provider_endpoints",
-                "provider_health",
-                "proxy_failover_live_snapshots",
-            ] {
-                tx.execute(
-                    &format!(
-                        "DELETE FROM {table}
-                         WHERE provider_id COLLATE BINARY = ?1 AND app_type COLLATE BINARY = ?2"
-                    ),
-                    params![id, app_type],
-                )
-                .map_err(|error| AppError::Database(error.to_string()))?;
-            }
-        }
         let outcome = match target.as_ref() {
-            Some(target) => cc_switch_store::delete_provider_if_unchanged(
+            Some(target) => cc_switch_store::delete_provider_with_host_cleanup_if_unchanged(
                 &mut tx,
                 id,
                 app_type,
@@ -399,8 +379,7 @@ impl Database {
         if target_exists {
             require_applied(outcome, "delete")?;
         }
-        tx.commit()
-            .map_err(|error| AppError::Database(error.to_string()))?;
+        tx.commit().map_err(sqlite_write_error)?;
         Ok(())
     }
 
@@ -443,7 +422,7 @@ impl Database {
             require_applied(outcome, "current-provider selection")?;
         }
 
-        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        tx.commit().map_err(sqlite_write_error)?;
         Ok(())
     }
 
@@ -475,8 +454,7 @@ impl Database {
         if target.is_some() {
             require_applied(outcome, "settings update")?;
         }
-        tx.commit()
-            .map_err(|error| AppError::Database(error.to_string()))?;
+        tx.commit().map_err(sqlite_write_error)?;
         Ok(())
     }
 
@@ -625,6 +603,110 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )?,
             0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_provider_allows_unknown_host_cleanup() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.save_provider("claude", &provider("deleted"))?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TABLE host_provider_binding (
+                    provider_id TEXT NOT NULL,
+                    app_type TEXT NOT NULL
+                 );
+                 INSERT INTO host_provider_binding VALUES ('deleted', 'claude');
+                 CREATE TRIGGER clean_host_provider_binding
+                 AFTER DELETE ON providers
+                 WHEN OLD.id = 'deleted' AND OLD.app_type = 'claude'
+                 BEGIN
+                    DELETE FROM host_provider_binding
+                    WHERE provider_id = OLD.id AND app_type = OLD.app_type;
+                 END;",
+            )?;
+        }
+
+        db.delete_provider("claude", "deleted")?;
+
+        let conn = lock_conn!(db.conn);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM host_provider_binding", [], |row| {
+                row.get::<_, i64>(0)
+            })?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_provider_rolls_back_dependent_trigger_catalog_rewrite() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.save_provider("claude", &provider("deleted"))?;
+        db.save_provider("claude", &provider("other"))?;
+        db.add_custom_endpoint("claude", "deleted", "https://edge.example.com")?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TRIGGER rewrite_provider_from_endpoint_cleanup
+                 AFTER DELETE ON provider_endpoints
+                 WHEN OLD.provider_id = 'deleted' AND OLD.app_type = 'claude'
+                 BEGIN
+                    UPDATE providers SET name = 'rewritten'
+                    WHERE id = 'other' AND app_type = 'claude';
+                 END;",
+            )?;
+        }
+
+        assert!(matches!(
+            db.delete_provider("claude", "deleted"),
+            Err(AppError::Conflict(_))
+        ));
+        assert!(db.get_provider_by_id("deleted", "claude")?.is_some());
+        assert_eq!(
+            db.get_provider_by_id("other", "claude")?
+                .expect("other provider remains")
+                .name,
+            "other"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_provider_reports_deferred_foreign_key_rejection_as_conflict() -> Result<(), AppError>
+    {
+        let db = Database::memory()?;
+        db.save_provider("claude", &provider("referenced"))?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TABLE deferred_provider_reference (
+                    provider_id TEXT NOT NULL,
+                    app_type TEXT NOT NULL,
+                    FOREIGN KEY (provider_id, app_type)
+                    REFERENCES providers(id, app_type)
+                    DEFERRABLE INITIALLY DEFERRED
+                 );
+                 INSERT INTO deferred_provider_reference
+                 VALUES ('referenced', 'claude');",
+            )?;
+        }
+
+        assert!(matches!(
+            db.delete_provider("claude", "referenced"),
+            Err(AppError::Conflict(_))
+        ));
+        assert!(db.get_provider_by_id("referenced", "claude")?.is_some());
+        let conn = lock_conn!(db.conn);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM deferred_provider_reference",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            1
         );
         Ok(())
     }
