@@ -33,6 +33,21 @@ impl McpApps {
         }
     }
 
+    /// Returns a selection only when this compatibility DTO owns its field.
+    pub(crate) fn catalog_selection(&self, app: &CoreAppType) -> Option<bool> {
+        match app {
+            CoreAppType::Claude => Some(self.claude),
+            CoreAppType::Codex => Some(self.codex),
+            CoreAppType::Gemini => Some(self.gemini),
+            CoreAppType::OpenCode => Some(self.opencode),
+            CoreAppType::Hermes => Some(self.hermes),
+            CoreAppType::ClaudeDesktop
+            | CoreAppType::GrokBuild
+            | CoreAppType::OpenClaw
+            | CoreAppType::Pi => None,
+        }
+    }
+
     /// 设置指定应用的启用状态
     pub fn set_enabled_for(&mut self, app: &AppType, enabled: bool) {
         match app {

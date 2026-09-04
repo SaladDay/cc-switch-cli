@@ -30,8 +30,7 @@ impl Database {
             Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_tables_on_conn(&conn)?;
         Self::apply_schema_migrations_on_conn(&conn)?;
-        cc_switch_store::ensure_mcp_native_link_schema(&mut conn)
-            .map_err(|error| AppError::Database(error.to_string()))?;
+        super::dao::mcp::ensure_mcp_store_schema(&mut conn)?;
 
         let mut tx = conn
             .transaction()

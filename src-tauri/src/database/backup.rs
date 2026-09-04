@@ -306,8 +306,7 @@ impl Database {
         // 补齐缺失表/索引并执行迁移
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
-        cc_switch_store::ensure_mcp_native_link_schema(&mut temp_conn)
-            .map_err(|error| AppError::Database(error.to_string()))?;
+        super::dao::mcp::ensure_mcp_store_schema(&mut temp_conn)?;
         Self::validate_imported_schema_contract(&temp_conn)?;
         on_staging_ready()?;
 

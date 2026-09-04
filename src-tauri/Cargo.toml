@@ -47,8 +47,8 @@ test-hooks = []
 
 [dependencies]
 # Core dependencies
-cc-switch-core = { git = "https://github.com/SaladDay/cc-switch-core", rev = "b7848b94d5b853d19d63ca01cd7ac1c43487f7bf" }
-cc-switch-store = { git = "https://github.com/SaladDay/cc-switch-core", rev = "b7848b94d5b853d19d63ca01cd7ac1c43487f7bf" }
+cc-switch-core = { git = "https://github.com/SaladDay/cc-switch-core", rev = "b450b744a4153584c98f37639e1372c6d33e21f9" }
+cc-switch-store = { git = "https://github.com/SaladDay/cc-switch-core", rev = "b450b744a4153584c98f37639e1372c6d33e21f9" }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }
 log = { version = "0.4", features = ["std"] }

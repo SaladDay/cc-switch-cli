@@ -6,7 +6,9 @@ use crate::app_config::AppType;
 use crate::app_config::{McpApps, McpServer};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use cc_switch_store::{McpServerRow, McpServerValues, McpServerWriteOutcome};
+use cc_switch_store::{
+    McpServerCatalogValues, McpServerFields, McpServerRow, McpServerWriteOutcome,
+};
 use indexmap::IndexMap;
 use rusqlite::params;
 use serde_json::Value;
@@ -46,11 +48,18 @@ fn require_applied(outcome: McpServerWriteOutcome) -> Result<(), AppError> {
     }
 }
 
+pub(crate) fn ensure_mcp_store_schema(
+    connection: &mut rusqlite::Connection,
+) -> Result<(), AppError> {
+    cc_switch_store::ensure_mcp_server_schema(connection).map_err(shared_store_error)?;
+    cc_switch_store::ensure_mcp_native_link_schema(connection).map_err(shared_store_error)
+}
+
 impl Database {
-    /// Initialize Core-owned MCP link state without changing the product schema version.
+    /// Initialize Core-owned MCP catalog and link state without changing the product schema version.
     pub(crate) fn ensure_mcp_native_link_schema(&self) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
-        cc_switch_store::ensure_mcp_native_link_schema(&mut conn).map_err(shared_store_error)
+        ensure_mcp_store_schema(&mut conn)
     }
 
     /// Merge one observed native MCP document into the shared catalog and
@@ -145,18 +154,13 @@ impl Database {
         for row in rows {
             let server = serde_json::from_str(&row.server_config).unwrap_or_default();
             let tags = serde_json::from_str(&row.tags).unwrap_or_default();
+            let apps = mcp_apps_from_shared_row(&row);
             let id = row.id;
             let server = McpServer {
                 id: id.clone(),
                 name: row.name,
                 server,
-                apps: McpApps {
-                    claude: row.enabled_claude != 0,
-                    codex: row.enabled_codex != 0,
-                    gemini: row.enabled_gemini != 0,
-                    opencode: row.enabled_opencode != 0,
-                    hermes: row.enabled_hermes != 0,
-                },
+                apps,
                 description: row.description,
                 homepage: row.homepage,
                 docs: row.docs,
@@ -177,44 +181,15 @@ impl Database {
 
     /// 保存 MCP 服务器
     pub fn save_mcp_server(&self, server: &McpServer) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
-        conn.execute(
-            "INSERT INTO mcp_servers (
-                id, name, server_config, description, homepage, docs, tags,
-                enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                server_config = excluded.server_config,
-                description = excluded.description,
-                homepage = excluded.homepage,
-                docs = excluded.docs,
-                tags = excluded.tags,
-                enabled_claude = excluded.enabled_claude,
-                enabled_codex = excluded.enabled_codex,
-                enabled_gemini = excluded.enabled_gemini,
-                enabled_opencode = excluded.enabled_opencode,
-                enabled_hermes = excluded.enabled_hermes",
-            params![
-                server.id,
-                server.name,
-                serde_json::to_string(&server.server).map_err(|e| AppError::Database(format!(
-                    "Failed to serialize server config: {e}"
-                )))?,
-                server.description,
-                server.homepage,
-                server.docs,
-                serde_json::to_string(&server.tags)
-                    .map_err(|e| AppError::Database(format!("Failed to serialize tags: {e}")))?,
-                server.apps.claude,
-                server.apps.codex,
-                server.apps.gemini,
-                server.apps.opencode,
-                server.apps.hermes,
-            ],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        Ok(())
+        let mut conn = lock_conn!(self.conn);
+        let mut transaction =
+            cc_switch_store::begin_immediate_transaction(&mut conn).map_err(shared_store_error)?;
+        let current = cc_switch_store::read_mcp_server_row(&transaction, &server.id)
+            .map_err(shared_store_error)?;
+        write_mcp_change(&mut transaction, current.as_ref(), Some(server))?;
+        transaction
+            .commit()
+            .map_err(|error| AppError::Database(error.to_string()))
     }
 
     /// 删除 MCP 服务器
@@ -459,19 +434,23 @@ fn mcp_server_from_shared_row(row: &McpServerRow) -> Result<McpServer, AppError>
         name: row.name.clone(),
         server: serde_json::from_str(&row.server_config)
             .map_err(|error| AppError::Database(format!("Invalid MCP server JSON: {error}")))?,
-        apps: McpApps {
-            claude: row.enabled_claude != 0,
-            codex: row.enabled_codex != 0,
-            gemini: row.enabled_gemini != 0,
-            opencode: row.enabled_opencode != 0,
-            hermes: row.enabled_hermes != 0,
-        },
+        apps: mcp_apps_from_shared_row(row),
         description: row.description.clone(),
         homepage: row.homepage.clone(),
         docs: row.docs.clone(),
         tags: serde_json::from_str(&row.tags)
             .map_err(|error| AppError::Database(format!("Invalid MCP tags JSON: {error}")))?,
     })
+}
+
+fn mcp_apps_from_shared_row(row: &McpServerRow) -> McpApps {
+    let mut apps = McpApps::default();
+    for app in AppType::all() {
+        if let Some(enabled) = row.enabled_for(&app.as_core()) {
+            apps.set_enabled_for(&app, enabled);
+        }
+    }
+    apps
 }
 
 fn row_matches_previous(
@@ -492,11 +471,7 @@ fn row_matches_previous(
         && row.homepage == previous.homepage
         && row.docs == previous.docs
         && tags == previous.tags
-        && (row.enabled_claude != 0) == previous.apps.claude
-        && (row.enabled_codex != 0) == previous.apps.codex
-        && (row.enabled_gemini != 0) == previous.apps.gemini
-        && (row.enabled_opencode != 0) == previous.apps.opencode
-        && (row.enabled_hermes != 0) == previous.apps.hermes)
+        && mcp_apps_from_shared_row(row) == previous.apps)
 }
 
 fn write_mcp_change(
@@ -510,28 +485,31 @@ fn write_mcp_change(
                 .map_err(|error| AppError::Database(error.to_string()))?;
             let tags = serde_json::to_string(&server.tags)
                 .map_err(|error| AppError::Database(error.to_string()))?;
-            let values = McpServerValues {
-                id: &server.id,
-                name: &server.name,
-                server_config: &server_config,
-                description: server.description.as_deref(),
-                homepage: server.homepage.as_deref(),
-                docs: server.docs.as_deref(),
-                tags: &tags,
-                enabled_claude: server.apps.claude,
-                enabled_codex: server.apps.codex,
-                enabled_gemini: server.apps.gemini,
-                enabled_grokbuild: current.is_some_and(|row| row.enabled_grokbuild != 0),
-                enabled_opencode: server.apps.opencode,
-                enabled_hermes: server.apps.hermes,
-            };
+            let values = McpServerCatalogValues::new(
+                McpServerFields {
+                    id: &server.id,
+                    name: &server.name,
+                    server_config: &server_config,
+                    description: server.description.as_deref(),
+                    homepage: server.homepage.as_deref(),
+                    docs: server.docs.as_deref(),
+                    tags: &tags,
+                },
+                |core_app| {
+                    server
+                        .apps
+                        .catalog_selection(core_app)
+                        .or_else(|| current.and_then(|row| row.enabled_for(core_app)))
+                        .unwrap_or(false)
+                },
+            );
             let outcome = match current {
-                Some(row) => cc_switch_store::update_mcp_server(
+                Some(row) => cc_switch_store::update_mcp_server_catalog(
                     transaction,
                     row.source_fingerprint(),
                     &values,
                 ),
-                None => cc_switch_store::insert_mcp_server(transaction, &values),
+                None => cc_switch_store::insert_mcp_server_catalog(transaction, &values),
             }
             .map_err(shared_store_error)?;
             require_applied(outcome)
@@ -592,6 +570,46 @@ mod tests {
             homepage: None,
             docs: None,
             tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn database_schema_contains_every_core_mcp_catalog_column() {
+        let database = Database::memory().expect("create database");
+        let connection = database.conn.lock().expect("lock database");
+
+        for column in cc_switch_core::mcp_catalog_columns() {
+            let count = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('mcp_servers') WHERE name = ?1",
+                    [column.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("inspect MCP catalog column");
+            assert_eq!(count, 1, "missing Core MCP column {}", column.as_str());
+        }
+    }
+
+    #[test]
+    fn compatibility_mcp_apps_own_only_their_serialized_fields() {
+        let apps = McpApps::default();
+
+        for app in [
+            cc_switch_core::AppType::Claude,
+            cc_switch_core::AppType::Codex,
+            cc_switch_core::AppType::Gemini,
+            cc_switch_core::AppType::OpenCode,
+            cc_switch_core::AppType::Hermes,
+        ] {
+            assert_eq!(apps.catalog_selection(&app), Some(false));
+        }
+        for app in [
+            cc_switch_core::AppType::ClaudeDesktop,
+            cc_switch_core::AppType::GrokBuild,
+            cc_switch_core::AppType::OpenClaw,
+            cc_switch_core::AppType::Pi,
+        ] {
+            assert_eq!(apps.catalog_selection(&app), None);
         }
     }
 
