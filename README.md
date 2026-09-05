@@ -168,6 +168,7 @@ cc-switch provider export <id>       # Export a Claude provider to a standalone 
 cc-switch provider stream-check <id> # Check provider stream health
 cc-switch start claude <id>          # Launch Claude with this provider without switching globally
 cc-switch start codex <id>           # Launch Codex with this provider without switching globally
+cc-switch start codex <id> --shared-sessions # Share persistent Codex history across providers
 cc-switch start claude <id> --dry-run # Preview the launch without starting Claude
 cc-switch auth list                  # List managed ChatGPT/Codex OAuth accounts
 cc-switch sessions list --all        # Review saved assistant sessions
@@ -189,6 +190,10 @@ cc-switch --app pi provider list        # Manage Pi providers
 ```
 
 Use `cc-switch start` when you want different providers in multiple terminals. It only affects the Claude or Codex session launched by that command; `provider switch` and `use` still change the global provider. In the TUI, select a provider on the Providers page and press `o` for the same behavior.
+
+On macOS/Linux, add `--shared-sessions` to `start codex` to share the configured Codex home's sessions, archived sessions, and SQLite history index. Each provider uses a persistent, private directory under that home's `.cc-switch-launches/`; these directories must remain in place because Codex records session paths through them. Different providers can run concurrently; a second shared launch of the same provider is rejected while the first is running. Codex's per-thread writer locks are shared too, so close an active session before resuming it from another provider. Login changes are saved back to that provider, while launch-specific configuration is kept out of the saved provider settings. Native `--model`, `resume`, and `fork` arguments are supported; `--config`, `--profile`, and `--oss` overrides are not supported in shared mode.
+
+Shared launches use the existing unified `custom` provider identifier without changing the global history setting. To include older official sessions, use the existing **Unified Codex session history** setting and its optional migration. Cross-provider continuation still depends on the upstream accepting the old conversation's content, including encrypted reasoning. The default temporary launch and the TUI `o` shortcut remain unchanged.
 
 See the "Features" section for full command list.
 

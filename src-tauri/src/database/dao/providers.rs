@@ -8,6 +8,7 @@ use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 impl Database {
@@ -460,6 +461,47 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// Shared Codex launches must not overwrite configuration edits or another
+    /// provider's login refresh when they capture credentials on exit.
+    pub(crate) fn update_codex_provider_auth(
+        &self,
+        provider_id: &str,
+        auth: &serde_json::Value,
+        expected_auth_source: &str,
+    ) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| AppError::Database(err.to_string()))?;
+        let settings: String = tx
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = 'codex'",
+                [provider_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| AppError::Database(err.to_string()))?;
+        let settings: serde_json::Value =
+            serde_json::from_str(&settings).map_err(|err| AppError::Database(err.to_string()))?;
+        let current_auth = settings
+            .get("auth")
+            .filter(|auth| auth.is_object())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if format!("{:x}", Sha256::digest(current_auth.to_string().as_bytes()))
+            != expected_auth_source
+        {
+            return Ok(());
+        }
+        tx.execute(
+            "UPDATE providers SET settings_config = json_set(settings_config, '$.auth', json(?1))
+                 WHERE id = ?2 AND app_type = 'codex'",
+            params![auth.to_string(), provider_id],
+        )
+        .map_err(|err| AppError::Database(err.to_string()))?;
+        tx.commit()
+            .map_err(|err| AppError::Database(err.to_string()))
     }
 
     /// 添加自定义端点

@@ -1,8 +1,35 @@
 use super::*;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
 impl ProviderService {
+    /// Shared launches derive their routing/storage settings at startup. Only
+    /// login changes belong back in the provider record; never save AppState's
+    /// full snapshot while other providers may be finishing concurrently.
+    pub(crate) fn capture_codex_launch_auth(
+        db: &crate::Database,
+        provider_id: &str,
+        codex_home: &Path,
+    ) -> Result<(), AppError> {
+        let auth_path = codex_home.join("auth.json");
+        let auth = if auth_path.exists() {
+            read_json_file::<Value>(&auth_path)?
+        } else {
+            serde_json::json!({})
+        };
+        if !auth.is_object() {
+            return Err(AppError::Config("Codex auth.json must be an object".into()));
+        }
+        let source_path = codex_home.join(".auth-source");
+        let source =
+            fs::read_to_string(&source_path).map_err(|err| AppError::io(&source_path, err))?;
+        if format!("{:x}", Sha256::digest(auth.to_string().as_bytes())) == source {
+            return Ok(());
+        }
+        db.update_codex_provider_auth(provider_id, &auth, &source)
+    }
+
     pub(crate) fn capture_codex_temp_launch_snapshot(
         state: &AppState,
         provider_id: &str,

@@ -3,6 +3,8 @@ use clap_complete::Shell;
 use std::io::Write;
 
 mod claude_temp_launch;
+#[cfg(unix)]
+mod codex_shared_launch;
 mod codex_temp_launch;
 pub mod commands;
 pub mod editor;
@@ -848,10 +850,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(!dry_run);
+                assert!(!shared_sessions);
                 assert!(native_args.is_empty());
             }
             _ => panic!("expected start codex command"),
@@ -876,10 +880,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(dry_run);
+                assert!(!shared_sessions);
                 assert_eq!(
                     native_args,
                     vec![OsString::from("--model"), OsString::from("gpt-5.4")]
@@ -908,10 +914,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(!dry_run);
+                assert!(!shared_sessions);
                 assert_eq!(
                     native_args,
                     vec![
