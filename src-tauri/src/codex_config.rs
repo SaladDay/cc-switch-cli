@@ -1133,30 +1133,12 @@ pub fn extract_codex_experimental_bearer_token(config_text: &str) -> Option<Stri
     if !config_text.contains("experimental_bearer_token") {
         return None;
     }
-    let doc = config_text.parse::<DocumentMut>().ok()?;
-    let provider_id = active_codex_model_provider_id(&doc);
-
-    let top_level_token = || {
-        doc.get("experimental_bearer_token")
-            .and_then(|item| item.as_str())
-    };
-    let token = match provider_id.as_deref() {
-        Some(id) if is_custom_codex_model_provider_id(id) => doc
-            .get("model_providers")
-            .and_then(|item| item.as_table())
-            .and_then(|table| table.get(id))
-            .and_then(|item| item.as_table())
-            .and_then(|table| table.get("experimental_bearer_token"))
-            .and_then(|item| item.as_str())
-            .or_else(top_level_token),
-        Some(_) => top_level_token(),
-        None => top_level_token(),
-    };
-
-    token
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
+    // Keep the CLI's accepted TOML syntax while Core owns token routing.
+    config_text.parse::<DocumentMut>().ok()?;
+    cc_switch_core::codex::read_experimental_bearer_token(
+        config_text,
+        cc_switch_core::codex::ProviderTableSyntax::TablesOnly,
+    )
 }
 
 fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result<String, AppError> {
@@ -1168,37 +1150,12 @@ fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result
         ));
     }
 
-    let mut doc = config_text
+    config_text
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
-    let Some(provider_id) = active_codex_model_provider_id(&doc) else {
-        doc["experimental_bearer_token"] = toml_edit::value(token);
-        return Ok(doc.to_string());
-    };
-
-    if !is_custom_codex_model_provider_id(&provider_id) {
-        // Reserved Codex provider IDs are owned by the CLI. Keep third-party
-        // bearer tokens at the top level so we do not shadow built-in tables.
-        doc["experimental_bearer_token"] = toml_edit::value(token);
-        return Ok(doc.to_string());
-    }
-
-    if let Some(model_providers) = doc
-        .get_mut("model_providers")
-        .and_then(|item| item.as_table_mut())
-    {
-        if let Some(provider_table) = model_providers
-            .get_mut(provider_id.as_str())
-            .and_then(|item| item.as_table_mut())
-        {
-            provider_table["experimental_bearer_token"] = toml_edit::value(token);
-            return Ok(doc.to_string());
-        }
-    }
-
-    doc["experimental_bearer_token"] = toml_edit::value(token);
-    Ok(doc.to_string())
+    cc_switch_core::codex::set_experimental_bearer_token(config_text, token)
+        .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))
 }
 
 pub fn remove_codex_experimental_bearer_token_if(
@@ -2577,6 +2534,65 @@ requires_openai_auth = true
             Some("")
         );
         assert!(settings.pointer("/auth/tokens/access_token").is_some());
+    }
+
+    #[test]
+    fn bearer_token_helpers_keep_table_syntax_and_error_policy() {
+        for (source, expected) in [
+            ("model_provider = 'vendor'\nexperimental_bearer_token = 'root'\n[model_providers.vendor]\nexperimental_bearer_token = ' scoped '", Some("scoped")),
+            ("model_provider = 'vendor'\nexperimental_bearer_token = 'root'\n[model_providers.vendor]\nexperimental_bearer_token = ' '", None),
+            ("model_provider = 'vendor'\nexperimental_bearer_token = 'root'\n[model_providers.vendor]\nexperimental_bearer_token = false", Some("root")),
+            ("model_provider = 'vendor'\nexperimental_bearer_token = 'root'\n[model_providers]\nvendor = {experimental_bearer_token = 'inline'}", Some("root")),
+            ("model_provider = 'vendor'\nmodel_providers = {vendor = {experimental_bearer_token = 'inline'}}", None),
+            ("model_provider = ' OPENAI '\nexperimental_bearer_token = 'root'\n[model_providers.OPENAI]\nexperimental_bearer_token = 'builtin'", Some("root")),
+            ("experimental_bearer_token = [", None),
+            ("experimental_bearer_token = \"\\e\"", None),
+        ] {
+            assert_eq!(extract_codex_experimental_bearer_token(source).as_deref(), expected, "{source}");
+        }
+
+        let inline = "model_provider = 'vendor'\nmodel_providers = {vendor = {experimental_bearer_token = 'inline'}}";
+        assert_eq!(
+            prepare_codex_provider_live_config(&json!({}), inline)
+                .expect("leave unsupported token syntax alone"),
+            inline
+        );
+        assert_eq!(
+            prepare_codex_provider_live_config(&json!({}), "invalid = [")
+                .expect("no token, no rewrite"),
+            "invalid = ["
+        );
+        assert!(matches!(
+            prepare_codex_provider_live_config(&json!({"OPENAI_API_KEY":"key"}), " "),
+            Err(AppError::Localized {
+                key: "provider.codex.config.missing",
+                ..
+            })
+        ));
+        for invalid in ["invalid = [", "experimental_bearer_token = \"\\e\""] {
+            let parse_error = invalid
+                .parse::<DocumentMut>()
+                .expect_err("invalid CLI TOML");
+            assert!(
+                matches!(prepare_codex_provider_live_config(&json!({"OPENAI_API_KEY":"key"}), invalid), Err(AppError::Message(message)) if message == format!("Invalid Codex config.toml: {parse_error}"))
+            );
+        }
+    }
+
+    #[test]
+    fn projected_bearer_tokens_remain_readable_by_the_cli_parser() {
+        for source in [
+            "model = 'example'\n",
+            "model_provider = 'vendor'\n[model_providers.vendor]\nbase_url = 'https://example.test'\n",
+        ] {
+            for token in ["quote\"slash\\", "multi\nline", "\u{1b}\u{0}\u{7}\u{7f}", "中文🔑"] {
+                let result = prepare_codex_provider_live_config(
+                    &json!({"OPENAI_API_KEY":token}), source,
+                ).expect("project token");
+                result.parse::<DocumentMut>().expect("Core output remains valid CLI TOML");
+                assert_eq!(extract_codex_experimental_bearer_token(&result).as_deref(), Some(token));
+            }
+        }
     }
 
     #[test]

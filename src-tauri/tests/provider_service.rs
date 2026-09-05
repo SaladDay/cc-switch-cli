@@ -4076,6 +4076,40 @@ fn provider_service_switch_codex_missing_auth_is_rejected() {
 }
 
 #[test]
+fn provider_service_switch_codex_preserves_token_routing_and_oauth() {
+    let _guard = lock_test_mutex();
+    for (native_config, scoped) in [
+        ("model_provider = 'vendor'\n[model_providers.vendor]\nbase_url = 'https://example.test'\n", true),
+        ("model_provider = 'vendor'\n[model_providers]\nvendor = {base_url = 'https://example.test', experimental_bearer_token = 'keep-inline'}\n", false),
+        ("model_provider = 'vendor'\nmodel_providers = {vendor = {base_url = 'https://example.test'}}\n", false),
+        ("model_provider = 'missing'\nmodel = 'example'\n", false),
+    ] {
+        reset_test_fs();
+        let _home = ensure_test_home();
+        enable_codex_official_auth_preservation();
+        let oauth = json!({"tokens":{"access_token":"existing-oauth"}});
+        write_codex_live_atomic(&oauth, Some("model = 'existing'\n")).expect("seed login state");
+        let mut config = MultiAppConfig::default();
+        let mut provider = codex_provider("next", "Next", " new-key ", "vendor", "https://example.test");
+        provider.settings_config["config"] = json!(native_config);
+        config.get_manager_mut(&AppType::Codex).expect("Codex manager").providers.insert(provider.id.clone(), provider);
+        let state = state_from_config(config);
+
+        ProviderService::switch(&state, AppType::Codex, "next").expect("switch provider");
+
+        let actual_auth: serde_json::Value = read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth");
+        assert_eq!(actual_auth, oauth);
+        let text = std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config");
+        let actual: toml::Value = toml::from_str(&text).expect("TOML");
+        let token = if scoped { &actual["model_providers"]["vendor"]["experimental_bearer_token"] } else { &actual["experimental_bearer_token"] };
+        assert_eq!(token.as_str(), Some("new-key"));
+        if native_config.contains("keep-inline") {
+            assert_eq!(actual["model_providers"]["vendor"]["experimental_bearer_token"].as_str(), Some("keep-inline"));
+        }
+    }
+}
+
+#[test]
 fn provider_service_switch_codex_official_keeps_snapshot_payload_policy() {
     let _guard = lock_test_mutex();
     for (auth, writes_snapshot) in [
