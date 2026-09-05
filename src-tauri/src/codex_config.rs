@@ -13,6 +13,9 @@ use toml_edit::DocumentMut;
 
 mod operation;
 
+#[cfg(test)]
+mod credential_tests;
+
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
@@ -290,16 +293,29 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
 }
 
 pub fn extract_codex_auth_api_key(auth: &Value) -> Option<String> {
-    auth.get("OPENAI_API_KEY")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .map(str::to_string)
+    cc_switch_core::codex::extract_auth_api_key(auth)
 }
 
 pub fn extract_codex_api_key(auth: Option<&Value>, config_text: Option<&str>) -> Option<String> {
-    auth.and_then(extract_codex_auth_api_key)
-        .or_else(|| config_text.and_then(extract_codex_experimental_bearer_token))
+    cc_switch_core::codex::extract_api_key(
+        auth,
+        codex_token_config_for_core(auth, config_text),
+        cc_switch_core::codex::ProviderTableSyntax::TablesOnly,
+    )
+}
+
+// Core owns credential selection; this gate preserves the CLI parser's grammar
+// and avoids parsing config when auth already supplies the preferred key.
+fn codex_token_config_for_core<'a>(
+    auth: Option<&Value>,
+    config: Option<&'a str>,
+) -> Option<&'a str> {
+    if auth.and_then(extract_codex_auth_api_key).is_some() {
+        return None;
+    }
+    config.filter(|text| {
+        text.contains("experimental_bearer_token") && text.parse::<DocumentMut>().is_ok()
+    })
 }
 
 /// Extract the upstream base URL from a Codex `config.toml` string.
@@ -378,13 +394,21 @@ pub fn sanitize_codex_third_party_auth(
     fallback_auth: Option<&Value>,
     fallback_config_text: Option<&str>,
 ) -> Value {
-    let key = extract_codex_api_key(auth, config_text)
-        .or_else(|| extract_codex_api_key(fallback_auth, fallback_config_text));
-    let mut sanitized = serde_json::Map::new();
-    if let Some(key) = key {
-        sanitized.insert("OPENAI_API_KEY".to_string(), Value::String(key));
-    }
-    Value::Object(sanitized)
+    let config_text = codex_token_config_for_core(auth, config_text);
+    let syntax = cc_switch_core::codex::ProviderTableSyntax::TablesOnly;
+    let fallback_config_text =
+        if cc_switch_core::codex::extract_api_key(auth, config_text, syntax).is_none() {
+            codex_token_config_for_core(fallback_auth, fallback_config_text)
+        } else {
+            None
+        };
+    cc_switch_core::codex::sanitize_third_party_auth(
+        auth,
+        config_text,
+        fallback_auth,
+        fallback_config_text,
+        syntax,
+    )
 }
 
 fn parse_codex_positive_u64(value: Option<&Value>) -> Option<u64> {
@@ -1115,7 +1139,7 @@ pub fn extract_codex_experimental_bearer_token(config_text: &str) -> Option<Stri
     )
 }
 
-fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result<String, AppError> {
+fn validate_codex_token_projection(config_text: &str) -> Result<(), AppError> {
     if config_text.trim().is_empty() {
         return Err(AppError::localized(
             "provider.codex.config.missing",
@@ -1128,8 +1152,7 @@ fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
-    cc_switch_core::codex::set_experimental_bearer_token(config_text, token)
-        .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))
+    Ok(())
 }
 
 pub fn remove_codex_experimental_bearer_token_if(
@@ -1140,41 +1163,15 @@ pub fn remove_codex_experimental_bearer_token_if(
         return Ok(config_text.to_string());
     }
 
-    let mut doc = config_text
+    config_text
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
-
-    if let Some(provider_id) = active_codex_model_provider_id(&doc) {
-        if let Some(provider_table) = doc
-            .get_mut("model_providers")
-            .and_then(|item| item.as_table_mut())
-            .and_then(|table| table.get_mut(provider_id.as_str()))
-            .and_then(|item| item.as_table_mut())
-        {
-            let should_remove = provider_table
-                .get("experimental_bearer_token")
-                .and_then(|item| item.as_str())
-                .map(str::trim)
-                .is_some_and(&predicate);
-            if should_remove {
-                provider_table.remove("experimental_bearer_token");
-            }
-        }
-    }
-
-    let should_remove_top_level = doc
-        .get("experimental_bearer_token")
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .is_some_and(&predicate);
-    if should_remove_top_level {
-        doc.as_table_mut().remove("experimental_bearer_token");
-    }
-    Ok(doc.to_string())
-}
-
-fn remove_codex_experimental_bearer_token(config_text: &str) -> Result<String, AppError> {
-    remove_codex_experimental_bearer_token_if(config_text, |_| true)
+    cc_switch_core::codex::remove_experimental_bearer_token_if(
+        config_text,
+        cc_switch_core::codex::ProviderTableSyntax::TablesOnly,
+        predicate,
+    )
+    .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))
 }
 
 /// Read the current Codex live settings as a `{ auth, config }` object.
@@ -1462,13 +1459,16 @@ pub fn prepare_codex_provider_live_config(
     auth: &Value,
     config_text: &str,
 ) -> Result<String, AppError> {
-    let token = extract_codex_auth_api_key(auth)
-        .or_else(|| extract_codex_experimental_bearer_token(config_text));
-
-    Ok(match token {
-        Some(token) => set_codex_experimental_bearer_token(config_text, &token)?,
-        None => config_text.to_string(),
-    })
+    if extract_codex_api_key(Some(auth), Some(config_text)).is_none() {
+        return Ok(config_text.to_string());
+    }
+    validate_codex_token_projection(config_text)?;
+    cc_switch_core::codex::prepare_provider_live_config_with_syntax(
+        auth,
+        config_text,
+        cc_switch_core::codex::ProviderTableSyntax::TablesOnly,
+    )
+    .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))
 }
 
 /// During DB backfill, lift a live `experimental_bearer_token` back into
@@ -1482,35 +1482,20 @@ pub fn restore_codex_provider_token_for_backfill(
     settings: &mut Value,
     template_settings: &Value,
 ) -> Result<(), AppError> {
-    let Some(config_text) = settings
+    if settings
         .get("config")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-    else {
+        .and_then(Value::as_str)
+        .and_then(extract_codex_experimental_bearer_token)
+        .is_none()
+    {
         return Ok(());
-    };
-
-    let Some(token) = extract_codex_experimental_bearer_token(&config_text) else {
-        return Ok(());
-    };
-
-    let cleaned_config = remove_codex_experimental_bearer_token(&config_text)?;
-
-    if let Some(obj) = settings.as_object_mut() {
-        obj.insert("config".to_string(), Value::String(cleaned_config));
-
-        let mut auth = template_settings
-            .get("auth")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        if let Some(auth_obj) = auth.as_object_mut() {
-            auth_obj.insert("OPENAI_API_KEY".to_string(), Value::String(token));
-        }
-        obj.insert("auth".to_string(), auth);
     }
-
-    Ok(())
+    cc_switch_core::codex::restore_provider_token_for_backfill(
+        settings,
+        template_settings,
+        cc_switch_core::codex::ProviderTableSyntax::TablesOnly,
+    )
+    .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))
 }
 
 pub fn restore_codex_settings_for_backfill(
