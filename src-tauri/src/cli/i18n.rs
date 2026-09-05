@@ -2300,6 +2300,46 @@ pub mod texts {
         }
     }
 
+    pub fn tui_codex_reasoning_levels_header() -> &'static str {
+        if is_chinese() {
+            "档位"
+        } else {
+            "Levels"
+        }
+    }
+
+    pub fn tui_codex_reasoning_levels() -> &'static str {
+        if is_chinese() {
+            "推理档位"
+        } else {
+            "Reasoning Levels"
+        }
+    }
+
+    pub fn tui_codex_default_reasoning_header() -> &'static str {
+        if is_chinese() {
+            "默认"
+        } else {
+            "Default"
+        }
+    }
+
+    pub fn tui_codex_default_reasoning_level() -> &'static str {
+        if is_chinese() {
+            "默认推理档位"
+        } else {
+            "Default Reasoning Level"
+        }
+    }
+
+    pub fn tui_codex_reasoning_auto() -> &'static str {
+        if is_chinese() {
+            "自动"
+        } else {
+            "Auto"
+        }
+    }
+
     pub fn tui_codex_model_catalog_model_prompt() -> &'static str {
         if is_chinese() {
             "模型 ID"

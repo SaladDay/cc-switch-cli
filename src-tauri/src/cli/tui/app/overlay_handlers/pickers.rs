@@ -78,6 +78,71 @@ fn session_project_option_index(
 }
 
 impl App {
+    fn handle_codex_reasoning_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let (selected, count) = match &mut self.overlay {
+            Overlay::CodexReasoningLevelsPicker {
+                selected, checked, ..
+            } => (selected, checked.len()),
+            Overlay::CodexDefaultReasoningPicker {
+                selected, options, ..
+            } => (selected, options.len()),
+            _ => return None,
+        };
+        match key.code {
+            KeyCode::Up => *selected = selected.saturating_sub(1),
+            KeyCode::Down => *selected = (*selected + 1).min(count.saturating_sub(1)),
+            KeyCode::Char(' ') => {
+                if let Overlay::CodexReasoningLevelsPicker {
+                    selected, checked, ..
+                } = &mut self.overlay
+                {
+                    if let Some(enabled) = checked.get_mut(*selected) {
+                        *enabled = !*enabled;
+                    }
+                }
+            }
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Enter => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    match &self.overlay {
+                        Overlay::CodexReasoningLevelsPicker { row, checked, .. } => {
+                            if let Some(model) = provider.codex_model_catalog.get_mut(*row) {
+                                model.reasoning_levels = form::CODEX_REASONING_LEVELS
+                                    .iter()
+                                    .zip(checked)
+                                    .filter(|(_, enabled)| **enabled)
+                                    .map(|(level, _)| (*level).to_string())
+                                    .collect();
+                                if !model
+                                    .reasoning_levels
+                                    .contains(&model.default_reasoning_level)
+                                {
+                                    model.default_reasoning_level.clear();
+                                }
+                            }
+                        }
+                        Overlay::CodexDefaultReasoningPicker {
+                            row,
+                            selected,
+                            options,
+                        } => {
+                            if let (Some(model), Some(level)) = (
+                                provider.codex_model_catalog.get_mut(*row),
+                                options.get(*selected),
+                            ) {
+                                model.default_reasoning_level.clone_from(level);
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                self.overlay = Overlay::None;
+            }
+            _ => {}
+        }
+        Some(Action::None)
+    }
+
     pub(super) fn handle_picker_overlay_key(
         &mut self,
         key: KeyEvent,
@@ -90,6 +155,9 @@ impl App {
             return Some(action);
         }
         if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
+            return Some(action);
+        }
+        if let Some(action) = self.handle_codex_reasoning_picker_key(key) {
             return Some(action);
         }
         if let Some(action) = self.handle_user_agent_picker_key(key) {

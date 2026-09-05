@@ -1206,6 +1206,45 @@ impl App {
             form::CodexModelCatalogField::ContextWindow => {
                 texts::tui_codex_model_catalog_context_prompt()
             }
+            form::CodexModelCatalogField::ReasoningLevels
+            | form::CodexModelCatalogField::DefaultReasoningLevel => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+                    return;
+                };
+                let Some(index) = row else { return };
+                let Some(model) = provider.codex_model_catalog.get(index) else {
+                    return;
+                };
+                let checked = form::CODEX_REASONING_LEVELS
+                    .map(|level| model.reasoning_levels.iter().any(|value| value == level));
+                self.overlay = if field == form::CodexModelCatalogField::ReasoningLevels {
+                    Overlay::CodexReasoningLevelsPicker {
+                        row: index,
+                        selected: 0,
+                        checked,
+                    }
+                } else {
+                    let options: Vec<String> = std::iter::once(String::new())
+                        .chain(
+                            form::CODEX_REASONING_LEVELS
+                                .iter()
+                                .zip(checked)
+                                .filter(|(_, enabled)| *enabled)
+                                .map(|(level, _)| (*level).to_string()),
+                        )
+                        .collect();
+                    let selected = options
+                        .iter()
+                        .position(|level| level == &model.default_reasoning_level)
+                        .unwrap_or(0);
+                    Overlay::CodexDefaultReasoningPicker {
+                        row: index,
+                        selected,
+                        options,
+                    }
+                };
+                return;
+            }
         };
         self.overlay = Overlay::TextInput(TextInputState {
             title: texts::tui_codex_model_catalog().to_string(),

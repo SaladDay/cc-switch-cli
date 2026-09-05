@@ -1211,6 +1211,8 @@ fn render_codex_model_catalog_inline(
         Cell::from(cell_pad(texts::tui_codex_model_catalog_model_header())),
         Cell::from(cell_pad(texts::tui_codex_model_catalog_display_header())),
         Cell::from(cell_pad(texts::tui_codex_model_catalog_context_header())),
+        Cell::from(cell_pad(texts::tui_codex_reasoning_levels_header())),
+        Cell::from(cell_pad(texts::tui_codex_default_reasoning_header())),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -1229,6 +1231,12 @@ fn render_codex_model_catalog_inline(
         let model = bounded_trimmed_text_for_display(&row.model);
         let display_name = bounded_trimmed_text_for_display(&row.display_name);
         let context_window = codex_model_catalog_context_for_display(&row.context_window);
+        let levels = codex_model_catalog_reasoning_for_display(row);
+        let default = if row.default_reasoning_level.is_empty() {
+            texts::tui_codex_reasoning_auto().to_string()
+        } else {
+            bounded_trimmed_text_for_display(&row.default_reasoning_level)
+        };
         let cell = |value: &str, field: super::form::CodexModelCatalogField| {
             if active {
                 codex_model_catalog_cell(value, idx, selected_idx, field, selected_field, theme)
@@ -1246,15 +1254,25 @@ fn render_codex_model_catalog_inline(
                 &context_window,
                 super::form::CodexModelCatalogField::ContextWindow,
             ),
+            cell(
+                &levels,
+                super::form::CodexModelCatalogField::ReasoningLevels,
+            ),
+            cell(
+                &default,
+                super::form::CodexModelCatalogField::DefaultReasoningLevel,
+            ),
         ])
     });
 
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(45),
-            Constraint::Percentage(35),
+            Constraint::Percentage(24),
             Constraint::Percentage(20),
+            Constraint::Length(9),
+            Constraint::Fill(1),
+            Constraint::Length(8),
         ],
     )
     .header(header)
@@ -1313,6 +1331,8 @@ fn render_codex_model_catalog_form(
         Cell::from(cell_pad(texts::tui_codex_model_catalog_model_header())),
         Cell::from(texts::tui_codex_model_catalog_display_header()),
         Cell::from(texts::tui_codex_model_catalog_context_header()),
+        Cell::from(cell_pad(texts::tui_codex_reasoning_levels_header())),
+        Cell::from(cell_pad(texts::tui_codex_default_reasoning_header())),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -1331,6 +1351,12 @@ fn render_codex_model_catalog_form(
         let model = bounded_trimmed_text_for_display(&row.model);
         let display_name = bounded_trimmed_text_for_display(&row.display_name);
         let context_window = codex_model_catalog_context_for_display(&row.context_window);
+        let levels = codex_model_catalog_reasoning_for_display(row);
+        let default = if row.default_reasoning_level.is_empty() {
+            texts::tui_codex_reasoning_auto().to_string()
+        } else {
+            bounded_trimmed_text_for_display(&row.default_reasoning_level)
+        };
         Row::new(vec![
             codex_model_catalog_cell(
                 &model,
@@ -1356,21 +1382,51 @@ fn render_codex_model_catalog_form(
                 selected_field,
                 theme,
             ),
+            codex_model_catalog_cell(
+                &levels,
+                idx,
+                selected_idx,
+                super::form::CodexModelCatalogField::ReasoningLevels,
+                selected_field,
+                theme,
+            ),
+            codex_model_catalog_cell(
+                &default,
+                idx,
+                selected_idx,
+                super::form::CodexModelCatalogField::DefaultReasoningLevel,
+                selected_field,
+                theme,
+            ),
         ])
     });
 
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(45),
-            Constraint::Percentage(35),
+            Constraint::Percentage(24),
             Constraint::Percentage(20),
+            Constraint::Length(9),
+            Constraint::Fill(1),
+            Constraint::Length(8),
         ],
     )
     .header(header)
     .block(Block::default().borders(Borders::NONE));
 
     frame.render_widget(table, table_area);
+}
+
+fn codex_model_catalog_reasoning_for_display(row: &super::form::CodexModelCatalogRow) -> String {
+    if row.reasoning_levels.is_empty() {
+        return "-".to_string();
+    }
+    row.reasoning_levels
+        .iter()
+        .take(super::form::CODEX_REASONING_LEVELS.len())
+        .map(|level| bounded_trimmed_text_for_display(level))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn codex_model_catalog_context_for_display(raw: &str) -> String {
