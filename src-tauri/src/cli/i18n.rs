@@ -2364,11 +2364,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_claude_quick_config_summary(enabled: usize) -> String {
+    pub fn tui_claude_quick_config_summary(enabled: usize, total: usize) -> String {
         if is_chinese() {
-            format!("已启用 {}/4", enabled)
+            format!("已启用 {}/{}", enabled, total)
         } else {
-            format!("{}/4 enabled", enabled)
+            format!("{}/{} enabled", enabled, total)
         }
     }
 

@@ -1990,9 +1990,10 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::ClaudeModelConfig => {
             texts::tui_claude_model_config_summary(provider.claude_model_configured_count())
         }
-        ProviderAddField::ClaudeQuickConfig => {
-            texts::tui_claude_quick_config_summary(provider.claude_quick_config_enabled_count())
-        }
+        ProviderAddField::ClaudeQuickConfig => texts::tui_claude_quick_config_summary(
+            provider.claude_quick_config_enabled_count(),
+            provider.claude_quick_config_fields().len(),
+        ),
         ProviderAddField::CodexQuickConfig => texts::tui_codex_quick_config_summary(
             provider.codex_quick_config_enabled_count(),
             provider.codex_quick_config_fields().len(),
