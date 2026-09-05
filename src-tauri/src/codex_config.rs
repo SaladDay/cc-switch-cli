@@ -360,50 +360,12 @@ pub fn extract_codex_base_url(config_text: &str) -> Option<String> {
 }
 
 pub fn codex_auth_has_login_material(auth: &Value) -> bool {
-    let Some(obj) = auth.as_object() else {
-        return false;
-    };
-
-    obj.iter().any(|(key, value)| {
-        if key == "auth_mode" {
-            return false;
-        }
-
-        if key == "OPENAI_API_KEY" {
-            return value
-                .as_str()
-                .map(str::trim)
-                .is_some_and(|token| !token.is_empty());
-        }
-
-        match value {
-            Value::Null => false,
-            Value::String(text) => !text.trim().is_empty(),
-            Value::Array(items) => !items.is_empty(),
-            Value::Object(map) => !map.is_empty(),
-            _ => true,
-        }
-    })
+    // Retain the CLI's snapshot payload policy, including opaque metadata.
+    cc_switch_core::codex::observe_auth(auth).has_payload()
 }
 
 pub fn codex_auth_has_oauth_login_material(auth: &Value) -> bool {
-    let Some(obj) = auth.as_object() else {
-        return false;
-    };
-
-    obj.iter().any(|(key, value)| {
-        if key == "auth_mode" || key == "OPENAI_API_KEY" {
-            return false;
-        }
-
-        match value {
-            Value::Null => false,
-            Value::String(text) => !text.trim().is_empty(),
-            Value::Array(items) => !items.is_empty(),
-            Value::Object(map) => !map.is_empty(),
-            _ => true,
-        }
-    })
+    cc_switch_core::codex::observe_auth(auth).has_non_key_payload()
 }
 
 pub fn should_restore_codex_provider_token_for_backfill(
@@ -2085,6 +2047,24 @@ mod tests {
     use std::env;
     use std::ffi::OsString;
     use tempfile::TempDir;
+
+    #[test]
+    fn auth_payload_predicates_keep_existing_snapshot_semantics() {
+        for (auth, any, oauth) in [
+            (Value::Null, false, false),
+            (json!({"auth_mode":"chatgpt"}), false, false),
+            (json!({"OPENAI_API_KEY":" test-key "}), true, false),
+            (json!({"OPENAI_API_KEY":42}), false, false),
+            (json!({"last_refresh":"2026-09-05"}), true, true),
+            (json!({"tokens":{}}), false, false),
+            (json!({"tokens":{"unknown":"opaque"}}), true, true),
+            (json!({"personal_access_token":false}), true, true),
+            (json!({"future_auth":[]}), false, false),
+        ] {
+            assert_eq!(codex_auth_has_login_material(&auth), any, "{auth}");
+            assert_eq!(codex_auth_has_oauth_login_material(&auth), oauth, "{auth}");
+        }
+    }
 
     struct CodexHomeEnvGuard {
         original: Option<OsString>,

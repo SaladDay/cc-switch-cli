@@ -4076,6 +4076,55 @@ fn provider_service_switch_codex_missing_auth_is_rejected() {
 }
 
 #[test]
+fn provider_service_switch_codex_official_keeps_snapshot_payload_policy() {
+    let _guard = lock_test_mutex();
+    for (auth, writes_snapshot) in [
+        (json!({"last_refresh":"2026-09-05"}), true),
+        (json!({"tokens":{"unknown":"opaque"}}), true),
+        (json!({"auth_mode":"chatgpt"}), false),
+        (json!({"tokens":{}}), false),
+    ] {
+        reset_test_fs();
+        let home = ensure_test_home();
+        std::fs::create_dir_all(home.join(".codex")).expect("initialize Codex");
+        let auth_path = cc_switch_lib::get_codex_auth_path();
+        let live_auth = json!({"tokens":{"access_token":"existing-test-login"}});
+        std::fs::write(&auth_path, live_auth.to_string()).expect("seed auth");
+
+        let mut config = MultiAppConfig::default();
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("Codex manager");
+        manager.current = "other".into();
+        let mut official = codex_provider(
+            "official",
+            "Official",
+            "",
+            "openai",
+            "https://api.openai.com/v1",
+        );
+        official.category = Some("official".into());
+        official.settings_config["auth"] = auth.clone();
+        manager.providers.insert("official".into(), official);
+        manager.providers.insert(
+            "other".into(),
+            codex_provider(
+                "other",
+                "Other",
+                "test-key",
+                "other",
+                "https://other.example/v1",
+            ),
+        );
+        let state = state_from_config(config);
+
+        ProviderService::switch(&state, AppType::Codex, "official").expect("switch");
+        let written: serde_json::Value = read_json_file(&auth_path).expect("read live auth");
+        assert_eq!(written, if writes_snapshot { auth } else { live_auth });
+    }
+}
+
+#[test]
 fn provider_service_switch_codex_openai_official_overwrites_auth_json_from_provider_snapshot() {
     let _guard = lock_test_mutex();
     reset_test_fs();
