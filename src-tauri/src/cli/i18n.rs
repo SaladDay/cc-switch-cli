@@ -12921,6 +12921,14 @@ pub mod texts {
         }
     }
 
+    pub fn common_config_snippet_disables_monitor_traffic() -> &'static str {
+        if is_chinese() {
+            "警告：CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC 会禁用 Claude Code 的 Monitor 工具（及其他“非必要流量”）。"
+        } else {
+            "Warning: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables Claude Code's Monitor tool (and other \"nonessential traffic\")."
+        }
+    }
+
     pub fn common_config_snippet_extracted() -> &'static str {
         if is_chinese() {
             "已从当前编辑内容提取通用配置片段"
