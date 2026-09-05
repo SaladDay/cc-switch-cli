@@ -315,6 +315,20 @@ enum PreparedCodexAuthWrite {
     Delete,
 }
 
+struct PostCommitFailure {
+    error: Box<AppError>,
+    restore_live_snapshot: bool,
+}
+
+impl From<AppError> for PostCommitFailure {
+    fn from(error: AppError) -> Self {
+        Self {
+            error: Box::new(error),
+            restore_live_snapshot: true,
+        }
+    }
+}
+
 impl ProviderService {
     pub fn is_provider_key_app(app_type: &AppType) -> bool {
         matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi)
@@ -835,19 +849,16 @@ impl ProviderService {
         }
 
         if let Some(prepared) = prepared {
-            if let Err(err) = Self::apply_prepared_post_commit_action(state, &prepared) {
+            if let Err(failure) = Self::apply_prepared_post_commit_action(state, &prepared) {
+                let err = *failure.error;
+                let backup = failure
+                    .restore_live_snapshot
+                    .then(|| prepared.action.backup.clone());
                 let rollback_result = match preserved_current_apps {
                     Some(apps) => Self::rollback_after_failure_preserving_current_providers(
-                        state,
-                        original,
-                        apps,
-                        prepared.action.backup.clone(),
+                        state, original, apps, backup,
                     ),
-                    None => Self::rollback_after_failure(
-                        state,
-                        original,
-                        prepared.action.backup.clone(),
-                    ),
+                    None => Self::rollback_after_failure(state, original, backup),
                 };
                 if let Err(rollback_err) = rollback_result {
                     return Err(AppError::localized(
@@ -897,24 +908,24 @@ impl ProviderService {
     fn rollback_after_failure(
         state: &AppState,
         snapshot: MultiAppConfig,
-        backup: LiveSnapshot,
+        backup: Option<LiveSnapshot>,
     ) -> Result<(), AppError> {
         Self::restore_config_only(state, snapshot)?;
-        backup.restore()
+        backup.map_or(Ok(()), |backup| backup.restore())
     }
 
     fn rollback_after_failure_preserving_current_providers(
         state: &AppState,
         snapshot: MultiAppConfig,
         preserved_current_apps: &[AppType],
-        backup: LiveSnapshot,
+        backup: Option<LiveSnapshot>,
     ) -> Result<(), AppError> {
         Self::restore_config_only_preserving_current_providers(
             state,
             snapshot,
             preserved_current_apps,
         )?;
-        backup.restore()
+        backup.map_or(Ok(()), |backup| backup.restore())
     }
 
     fn prepare_post_commit_action(
@@ -994,10 +1005,23 @@ impl ProviderService {
     fn apply_prepared_post_commit_action(
         state: &AppState,
         prepared: &PreparedPostCommitAction,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), PostCommitFailure> {
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
-                Self::apply_prepared_live_snapshot(live)?;
+                Self::apply_prepared_live_snapshot(live).map_err(|error| PostCommitFailure {
+                    error: Box::new(error),
+                    // Core has already recovered a failed Codex two-file write.
+                    // A second snapshot restore could overwrite external edits.
+                    // Failures in subsequent MCP/snapshot work retain the
+                    // existing host rollback policy for now.
+                    restore_live_snapshot: !matches!(
+                        live,
+                        PreparedLiveWrite::Codex {
+                            auth: PreparedCodexAuthWrite::Write(_) | PreparedCodexAuthWrite::Delete,
+                            ..
+                        }
+                    ),
+                })?;
                 if prepared.action.activate_provider
                     && matches!(prepared.action.app_type, AppType::Hermes)
                 {
@@ -1073,9 +1097,10 @@ impl ProviderService {
                             "provider.update.proxy_backup_rollback_failed",
                             format!("{sync_error}；恢复 Live 备份失败: {restore_error}"),
                             format!("{sync_error}; failed to restore live backup: {restore_error}"),
-                        ));
+                        )
+                        .into());
                     }
-                    return Err(sync_error);
+                    return Err(sync_error.into());
                 }
             }
         }

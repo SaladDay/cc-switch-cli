@@ -328,6 +328,81 @@ fn atomic_write_with_privacy(
     data: &[u8],
     force_private: bool,
 ) -> Result<(), AppError> {
+    let target = prepare_config_write(path, force_private)?;
+    write_prepared_config(&target.path, data, target.restrict_file)
+}
+
+/// A resolved write entry with the original path's permission policy.
+#[derive(Clone)]
+pub(crate) struct ConfigWriteTarget {
+    path: PathBuf,
+    restrict_file: bool,
+}
+
+impl PartialEq for ConfigWriteTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for ConfigWriteTarget {}
+
+impl ConfigWriteTarget {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn write(&self, data: &[u8]) -> Result<(), AppError> {
+        #[cfg(not(windows))]
+        {
+            write_prepared_config(&self.path, data, self.restrict_file)
+        }
+
+        // Conditional recovery needs replacement to either retain the old
+        // file or publish the new one, with no intermediate deletion. Other
+        // CLI writers keep their existing platform behavior.
+        #[cfg(windows)]
+        {
+            use cc_switch_core::fs::FileError;
+            cc_switch_core::fs::atomic_write(&self.path, data).map_err(|error| match error {
+                FileError::Io { path, source } => AppError::io(path, source),
+                FileError::AtomicReplace {
+                    temporary,
+                    destination,
+                    source,
+                } => AppError::IoContext {
+                    context: format!(
+                        "原子替换失败: {} -> {}",
+                        temporary.display(),
+                        destination.display()
+                    ),
+                    source,
+                },
+                other => AppError::Config(other.to_string()),
+            })
+        }
+    }
+}
+
+/// Binds the parent directory, not the leaf: atomic replacement replaces a
+/// leaf symlink instead of writing through it. Managed-path checks and privacy
+/// decisions must run on the original path before canonicalizing the parent.
+pub(crate) fn bind_config_write(path: &Path) -> Result<ConfigWriteTarget, AppError> {
+    let mut target = prepare_config_write(path, false)?;
+    let parent = target
+        .path
+        .parent()
+        .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
+    let parent = fs::canonicalize(parent).map_err(|e| AppError::io(parent, e))?;
+    let name = target
+        .path
+        .file_name()
+        .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?;
+    target.path = parent.join(name);
+    Ok(target)
+}
+
+fn prepare_config_write(path: &Path, force_private: bool) -> Result<ConfigWriteTarget, AppError> {
     let managed_write_path = resolve_managed_storage_path(path)?;
     let should_restrict_file = force_private || should_restrict_sensitive_config_file(path)?;
     let write_path = managed_write_path.unwrap_or_else(|| path.to_path_buf());
@@ -341,6 +416,17 @@ fn atomic_write_with_privacy(
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
+    Ok(ConfigWriteTarget {
+        path: write_path,
+        restrict_file: should_restrict_file,
+    })
+}
+
+fn write_prepared_config(
+    write_path: &Path,
+    data: &[u8],
+    should_restrict_file: bool,
+) -> Result<(), AppError> {
     let parent = write_path
         .parent()
         .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
@@ -382,7 +468,7 @@ fn atomic_write_with_privacy(
         use std::os::unix::fs::PermissionsExt;
         if should_restrict_file {
             restrict_file_permissions(&tmp).map_err(|e| AppError::io(&tmp, e))?;
-        } else if let Ok(meta) = fs::metadata(&write_path) {
+        } else if let Ok(meta) = fs::metadata(write_path) {
             let perm = meta.permissions().mode();
             let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
         }
@@ -392,9 +478,9 @@ fn atomic_write_with_privacy(
     {
         // Windows 上 rename 目标存在会失败，先移除再重命名（尽量接近原子性）
         if write_path.exists() {
-            let _ = fs::remove_file(&write_path);
+            let _ = fs::remove_file(write_path);
         }
-        fs::rename(&tmp, &write_path).map_err(|e| AppError::IoContext {
+        fs::rename(&tmp, write_path).map_err(|e| AppError::IoContext {
             context: format!(
                 "原子替换失败: {} -> {}",
                 tmp.display(),
@@ -406,7 +492,7 @@ fn atomic_write_with_privacy(
 
     #[cfg(not(windows))]
     {
-        fs::rename(&tmp, &write_path).map_err(|e| AppError::IoContext {
+        fs::rename(&tmp, write_path).map_err(|e| AppError::IoContext {
             context: format!(
                 "原子替换失败: {} -> {}",
                 tmp.display(),
@@ -416,7 +502,7 @@ fn atomic_write_with_privacy(
         })?;
     }
     if should_restrict_file {
-        restrict_file_permissions(&write_path).map_err(|e| AppError::io(&write_path, e))?;
+        restrict_file_permissions(write_path).map_err(|e| AppError::io(write_path, e))?;
     }
     Ok(())
 }

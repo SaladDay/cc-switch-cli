@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::{
-    atomic_write, delete_file, home_dir, read_json_file, sanitize_provider_name, write_json_file,
-    write_text_file,
+    delete_file, home_dir, read_json_file, sanitize_provider_name, write_json_file, write_text_file,
 };
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
@@ -11,6 +10,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use toml_edit::DocumentMut;
+
+mod operation;
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
@@ -166,24 +167,8 @@ pub fn write_codex_live_atomic_optional_auth(
     auth: Option<&Value>,
     config_text_opt: Option<&str>,
 ) -> Result<(), AppError> {
-    let auth_path = get_codex_auth_path();
     let config_path = get_codex_config_path();
-
-    if let Some(parent) = auth_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
-    // 读取旧内容用于回滚
-    let old_auth = if auth_path.exists() {
-        Some(fs::read(&auth_path).map_err(|e| AppError::io(&auth_path, e))?)
-    } else {
-        None
-    };
-    let _old_config = if config_path.exists() {
-        Some(fs::read(&config_path).map_err(|e| AppError::io(&config_path, e))?)
-    } else {
-        None
-    };
+    let operation = operation::CodexOperation::observe()?;
 
     // 准备写入内容
     let cfg_text = match config_text_opt {
@@ -194,25 +179,11 @@ pub fn write_codex_live_atomic_optional_auth(
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
 
-    // 第一步：写 auth.json
-    if let Some(auth) = auth {
-        write_json_file(&auth_path, auth)?;
-    } else {
-        delete_file(&auth_path)?;
-    }
-
-    // 第二步：写 config.toml（失败则回滚 auth.json）
-    if let Err(e) = write_text_file(&config_path, &cfg_text) {
-        // 回滚 auth.json
-        if let Some(bytes) = old_auth {
-            let _ = atomic_write(&auth_path, &bytes);
-        } else {
-            let _ = delete_file(&auth_path);
-        }
-        return Err(e);
-    }
-
-    Ok(())
+    let auth = auth
+        .map(serde_json::to_string_pretty)
+        .transpose()
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    operation.execute(auth, cfg_text)
 }
 
 /// 读取 `~/.codex/config.toml`，若不存在返回空字符串
@@ -312,6 +283,9 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
 
+    // A single replacement has no earlier write to roll back and must retain
+    // the CLI's ability to replace a file without reading its previous bytes.
+    let _guard = operation::lock_live_write()?;
     write_text_file(&config_path, &cfg_text)
 }
 
