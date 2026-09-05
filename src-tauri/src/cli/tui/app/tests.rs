@@ -14832,6 +14832,200 @@ mod tests {
         assert_eq!(mode(&app), PromptCacheRoutingMode::Auto);
     }
 
+    fn codex_reasoning_form(app: &App) -> &ProviderAddFormState {
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        form
+    }
+
+    fn codex_reasoning_app(inline: bool) -> App {
+        let provider = Provider::with_id(
+            "test".into(),
+            "Test".into(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "fake-test-key"},
+                "config": "model_provider = \"test\"\nmodel = \"first\"\n[model_providers.test]\nname = \"Test\"\nbase_url = \"http://127.0.0.1:9/v1\"\nwire_api = \"responses\"\n",
+                "modelCatalog": {"models": [
+                    {"model": "first", "displayName": "First", "contextWindow": 128000,
+                     "supportsParallelToolCalls": true, "inputModalities": ["text", "image"],
+                     "baseInstructions": "Keep instructions.",
+                     "reasoningLevels": ["none", "high"], "defaultReasoningLevel": "high"},
+                    {"model": "second", "reasoningLevels": ["minimal", "ultra"], "defaultReasoningLevel": "ultra"}
+                ]}, "futureSetting": {"keep": true}
+            }),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+        if inline {
+            form.open_codex_local_routing_page();
+            form.codex_local_routing_field_idx = form
+                .codex_local_routing_fields()
+                .iter()
+                .position(|field| *field == CodexLocalRoutingField::ModelCatalog)
+                .unwrap();
+        } else {
+            form.open_codex_model_catalog_page();
+        }
+        form.codex_model_catalog_field = CodexModelCatalogField::ContextWindow;
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(form));
+        app
+    }
+
+    #[test]
+    fn codex_model_catalog_reasoning_pickers_roundtrip_each_model_on_both_pages() {
+        let _lang = use_test_language(Language::English);
+        for inline in [false, true] {
+            let mut app = codex_reasoning_app(inline);
+            let data = UiData::default();
+            let original = codex_reasoning_form(&app).to_provider_json_value();
+            app.on_key(key(KeyCode::Right), &data);
+            app.on_key(key(KeyCode::Char('?')), &data);
+            assert!(help_text(&app).contains("reasoning levels supported by this model"));
+            app.on_key(key(KeyCode::Esc), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            // Pick ultra before low: persistence must still follow canonical order.
+            for _ in 0..7 {
+                app.on_key(key(KeyCode::Down), &data);
+            }
+            app.on_key(key(KeyCode::Char(' ')), &data);
+            for _ in 0..5 {
+                app.on_key(key(KeyCode::Up), &data);
+            }
+            app.on_key(key(KeyCode::Char(' ')), &data);
+            app.on_key(key(KeyCode::Char('?')), &data);
+            assert!(help_text(&app).contains("Space toggles"));
+            app.on_key(key(KeyCode::Esc), &data);
+            assert!(matches!(
+                app.overlay,
+                Overlay::CodexReasoningLevelsPicker { selected: 2, .. }
+            ));
+            app.on_key(key(KeyCode::Enter), &data);
+            assert_eq!(
+                codex_reasoning_form(&app).codex_model_catalog[0].reasoning_levels,
+                ["none", "low", "high", "ultra"]
+            );
+            assert_eq!(
+                codex_reasoning_form(&app).codex_model_catalog[0].default_reasoning_level,
+                "high"
+            );
+
+            app.on_key(key(KeyCode::Right), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            let Overlay::CodexDefaultReasoningPicker {
+                options, selected, ..
+            } = &app.overlay
+            else {
+                panic!("expected default picker");
+            };
+            assert_eq!(options, &["", "none", "low", "high", "ultra"]);
+            assert_eq!(*selected, 3);
+            app.on_key(key(KeyCode::Up), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+
+            let saved = codex_reasoning_form(&app).to_provider_json_value();
+            let mut expected = original;
+            expected["settingsConfig"]["modelCatalog"]["models"][0]["reasoningLevels"] =
+                json!(["none", "low", "high", "ultra"]);
+            expected["settingsConfig"]["modelCatalog"]["models"][0]["defaultReasoningLevel"] =
+                json!("low");
+            assert_eq!(
+                saved, expected,
+                "only this model's reasoning fields may change"
+            );
+            assert!(codex_reasoning_form(&app).has_unsaved_changes());
+            let provider: Provider = serde_json::from_value(saved).unwrap();
+            let reopened = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+            assert_eq!(
+                reopened.codex_model_catalog,
+                codex_reasoning_form(&app).codex_model_catalog
+            );
+
+            app.on_key(key(KeyCode::Down), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            assert!(
+                matches!(&app.overlay, Overlay::CodexDefaultReasoningPicker { row: 1, options, .. }
+                if options == &["", "minimal", "ultra"])
+            );
+        }
+    }
+
+    #[test]
+    fn codex_model_catalog_reasoning_pickers_cancel_clear_and_restore_auto() {
+        for inline in [false, true] {
+            let mut app = codex_reasoning_app(inline);
+            let data = UiData::default();
+            let original = codex_reasoning_form(&app).to_provider_json_value();
+            app.on_key(key(KeyCode::Right), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            app.on_key(key(KeyCode::Char(' ')), &data);
+            app.on_key(key(KeyCode::Esc), &data);
+            assert_eq!(
+                codex_reasoning_form(&app).to_provider_json_value(),
+                original
+            );
+            app.on_key(key(KeyCode::Right), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            app.on_key(key(KeyCode::Up), &data);
+            app.on_key(key(KeyCode::Esc), &data);
+            assert_eq!(
+                codex_reasoning_form(&app).to_provider_json_value(),
+                original
+            );
+
+            app.on_key(key(KeyCode::Enter), &data);
+            app.on_key(key(KeyCode::Up), &data);
+            app.on_key(key(KeyCode::Up), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            assert!(
+                codex_reasoning_form(&app).to_provider_json_value()["settingsConfig"]
+                    ["modelCatalog"]["models"][0]
+                    .get("defaultReasoningLevel")
+                    .is_none()
+            );
+            // Restore high, then remove it from the supported levels.
+            app.on_key(key(KeyCode::Enter), &data);
+            for _ in 0..2 {
+                app.on_key(key(KeyCode::Down), &data);
+            }
+            app.on_key(key(KeyCode::Enter), &data);
+            app.on_key(key(KeyCode::Left), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            for _ in 0..4 {
+                app.on_key(key(KeyCode::Down), &data);
+            }
+            app.on_key(key(KeyCode::Char(' ')), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            assert_eq!(
+                codex_reasoning_form(&app).codex_model_catalog[0].reasoning_levels,
+                ["none"]
+            );
+            assert!(codex_reasoning_form(&app).codex_model_catalog[0]
+                .default_reasoning_level
+                .is_empty());
+            app.on_key(key(KeyCode::Enter), &data);
+            app.on_key(key(KeyCode::Char(' ')), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            let saved = codex_reasoning_form(&app).to_provider_json_value();
+            let first = &saved["settingsConfig"]["modelCatalog"]["models"][0];
+            assert!(first.get("reasoningLevels").is_none());
+            assert!(first.get("defaultReasoningLevel").is_none());
+            assert_eq!(
+                saved["settingsConfig"]["modelCatalog"]["models"][1],
+                original["settingsConfig"]["modelCatalog"]["models"][1]
+            );
+            app.on_key(key(KeyCode::Right), &data);
+            app.on_key(key(KeyCode::Enter), &data);
+            assert!(
+                matches!(&app.overlay, Overlay::CodexDefaultReasoningPicker { selected: 0, options, .. }
+                if options == &[""])
+            );
+        }
+    }
+
     #[test]
     fn provider_codex_local_routing_model_catalog_edits_inline_and_adds_models() {
         let mut app = App::new(Some(AppType::Codex));

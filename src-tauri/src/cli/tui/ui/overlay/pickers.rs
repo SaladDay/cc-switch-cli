@@ -13,6 +13,73 @@ const SESSION_PROJECT_PICKER_WIDTH: u16 = 86;
 const SESSION_PROJECT_PICKER_HEIGHT: u16 = 24;
 const SESSION_PROJECT_PICKER_WIDE_MIN_WIDTH: u16 = 64;
 
+pub(super) fn render_codex_reasoning_picker_overlay(
+    frame: &mut Frame<'_>,
+    content_area: Rect,
+    theme: &theme::Theme,
+    overlay: &Overlay,
+) {
+    let mut keys = vec![("↑↓", texts::tui_key_select())];
+    let (title, selected, items): (_, _, Vec<ListItem<'_>>) = match overlay {
+        Overlay::CodexReasoningLevelsPicker {
+            selected, checked, ..
+        } => {
+            keys.push(("Space", texts::tui_key_toggle()));
+            let items = form::CODEX_REASONING_LEVELS
+                .iter()
+                .zip(checked)
+                .map(|(level, enabled)| {
+                    let marker = if *enabled {
+                        texts::tui_marker_active()
+                    } else {
+                        texts::tui_marker_inactive()
+                    };
+                    ListItem::new(format!("{marker}  {level}"))
+                })
+                .collect();
+            (texts::tui_codex_reasoning_levels(), *selected, items)
+        }
+        Overlay::CodexDefaultReasoningPicker {
+            selected, options, ..
+        } => {
+            let items = options
+                .iter()
+                .map(|level| {
+                    ListItem::new(if level.is_empty() {
+                        texts::tui_codex_reasoning_auto()
+                    } else {
+                        level.as_str()
+                    })
+                })
+                .collect();
+            (texts::tui_codex_default_reasoning_level(), *selected, items)
+        }
+        _ => return,
+    };
+    keys.extend([
+        ("Enter", texts::tui_key_apply()),
+        ("Esc", texts::tui_key_cancel()),
+    ]);
+    let body_area = overlay_frame(
+        frame,
+        content_area,
+        theme,
+        title,
+        &keys,
+        OverlaySize::FitRows {
+            width: 58,
+            body_rows: items.len() as u16,
+        },
+        overlay_border_style(theme, false),
+    );
+    let mut state = ListState::default();
+    state.select(Some(selected.min(items.len().saturating_sub(1))));
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
 pub(super) fn render_claude_model_picker_overlay(
     frame: &mut Frame<'_>,
     app: &App,

@@ -4687,6 +4687,16 @@ pub enum Overlay {
     ClaudeApiFormatPicker {
         selected: usize,
     },
+    CodexReasoningLevelsPicker {
+        row: usize,
+        selected: usize,
+        checked: [bool; 8],
+    },
+    CodexDefaultReasoningPicker {
+        row: usize,
+        selected: usize,
+        options: Vec<String>,
+    },
     UserAgentPicker {
         selected: usize,
     },
@@ -4932,6 +4942,8 @@ impl Overlay {
                 | Overlay::ProviderTestMenu { .. }
                 | Overlay::FailoverQueueManager { .. }
                 | Overlay::ClaudeApiFormatPicker { .. }
+                | Overlay::CodexReasoningLevelsPicker { .. }
+                | Overlay::CodexDefaultReasoningPicker { .. }
                 | Overlay::UserAgentPicker { .. }
                 | Overlay::ExternalEditorPicker { .. }
                 | Overlay::UsageQueryTemplatePicker { .. }
@@ -4979,6 +4991,8 @@ impl Overlay {
             | Overlay::ProviderTestMenu { .. }
             | Overlay::FailoverQueueManager { .. }
             | Overlay::ClaudeApiFormatPicker { .. }
+            | Overlay::CodexReasoningLevelsPicker { .. }
+            | Overlay::CodexDefaultReasoningPicker { .. }
             | Overlay::UserAgentPicker { .. }
             | Overlay::ExternalEditorPicker { .. }
             | Overlay::UsageQueryTemplatePicker { .. }

@@ -84,6 +84,15 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::CodexReasoningLevelsPicker { .. }
+        | Overlay::CodexDefaultReasoningPicker { .. } => {
+            super::pickers::render_codex_reasoning_picker_overlay(
+                frame,
+                content_area,
+                theme,
+                &app.overlay,
+            )
+        }
         Overlay::UserAgentPicker { selected } => super::pickers::render_user_agent_picker_overlay(
             frame,
             app,
