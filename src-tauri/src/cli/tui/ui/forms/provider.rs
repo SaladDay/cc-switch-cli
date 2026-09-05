@@ -1888,6 +1888,9 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::CodexRemoteCompaction => {
             texts::tui_label_codex_remote_compaction().to_string()
         }
+        ProviderAddField::CodexDisableWebSearch => {
+            texts::tui_label_codex_disable_web_search().to_string()
+        }
         ProviderAddField::ClaudeHideAttribution => {
             texts::tui_label_claude_hide_attribution().to_string()
         }
@@ -2007,6 +2010,13 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::CodexRemoteCompaction => {
             if provider.codex_remote_compaction {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::CodexDisableWebSearch => {
+            if provider.codex_disable_web_search {
                 format!("[{}]", texts::tui_marker_active())
             } else {
                 "[ ]".to_string()

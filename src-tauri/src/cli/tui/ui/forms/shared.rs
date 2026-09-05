@@ -57,6 +57,7 @@ pub(crate) fn add_form_key_items(
                         | ProviderAddField::ClaudeDisableAutoUpgrade
                         | ProviderAddField::CodexGoalMode
                         | ProviderAddField::CodexRemoteCompaction
+                        | ProviderAddField::CodexDisableWebSearch
                         | ProviderAddField::CodexFastMode
                         | ProviderAddField::OpenClawUserAgent
                         | ProviderAddField::IncludeCommonConfig,

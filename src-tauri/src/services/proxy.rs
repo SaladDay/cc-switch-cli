@@ -3732,6 +3732,7 @@ impl ProxyService {
                 );
             }
         }
+        crate::codex_config::merge_codex_provider_catalog_options(&mut settings, provider);
 
         let profile = crate::proxy::providers::codex_provider_catalog_tool_profile(provider);
         crate::codex_config::write_codex_provider_live_with_catalog(
@@ -3773,6 +3774,9 @@ impl ProxyService {
                     );
                 }
             }
+            if let Some(provider) = provider {
+                crate::codex_config::merge_codex_provider_catalog_options(&mut settings, provider);
+            }
 
             let config_text = config
                 .get("config")
@@ -3781,13 +3785,36 @@ impl ProxyService {
             let profile = provider
                 .map(crate::proxy::providers::codex_provider_catalog_tool_profile)
                 .unwrap_or(crate::codex_config::CodexCatalogToolProfile::ProxyChat);
-            let prepared_config =
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+            // rewrite_live_for_proxy already replaced the live base_url with
+            // the local proxy address, so the web_search blacklist verdict
+            // must come from the provider's stored (pre-rewrite) config;
+            // otherwise host-blacklisted gateways lose their
+            // web_search = "disabled" during takeover and get rejected 400s.
+            let web_search_reject_override = provider
+                .and_then(|provider| {
+                    provider
+                        .settings_config
+                        .get("config")
+                        .and_then(Value::as_str)
+                        .map(crate::codex_config::codex_native_gateway_rejects_web_search)
+                })
+                .unwrap_or_else(|| {
+                    crate::codex_config::codex_native_gateway_rejects_web_search(config_text)
+                });
+            let prepared_config = if settings.get("modelCatalog").is_some() {
+                let prepared = crate::codex_config::prepare_codex_config_text_with_model_catalog_payload_with_reject_verdict(
                     &settings,
                     config_text,
                     profile,
+                    web_search_reject_override,
                 )
                 .map_err(|error| format!("write Codex live config failed: {error}"))?;
+                crate::codex_config::write_prepared_codex_model_catalog(&prepared)
+                    .map_err(|error| format!("write Codex live config failed: {error}"))?;
+                prepared.config_text
+            } else {
+                config_text.to_string()
+            };
             let live_config =
                 crate::codex_config::prepare_codex_provider_live_config(auth, &prepared_config)
                     .map_err(|error| format!("write Codex live config failed: {error}"))?;
@@ -3825,6 +3852,7 @@ impl ProxyService {
                 );
             }
         }
+        crate::codex_config::merge_codex_provider_catalog_options(&mut settings, provider);
 
         let profile = crate::proxy::providers::codex_provider_catalog_tool_profile(provider);
         crate::codex_config::write_codex_provider_live_config_only_with_catalog(
@@ -3842,10 +3870,12 @@ impl ProxyService {
 
         // A saved live snapshot may carry an inline model catalog, so prepare
         // the config once for every restore branch before deciding whether
-        // auth.json also needs to be written.
+        // auth.json also needs to be written. The captured text's web_search
+        // state is authoritative: a native provider's `web_search = "disabled"`
+        // must survive the provider-less ProxyChat fallback profile here.
         let prepared_config = config_text
             .map(|config_text| {
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog_verbatim(
                     config,
                     config_text,
                     crate::codex_config::CodexCatalogToolProfile::ProxyChat,
