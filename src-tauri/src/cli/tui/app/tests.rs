@@ -2391,6 +2391,7 @@ mod tests {
         assert!(matches!(
             action,
             Action::ProviderModelFetch {
+                app_type: AppType::Hermes,
                 base_url,
                 is_full_url: false,
                 api_key: Some(api_key),
@@ -5439,6 +5440,7 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('f')), &data());
         let Action::ProviderModelFetch {
+            app_type,
             base_url,
             api_key,
             api_protocol,
@@ -5449,6 +5451,7 @@ mod tests {
         else {
             panic!("expected Pi model fetch action");
         };
+        assert_eq!(app_type, AppType::Pi);
         assert_eq!(base_url, "https://pi.example.test/v1");
         assert_eq!(api_key, None, "Anthropic auth is carried by x-api-key");
         assert_eq!(api_protocol.as_deref(), Some("anthropic-messages"));
@@ -14991,6 +14994,7 @@ mod tests {
         assert!(matches!(
             action,
             Action::ProviderModelFetch {
+                app_type: AppType::Codex,
                 field: ProviderAddField::CodexLocalRouting,
                 is_full_url: true,
                 ..
@@ -15264,6 +15268,7 @@ mod tests {
         assert!(matches!(
             action,
             Action::ProviderModelFetch {
+                app_type: AppType::Claude,
                 is_full_url: true,
                 field: ProviderAddField::ClaudeModelConfig,
                 ..
@@ -15288,6 +15293,7 @@ mod tests {
         assert!(matches!(
             action,
             Action::ProviderModelFetch {
+                app_type: AppType::Claude,
                 codex_oauth: true,
                 codex_oauth_account_id: None,
                 field: ProviderAddField::ClaudeModelConfig,
@@ -16223,6 +16229,7 @@ mod tests {
         assert!(matches!(
             action,
             Action::ProviderModelFetch {
+                app_type: AppType::Gemini,
                 field: ProviderAddField::GeminiModel,
                 base_url,
                 api_key: Some(api_key),

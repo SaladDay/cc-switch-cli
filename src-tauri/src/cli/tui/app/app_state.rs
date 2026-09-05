@@ -128,6 +128,7 @@ pub enum Action {
         id: String,
     },
     ProviderModelFetch {
+        app_type: AppType,
         base_url: String,
         is_full_url: bool,
         api_key: Option<String>,

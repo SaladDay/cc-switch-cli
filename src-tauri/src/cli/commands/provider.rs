@@ -918,7 +918,7 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                     app_type,
                     base_url.as_deref(),
                     api_key.as_deref(),
-                    auth.map(Into::into),
+                    auth.map(ModelFetchAuthArg::spec),
                 )
             }
         }
@@ -937,12 +937,15 @@ pub enum ModelFetchAuthArg {
     GoogleApiKey,
 }
 
-impl From<ModelFetchAuthArg> for provider_inspect::ProviderModelFetchStrategy {
-    fn from(value: ModelFetchAuthArg) -> Self {
-        match value {
-            ModelFetchAuthArg::Bearer => Self::Bearer,
-            ModelFetchAuthArg::Anthropic => Self::Anthropic,
-            ModelFetchAuthArg::GoogleApiKey => Self::GoogleApiKey,
+impl ModelFetchAuthArg {
+    fn spec(self) -> &'static cc_switch_core::model_fetch::ModelFetchSpec {
+        use cc_switch_core::model_fetch::{
+            ANTHROPIC_COMPATIBLE, BEARER_COMPATIBLE, GOOGLE_API_KEY,
+        };
+        match self {
+            Self::Bearer => &BEARER_COMPATIBLE,
+            Self::Anthropic => &ANTHROPIC_COMPATIBLE,
+            Self::GoogleApiKey => &GOOGLE_API_KEY,
         }
     }
 }

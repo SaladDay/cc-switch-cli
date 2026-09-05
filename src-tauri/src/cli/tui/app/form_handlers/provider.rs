@@ -1226,6 +1226,7 @@ impl App {
         }
 
         Action::ProviderModelFetch {
+            app_type: provider.app_type.clone(),
             base_url: provider.codex_base_url.value.clone(),
             is_full_url: provider.is_full_url,
             api_key: (!provider.codex_api_key.value.trim().is_empty())
@@ -1477,6 +1478,7 @@ impl App {
         }
 
         Action::ProviderModelFetch {
+            app_type: provider.app_type.clone(),
             base_url: provider.hermes_base_url.value.clone(),
             is_full_url: false,
             api_key: Some(provider.hermes_api_key.value.clone()),
@@ -1574,6 +1576,7 @@ impl App {
             }
         }
         Action::ProviderModelFetch {
+            app_type: provider.app_type.clone(),
             base_url,
             is_full_url: provider.is_full_url && matches!(selected, ProviderAddField::CodexModel),
             api_key,

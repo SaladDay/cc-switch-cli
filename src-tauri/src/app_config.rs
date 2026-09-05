@@ -380,6 +380,16 @@ impl AppType {
             .display_name()
     }
 
+    pub(crate) fn default_model_fetch_spec(
+        &self,
+    ) -> &'static cc_switch_core::model_fetch::ModelFetchSpec {
+        // Preserve the CLI's generic fallback if an app has no shared default.
+        builtin_app_registry()
+            .for_app(&self.as_core())
+            .default_model_fetch_spec()
+            .unwrap_or(&cc_switch_core::model_fetch::BEARER_COMPATIBLE)
+    }
+
     pub fn is_additive_mode(&self) -> bool {
         matches!(
             builtin_app_registry()

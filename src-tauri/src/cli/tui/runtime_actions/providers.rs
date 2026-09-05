@@ -524,6 +524,7 @@ pub(super) fn stream_check(ctx: &mut RuntimeActionContext<'_>, id: String) -> Re
 )]
 pub(super) fn model_fetch(
     ctx: &mut RuntimeActionContext<'_>,
+    app_type: crate::app_config::AppType,
     base_url: String,
     is_full_url: bool,
     api_key: Option<String>,
@@ -564,6 +565,7 @@ pub(super) fn model_fetch(
 
     if let Err(err) = tx.send(ModelFetchReq::Fetch {
         request_id,
+        app_type,
         base_url,
         is_full_url,
         api_key,

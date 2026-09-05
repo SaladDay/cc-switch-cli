@@ -797,6 +797,7 @@ pub(crate) struct UpdateSystem {
 pub(crate) enum ModelFetchReq {
     Fetch {
         request_id: u64,
+        app_type: AppType,
         base_url: String,
         is_full_url: bool,
         api_key: Option<String>,
@@ -825,37 +826,22 @@ pub(crate) struct ModelFetchSystem {
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModelFetchStrategy {
-    Bearer,
-    Anthropic,
-    GoogleApiKey,
-}
-
-pub(crate) fn model_fetch_strategy_for_field(field: ProviderAddField) -> ModelFetchStrategy {
-    match field {
-        ProviderAddField::GeminiModel => ModelFetchStrategy::GoogleApiKey,
-        ProviderAddField::ClaudeModelConfig => ModelFetchStrategy::Anthropic,
-        _ => ModelFetchStrategy::Bearer,
+pub(crate) fn model_fetch_spec_for_app(
+    app: &AppType,
+    api_protocol: Option<&str>,
+) -> &'static cc_switch_core::model_fetch::ModelFetchSpec {
+    use cc_switch_core::model_fetch::{ANTHROPIC_COMPATIBLE, GOOGLE_API_KEY};
+    match api_protocol {
+        Some("anthropic-messages") => return &ANTHROPIC_COMPATIBLE,
+        Some("google-generative-ai") => return &GOOGLE_API_KEY,
+        _ => {}
     }
-}
-
-impl ModelFetchStrategy {
-    fn spec(self) -> &'static cc_switch_core::model_fetch::ModelFetchSpec {
-        use cc_switch_core::model_fetch::{
-            ANTHROPIC_COMPATIBLE, BEARER_COMPATIBLE, GOOGLE_API_KEY,
-        };
-        match self {
-            Self::Bearer => &BEARER_COMPATIBLE,
-            Self::Anthropic => &ANTHROPIC_COMPATIBLE,
-            Self::GoogleApiKey => &GOOGLE_API_KEY,
-        }
-    }
+    app.default_model_fetch_spec()
 }
 
 pub(crate) fn build_model_fetch_candidate_urls(
     base_url: &str,
-    strategy: ModelFetchStrategy,
+    spec: &cc_switch_core::model_fetch::ModelFetchSpec,
     is_full_url: bool,
 ) -> Vec<String> {
     use cc_switch_core::model_fetch::ModelEndpointInput;
@@ -864,7 +850,7 @@ pub(crate) fn build_model_fetch_candidate_urls(
     } else {
         ModelEndpointInput::BaseUrl
     };
-    strategy.spec().candidate_urls(base_url, input)
+    spec.candidate_urls(base_url, input)
 }
 
 #[cfg(test)]
@@ -877,10 +863,10 @@ pub(crate) async fn fetch_provider_models_for_tui(
     is_full_url: bool,
     api_key: Option<&str>,
     custom_user_agent: Option<&str>,
-    strategy: ModelFetchStrategy,
+    spec: &cc_switch_core::model_fetch::ModelFetchSpec,
     request_headers: Option<&BTreeMap<String, String>>,
 ) -> Result<Vec<String>, String> {
-    let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy, is_full_url);
+    let candidate_urls = build_model_fetch_candidate_urls(base_url, spec, is_full_url);
     if candidate_urls.is_empty() {
         return Err(if is_full_url && !base_url.trim().is_empty() {
             "Cannot derive models endpoint from full URL".to_string()
@@ -906,7 +892,7 @@ pub(crate) async fn fetch_provider_models_for_tui(
     for url in candidate_urls {
         let mut req = client.get(&url).timeout(Duration::from_secs(5));
         if let Some(key) = key {
-            for (name, value) in strategy.spec().headers_for_key(key) {
+            for (name, value) in spec.headers_for_key(key) {
                 req = req.header(name, value);
             }
         }
@@ -940,7 +926,7 @@ pub(crate) async fn fetch_provider_models_for_tui(
                 }
                 match resp.json::<Value>().await {
                     Ok(payload) => {
-                        let models = strategy.spec().parse_model_ids(&payload);
+                        let models = spec.parse_model_ids(&payload);
                         if models.is_empty() {
                             last_err = format!("No model list found in response ({url})");
                         } else {

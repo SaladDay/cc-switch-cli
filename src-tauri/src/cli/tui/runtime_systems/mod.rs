@@ -13,13 +13,10 @@ pub(crate) use handlers::{
 };
 #[cfg(test)]
 pub(crate) use types::{
-    build_model_fetch_candidate_urls, model_fetch_strategy_for_field,
-    parse_model_ids_from_response, ManagedAuthMsg, ManagedSessionOutcome, ProxyMsg, QuotaMsg,
-    UpdateMsg,
+    build_model_fetch_candidate_urls, model_fetch_spec_for_app, parse_model_ids_from_response,
+    ManagedAuthMsg, ManagedSessionOutcome, ProxyMsg, QuotaMsg, UpdateMsg,
 };
-pub(crate) use types::{
-    build_stream_check_result_lines, fetch_provider_models_for_tui, ModelFetchStrategy,
-};
+pub(crate) use types::{build_stream_check_result_lines, fetch_provider_models_for_tui};
 pub(crate) use types::{
     next_model_fetch_request_id, AppDataLoadKind, AppDataMsg, AppDataReq, CodexHistoryReq,
     LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq,

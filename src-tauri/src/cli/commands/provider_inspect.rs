@@ -1,3 +1,6 @@
+use cc_switch_core::model_fetch::{
+    ModelFetchSpec, ANTHROPIC_COMPATIBLE, BEARER_COMPATIBLE, GOOGLE_API_KEY,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -18,13 +21,6 @@ use crate::store::AppState;
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderModelFetchStrategy {
-    Bearer,
-    Anthropic,
-    GoogleApiKey,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelFetchSource {
     Http(ModelFetchTarget),
@@ -38,7 +34,7 @@ struct ModelFetchTarget {
     auth_value: Option<String>,
     custom_user_agent: Option<String>,
     request_headers: Option<BTreeMap<String, String>>,
-    strategy: ProviderModelFetchStrategy,
+    strategy: &'static ModelFetchSpec,
 }
 
 #[derive(Default)]
@@ -345,7 +341,7 @@ pub(crate) fn fetch_models_once(
     app_type: AppType,
     base_url: Option<&str>,
     api_key: Option<&str>,
-    strategy: Option<ProviderModelFetchStrategy>,
+    strategy: Option<&'static ModelFetchSpec>,
 ) -> Result<(), AppError> {
     let target = one_off_model_fetch_target(&app_type, base_url, api_key, strategy)?;
     let source = ModelFetchSource::Http(target);
@@ -389,7 +385,7 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
                 target.is_full_url,
                 target.auth_value.as_deref(),
                 target.custom_user_agent.as_deref(),
-                to_tui_strategy(target.strategy),
+                target.strategy,
                 target.request_headers.as_ref(),
             )
             .await
@@ -835,9 +831,9 @@ fn model_fetch_target(
                 AppError::Message(format!("Missing API key for provider '{}'", provider.id))
             })?;
             let strategy = if claude_uses_bearer_auth(provider, &base_url) {
-                ProviderModelFetchStrategy::Bearer
+                &BEARER_COMPATIBLE
             } else {
-                ProviderModelFetchStrategy::Anthropic
+                app_type.default_model_fetch_spec()
             };
 
             Ok(ModelFetchTarget {
@@ -858,7 +854,7 @@ fn model_fetch_target(
                 )?),
                 custom_user_agent,
                 request_headers: None,
-                strategy: ProviderModelFetchStrategy::Bearer,
+                strategy: app_type.default_model_fetch_spec(),
             })
         }
         AppType::Gemini => {
@@ -890,7 +886,7 @@ fn model_fetch_target(
             ),
             custom_user_agent,
             request_headers: None,
-            strategy: ProviderModelFetchStrategy::Bearer,
+            strategy: app_type.default_model_fetch_spec(),
         }),
         AppType::Hermes => Ok(ModelFetchTarget {
             base_url,
@@ -910,7 +906,7 @@ fn model_fetch_target(
             ),
             custom_user_agent,
             request_headers: None,
-            strategy: ProviderModelFetchStrategy::Bearer,
+            strategy: app_type.default_model_fetch_spec(),
         }),
         AppType::OpenClaw => Ok(ModelFetchTarget {
             base_url,
@@ -929,14 +925,14 @@ fn model_fetch_target(
             ),
             custom_user_agent,
             request_headers: None,
-            strategy: ProviderModelFetchStrategy::Bearer,
+            strategy: app_type.default_model_fetch_spec(),
         }),
         AppType::Pi => {
             let api = provider.settings_config.get("api").and_then(Value::as_str);
             let strategy = match api {
-                Some("anthropic-messages") => ProviderModelFetchStrategy::Anthropic,
-                Some("google-generative-ai") => ProviderModelFetchStrategy::GoogleApiKey,
-                _ => ProviderModelFetchStrategy::Bearer,
+                Some("anthropic-messages") => &ANTHROPIC_COMPATIBLE,
+                Some("google-generative-ai") => &GOOGLE_API_KEY,
+                _ => app_type.default_model_fetch_spec(),
             };
             let mut request_headers = provider
                 .settings_config
@@ -987,7 +983,7 @@ fn one_off_model_fetch_target(
     app_type: &AppType,
     base_url: Option<&str>,
     api_key: Option<&str>,
-    strategy: Option<ProviderModelFetchStrategy>,
+    strategy: Option<&'static ModelFetchSpec>,
 ) -> Result<ModelFetchTarget, AppError> {
     let base_url = base_url
         .map(str::trim)
@@ -999,7 +995,7 @@ fn one_off_model_fetch_target(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let strategy = strategy.unwrap_or_else(|| default_one_off_model_fetch_strategy(app_type));
+    let strategy = strategy.unwrap_or_else(|| app_type.default_model_fetch_spec());
 
     Ok(ModelFetchTarget {
         base_url,
@@ -1009,16 +1005,6 @@ fn one_off_model_fetch_target(
         request_headers: None,
         strategy,
     })
-}
-
-fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetchStrategy {
-    match app_type {
-        AppType::Claude => ProviderModelFetchStrategy::Anthropic,
-        AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            ProviderModelFetchStrategy::Bearer
-        }
-    }
 }
 
 fn model_fetch_source(
@@ -1062,7 +1048,7 @@ fn claude_uses_bearer_auth(provider: &Provider, base_url: &str) -> bool {
 
 fn extract_gemini_model_fetch_auth(
     provider: &Provider,
-) -> Result<(String, ProviderModelFetchStrategy), AppError> {
+) -> Result<(String, &'static ModelFetchSpec), AppError> {
     let env_map = crate::gemini_config::json_to_env(&provider.settings_config)?;
 
     if let Some(token) = env_map
@@ -1072,7 +1058,7 @@ fn extract_gemini_model_fetch_auth(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Ok((token.to_string(), ProviderModelFetchStrategy::Bearer));
+        return Ok((token.to_string(), &BEARER_COMPATIBLE));
     }
 
     let key = env_map
@@ -1087,14 +1073,14 @@ fn extract_gemini_model_fetch_auth(
         })?;
 
     if key.starts_with("ya29.") {
-        return Ok((key.to_string(), ProviderModelFetchStrategy::Bearer));
+        return Ok((key.to_string(), &BEARER_COMPATIBLE));
     }
 
     if let Some(access_token) = parse_access_token_blob(key) {
-        return Ok((access_token, ProviderModelFetchStrategy::Bearer));
+        return Ok((access_token, &BEARER_COMPATIBLE));
     }
 
-    Ok((key.to_string(), ProviderModelFetchStrategy::GoogleApiKey))
+    Ok((key.to_string(), AppType::Gemini.default_model_fetch_spec()))
 }
 
 fn parse_access_token_blob(raw: &str) -> Option<String> {
@@ -1105,16 +1091,6 @@ fn parse_access_token_blob(raw: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-fn to_tui_strategy(strategy: ProviderModelFetchStrategy) -> crate::cli::tui::ModelFetchStrategy {
-    match strategy {
-        ProviderModelFetchStrategy::Bearer => crate::cli::tui::ModelFetchStrategy::Bearer,
-        ProviderModelFetchStrategy::Anthropic => crate::cli::tui::ModelFetchStrategy::Anthropic,
-        ProviderModelFetchStrategy::GoogleApiKey => {
-            crate::cli::tui::ModelFetchStrategy::GoogleApiKey
-        }
-    }
 }
 
 fn extract_api_url(provider: &Provider, app_type: &AppType) -> Option<String> {
@@ -1422,7 +1398,7 @@ base_url = "https://current.example.com/v1"
 
         assert_eq!(target.base_url, "https://claude.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-claude"));
-        assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
+        assert_eq!(target.strategy, &ANTHROPIC_COMPATIBLE);
     }
 
     #[test]
@@ -1471,7 +1447,7 @@ base_url = "https://current.example.com/v1"
 
         let target = model_fetch_target(&provider, &AppType::Pi)
             .expect("Pi provider should resolve fetch target");
-        assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
+        assert_eq!(target.strategy, &ANTHROPIC_COMPATIBLE);
         assert_eq!(target.auth_value, None);
         assert_eq!(
             target.request_headers,
@@ -1499,7 +1475,7 @@ base_url = "https://current.example.com/v1"
         let target = model_fetch_target(&provider, &AppType::Claude)
             .expect("openrouter provider should resolve fetch target");
 
-        assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
+        assert_eq!(target.strategy, &BEARER_COMPATIBLE);
         assert_eq!(target.auth_value.as_deref(), Some("sk-openrouter"));
     }
 
@@ -1570,7 +1546,7 @@ base_url = "https://current.example.com/v1"
 
         assert_eq!(target.base_url, "https://codex.example.com/v1");
         assert_eq!(target.auth_value.as_deref(), Some("sk-codex-env"));
-        assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
+        assert_eq!(target.strategy, &BEARER_COMPATIBLE);
     }
 
     #[test]
@@ -1591,7 +1567,7 @@ base_url = "https://current.example.com/v1"
             .expect("gemini provider should resolve oauth fetch target");
 
         assert_eq!(target.auth_value.as_deref(), Some("ya29.token"));
-        assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
+        assert_eq!(target.strategy, &BEARER_COMPATIBLE);
     }
 
     #[test]
@@ -1607,7 +1583,55 @@ base_url = "https://current.example.com/v1"
         assert_eq!(target.base_url, "https://gemini.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-gemini"));
         assert_eq!(target.custom_user_agent, None);
-        assert_eq!(target.strategy, ProviderModelFetchStrategy::GoogleApiKey);
+        assert_eq!(target.strategy, &GOOGLE_API_KEY);
+    }
+
+    #[test]
+    fn model_fetch_registry_defaults_and_explicit_overrides_keep_the_app_matrix() {
+        const CUSTOM: ModelFetchSpec = ModelFetchSpec {
+            key_headers: &[(
+                "x-custom-key",
+                cc_switch_core::model_fetch::ModelHeaderValue::Key { prefix: "Custom " },
+            )],
+            ..BEARER_COMPATIBLE
+        };
+        let cases = [
+            (AppType::Claude, &ANTHROPIC_COMPATIBLE),
+            (AppType::Codex, &BEARER_COMPATIBLE),
+            (AppType::Gemini, &GOOGLE_API_KEY),
+            (AppType::OpenCode, &BEARER_COMPATIBLE),
+            (AppType::Hermes, &BEARER_COMPATIBLE),
+            (AppType::OpenClaw, &BEARER_COMPATIBLE),
+            (AppType::Pi, &BEARER_COMPATIBLE),
+        ];
+        assert_eq!(
+            AppType::all().collect::<Vec<_>>(),
+            cases.iter().map(|(app, _)| app.clone()).collect::<Vec<_>>()
+        );
+        for (app, expected) in cases {
+            for override_spec in [
+                None,
+                Some(&ANTHROPIC_COMPATIBLE),
+                Some(&BEARER_COMPATIBLE),
+                Some(&GOOGLE_API_KEY),
+                Some(&CUSTOM),
+            ] {
+                let target = one_off_model_fetch_target(
+                    &app,
+                    Some(" https://relay.invalid/ "),
+                    None,
+                    override_spec,
+                )
+                .unwrap();
+                assert_eq!(
+                    target.strategy,
+                    override_spec.unwrap_or(expected),
+                    "{app:?}"
+                );
+                assert_eq!(target.auth_value, None);
+                assert_eq!(target.base_url, "https://relay.invalid");
+            }
+        }
     }
 
     #[test]
@@ -1616,13 +1640,13 @@ base_url = "https://current.example.com/v1"
             &AppType::Claude,
             Some("https://openrouter.ai/api/v1"),
             None,
-            Some(ProviderModelFetchStrategy::Bearer),
+            Some(&BEARER_COMPATIBLE),
         )
         .expect("one-off target should be built");
 
         assert_eq!(target.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(target.auth_value, None);
-        assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
+        assert_eq!(target.strategy, &BEARER_COMPATIBLE);
     }
 
     #[test]

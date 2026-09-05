@@ -18,16 +18,16 @@ use super::super::data::{
     UsageRangePreset,
 };
 use super::types::{
-    fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
+    fetch_provider_models_for_tui, model_fetch_spec_for_app, AppDataLoadKind, AppDataMsg,
     AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem,
     LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
-    ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchStrategy,
-    ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem,
-    RefreshedMessagePages, SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg,
-    SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg,
-    SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq,
-    UpdateSystem, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq,
-    UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchSystem,
+    ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages,
+    SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
+    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
+    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
+    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
+    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -628,6 +628,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
     while let Ok(req) = rx.recv() {
         let ModelFetchReq::Fetch {
             request_id,
+            app_type,
             base_url,
             is_full_url,
             api_key,
@@ -646,11 +647,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
                     .map(|models| models.into_iter().map(|model| model.id).collect())
             })
         } else {
-            let strategy = match api_protocol.as_deref() {
-                Some("anthropic-messages") => ModelFetchStrategy::Anthropic,
-                Some("google-generative-ai") => ModelFetchStrategy::GoogleApiKey,
-                _ => model_fetch_strategy_for_field(field),
-            };
+            let strategy = model_fetch_spec_for_app(&app_type, api_protocol.as_deref());
             rt.block_on(async {
                 fetch_provider_models_for_tui(
                     &base_url,

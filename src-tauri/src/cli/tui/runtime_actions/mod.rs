@@ -929,6 +929,7 @@ pub(crate) fn handle_action(
         }
         Action::ProviderQuotaRefresh { .. } => Ok(()),
         Action::ProviderModelFetch {
+            app_type,
             base_url,
             is_full_url,
             api_key,
@@ -941,6 +942,7 @@ pub(crate) fn handle_action(
             claude_idx,
         } => providers::model_fetch(
             &mut ctx,
+            app_type,
             base_url,
             is_full_url,
             api_key,

@@ -41,13 +41,13 @@ use runtime_skills::{
     finish_skills_import_with, open_skills_import_picker_with, scan_unmanaged_skills_with,
 };
 pub(crate) use runtime_systems::build_stream_check_result_lines;
+pub(crate) use runtime_systems::fetch_provider_models_for_tui;
 #[cfg(test)]
 use runtime_systems::{
     apply_webdav_jianguoyun_quick_setup, build_model_fetch_candidate_urls, drain_latest_webdav_req,
-    model_fetch_strategy_for_field, parse_model_ids_from_response, update_webdav_last_error_with,
+    model_fetch_spec_for_app, parse_model_ids_from_response, update_webdav_last_error_with,
     UpdateMsg, WebDavReqKind,
 };
-pub(crate) use runtime_systems::{fetch_provider_models_for_tui, ModelFetchStrategy};
 use runtime_systems::{
     handle_codex_history_msg, handle_local_env_msg, handle_managed_auth_msg,
     handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg, handle_session_msg,

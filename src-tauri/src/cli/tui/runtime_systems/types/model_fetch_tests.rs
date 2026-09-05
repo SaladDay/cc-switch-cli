@@ -7,6 +7,112 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+// Keep the previous protocol discriminator only in the independent test oracle.
+#[derive(Debug, Clone, Copy)]
+enum ModelFetchStrategy {
+    Bearer,
+    Anthropic,
+    GoogleApiKey,
+}
+
+impl ModelFetchStrategy {
+    fn spec(self) -> &'static cc_switch_core::model_fetch::ModelFetchSpec {
+        use cc_switch_core::model_fetch::{
+            ANTHROPIC_COMPATIBLE, BEARER_COMPATIBLE, GOOGLE_API_KEY,
+        };
+        match self {
+            Self::Bearer => &BEARER_COMPATIBLE,
+            Self::Anthropic => &ANTHROPIC_COMPATIBLE,
+            Self::GoogleApiKey => &GOOGLE_API_KEY,
+        }
+    }
+}
+
+#[test]
+fn registry_defaults_and_protocol_overrides_keep_tui_app_behavior() {
+    use cc_switch_core::model_fetch::{ANTHROPIC_COMPATIBLE, BEARER_COMPATIBLE, GOOGLE_API_KEY};
+    for (app, default) in [
+        (AppType::Claude, &ANTHROPIC_COMPATIBLE),
+        (AppType::Gemini, &GOOGLE_API_KEY),
+        (AppType::Codex, &BEARER_COMPATIBLE),
+        (AppType::OpenCode, &BEARER_COMPATIBLE),
+        (AppType::OpenClaw, &BEARER_COMPATIBLE),
+        (AppType::Hermes, &BEARER_COMPATIBLE),
+        (AppType::Pi, &BEARER_COMPATIBLE),
+    ] {
+        for (protocol, expected) in [
+            (None, default),
+            (Some("anthropic-messages"), &ANTHROPIC_COMPATIBLE),
+            (Some("google-generative-ai"), &GOOGLE_API_KEY),
+            (Some("openai-completions"), default),
+            (Some("unknown"), default),
+            (Some(" anthropic-messages "), default),
+            (Some(""), default),
+        ] {
+            assert_eq!(
+                model_fetch_spec_for_app(&app, protocol),
+                expected,
+                "{app:?}, {protocol:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn real_http_executor_accepts_custom_declarations_without_a_protocol_enum() {
+    use cc_switch_core::model_fetch::{
+        ModelEndpointPolicy, ModelFetchSpec, ModelHeaderValue, ModelListShape,
+    };
+    let spec = ModelFetchSpec {
+        endpoints: ModelEndpointPolicy::VersionedFirst {
+            compatibility_suffixes: &[],
+        },
+        key_headers: &[
+            ("x-native-key", ModelHeaderValue::Key { prefix: "Token " }),
+            ("x-native-version", ModelHeaderValue::Literal("2")),
+        ],
+        response_shapes: &[ModelListShape {
+            collection_pointer: "/result/catalog",
+            id_pointer: "/native/id",
+            strip_prefix: Some("model/"),
+        }],
+    };
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let handler_observed = Arc::clone(&observed);
+    let router = Router::new().fallback(move |uri: Uri, headers: HeaderMap| {
+        let observed = Arc::clone(&handler_observed);
+        async move {
+            observed.lock().unwrap().push((uri.to_string(), headers));
+            axum::Json(json!({"result": {"catalog": [
+                {"native": {"id": "model/a"}, "capabilities": {"future": true}},
+                {"native": {"id": "model/a"}}, {"native": {"id": "model/b"}}
+            ]}, "cursor": "opaque"}))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let result =
+        fetch_provider_models_for_tui(&origin, false, Some(" fake-key "), None, &spec, None).await;
+    server.abort();
+    let _ = server.await;
+    assert_eq!(result.unwrap(), ["a", "b"]);
+    let requests = observed.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "/v1/models");
+    let headers = &requests[0].1;
+    assert_eq!(headers["x-native-key"], "Token fake-key");
+    assert_eq!(headers["x-native-version"], "2");
+    for absent in [
+        "authorization",
+        "x-api-key",
+        "x-goog-api-key",
+        "anthropic-version",
+    ] {
+        assert!(!headers.contains_key(absent), "{absent}");
+    }
+}
+
 #[test]
 fn candidates_and_response_ids_match_the_previous_production_implementation() {
     let roots = [
@@ -43,7 +149,7 @@ fn candidates_and_response_ids_match_the_previous_production_implementation() {
                 for full in [false, true] {
                     for url in [format!("{root}{path}"), format!(" \t{root}{path}/ \n")] {
                         assert_eq!(
-                            build_model_fetch_candidate_urls(&url, strategy, full),
+                            build_model_fetch_candidate_urls(&url, strategy.spec(), full),
                             baseline_candidate_urls(&url, strategy, full),
                             "{url:?}, {strategy:?}, full={full}"
                         );
@@ -188,7 +294,7 @@ async fn real_http_requests_results_and_failures_match_the_baseline() {
                         full,
                         key,
                         Some(" agent "),
-                        strategy,
+                        strategy.spec(),
                         Some(&custom),
                     )
                     .await;
@@ -241,7 +347,7 @@ async fn preflight_errors_match_without_sending_requests() {
             full,
             key,
             None,
-            ModelFetchStrategy::Anthropic,
+            ModelFetchStrategy::Anthropic.spec(),
             headers,
         )
         .await;

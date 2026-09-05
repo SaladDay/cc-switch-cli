@@ -11,7 +11,6 @@ use super::app::{
     App, ConfirmAction, ConfirmOverlay, EditorSubmit, LoadingKind, Overlay, ToastKind,
 };
 use super::data::UiData;
-use super::form::ProviderAddField;
 use super::*;
 use crate::cli::i18n::texts;
 use crate::test_support::{
@@ -5289,22 +5288,22 @@ fn update_check_finished_is_ignored_when_request_id_mismatch() {
 }
 
 #[test]
-fn model_fetch_strategy_matches_provider_field() {
+fn model_fetch_spec_matches_provider_app() {
     assert_eq!(
-        model_fetch_strategy_for_field(ProviderAddField::CodexModel),
-        ModelFetchStrategy::Bearer
+        model_fetch_spec_for_app(&AppType::Codex, None),
+        &cc_switch_core::model_fetch::BEARER_COMPATIBLE
     );
     assert_eq!(
-        model_fetch_strategy_for_field(ProviderAddField::GeminiModel),
-        ModelFetchStrategy::GoogleApiKey
+        model_fetch_spec_for_app(&AppType::Gemini, None),
+        &cc_switch_core::model_fetch::GOOGLE_API_KEY
     );
     assert_eq!(
-        model_fetch_strategy_for_field(ProviderAddField::ClaudeModelConfig),
-        ModelFetchStrategy::Anthropic
+        model_fetch_spec_for_app(&AppType::Claude, None),
+        &cc_switch_core::model_fetch::ANTHROPIC_COMPATIBLE
     );
     assert_eq!(
-        model_fetch_strategy_for_field(ProviderAddField::HermesModels),
-        ModelFetchStrategy::Bearer
+        model_fetch_spec_for_app(&AppType::Hermes, None),
+        &cc_switch_core::model_fetch::BEARER_COMPATIBLE
     );
 }
 
@@ -5312,7 +5311,7 @@ fn model_fetch_strategy_matches_provider_field() {
 fn model_fetch_candidate_urls_prefers_v1_for_anthropic_base() {
     let urls = build_model_fetch_candidate_urls(
         "https://api.anthropic.com",
-        ModelFetchStrategy::Anthropic,
+        &cc_switch_core::model_fetch::ANTHROPIC_COMPATIBLE,
         false,
     );
     assert_eq!(
@@ -5328,7 +5327,7 @@ fn model_fetch_candidate_urls_prefers_v1_for_anthropic_base() {
 fn model_fetch_candidate_urls_strip_anthropic_compat_suffix() {
     let urls = build_model_fetch_candidate_urls(
         "https://api.deepseek.com/anthropic",
-        ModelFetchStrategy::Anthropic,
+        &cc_switch_core::model_fetch::ANTHROPIC_COMPATIBLE,
         false,
     );
     assert_eq!(
@@ -5345,7 +5344,7 @@ fn model_fetch_candidate_urls_strip_anthropic_compat_suffix() {
 fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
     let urls = build_model_fetch_candidate_urls(
         "https://generativelanguage.googleapis.com/v1beta",
-        ModelFetchStrategy::GoogleApiKey,
+        &cc_switch_core::model_fetch::GOOGLE_API_KEY,
         false,
     );
     assert_eq!(
@@ -5359,7 +5358,7 @@ fn model_fetch_candidate_urls_derive_models_endpoint_from_full_url() {
     assert_eq!(
         build_model_fetch_candidate_urls(
             "https://relay.example/v1/chat/completions?api-version=2026-01-01",
-            ModelFetchStrategy::Bearer,
+            &cc_switch_core::model_fetch::BEARER_COMPATIBLE,
             true,
         ),
         vec!["https://relay.example/v1/models".to_string()]
@@ -5367,7 +5366,7 @@ fn model_fetch_candidate_urls_derive_models_endpoint_from_full_url() {
     assert_eq!(
         build_model_fetch_candidate_urls(
             "https://relay.example/custom/chat/completions",
-            ModelFetchStrategy::Anthropic,
+            &cc_switch_core::model_fetch::ANTHROPIC_COMPATIBLE,
             true,
         ),
         vec!["https://relay.example/custom/chat/v1/models".to_string()]
@@ -5381,7 +5380,7 @@ async fn model_fetch_full_url_reports_when_models_endpoint_cannot_be_derived() {
         true,
         None,
         None,
-        ModelFetchStrategy::Bearer,
+        &cc_switch_core::model_fetch::BEARER_COMPATIBLE,
         None,
     )
     .await
@@ -5429,7 +5428,7 @@ async fn model_fetch_sends_trimmed_custom_user_agent() {
         false,
         Some("sk-test"),
         Some("  cc-switch-model-fetch/test  "),
-        ModelFetchStrategy::Bearer,
+        &cc_switch_core::model_fetch::BEARER_COMPATIBLE,
         None,
     )
     .await

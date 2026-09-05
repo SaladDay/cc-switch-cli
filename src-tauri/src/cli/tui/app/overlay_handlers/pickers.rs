@@ -995,6 +995,7 @@ impl App {
                         .then(|| provider.codex_oauth_account_id.clone())
                         .flatten();
                     Action::ProviderModelFetch {
+                        app_type: provider.app_type.clone(),
                         base_url: provider.claude_base_url.value.clone(),
                         is_full_url: provider.is_full_url,
                         api_key: (!provider.claude_api_key.value.trim().is_empty())
