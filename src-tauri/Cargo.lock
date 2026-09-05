@@ -571,7 +571,7 @@ dependencies = [
 [[package]]
 name = "cc-switch-core"
 version = "0.1.0"
-source = "git+https://github.com/SaladDay/cc-switch-core?rev=23f2ed5a0c3d3e692b76e1aff11f99d9ef13d2ea#23f2ed5a0c3d3e692b76e1aff11f99d9ef13d2ea"
+source = "git+https://github.com/SaladDay/cc-switch-core?rev=a09204b59c2849acc17e54109c3e8a9e2a528705#a09204b59c2849acc17e54109c3e8a9e2a528705"
 dependencies = [
  "http",
  "json-five",
@@ -592,7 +592,7 @@ dependencies = [
 [[package]]
 name = "cc-switch-store"
 version = "0.1.0"
-source = "git+https://github.com/SaladDay/cc-switch-core?rev=23f2ed5a0c3d3e692b76e1aff11f99d9ef13d2ea#23f2ed5a0c3d3e692b76e1aff11f99d9ef13d2ea"
+source = "git+https://github.com/SaladDay/cc-switch-core?rev=a09204b59c2849acc17e54109c3e8a9e2a528705#a09204b59c2849acc17e54109c3e8a9e2a528705"
 dependencies = [
  "cc-switch-core",
  "libc",

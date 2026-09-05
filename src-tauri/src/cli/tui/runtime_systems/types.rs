@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -15,17 +15,8 @@ use crate::services::{EndpointLatency, HealthStatus, StreamCheckResult, SyncDeci
 
 use super::super::form::ProviderAddField;
 
-const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
-    "/api/claudecode",
-    "/api/anthropic",
-    "/apps/anthropic",
-    "/api/coding",
-    "/claudecode",
-    "/anthropic",
-    "/step_plan",
-    "/coding",
-    "/claude",
-];
+#[cfg(test)]
+mod model_fetch_tests;
 
 pub(crate) fn next_model_fetch_request_id() -> u64 {
     static NEXT_MODEL_FETCH_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -849,118 +840,36 @@ pub(crate) fn model_fetch_strategy_for_field(field: ProviderAddField) -> ModelFe
     }
 }
 
+impl ModelFetchStrategy {
+    fn spec(self) -> &'static cc_switch_core::model_fetch::ModelFetchSpec {
+        use cc_switch_core::model_fetch::{
+            ANTHROPIC_COMPATIBLE, BEARER_COMPATIBLE, GOOGLE_API_KEY,
+        };
+        match self {
+            Self::Bearer => &BEARER_COMPATIBLE,
+            Self::Anthropic => &ANTHROPIC_COMPATIBLE,
+            Self::GoogleApiKey => &GOOGLE_API_KEY,
+        }
+    }
+}
+
 pub(crate) fn build_model_fetch_candidate_urls(
     base_url: &str,
     strategy: ModelFetchStrategy,
     is_full_url: bool,
 ) -> Vec<String> {
-    let base = base_url.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Vec::new();
-    }
-
-    if is_full_url {
-        let mut urls = Vec::new();
-        if let Some(index) = base.find("/v1/") {
-            urls.push(format!("{}/v1/models", &base[..index]));
-        } else if let Some(index) = base.rfind('/') {
-            let root = &base[..index];
-            if root
-                .find("://")
-                .is_some_and(|scheme| root.len() > scheme.saturating_add(3))
-            {
-                urls.push(format!("{root}/v1/models"));
-            }
-        }
-        return urls;
-    }
-
-    if base.ends_with("/models") {
-        return vec![base.to_string()];
-    }
-
-    let append_models = format!("{base}/models");
-    let append_versioned_models = if base.ends_with("/v1") || base.ends_with("/v1beta") {
-        None
+    use cc_switch_core::model_fetch::ModelEndpointInput;
+    let input = if is_full_url {
+        ModelEndpointInput::CompletionUrl
     } else {
-        Some(format!("{base}/v1/models"))
+        ModelEndpointInput::BaseUrl
     };
-
-    let mut urls: Vec<String> = Vec::new();
-    match strategy {
-        ModelFetchStrategy::Anthropic => {
-            if let Some(versioned) = append_versioned_models.as_ref() {
-                urls.push(versioned.clone());
-            } else {
-                urls.push(append_models.clone());
-            }
-
-            if let Some(stripped) = strip_compat_suffix(base) {
-                let root = stripped.trim_end_matches('/');
-                if !root.is_empty() && root.contains("://") {
-                    urls.push(format!("{root}/v1/models"));
-                    urls.push(format!("{root}/models"));
-                }
-            } else if append_versioned_models.is_some() {
-                urls.push(append_models);
-            }
-        }
-        ModelFetchStrategy::Bearer | ModelFetchStrategy::GoogleApiKey => {
-            urls.push(append_models);
-            if let Some(v1) = append_versioned_models.as_ref() {
-                urls.push(v1.clone());
-            }
-        }
-    }
-
-    let mut seen = HashSet::new();
-    urls.retain(|url| seen.insert(url.clone()));
-    urls
+    strategy.spec().candidate_urls(base_url, input)
 }
 
-fn strip_compat_suffix(base: &str) -> Option<&str> {
-    let lower = base.to_ascii_lowercase();
-    KNOWN_COMPAT_SUFFIXES.iter().find_map(|suffix| {
-        lower
-            .ends_with(suffix)
-            .then(|| &base[..base.len() - suffix.len()])
-    })
-}
-
+#[cfg(test)]
 pub(crate) fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-
-    if let Some(data) = payload.get("data").and_then(|v| v.as_array()) {
-        for item in data {
-            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                out.push(id.to_string());
-            }
-        }
-    }
-
-    if out.is_empty() {
-        if let Some(models) = payload.get("models").and_then(|v| v.as_array()) {
-            for item in models {
-                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                    out.push(name.strip_prefix("models/").unwrap_or(name).to_string());
-                }
-            }
-        }
-    }
-
-    if out.is_empty() {
-        if let Some(arr) = payload.as_array() {
-            for item in arr {
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    out.push(id.to_string());
-                }
-            }
-        }
-    }
-
-    let mut seen = HashSet::new();
-    out.retain(|model| seen.insert(model.clone()));
-    out
+    cc_switch_core::model_fetch::BEARER_COMPATIBLE.parse_model_ids(payload)
 }
 
 pub(crate) async fn fetch_provider_models_for_tui(
@@ -997,14 +906,9 @@ pub(crate) async fn fetch_provider_models_for_tui(
     for url in candidate_urls {
         let mut req = client.get(&url).timeout(Duration::from_secs(5));
         if let Some(key) = key {
-            req = match strategy {
-                ModelFetchStrategy::Bearer => req.header("Authorization", format!("Bearer {key}")),
-                ModelFetchStrategy::Anthropic => req
-                    .header("Authorization", format!("Bearer {key}"))
-                    .header("x-api-key", key)
-                    .header("anthropic-version", "2023-06-01"),
-                ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
-            };
+            for (name, value) in strategy.spec().headers_for_key(key) {
+                req = req.header(name, value);
+            }
         }
         if let Some(user_agent) = &custom_user_agent {
             req = req.header(reqwest::header::USER_AGENT, user_agent.clone());
@@ -1036,7 +940,7 @@ pub(crate) async fn fetch_provider_models_for_tui(
                 }
                 match resp.json::<Value>().await {
                     Ok(payload) => {
-                        let models = parse_model_ids_from_response(&payload);
+                        let models = strategy.spec().parse_model_ids(&payload);
                         if models.is_empty() {
                             last_err = format!("No model list found in response ({url})");
                         } else {
