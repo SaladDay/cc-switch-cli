@@ -1066,17 +1066,13 @@ fn json_value_to_toml_item(value: &Value, field_name: &str) -> Option<toml_edit:
 /// 2. 扩展字段（timeout、retry 等）通过白名单列表自动转换
 /// 3. 其他未知字段使用通用转换器尝试转换
 fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError> {
-    use toml_edit::{Array, Item, Table};
-
-    let mut t = Table::new();
     let typ = spec.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    t["type"] = toml_edit::value(typ);
 
     // 定义核心字段（已在下方处理，跳过通用转换）
-    let core_fields = match typ {
-        "stdio" => vec!["type", "command", "args", "env", "cwd"],
-        "http" | "sse" => vec!["type", "url", "headers", "http_headers"],
-        _ => vec!["type"],
+    let core_fields: &[&str] = match typ {
+        "stdio" => &["type", "command", "args", "env", "cwd"],
+        "http" | "sse" => &["type", "url", "headers", "http_headers"],
+        _ => &["type"],
     };
 
     // 定义扩展字段白名单（Codex 常见可选字段）
@@ -1107,58 +1103,58 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
         "proxy",
     ];
 
-    // 1. 处理核心字段（强类型）
-    match typ {
-        "stdio" => {
-            let cmd = spec.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            t["command"] = toml_edit::value(cmd);
-
-            if let Some(args) = spec.get("args").and_then(|v| v.as_array()) {
-                let mut arr_v = Array::default();
-                for a in args.iter().filter_map(|x| x.as_str()) {
-                    arr_v.push(a);
-                }
-                if !arr_v.is_empty() {
-                    t["args"] = Item::Value(toml_edit::Value::Array(arr_v));
-                }
-            }
-
-            if let Some(cwd) = spec.get("cwd").and_then(|v| v.as_str()) {
-                if !cwd.trim().is_empty() {
-                    t["cwd"] = toml_edit::value(cwd);
-                }
-            }
-
-            if let Some(env) = spec.get("env").and_then(|v| v.as_object()) {
-                let mut env_tbl = Table::new();
-                for (k, v) in env.iter() {
-                    if let Some(s) = v.as_str() {
-                        env_tbl[&k[..]] = toml_edit::value(s);
-                    }
-                }
-                if !env_tbl.is_empty() {
-                    t["env"] = Item::Table(env_tbl);
-                }
-            }
+    // Preserve the CLI's tolerant field filtering before native encoding.
+    let mut connection = serde_json::Map::new();
+    connection.insert("type".into(), json!(typ));
+    for &field in core_fields {
+        let value = match field {
+            "command" | "url" => Some(json!(spec.get(field).and_then(Value::as_str).unwrap_or(""))),
+            "cwd" => spec
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| json!(value)),
+            "args" => spec
+                .get(field)
+                .and_then(Value::as_array)
+                .map(|values| {
+                    Value::Array(
+                        values
+                            .iter()
+                            .filter(|value| value.is_string())
+                            .cloned()
+                            .collect(),
+                    )
+                })
+                .filter(|value| value.as_array().is_some_and(|values| !values.is_empty())),
+            "env" | "headers" => spec
+                .get(field)
+                .and_then(Value::as_object)
+                .map(|values| {
+                    Value::Object(
+                        values
+                            .iter()
+                            .filter(|(_, value)| value.is_string())
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    )
+                })
+                .filter(|value| value.as_object().is_some_and(|values| !values.is_empty())),
+            _ => None,
+        };
+        if let Some(value) = value {
+            connection.insert(field.into(), value);
         }
-        "http" | "sse" => {
-            let url = spec.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            t["url"] = toml_edit::value(url);
-
-            if let Some(headers) = spec.get("headers").and_then(|v| v.as_object()) {
-                let mut h_tbl = Table::new();
-                for (k, v) in headers.iter() {
-                    if let Some(s) = v.as_str() {
-                        h_tbl[&k[..]] = toml_edit::value(s);
-                    }
-                }
-                if !h_tbl.is_empty() {
-                    t["http_headers"] = Item::Table(h_tbl);
-                }
-            }
-        }
-        _ => {}
     }
+    let native = cc_switch_core::McpConfigTarget::Codex
+        .encode_server(&Value::Object(connection))
+        .map_err(|error| AppError::McpValidation(error.to_string()))?;
+    let text =
+        toml::to_string(&native).map_err(|error| AppError::McpValidation(error.to_string()))?;
+    let mut t = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| AppError::McpValidation(error.to_string()))?
+        .into_table();
 
     // 2. 处理扩展字段和其他未知字段
     if let Some(obj) = spec.as_object() {
@@ -1662,6 +1658,51 @@ mod portable_mcp_tests {
 #[cfg(test)]
 mod codex_mcp_tests {
     use super::*;
+
+    #[test]
+    fn codex_entry_encoding_preserves_tolerant_fields_and_extensions() {
+        for (spec, expected) in [
+            (
+                json!({"command":"node", "args":["server",42,false],
+                    "env":{"KEEP":"yes", "DROP":false}, "cwd":" /work ",
+                    "startup_timeout_sec":3.5, "enabled":false, "name":"extension",
+                    "headers":{"CROSS":"preserved"}, "unknown":{"key":"value"},
+                    "nested":{"not":"all strings", "number":42}, "empty":[]}),
+                json!({"type":"stdio", "command":"node", "args":["server"],
+                    "env":{"KEEP":"yes"}, "cwd":" /work ",
+                    "startup_timeout_sec":3.5, "enabled":false, "name":"extension",
+                    "headers":{"CROSS":"preserved"}, "unknown":{"key":"value"}}),
+            ),
+            (
+                json!({"type":"http", "url":"https://example.com/mcp",
+                    "headers":{"Authorization":"test-key", "DROP":42},
+                    "http_headers":{"IGNORED":"native alias"},
+                    "env":{"CROSS":"preserved"}, "args":["mixed",42,false], "retry_count":2}),
+                json!({"type":"http", "url":"https://example.com/mcp",
+                    "http_headers":{"Authorization":"test-key"},
+                    "env":{"CROSS":"preserved"}, "args":["mixed",42,false], "retry_count":2}),
+            ),
+            (
+                json!({"type":"sse", "url":false, "headers":false,
+                    "http_headers":{"IGNORED":"native alias"}}),
+                json!({"type":"sse", "url":""}),
+            ),
+            (
+                json!({"type":"future", "command":"preserved", "args":[42]}),
+                json!({"type":"future", "command":"preserved", "args":[42]}),
+            ),
+            (
+                json!({"command":false, "args":[42], "env":{}, "cwd":"  "}),
+                json!({"type":"stdio", "command":""}),
+            ),
+            (Value::Null, json!({"type":"stdio", "command":""})),
+        ] {
+            let mut document = toml_edit::DocumentMut::new();
+            *document.as_table_mut() = json_server_to_toml_table(&spec).expect("encode");
+            let parsed: toml::Value = toml::from_str(&document.to_string()).expect("native TOML");
+            assert_eq!(serde_json::to_value(parsed).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn upsert_normalizes_non_table_mcp_servers_without_panicking() {
