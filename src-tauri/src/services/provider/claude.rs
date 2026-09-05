@@ -1,76 +1,12 @@
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl ProviderService {
     /// 归一化 Claude 模型键：读旧键(ANTHROPIC_SMALL_FAST_MODEL)，写新键(DEFAULT_*), 并删除旧键
     pub(crate) fn normalize_claude_models_in_value(settings: &mut Value) -> bool {
-        let mut changed = false;
-        let env = match settings.get_mut("env") {
-            Some(v) if v.is_object() => v.as_object_mut().unwrap(),
-            _ => return changed,
-        };
-
-        let model = env
-            .get("ANTHROPIC_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let small_fast = env
-            .get("ANTHROPIC_SMALL_FAST_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let current_haiku = env
-            .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let current_sonnet = env
-            .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let current_opus = env
-            .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let target_haiku = current_haiku
-            .or_else(|| small_fast.clone())
-            .or_else(|| model.clone());
-        let target_sonnet = current_sonnet
-            .or_else(|| model.clone())
-            .or_else(|| small_fast.clone());
-        let target_opus = current_opus
-            .or_else(|| model.clone())
-            .or_else(|| small_fast.clone());
-
-        if env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none() {
-            if let Some(v) = target_haiku {
-                env.insert(
-                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    Value::String(v),
-                );
-                changed = true;
-            }
-        }
-        if env.get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_none() {
-            if let Some(v) = target_sonnet {
-                env.insert(
-                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-                    Value::String(v),
-                );
-                changed = true;
-            }
-        }
-        if env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none() {
-            if let Some(v) = target_opus {
-                env.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), Value::String(v));
-                changed = true;
-            }
-        }
-
-        if env.remove("ANTHROPIC_SMALL_FAST_MODEL").is_some() {
-            changed = true;
-        }
-
-        changed
+        cc_switch_core::claude::normalize_model_keys(settings)
     }
 
     pub(super) fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
@@ -234,12 +170,7 @@ impl ProviderService {
     /// Mirror of upstream `sanitize_claude_settings_for_live`: remove CC-Switch
     /// internal-only fields that must not leak into Claude Code's settings.json.
     fn sanitize_claude_settings_for_live(settings: &mut Value) {
-        if let Some(obj) = settings.as_object_mut() {
-            obj.remove("api_format");
-            obj.remove("apiFormat");
-            obj.remove("openrouter_compat_mode");
-            obj.remove("openrouterCompatMode");
-        }
+        cc_switch_core::claude::strip_internal_metadata(settings);
     }
 
     pub(super) fn apply_claude_live_write(prepared: &PreparedLiveWrite) -> Result<(), AppError> {
