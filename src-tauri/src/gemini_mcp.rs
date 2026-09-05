@@ -1,3 +1,4 @@
+use cc_switch_core::{McpConfigTarget, McpEntryDecodePolicy, McpEntryEncodePolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
@@ -6,6 +7,9 @@ use std::path::{Path, PathBuf};
 use crate::config::atomic_write;
 use crate::error::AppError;
 use crate::gemini_config::get_gemini_settings_path;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,26 +68,13 @@ pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>
     };
 
     for (id, raw_spec) in obj {
-        let mut spec = raw_spec.clone();
-
-        // Reverse conversion (align upstream):
-        // - httpUrl -> url + type:"http"
-        // - if no type: command => "stdio", url => "sse"
-        if let Some(spec_obj) = spec.as_object_mut() {
-            if let Some(http_url_value) = spec_obj.remove("httpUrl") {
-                spec_obj.insert("url".to_string(), http_url_value);
-                spec_obj.insert("type".to_string(), Value::String("http".to_string()));
-            }
-
-            let has_type = spec_obj.get("type").and_then(|v| v.as_str()).is_some();
-            if !has_type {
-                if spec_obj.get("command").and_then(|v| v.as_str()).is_some() {
-                    spec_obj.insert("type".to_string(), Value::String("stdio".to_string()));
-                } else if spec_obj.get("url").and_then(|v| v.as_str()).is_some() {
-                    spec_obj.insert("type".to_string(), Value::String("sse".to_string()));
-                }
-            }
-        }
+        let spec = if raw_spec.is_object() {
+            McpConfigTarget::Gemini
+                .decode_server_with_policy(raw_spec, McpEntryDecodePolicy::InferFromStringFields)
+                .map_err(|error| AppError::McpValidation(error.to_string()))?
+        } else {
+            raw_spec.clone()
+        };
 
         servers.insert(id.clone(), spec);
     }
@@ -106,73 +97,29 @@ pub fn set_mcp_servers_map(
     // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
     let mut out: Map<String, Value> = Map::new();
     for (id, spec) in servers.iter() {
-        let mut obj = if let Some(map) = spec.as_object() {
-            map.clone()
+        let obj = spec
+            .as_object()
+            .ok_or_else(|| AppError::McpValidation(format!("MCP 服务器 '{id}' 不是对象")))?;
+        let server = if let Some(server) = obj.get("server") {
+            if !server.is_object() {
+                return Err(AppError::McpValidation(format!(
+                    "MCP 服务器 '{id}' server 字段不是对象"
+                )));
+            }
+            server
         } else {
-            return Err(AppError::McpValidation(format!(
-                "MCP 服务器 '{id}' 不是对象"
-            )));
+            spec
+        };
+        let native = McpConfigTarget::Gemini
+            .encode_server_with_policy(server, McpEntryEncodePolicy::PreserveFields)
+            .map_err(|error| AppError::McpValidation(error.to_string()))?;
+        let Value::Object(mut obj) = native else {
+            return Err(AppError::McpValidation(
+                "Gemini MCP entry codec did not return an object".into(),
+            ));
         };
 
-        // 提取 server 字段（如果存在）
-        if let Some(server_val) = obj.remove("server") {
-            let server_obj = server_val.as_object().cloned().ok_or_else(|| {
-                AppError::McpValidation(format!("MCP 服务器 '{id}' server 字段不是对象"))
-            })?;
-            obj = server_obj;
-        }
-
-        // Gemini CLI 格式转换：
-        // - Gemini 不使用 "type" 字段（从字段名推断传输类型）
-        // - HTTP 使用 "httpUrl" 字段，SSE 使用 "url" 字段
-        let transport_type = obj.get("type").and_then(|v| v.as_str());
-        if transport_type == Some("http") {
-            // HTTP streaming: 将 "url" 重命名为 "httpUrl"
-            if let Some(url_value) = obj.remove("url") {
-                obj.insert("httpUrl".to_string(), url_value);
-            }
-        }
-        // SSE 保持 "url" 字段不变
-
-        // Timeout conversion:
-        // - CC-Switch/Codex/Claude may use startup_timeout_* / tool_timeout_*.
-        // - Gemini CLI uses a single timeout field (ms).
-        // Derive Gemini timeout by taking the maximum of:
-        //   - existing `timeout` (if any)
-        //   - startup timeout (default 10s)
-        //   - tool timeout (default 60s)
-        const DEFAULT_STARTUP_MS: u64 = 10_000;
-        const DEFAULT_TOOL_MS: u64 = 60_000;
-
-        let existing_timeout_ms = obj
-            .get("timeout")
-            .and_then(|val| val.as_u64().or_else(|| val.as_f64().map(|f| f as u64)));
-
-        let extract_timeout =
-            |obj: &mut Map<String, Value>, key: &str, multiplier: u64| -> Option<u64> {
-                obj.remove(key).and_then(|val| {
-                    val.as_u64()
-                        .map(|n| n.saturating_mul(multiplier))
-                        .or_else(|| val.as_f64().map(|f| (f * multiplier as f64) as u64))
-                })
-            };
-
-        let startup_ms = extract_timeout(&mut obj, "startup_timeout_sec", 1000)
-            .or_else(|| extract_timeout(&mut obj, "startup_timeout_ms", 1))
-            .unwrap_or(DEFAULT_STARTUP_MS);
-        let tool_ms = extract_timeout(&mut obj, "tool_timeout_sec", 1000)
-            .or_else(|| extract_timeout(&mut obj, "tool_timeout_ms", 1))
-            .unwrap_or(DEFAULT_TOOL_MS);
-
-        let derived_timeout_ms = startup_ms.max(tool_ms);
-        let final_timeout_ms = existing_timeout_ms.unwrap_or(0).max(derived_timeout_ms);
-        obj.insert(
-            "timeout".to_string(),
-            Value::Number(final_timeout_ms.into()),
-        );
-
-        // 移除 UI 辅助字段和 type 字段（Gemini 不需要）
-        obj.remove("type");
+        // Catalog metadata stays host-owned; Core preserves unconsumed fields.
         obj.remove("enabled");
         obj.remove("source");
         obj.remove("id");
