@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::{
-    delete_file, home_dir, read_json_file, sanitize_provider_name, write_json_file, write_text_file,
+    delete_file, home_dir, sanitize_provider_name, write_json_file, write_text_file,
 };
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Command;
 use toml_edit::DocumentMut;
 
+mod native_import;
 mod operation;
 
 #[cfg(test)]
@@ -998,13 +999,20 @@ pub fn read_codex_model_catalog_simplified_from_live() -> Result<Option<Value>, 
 }
 
 pub fn read_codex_live_settings_with_model_catalog() -> Result<Value, AppError> {
-    let mut settings = read_codex_live_settings()?;
+    Ok(read_codex_native_import_with_model_catalog()?
+        .provider
+        .settings)
+}
+
+pub(crate) fn read_codex_native_import_with_model_catalog(
+) -> Result<cc_switch_core::NativeImportCandidate, AppError> {
+    let mut imported = native_import::read()?;
     if let Ok(Some(model_catalog)) = read_codex_model_catalog_simplified_from_live() {
-        if let Some(obj) = settings.as_object_mut() {
+        if let Some(obj) = imported.provider.settings.as_object_mut() {
             obj.insert("modelCatalog".to_string(), model_catalog);
         }
     }
-    Ok(settings)
+    Ok(imported)
 }
 
 pub(crate) fn resolve_cc_switch_catalog_path(
@@ -1179,22 +1187,7 @@ pub fn remove_codex_experimental_bearer_token_if(
 /// Missing `auth.json` collapses to `{}` so a config-only third-party install
 /// is still importable; both files empty is treated as "no live install".
 pub fn read_codex_live_settings() -> Result<Value, AppError> {
-    let auth_path = get_codex_auth_path();
-    let auth_present = auth_path.exists();
-    let auth: Value = if auth_present {
-        read_json_file(&auth_path)?
-    } else {
-        json!({})
-    };
-    let cfg_text = read_and_validate_codex_config_text()?;
-    if !auth_present && cfg_text.trim().is_empty() {
-        return Err(AppError::localized(
-            "codex.live.missing",
-            "Codex 配置文件不存在",
-            "Codex configuration is missing",
-        ));
-    }
-    Ok(json!({ "auth": auth, "config": cfg_text }))
+    Ok(native_import::read()?.provider.settings)
 }
 
 /// `[model_providers.custom]` entry that makes an official (ChatGPT OAuth)

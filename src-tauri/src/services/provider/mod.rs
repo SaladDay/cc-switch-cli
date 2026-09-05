@@ -2447,8 +2447,13 @@ impl ProviderService {
             return Ok(false);
         }
 
+        let mut native_classification = None;
         let settings_config = match app_type {
-            AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog()?,
+            AppType::Codex => {
+                let imported = crate::codex_config::read_codex_native_import_with_model_catalog()?;
+                native_classification = imported.classification;
+                imported.provider.settings
+            }
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
                 if !settings_path.exists() {
@@ -2508,26 +2513,8 @@ impl ProviderService {
             None,
         );
         provider.category = Some(
-            if matches!(app_type, AppType::Codex) {
-                let config_text = provider
-                    .settings_config
-                    .get("config")
-                    .and_then(Value::as_str);
-                let has_provider_key = crate::codex_config::extract_codex_api_key(
-                    provider.settings_config.get("auth"),
-                    config_text,
-                )
-                .is_some();
-                let has_login_material = provider
-                    .settings_config
-                    .get("auth")
-                    .is_some_and(crate::codex_config::codex_auth_has_login_material);
-
-                if has_login_material && !has_provider_key {
-                    "official"
-                } else {
-                    "custom"
-                }
+            if native_classification == Some(cc_switch_core::NativeProviderMode::Official) {
+                "official"
             } else {
                 "custom"
             }

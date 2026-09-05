@@ -6445,6 +6445,44 @@ fn replacing_codex_common_snippet_tolerates_invalid_stored_snippet() {
 
 #[test]
 #[serial]
+fn import_default_config_uses_core_codex_classification_without_changing_identity() {
+    for (auth, config_text, category) in [
+        (
+            json!({"last_refresh":"yesterday", "future":{"keep":true}}),
+            "# keep\nmodel = 'x'\n",
+            "official",
+        ),
+        (
+            json!({"tokens":{"access_token":"oauth"}}),
+            "experimental_bearer_token = 'key'\n",
+            "custom",
+        ),
+        (json!(["opaque"]), "model = 'x'\n", "custom"),
+    ] {
+        let temp_home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+        write_json_file(&get_codex_auth_path(), &auth).unwrap();
+        std::fs::write(get_codex_config_path(), config_text).unwrap();
+        let mut config = MultiAppConfig::default();
+        config.ensure_app(&AppType::Codex);
+        let state = state_from_config(config);
+        assert!(ProviderService::import_default_config(&state, AppType::Codex).unwrap());
+        let provider = state
+            .db
+            .get_provider_by_id("default", "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(provider.name, "default");
+        assert_eq!(provider.category.as_deref(), Some(category));
+        assert_eq!(provider.settings_config["auth"], auth);
+        assert_eq!(provider.settings_config["config"], config_text);
+        assert!(!ProviderService::import_default_config(&state, AppType::Codex).unwrap());
+    }
+}
+
+#[test]
+#[serial]
 fn import_default_config_preserves_codex_common_snippet_in_db_snapshot() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
