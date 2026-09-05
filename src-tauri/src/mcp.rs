@@ -806,103 +806,60 @@ pub fn import_from_gemini(config: &mut MultiAppConfig) -> Result<usize, AppError
 }
 
 /// OpenCode MCP: CC Switch 统一格式 → OpenCode 格式
-fn convert_to_opencode_mcp_spec(spec: &Value) -> Result<Value, AppError> {
+// The CLI imports only portable connection fields for OpenCode and Hermes.
+// Native field names belong to Core; selection and tolerant optional-field
+// handling remain the CLI's existing catalog policy.
+fn portable_mcp_spec(spec: &Value) -> Result<Value, AppError> {
     let obj = spec
         .as_object()
         .ok_or_else(|| AppError::McpValidation("MCP spec must be a JSON object".into()))?;
-
-    let typ = obj.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    let mut result = serde_json::Map::new();
-
-    match typ {
-        "stdio" => {
-            result.insert("type".into(), json!("local"));
-
-            let cmd = obj.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let mut command = vec![json!(cmd)];
-            if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
-                command.extend(args.iter().cloned());
-            }
-            result.insert("command".into(), Value::Array(command));
-
-            if let Some(env) = obj.get("env") {
-                if env.is_object() && !env.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                    result.insert("environment".into(), env.clone());
-                }
-            }
-            result.insert("enabled".into(), json!(true));
-        }
-        "sse" | "http" => {
-            result.insert("type".into(), json!("remote"));
-            if let Some(url) = obj.get("url") {
-                result.insert("url".into(), url.clone());
-            }
-            if let Some(headers) = obj.get("headers") {
-                if headers.is_object() && !headers.as_object().map(|o| o.is_empty()).unwrap_or(true)
-                {
-                    result.insert("headers".into(), headers.clone());
-                }
-            }
-            result.insert("enabled".into(), json!(true));
-        }
+    let typ = obj.get("type").and_then(Value::as_str).unwrap_or("stdio");
+    let fields: &[&str] = match typ {
+        "stdio" => &["command", "args", "env"],
+        "http" | "sse" => &["url", "headers"],
         other => {
             return Err(AppError::McpValidation(format!(
                 "Unknown MCP type: {other}"
-            )));
+            )))
+        }
+    };
+    let mut result = serde_json::Map::new();
+    result.insert("type".into(), json!(typ));
+    for &field in fields {
+        if let Some(value) = obj.get(field) {
+            let include = match field {
+                "args" => value.as_array().is_some_and(|array| !array.is_empty()),
+                "env" | "headers" => value.as_object().is_some_and(|map| !map.is_empty()),
+                _ => true,
+            };
+            if include {
+                result.insert(field.into(), value.clone());
+            }
         }
     }
-
     Ok(Value::Object(result))
+}
+
+fn convert_to_opencode_mcp_spec(spec: &Value) -> Result<Value, AppError> {
+    cc_switch_core::McpConfigTarget::OpenCode
+        .encode_server(&portable_mcp_spec(spec)?)
+        .map_err(|error| AppError::McpValidation(error.to_string()))
 }
 
 /// OpenCode MCP: OpenCode 格式 → CC Switch 统一格式
 fn convert_from_opencode_mcp_spec(spec: &Value) -> Result<Value, AppError> {
-    let obj = spec
+    let mut native = spec
         .as_object()
+        .cloned()
         .ok_or_else(|| AppError::McpValidation("OpenCode MCP spec must be a JSON object".into()))?;
-
-    let typ = obj.get("type").and_then(|v| v.as_str()).unwrap_or("local");
-    let mut result = serde_json::Map::new();
-
-    match typ {
-        "local" => {
-            result.insert("type".into(), json!("stdio"));
-            if let Some(command) = obj.get("command").and_then(|v| v.as_array()) {
-                if let Some(cmd) = command.first().and_then(|v| v.as_str()) {
-                    result.insert("command".into(), json!(cmd));
-                }
-                if command.len() > 1 {
-                    result.insert("args".into(), Value::Array(command[1..].to_vec()));
-                }
-            }
-            if let Some(env) = obj.get("environment") {
-                if env.is_object() && !env.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                    result.insert("env".into(), env.clone());
-                }
-            }
-        }
-        "remote" => {
-            result.insert("type".into(), json!("sse"));
-            if let Some(url) = obj.get("url") {
-                result.insert("url".into(), url.clone());
-            }
-            if let Some(headers) = obj.get("headers") {
-                if headers.is_object() && !headers.as_object().map(|o| o.is_empty()).unwrap_or(true)
-                {
-                    result.insert("headers".into(), headers.clone());
-                }
-            }
-        }
-        other => {
-            return Err(AppError::McpValidation(format!(
-                "Unknown OpenCode MCP type: {other}"
-            )));
-        }
-    }
-
-    Ok(Value::Object(result))
+    // Only the native command array and environment map define these fields.
+    native.remove("args");
+    native.remove("env");
+    let unified = cc_switch_core::McpConfigTarget::OpenCode
+        .decode_server(&Value::Object(native))
+        .map_err(|error| AppError::McpValidation(error.to_string()))?;
+    portable_mcp_spec(&unified)
 }
-
 /// 从 ~/.config/opencode/opencode.json 导入 MCP 到统一结构
 pub fn import_from_opencode(config: &mut MultiAppConfig) -> Result<usize, AppError> {
     use crate::app_config::{McpApps, McpServer};
@@ -1454,98 +1411,18 @@ fn should_sync_hermes_mcp() -> bool {
 
 /// Convert CC Switch's unified MCP format to the Hermes YAML shape.
 fn convert_to_hermes_mcp_spec(spec: &Value) -> Result<Value, AppError> {
-    let obj = spec
-        .as_object()
-        .ok_or_else(|| AppError::McpValidation("MCP spec must be a JSON object".into()))?;
-
-    let typ = obj.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    let mut result = serde_json::Map::new();
-
-    match typ {
-        "stdio" => {
-            if let Some(command) = obj.get("command") {
-                result.insert("command".into(), command.clone());
-            }
-            if let Some(args) = obj.get("args") {
-                if args.is_array() && !args.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-                    result.insert("args".into(), args.clone());
-                }
-            }
-            if let Some(env) = obj.get("env") {
-                if env.is_object() && !env.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                    result.insert("env".into(), env.clone());
-                }
-            }
-        }
-        "sse" | "http" => {
-            if let Some(url) = obj.get("url") {
-                result.insert("url".into(), url.clone());
-            }
-            if let Some(headers) = obj.get("headers") {
-                if headers.is_object() && !headers.as_object().map(|o| o.is_empty()).unwrap_or(true)
-                {
-                    result.insert("headers".into(), headers.clone());
-                }
-            }
-        }
-        other => {
-            return Err(AppError::McpValidation(format!(
-                "Unknown MCP type: {other}"
-            )));
-        }
-    }
-
-    // Hermes expects an explicit `enabled` flag; default to true on write.
-    result.insert("enabled".into(), json!(true));
-
-    Ok(Value::Object(result))
+    cc_switch_core::McpConfigTarget::Hermes
+        .encode_server(&portable_mcp_spec(spec)?)
+        .map_err(|error| AppError::McpValidation(error.to_string()))
 }
 
-/// Convert Hermes YAML shape back to CC Switch's unified format, stripping
-/// Hermes-private fields on the import path.
+/// Import only portable connection fields, leaving native metadata in Hermes.
 fn convert_from_hermes_mcp_spec(id: &str, spec: &Value) -> Result<Value, AppError> {
-    let obj = spec
-        .as_object()
-        .ok_or_else(|| AppError::McpValidation("Hermes MCP spec must be a JSON object".into()))?;
-
-    let mut result = serde_json::Map::new();
-
-    if obj.contains_key("command") {
-        result.insert("type".into(), json!("stdio"));
-
-        if let Some(command) = obj.get("command") {
-            result.insert("command".into(), command.clone());
-        }
-        if let Some(args) = obj.get("args") {
-            if args.is_array() && !args.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-                result.insert("args".into(), args.clone());
-            }
-        }
-        if let Some(env) = obj.get("env") {
-            if env.is_object() && !env.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                result.insert("env".into(), env.clone());
-            }
-        }
-    } else if obj.contains_key("url") {
-        result.insert("type".into(), json!("sse"));
-
-        if let Some(url) = obj.get("url") {
-            result.insert("url".into(), url.clone());
-        }
-        if let Some(headers) = obj.get("headers") {
-            if headers.is_object() && !headers.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                result.insert("headers".into(), headers.clone());
-            }
-        }
-    } else {
-        return Err(AppError::McpValidation(format!(
-            "Hermes MCP server '{id}' has neither a 'command' nor 'url' field"
-        )));
-    }
-
-    Ok(Value::Object(result))
+    let unified = cc_switch_core::McpConfigTarget::Hermes
+        .decode_server(spec)
+        .map_err(|error| AppError::McpValidation(format!("Hermes MCP server '{id}': {error}")))?;
+    portable_mcp_spec(&unified)
 }
-
 /// Merge: core fields come from `new_spec`, Hermes-specific fields are
 /// preserved from `existing`.
 fn merge_hermes_spec(existing: &Value, new_spec: &Value) -> Value {
@@ -1711,6 +1588,75 @@ pub fn import_from_hermes(config: &mut MultiAppConfig) -> Result<usize, AppError
     }
 
     Ok(changed)
+}
+
+#[cfg(test)]
+mod portable_mcp_tests {
+    use super::*;
+
+    #[test]
+    fn export_keeps_the_existing_portable_field_policy() {
+        for (spec, opencode, hermes) in [
+            (
+                json!({"command":"node", "args":["server", 42], "env":{"KEY":false},
+                    "cwd":"/private", "timeout":900, "enabled":false, "url":"ignored"}),
+                json!({"type":"local", "command":["node","server",42],
+                    "environment":{"KEY":false}, "enabled":true}),
+                json!({"command":"node", "args":["server",42], "env":{"KEY":false}, "enabled":true}),
+            ),
+            (
+                json!({"type":"http", "url":"https://example.com/mcp", "headers":{"X-Test":42},
+                    "command":"ignored", "auth":"oauth", "args":[], "env":{}}),
+                json!({"type":"remote", "url":"https://example.com/mcp", "headers":{"X-Test":42}, "enabled":true}),
+                json!({"url":"https://example.com/mcp", "headers":{"X-Test":42}, "enabled":true}),
+            ),
+            (
+                json!({"type":false, "command":"node", "args":false, "env":[], "headers":{}}),
+                json!({"type":"local", "command":["node"], "enabled":true}),
+                json!({"command":"node", "enabled":true}),
+            ),
+            (
+                json!({"type":"sse", "headers":{}, "url":null}),
+                json!({"type":"remote", "url":null, "enabled":true}),
+                json!({"url":null, "enabled":true}),
+            ),
+        ] {
+            assert_eq!(convert_to_opencode_mcp_spec(&spec).unwrap(), opencode);
+            assert_eq!(convert_to_hermes_mcp_spec(&spec).unwrap(), hermes);
+        }
+    }
+
+    #[test]
+    fn opencode_import_uses_only_native_connection_fields() {
+        for (native, expected) in [
+            (
+                json!({"command":["node"], "args":["ignored"], "env":{"IGNORED":"yes"},
+                    "environment":{}, "url":"ignored", "enabled":false, "timeout":900}),
+                json!({"type":"stdio", "command":"node"}),
+            ),
+            (
+                json!({"type":"local", "command":["node",42], "environment":{"KEY":false}}),
+                json!({"type":"stdio", "command":"node", "args":[42], "env":{"KEY":false}}),
+            ),
+            (
+                json!({"type":"remote", "url":"https://example.com/mcp", "headers":{},
+                    "command":["ignored"], "oauth":true}),
+                json!({"type":"sse", "url":"https://example.com/mcp"}),
+            ),
+        ] {
+            assert_eq!(convert_from_opencode_mcp_spec(&native).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn hermes_import_preserves_endpoint_precedence_and_optional_field_handling() {
+        let native = json!({"command":"node", "url":"ignored", "args":[], "env":false,
+            "enabled":false, "headers":{"ignored":"yes"}, "timeout":90});
+        assert_eq!(
+            convert_from_hermes_mcp_spec("test", &native).unwrap(),
+            json!({"type":"stdio", "command":"node"})
+        );
+    }
 }
 
 #[cfg(test)]
