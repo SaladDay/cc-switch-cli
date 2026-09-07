@@ -4,9 +4,10 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::atomic_write;
 use crate::error::AppError;
 use crate::gemini_config::get_gemini_settings_path;
+
+mod operation;
 
 #[cfg(test)]
 mod tests;
@@ -26,42 +27,39 @@ fn user_config_path() -> PathBuf {
 }
 
 fn read_json_value(path: &Path) -> Result<Value, AppError> {
-    if !path.exists() {
-        return Ok(serde_json::json!({}));
-    }
-    let content = fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
-    let value: Value = serde_json::from_str(&content).map_err(|e| AppError::json(path, e))?;
-    Ok(value)
+    parse_json_value(path, read_json_text(path)?.as_deref())
 }
 
-fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+fn read_json_text(path: &Path) -> Result<Option<String>, AppError> {
+    if !path.exists() {
+        return Ok(None);
     }
-    let json =
-        serde_json::to_string_pretty(value).map_err(|e| AppError::JsonSerialize { source: e })?;
-    atomic_write(path, json.as_bytes())
+    fs::read_to_string(path)
+        .map(Some)
+        .map_err(|e| AppError::io(path, e))
+}
+
+fn parse_json_value(path: &Path, content: Option<&str>) -> Result<Value, AppError> {
+    match content {
+        Some(content) => serde_json::from_str(content).map_err(|e| AppError::json(path, e)),
+        None => Ok(serde_json::json!({})),
+    }
 }
 
 /// 读取 Gemini MCP 配置文件的完整 JSON 文本
 #[allow(dead_code)]
 pub fn read_mcp_json() -> Result<Option<String>, AppError> {
-    let path = user_config_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
-    Ok(Some(content))
+    read_json_text(&user_config_path())
 }
 
 /// 读取 Gemini settings.json 中的 mcpServers 映射
 pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>, AppError> {
     let path = user_config_path();
-    if !path.exists() {
-        return Ok(std::collections::HashMap::new());
-    }
-
     let root = read_json_value(&path)?;
+    decode_servers(&root)
+}
+
+fn decode_servers(root: &Value) -> Result<std::collections::HashMap<String, Value>, AppError> {
     let mut servers: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     let Some(obj) = root.get("mcpServers").and_then(|v| v.as_object()) else {
         return Ok(servers);
@@ -88,12 +86,30 @@ pub fn set_mcp_servers_map(
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
     let path = user_config_path();
-    let mut root = if path.exists() {
-        read_json_value(&path)?
-    } else {
-        serde_json::json!({})
-    };
+    let operation = operation::SettingsOperation::observe(&path)?;
+    let root = parse_json_value(&path, operation.contents())?;
+    publish_servers(operation, root, servers).map(operation::SettingsWrite::finish)
+}
 
+/// Read-modify-write callers must derive their map from the same observation
+/// used by publication. Reading a map and later calling the replacement setter
+/// would authorize stale server data against a newer document.
+pub(crate) fn update_mcp_servers_map(
+    update: impl FnOnce(&mut std::collections::HashMap<String, Value>),
+) -> Result<(), AppError> {
+    let path = user_config_path();
+    let operation = operation::SettingsOperation::observe(&path)?;
+    let root = parse_json_value(&path, operation.contents())?;
+    let mut servers = decode_servers(&root)?;
+    update(&mut servers);
+    publish_servers(operation, root, &servers).map(operation::SettingsWrite::finish)
+}
+
+fn publish_servers(
+    operation: operation::SettingsOperation,
+    mut root: Value,
+    servers: &std::collections::HashMap<String, Value>,
+) -> Result<operation::SettingsWrite, AppError> {
     // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
     let mut out: Map<String, Value> = Map::new();
     for (id, spec) in servers.iter() {
@@ -139,6 +155,7 @@ pub fn set_mcp_servers_map(
         obj.insert("mcpServers".into(), Value::Object(out));
     }
 
-    write_json_value(&path, &root)?;
-    Ok(())
+    let json =
+        serde_json::to_string_pretty(&root).map_err(|e| AppError::JsonSerialize { source: e })?;
+    operation.execute(json)
 }

@@ -1129,15 +1129,9 @@ pub fn sync_single_server_to_gemini(
         return Ok(());
     }
 
-    // 读取现有的 MCP 配置
-    let current = crate::gemini_mcp::read_mcp_servers_map()?;
-
-    // 创建新的 HashMap，包含现有的所有服务器 + 当前要同步的服务器
-    let mut updated = current;
-    updated.insert(id.to_string(), server_spec.clone());
-
-    // 写回
-    crate::gemini_mcp::set_mcp_servers_map(&updated)
+    crate::gemini_mcp::update_mcp_servers_map(|servers| {
+        servers.insert(id.to_string(), server_spec.clone());
+    })
 }
 
 /// 从 Gemini live 配置中移除单个 MCP 服务器
@@ -1146,14 +1140,9 @@ pub fn remove_server_from_gemini(id: &str) -> Result<(), AppError> {
         return Ok(());
     }
 
-    // 读取现有的 MCP 配置
-    let mut current = crate::gemini_mcp::read_mcp_servers_map()?;
-
-    // 移除指定服务器
-    current.remove(id);
-
-    // 写回
-    crate::gemini_mcp::set_mcp_servers_map(&current)
+    crate::gemini_mcp::update_mcp_servers_map(|servers| {
+        servers.remove(id);
+    })
 }
 
 /// 将单个 MCP 服务器同步到 OpenCode live 配置
