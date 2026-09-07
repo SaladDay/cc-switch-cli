@@ -1125,6 +1125,10 @@ pub fn sync_single_server_to_gemini(
     id: &str,
     server_spec: &Value,
 ) -> Result<(), AppError> {
+    sync_gemini_server(id, server_spec)
+}
+
+pub(crate) fn sync_gemini_server(id: &str, server_spec: &Value) -> Result<(), AppError> {
     if !crate::sync_policy::should_sync_live(&AppType::Gemini) {
         return Ok(());
     }

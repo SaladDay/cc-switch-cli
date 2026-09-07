@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::error::AppError;
 use crate::gemini_config::get_gemini_settings_path;
 
-mod operation;
+use crate::gemini_config::operation::GeminiOperation;
 
 #[cfg(test)]
 mod tests;
@@ -86,9 +86,9 @@ pub fn set_mcp_servers_map(
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
     let path = user_config_path();
-    let operation = operation::SettingsOperation::observe(&path)?;
+    let mut operation = GeminiOperation::observe_settings(&path)?;
     let root = parse_json_value(&path, operation.contents())?;
-    publish_servers(operation, root, servers).map(operation::SettingsWrite::finish)
+    publish_servers(&mut operation, root, servers)
 }
 
 /// Read-modify-write callers must derive their map from the same observation
@@ -98,18 +98,25 @@ pub(crate) fn update_mcp_servers_map(
     update: impl FnOnce(&mut std::collections::HashMap<String, Value>),
 ) -> Result<(), AppError> {
     let path = user_config_path();
-    let operation = operation::SettingsOperation::observe(&path)?;
-    let root = parse_json_value(&path, operation.contents())?;
+    let mut operation = GeminiOperation::observe_settings(&path)?;
+    update_with_operation(&mut operation, update)
+}
+
+pub(crate) fn update_with_operation(
+    operation: &mut GeminiOperation,
+    update: impl FnOnce(&mut std::collections::HashMap<String, Value>),
+) -> Result<(), AppError> {
+    let root = parse_json_value(operation.settings_path(), operation.contents())?;
     let mut servers = decode_servers(&root)?;
     update(&mut servers);
-    publish_servers(operation, root, &servers).map(operation::SettingsWrite::finish)
+    publish_servers(operation, root, &servers)
 }
 
 fn publish_servers(
-    operation: operation::SettingsOperation,
+    operation: &mut GeminiOperation,
     mut root: Value,
     servers: &std::collections::HashMap<String, Value>,
-) -> Result<operation::SettingsWrite, AppError> {
+) -> Result<(), AppError> {
     // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
     let mut out: Map<String, Value> = Map::new();
     for (id, spec) in servers.iter() {
@@ -157,5 +164,5 @@ fn publish_servers(
 
     let json =
         serde_json::to_string_pretty(&root).map_err(|e| AppError::JsonSerialize { source: e })?;
-    operation.execute(json)
+    operation.write_settings(json)
 }

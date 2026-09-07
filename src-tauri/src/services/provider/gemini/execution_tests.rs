@@ -1,5 +1,4 @@
-//! Execution baselines from CLI dc0b6ced. These describe existing behavior,
-//! including incomplete recovery; they are not Core's target safety contract.
+//! Force-write compatibility baselines and ordinary-switch recovery contracts.
 
 use super::*;
 use crate::{
@@ -86,6 +85,14 @@ fn assert_restored_native_values() {
     assert_eq!(
         read_json_file::<Value>(&get_gemini_settings_path()).unwrap(),
         serde_json::from_str::<Value>(OLD_SETTINGS).unwrap()
+    );
+}
+
+fn assert_restored_native_bytes() {
+    assert_eq!(fs::read_to_string(get_gemini_env_path()).unwrap(), OLD_ENV);
+    assert_eq!(
+        fs::read_to_string(get_gemini_settings_path()).unwrap(),
+        OLD_SETTINGS
     );
 }
 
@@ -237,7 +244,7 @@ fn gemini_execution_baseline_replaces_leaf_links_and_unreadable_env_without_read
 }
 
 #[test]
-fn gemini_execution_baseline_switch_compensates_a_host_flag_write_failure() {
+fn gemini_switch_compensates_a_host_flag_write_failure_with_original_bytes() {
     let temp = TempDir::new().unwrap();
     let _guard = TestEnvGuard::isolated(temp.path());
     seed_native();
@@ -249,12 +256,12 @@ fn gemini_execution_baseline_switch_compensates_a_host_flag_write_failure() {
     let error = ProviderService::switch(&state, AppType::Gemini, "new").unwrap_err();
     assert!(error.to_string().contains(host_settings.to_str().unwrap()));
     assert_old_selection(&state);
-    assert_restored_native_values();
+    assert_restored_native_bytes();
     assert_eq!(selected_type().as_deref(), Some("before"));
 }
 
 #[test]
-fn gemini_execution_baseline_later_mcp_failure_restores_native_but_not_host_auth_flag() {
+fn gemini_switch_later_mcp_failure_restores_bytes_and_keeps_host_auth_policy() {
     let temp = TempDir::new().unwrap();
     let _guard = TestEnvGuard::isolated(temp.path());
     seed_native();
@@ -282,7 +289,491 @@ fn gemini_execution_baseline_later_mcp_failure_restores_native_but_not_host_auth
     assert!(error.to_string().contains("MCP"));
     assert!(error.to_string().contains("codex"));
     assert_old_selection(&state);
-    assert_restored_native_values();
+    assert_restored_native_bytes();
     assert_eq!(selected_type().as_deref(), Some("gemini-api-key"));
     assert_eq!(fs::read_to_string(codex_path).unwrap(), "[invalid");
+}
+
+fn seed_mcp(state: &AppState) {
+    let servers = (0..2)
+        .map(|index| {
+            let id = format!("fixture-{index}");
+            let server = McpServer {
+                id: id.clone(),
+                name: id.clone(),
+                server: json!({"command":"fixture-not-executed"}),
+                apps: McpApps {
+                    gemini: true,
+                    ..Default::default()
+                },
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: vec![],
+            };
+            state.db.save_mcp_server(&server).unwrap();
+            (id, server)
+        })
+        .collect();
+    state.config.write().unwrap().mcp.servers = Some(servers);
+}
+
+#[test]
+fn gemini_switch_recovers_each_native_and_mcp_publication_failure() {
+    use crate::gemini_config::operation::with_hook;
+    for fail_at in 1..=4 {
+        for publish_first in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let _guard = TestEnvGuard::isolated(temp.path());
+            seed_native();
+            let state = state();
+            seed_mcp(&state);
+            let mut calls = 0;
+            let error = with_hook(
+                Box::new(move |resource, replacement| {
+                    calls += 1;
+                    if calls == fail_at {
+                        if publish_first {
+                            resource.write(replacement.unwrap())?;
+                        }
+                        return Err(AppError::io(
+                            resource.path(),
+                            std::io::Error::other("fixture publication failure"),
+                        ));
+                    }
+                    Ok(())
+                }),
+                || ProviderService::switch(&state, AppType::Gemini, "new"),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("fixture publication failure"),
+                "{error}"
+            );
+            assert_restored_native_bytes();
+            assert_old_selection(&state);
+            assert_eq!(
+                selected_type().as_deref(),
+                Some(if fail_at < 3 {
+                    "before"
+                } else {
+                    "gemini-api-key"
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn gemini_switch_keeps_external_settings_and_does_not_restore_dependent_env() {
+    use crate::gemini_config::operation::with_hook;
+    for edit_at in [2, 4] {
+        let temp = TempDir::new().unwrap();
+        let _guard = TestEnvGuard::isolated(temp.path());
+        seed_native();
+        let state = state();
+        seed_mcp(&state);
+        let mut calls = 0;
+        let error = with_hook(
+            Box::new(move |resource, _| {
+                calls += 1;
+                if calls == edit_at {
+                    fs::write(resource.path(), "{\"external\":true}").unwrap();
+                }
+                Ok(())
+            }),
+            || ProviderService::switch(&state, AppType::Gemini, "new"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Gemini"), "{error}");
+        assert_eq!(
+            fs::read_to_string(get_gemini_settings_path()).unwrap(),
+            "{\"external\":true}"
+        );
+        assert_eq!(
+            fs::read_to_string(get_gemini_env_path()).unwrap(),
+            "GEMINI_API_KEY=new-fake"
+        );
+        assert_old_selection(&state);
+    }
+}
+
+#[test]
+fn gemini_switch_supports_large_native_documents_and_missing_env_recovery() {
+    use crate::gemini_config::operation::with_hook;
+    for missing_env in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let _guard = TestEnvGuard::isolated(temp.path());
+        seed_native();
+        let large = format!(
+            "{{\"opaque\":\"{}\"}}\n",
+            "x".repeat(cc_switch_core::MAX_OPERATION_CONTENT_BYTES + 1)
+        );
+        fs::write(get_gemini_settings_path(), &large).unwrap();
+        if missing_env {
+            fs::remove_file(get_gemini_env_path()).unwrap();
+        }
+        let state = state();
+        seed_mcp(&state);
+        let mut calls = 0;
+        let error = with_hook(
+            Box::new(move |resource, replacement| {
+                calls += 1;
+                if calls == 4 {
+                    resource.write(replacement.unwrap())?;
+                    return Err(AppError::io(
+                        resource.path(),
+                        std::io::Error::other("fixture final MCP failure"),
+                    ));
+                }
+                Ok(())
+            }),
+            || ProviderService::switch(&state, AppType::Gemini, "new"),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("fixture final MCP failure"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(get_gemini_settings_path()).unwrap(),
+            large
+        );
+        assert_eq!(
+            fs::read(get_gemini_env_path()).ok().as_deref(),
+            (!missing_env).then_some(OLD_ENV.as_bytes())
+        );
+        assert_old_selection(&state);
+    }
+}
+
+#[test]
+fn gemini_switch_success_keeps_native_fields_and_all_mcp_followups() {
+    let temp = TempDir::new().unwrap();
+    let _guard = TestEnvGuard::isolated(temp.path());
+    seed_native();
+    let state = state();
+    seed_mcp(&state);
+    ProviderService::switch(&state, AppType::Gemini, "new").unwrap();
+    let settings = read_json_file::<Value>(&get_gemini_settings_path()).unwrap();
+    assert_eq!(settings["advanced"], json!({"opaque":true}));
+    assert_eq!(settings["theme"], "dark");
+    for index in 0..2 {
+        assert_eq!(
+            settings["mcpServers"][format!("fixture-{index}")]["command"],
+            "fixture-not-executed"
+        );
+    }
+    assert_eq!(
+        state.db.get_current_provider("gemini").unwrap().as_deref(),
+        Some("new")
+    );
+    assert_eq!(
+        crate::settings::get_current_provider(&AppType::Gemini).as_deref(),
+        Some("new")
+    );
+    crate::mcp::remove_server_from_gemini("fixture-0").unwrap();
+    assert!(!crate::gemini_mcp::read_mcp_servers_map()
+        .unwrap()
+        .contains_key("fixture-0"));
+}
+
+#[test]
+fn gemini_switch_keeps_native_receipts_through_snapshot_persistence() {
+    use crate::gemini_config::operation::with_hook;
+    for after_native in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let _guard = TestEnvGuard::isolated(temp.path());
+        seed_native();
+        let state = state();
+        seed_mcp(&state);
+        let condition = if after_native {
+            "instr(NEW.settings_config, 'fixture-') > 0"
+        } else {
+            "NEW.is_current = 1"
+        };
+        for event in ["INSERT", "UPDATE"] {
+            state
+                .db
+                .conn
+                .lock()
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TRIGGER fixture_{event} BEFORE {event} ON providers
+                 WHEN NEW.id = 'new' AND NEW.app_type = 'gemini' AND {condition}
+                 BEGIN SELECT RAISE(ABORT, 'fixture database failure'); END;"
+                ))
+                .unwrap();
+        }
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = calls.clone();
+        let error = with_hook(
+            Box::new(move |_, _| {
+                observed.set(observed.get() + 1);
+                Ok(())
+            }),
+            || ProviderService::switch(&state, AppType::Gemini, "new"),
+        )
+        .unwrap_err();
+        // Store intentionally hides raw SQLite diagnostics at the host boundary.
+        assert!(matches!(error, AppError::Conflict(_)), "{error}");
+        assert_eq!(calls.get(), if after_native { 6 } else { 0 });
+        assert_restored_native_bytes();
+        assert_old_selection(&state);
+    }
+}
+
+#[test]
+fn gemini_mcp_service_does_not_retain_state_guard_during_native_publication() {
+    use crate::gemini_config::operation::with_hook;
+    let temp = TempDir::new().unwrap();
+    let _guard = TestEnvGuard::isolated(temp.path());
+    seed_native();
+    let state = std::sync::Arc::new(state());
+    seed_mcp(&state);
+    let observed = state.clone();
+    let server = state.config.read().unwrap().mcp.servers.as_ref().unwrap()["fixture-0"].clone();
+    with_hook(
+        Box::new(move |_, _| {
+            assert!(
+                observed.config.try_write().is_ok(),
+                "native publication must not retain a state read guard"
+            );
+            Ok(())
+        }),
+        || {
+            McpService::upsert_server(&state, server).unwrap();
+            McpService::toggle_app(&state, "fixture-0", AppType::Gemini, true).unwrap();
+            McpService::sync_all_enabled(&state).unwrap();
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_switch_handles_indirect_link_observations_and_recovery() {
+    use crate::gemini_config::operation::with_hook;
+    use std::os::unix::fs::symlink;
+    for layout in ["missing", "intermediate", "cycle"] {
+        for (fail_at, publish_first) in [(0, false), (2, false), (2, true), (4, true)] {
+            let temp = TempDir::new().unwrap();
+            let _guard = TestEnvGuard::isolated(temp.path());
+            seed_native();
+            let env = get_gemini_env_path();
+            let settings = get_gemini_settings_path();
+            let relay = env.with_extension("relay");
+            let external = temp.path().join("external.json");
+            fs::write(&external, OLD_SETTINGS).unwrap();
+            fs::remove_file(&env).unwrap();
+            fs::remove_file(&settings).unwrap();
+            match layout {
+                "missing" => {
+                    symlink(&env, &relay).unwrap();
+                    symlink(&relay, &settings).unwrap();
+                }
+                "intermediate" => {
+                    symlink(&external, &env).unwrap();
+                    symlink(&env, &relay).unwrap();
+                    symlink(&relay, &settings).unwrap();
+                }
+                "cycle" => {
+                    symlink(&relay, &env).unwrap();
+                    symlink(&settings, &relay).unwrap();
+                    symlink(&env, &settings).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let original = (layout == "intermediate").then_some(OLD_SETTINGS.as_bytes());
+            let state = state();
+            seed_mcp(&state);
+            let mut calls = 0;
+            let result = with_hook(
+                Box::new(move |resource, replacement| {
+                    calls += 1;
+                    if calls == fail_at {
+                        if publish_first {
+                            resource.write(replacement.unwrap())?;
+                        }
+                        return Err(AppError::io(
+                            resource.path(),
+                            std::io::Error::other("fixture indirect publication failure"),
+                        ));
+                    }
+                    Ok(())
+                }),
+                || ProviderService::switch(&state, AppType::Gemini, "new"),
+            );
+            assert_eq!(fs::read_to_string(external).unwrap(), OLD_SETTINGS);
+            if fail_at == 0 {
+                result.unwrap();
+                assert_eq!(fs::read_to_string(env).unwrap(), "GEMINI_API_KEY=new-fake");
+                assert_eq!(read_json_file::<Value>(&settings).unwrap()["theme"], "dark");
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("fixture indirect publication failure"),
+                    "{layout}: {error}"
+                );
+                for path in [env, settings] {
+                    assert_eq!(
+                        fs::read(path).ok().as_deref(),
+                        original,
+                        "{layout}: {error}"
+                    );
+                }
+                assert_old_selection(&state);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_switch_keeps_external_changes_to_a_cross_target_link_referent() {
+    use crate::gemini_config::operation::with_hook;
+    use std::os::unix::fs::symlink;
+    for (atomic_replace, retarget) in [(false, false), (true, false), (false, true)] {
+        for external in ["{\"external\":true}", OLD_SETTINGS] {
+            let temp = TempDir::new().unwrap();
+            let _guard = TestEnvGuard::isolated(temp.path());
+            seed_native();
+            let source = get_gemini_env_path();
+            let link = get_gemini_settings_path();
+            let relay = source.with_extension("relay");
+            fs::write(&source, OLD_SETTINGS).unwrap();
+            fs::remove_file(&link).unwrap();
+            if retarget {
+                symlink(&source, &relay).unwrap();
+            }
+            symlink(if retarget { &relay } else { &source }, &link).unwrap();
+            let state = state();
+            seed_mcp(&state);
+            let mut calls = 0;
+            let error = with_hook(
+                Box::new(move |resource, _| {
+                    calls += 1;
+                    if calls == 2 {
+                        if atomic_replace || retarget {
+                            let next = source.with_extension("external");
+                            fs::write(&next, external).unwrap();
+                            if retarget {
+                                fs::remove_file(&relay).unwrap();
+                                symlink(next, &relay).unwrap();
+                            } else {
+                                fs::rename(next, &source).unwrap();
+                            }
+                        } else {
+                            fs::write(resource.path(), external).unwrap();
+                        }
+                    }
+                    Ok(())
+                }),
+                || ProviderService::switch(&state, AppType::Gemini, "new"),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("Gemini"), "{error}");
+            assert!(fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(fs::read_to_string(link).unwrap(), external);
+            assert_eq!(
+                fs::read_to_string(get_gemini_env_path()).unwrap(),
+                if retarget {
+                    "GEMINI_API_KEY=new-fake"
+                } else {
+                    external
+                }
+            );
+            assert_old_selection(&state);
+            assert_eq!(selected_type().as_deref(), Some("before"));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_switch_handles_cross_target_links_at_each_publication_boundary() {
+    use crate::gemini_config::operation::with_hook;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    for settings_points_to_env in [false, true] {
+        for (fail_at, publish_first) in [
+            (0, false),
+            (1, false),
+            (1, true),
+            (2, false),
+            (2, true),
+            (4, false),
+            (4, true),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let _guard = TestEnvGuard::isolated(temp.path());
+            seed_native();
+            // A JSON object is valid native settings and tolerated by the legacy env parser.
+            let (source, link) = if settings_points_to_env {
+                (get_gemini_env_path(), get_gemini_settings_path())
+            } else {
+                (get_gemini_settings_path(), get_gemini_env_path())
+            };
+            fs::write(&source, OLD_SETTINGS).unwrap();
+            fs::remove_file(&link).unwrap();
+            symlink(&source, &link).unwrap();
+            let state = state();
+            seed_mcp(&state);
+            let mut calls = 0;
+            let result = with_hook(
+                Box::new(move |resource, replacement| {
+                    calls += 1;
+                    if calls == fail_at {
+                        if publish_first {
+                            resource.write(replacement.unwrap())?;
+                        }
+                        return Err(AppError::io(
+                            resource.path(),
+                            std::io::Error::other("fixture linked publication failure"),
+                        ));
+                    }
+                    Ok(())
+                }),
+                || ProviderService::switch(&state, AppType::Gemini, "new"),
+            );
+            if fail_at != 0 {
+                let error = result.unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("fixture linked publication failure"),
+                    "{error}"
+                );
+                for path in [get_gemini_env_path(), get_gemini_settings_path()] {
+                    assert_eq!(fs::read_to_string(path).unwrap(), OLD_SETTINGS, "settings_points_to_env={settings_points_to_env}, fail_at={fail_at}, publish_first={publish_first}");
+                }
+                assert_old_selection(&state);
+                continue;
+            }
+            result.unwrap();
+            assert!(!fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                fs::read_to_string(get_gemini_env_path()).unwrap(),
+                "GEMINI_API_KEY=new-fake"
+            );
+            assert_eq!(
+                read_json_file::<Value>(&get_gemini_settings_path()).unwrap()["theme"],
+                "dark"
+            );
+            assert_eq!(
+                fs::metadata(get_gemini_env_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
 }

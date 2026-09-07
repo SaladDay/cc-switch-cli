@@ -28,6 +28,7 @@ use crate::config::{
     write_json_file,
 };
 use crate::error::AppError;
+use crate::gemini_config::operation::GeminiOperation;
 use crate::provider::{Provider, ProviderMeta, UsageScript};
 use crate::services::mcp::McpService;
 use crate::store::AppState;
@@ -800,12 +801,13 @@ impl ProviderService {
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        Self::run_staged_transaction(state, None, f)
+        Self::run_staged_transaction(state, None, None, f)
     }
 
     fn run_staged_transaction<R, F>(
         state: &AppState,
         preserved_current_apps: Option<&[AppType]>,
+        mut gemini: Option<&mut GeminiOperation>,
         f: F,
     ) -> Result<R, AppError>
     where
@@ -849,18 +851,27 @@ impl ProviderService {
         }
 
         if let Some(prepared) = prepared {
-            if let Err(failure) = Self::apply_prepared_post_commit_action(state, &prepared) {
+            if let Err(failure) =
+                Self::apply_prepared_post_commit_action(state, &prepared, gemini.as_deref_mut())
+            {
                 let err = *failure.error;
-                let backup = failure
-                    .restore_live_snapshot
+                let backup = (failure.restore_live_snapshot && gemini.is_none())
                     .then(|| prepared.action.backup.clone());
+                let native_rollback = gemini.map_or(Ok(()), GeminiOperation::rollback);
                 let rollback_result = match preserved_current_apps {
                     Some(apps) => Self::rollback_after_failure_preserving_current_providers(
                         state, original, apps, backup,
                     ),
                     None => Self::rollback_after_failure(state, original, backup),
                 };
-                if let Err(rollback_err) = rollback_result {
+                let rollback_errors = native_rollback
+                    .err()
+                    .into_iter()
+                    .chain(rollback_result.err())
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>();
+                if !rollback_errors.is_empty() {
+                    let rollback_err = rollback_errors.join("; ");
                     return Err(AppError::localized(
                         "post_commit.rollback_failed",
                         format!("后置操作失败: {err}；回滚失败: {rollback_err}"),
@@ -882,7 +893,7 @@ impl ProviderService {
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        Self::run_staged_transaction(state, Some(preserved_current_apps), f)
+        Self::run_staged_transaction(state, Some(preserved_current_apps), None, f)
     }
 
     fn restore_config_only(state: &AppState, snapshot: MultiAppConfig) -> Result<(), AppError> {
@@ -1005,10 +1016,15 @@ impl ProviderService {
     fn apply_prepared_post_commit_action(
         state: &AppState,
         prepared: &PreparedPostCommitAction,
+        mut gemini: Option<&mut GeminiOperation>,
     ) -> Result<(), PostCommitFailure> {
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
-                Self::apply_prepared_live_snapshot(live).map_err(|error| PostCommitFailure {
+                let result = match gemini.as_deref_mut() {
+                    Some(operation) => Self::apply_gemini_with_operation(live, operation),
+                    None => Self::apply_prepared_live_snapshot(live),
+                };
+                result.map_err(|error| PostCommitFailure {
                     error: Box::new(error),
                     // Core has already recovered a failed Codex two-file write.
                     // A second snapshot restore could overwrite external edits.
@@ -1107,7 +1123,7 @@ impl ProviderService {
 
         if prepared.action.sync_mcp {
             use crate::services::mcp::McpService;
-            McpService::sync_all_enabled(state)?;
+            McpService::sync_all_enabled_with_operation(state, gemini)?;
         }
         if !prepared.action.takeover_active
             && prepared.action.refresh_snapshot
@@ -3084,7 +3100,12 @@ impl ProviderService {
             state.db.get_config_snippet(app_type.as_str())?
         };
 
-        Self::run_transaction(state, move |config| {
+        // Keep the first native observation and every owned write through the
+        // existing post-commit failure boundary. Force/takeover paths are separate.
+        let mut gemini = matches!(app_type, AppType::Gemini)
+            .then(GeminiOperation::observe_provider)
+            .transpose()?;
+        Self::run_staged_transaction(state, None, gemini.as_mut(), move |config| {
             let action = Self::prepare_switch_post_commit_action(
                 config,
                 &app_type_clone,
@@ -3094,6 +3115,7 @@ impl ProviderService {
             )?;
             Ok(((), Some(action)))
         })?;
+        drop(gemini);
 
         if !app_type.is_additive_mode() {
             crate::settings::set_current_provider(&app_type, Some(provider_id))?;

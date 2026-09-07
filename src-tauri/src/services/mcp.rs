@@ -169,10 +169,10 @@ impl McpService {
 
     /// 将 MCP 服务器同步到所有启用的应用
     fn sync_server_to_apps(state: &AppState, server: &McpServer) -> Result<(), AppError> {
-        let cfg = state.config.read()?;
+        drop(state.config.read()?);
 
         for app in server.apps.enabled_apps() {
-            Self::sync_server_to_app_internal(&cfg, server, &app)?;
+            Self::sync_server_to_app(state, server, &app)?;
         }
 
         Ok(())
@@ -184,6 +184,12 @@ impl McpService {
         server: &McpServer,
         app: &AppType,
     ) -> Result<(), AppError> {
+        // Gemini sessions may retain the native lock while updating state.
+        // Never wait for that lock while retaining a state read guard.
+        if matches!(app, AppType::Gemini) {
+            drop(state.config.read()?);
+            return mcp::sync_gemini_server(&server.id, &server.server);
+        }
         let cfg = state.config.read()?;
         Self::sync_server_to_app_internal(&cfg, server, app)
     }
@@ -247,11 +253,24 @@ impl McpService {
     /// 一处损坏没有理由让其它应用的 MCP 状态保持陈旧。全部执行完后聚合错误，
     /// 保留调用方对部分失败的可见性。
     pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
+        Self::sync_all_enabled_with_operation(state, None)
+    }
+
+    pub(crate) fn sync_all_enabled_with_operation(
+        state: &AppState,
+        mut gemini: Option<&mut crate::gemini_config::operation::GeminiOperation>,
+    ) -> Result<(), AppError> {
         let servers = Self::get_all_servers(state)?;
 
         let mut failures = Vec::new();
         for app in Self::supported_mcp_apps() {
-            if let Err(err) = Self::project_servers_to_app(state, &servers, &app) {
+            let result = match (&app, gemini.as_deref_mut()) {
+                (AppType::Gemini, Some(operation)) => {
+                    Self::project_gemini_with_operation(&servers, operation)
+                }
+                _ => Self::project_servers_to_app(state, &servers, &app),
+            };
+            if let Err(err) = result {
                 log::warn!("同步 MCP 到 {app:?} 失败: {err}");
                 failures.push(format!("{}: {err}", app.as_str()));
             }
@@ -265,6 +284,25 @@ impl McpService {
                 failures.join("; ")
             )))
         }
+    }
+
+    fn project_gemini_with_operation(
+        servers: &HashMap<String, McpServer>,
+        operation: &mut crate::gemini_config::operation::GeminiOperation,
+    ) -> Result<(), AppError> {
+        if !crate::sync_policy::should_sync_live(&AppType::Gemini) {
+            return Ok(());
+        }
+        for server in servers.values() {
+            crate::gemini_mcp::update_with_operation(operation, |native| {
+                if server.apps.is_enabled_for(&AppType::Gemini) {
+                    native.insert(server.id.clone(), server.server.clone());
+                } else {
+                    native.remove(&server.id);
+                }
+            })?;
+        }
+        Ok(())
     }
 
     /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做

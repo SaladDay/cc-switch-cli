@@ -1,4 +1,5 @@
 use super::*;
+use crate::gemini_config::get_gemini_settings_path as user_config_path;
 use crate::{gemini_mcp::*, test_support::TestEnvGuard, MultiAppConfig};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -16,18 +17,6 @@ fn seed(contents: Option<&[u8]>) -> PathBuf {
         fs::remove_file(&path).unwrap();
     }
     path
-}
-
-fn with_hook<T>(hook: ExchangeHook, action: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            BEFORE_EXCHANGE.with(|slot| *slot.borrow_mut() = None);
-        }
-    }
-    BEFORE_EXCHANGE.with(|slot| *slot.borrow_mut() = Some(hook));
-    let _reset = Reset;
-    action()
 }
 
 fn injected_error(path: &Path, message: &'static str) -> AppError {
@@ -172,9 +161,9 @@ fn successful_mcp_receipt_holds_the_lock_and_recovers_large_original_bytes() {
     );
     for external_edit in [false, true] {
         let path = seed(Some(large.as_bytes()));
-        let operation = SettingsOperation::observe(&path).unwrap();
-        let root = parse_json_value(&path, operation.contents()).unwrap();
-        let mut published = publish_servers(operation, root, &HashMap::new()).unwrap();
+        let mut operation = GeminiOperation::observe_settings(&path).unwrap();
+        crate::gemini_mcp::update_with_operation(&mut operation, |servers| servers.clear())
+            .unwrap();
         assert!(matches!(
             SETTINGS_WRITE_LOCK.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
@@ -182,7 +171,7 @@ fn successful_mcp_receipt_holds_the_lock_and_recovers_large_original_bytes() {
         if external_edit {
             fs::write(&path, EXTERNAL).unwrap();
         }
-        let result = published.receipt.rollback(&mut published.host);
+        let result = operation.rollback();
         if external_edit {
             assert!(result.is_err());
             assert_eq!(fs::read(&path).unwrap(), EXTERNAL);
@@ -190,9 +179,64 @@ fn successful_mcp_receipt_holds_the_lock_and_recovers_large_original_bytes() {
             result.unwrap();
             assert_eq!(fs::read(&path).unwrap(), large.as_bytes());
         }
-        drop(published.host);
+        drop(operation);
         assert!(SETTINGS_WRITE_LOCK.try_lock().is_ok());
     }
+}
+
+#[test]
+fn gemini_mcp_followups_keep_one_recovery_record_for_large_settings() {
+    use crate::{
+        app_config::{McpApps, McpServer},
+        services::mcp::McpService,
+        store::AppState,
+        Database,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let _env = TestEnvGuard::isolated(temp.path());
+    let large = format!(
+        "{{ \"opaque\":\"{}\" }}\n",
+        "x".repeat(cc_switch_core::MAX_OPERATION_CONTENT_BYTES + 1)
+    );
+    let path = seed(Some(large.as_bytes()));
+    let state = AppState::new(std::sync::Arc::new(Database::memory().unwrap()));
+    state.config.write().unwrap().mcp.servers = Some(
+        (0..64)
+            .map(|index| {
+                let id = format!("fixture-{index}");
+                (
+                    id.clone(),
+                    McpServer {
+                        id: id.clone(),
+                        name: id,
+                        server: json!({"command":"not-executed"}),
+                        apps: McpApps {
+                            gemini: index % 2 == 0,
+                            ..Default::default()
+                        },
+                        description: None,
+                        homepage: None,
+                        docs: None,
+                        tags: Vec::new(),
+                    },
+                )
+            })
+            .collect(),
+    );
+    let mut operation = GeminiOperation::observe_provider().unwrap();
+    operation
+        .write_provider("GEMINI_API_KEY=fixture".into(), large.clone())
+        .unwrap();
+    McpService::sync_all_enabled_with_operation(&state, Some(&mut operation)).unwrap();
+    assert_eq!(
+        operation.receipts.len(),
+        1,
+        "one bounded receipt must cover every follow-up"
+    );
+    assert_eq!(read_mcp_servers_map().unwrap().len(), 32);
+    operation.rollback().unwrap();
+    assert_eq!(fs::read(&path).unwrap(), large.as_bytes());
+    assert!(!crate::gemini_config::get_gemini_env_path().exists());
 }
 
 #[test]
@@ -225,10 +269,11 @@ fn mcp_paths_reject_parent_retargeting_and_preserve_leaf_policy() {
     fs::write(original_dir.join("settings.json"), ORIGINAL).unwrap();
     fs::write(other_dir.join("settings.json"), ORIGINAL).unwrap();
     symlink(&original_dir, path.parent().unwrap()).unwrap();
-    let operation = SettingsOperation::observe(&path).unwrap();
+    let mut operation = GeminiOperation::observe_settings(&path).unwrap();
     fs::remove_file(path.parent().unwrap()).unwrap();
     symlink(&other_dir, path.parent().unwrap()).unwrap();
-    let error = operation.execute("{}".into()).err().unwrap();
+    let error = operation.write_settings("{}".into()).err().unwrap();
+    drop(operation);
     assert!(matches!(error, AppError::Conflict(_)), "{error}");
     assert_eq!(
         fs::read(original_dir.join("settings.json")).unwrap(),
@@ -237,13 +282,14 @@ fn mcp_paths_reject_parent_retargeting_and_preserve_leaf_policy() {
     assert_eq!(fs::read(&path).unwrap(), ORIGINAL);
 
     let missing_path = path.parent().unwrap().join("nested/deeper/settings.json");
-    let operation = SettingsOperation::observe(&missing_path).unwrap();
+    let mut operation = GeminiOperation::observe_settings(&missing_path).unwrap();
     fs::remove_file(path.parent().unwrap()).unwrap();
     symlink(&original_dir, path.parent().unwrap()).unwrap();
     assert!(matches!(
-        operation.execute("{}".into()),
+        operation.write_settings("{}".into()),
         Err(AppError::Conflict(_))
     ));
+    drop(operation);
     assert!(!original_dir.join("nested").exists());
     assert!(!other_dir.join("nested").exists());
 
@@ -262,6 +308,32 @@ fn mcp_paths_reject_parent_retargeting_and_preserve_leaf_policy() {
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o640
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_leaf_link_detects_atomic_replacement_of_an_unowned_referent() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    let _env = TestEnvGuard::isolated(temp.path());
+    let path = seed(None);
+    let source = temp.path().join("source.json");
+    let next = temp.path().join("external.json");
+    fs::write(&source, ORIGINAL).unwrap();
+    symlink(&source, &path).unwrap();
+    let error = update_mcp_servers_map(|servers| {
+        fs::write(&next, EXTERNAL).unwrap();
+        fs::rename(&next, &source).unwrap();
+        servers.clear();
+    })
+    .unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)), "{error}");
+    assert!(fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read(&path).unwrap(), EXTERNAL);
+    assert_eq!(fs::read(&source).unwrap(), EXTERNAL);
 }
 
 #[cfg(unix)]

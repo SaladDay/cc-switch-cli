@@ -302,4 +302,29 @@ impl ProviderService {
 
         Ok(())
     }
+
+    pub(super) fn apply_gemini_with_operation(
+        prepared: &PreparedLiveWrite,
+        operation: &mut crate::gemini_config::operation::GeminiOperation,
+    ) -> Result<(), AppError> {
+        match prepared {
+            PreparedLiveWrite::Gemini {
+                env,
+                settings,
+                auth_type,
+            } => {
+                let env = crate::gemini_config::serialize_env_file(env);
+                let settings = serde_json::to_string_pretty(settings)
+                    .map_err(|e| AppError::JsonSerialize { source: e })?;
+                operation.write_provider(env, settings)?;
+                Self::ensure_gemini_app_security_flag(*auth_type)
+            }
+            PreparedLiveWrite::GeminiSecurityFlag { auth_type } => {
+                Self::ensure_gemini_app_security_flag(*auth_type)
+            }
+            _ => Err(AppError::Config(
+                "Non-Gemini write in Gemini operation".into(),
+            )),
+        }
+    }
 }

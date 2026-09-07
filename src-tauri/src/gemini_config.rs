@@ -6,6 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 mod native_import;
+pub(crate) mod operation;
 pub(crate) use native_import::read as read_gemini_live_settings;
 
 #[cfg(test)]
