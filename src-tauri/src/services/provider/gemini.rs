@@ -1,6 +1,8 @@
 use super::*;
 
 #[cfg(test)]
+mod execution_tests;
+#[cfg(test)]
 mod tests;
 
 impl ProviderService {
