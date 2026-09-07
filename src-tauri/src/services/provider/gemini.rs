@@ -1,11 +1,45 @@
 use super::*;
 
+mod switch;
+
 #[cfg(test)]
 mod execution_tests;
 #[cfg(test)]
 mod tests;
 
 impl ProviderService {
+    pub(super) fn read_gemini_provider_snapshot(
+        provider: &Provider,
+        common_snippet: Option<&str>,
+    ) -> Result<Value, AppError> {
+        use crate::gemini_config::{
+            env_to_json, get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
+        };
+        if !get_gemini_env_path().exists() {
+            return Err(AppError::localized(
+                "gemini.live.missing",
+                "Gemini .env 文件不存在，无法刷新快照",
+                "Gemini .env file missing; cannot refresh snapshot",
+            ));
+        }
+        let mut live = env_to_json(&read_gemini_env()?);
+        let settings = get_gemini_settings_path();
+        let config = if settings.exists() {
+            read_json_file(&settings)?
+        } else {
+            json!({})
+        };
+        if let Some(obj) = live.as_object_mut() {
+            obj.insert("config".into(), config);
+        }
+        Self::normalize_settings_config_for_storage(
+            &AppType::Gemini,
+            provider,
+            live,
+            common_snippet,
+        )
+    }
+
     #[allow(dead_code)]
     pub(super) fn parse_common_gemini_config_snippet(snippet: &str) -> Result<Value, AppError> {
         let value: Value = serde_json::from_str(snippet).map_err(|e| {

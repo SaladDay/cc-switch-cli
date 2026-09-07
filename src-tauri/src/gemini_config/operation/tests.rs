@@ -227,7 +227,8 @@ fn gemini_mcp_followups_keep_one_recovery_record_for_large_settings() {
     operation
         .write_provider("GEMINI_API_KEY=fixture".into(), large.clone())
         .unwrap();
-    McpService::sync_all_enabled_with_operation(&state, Some(&mut operation)).unwrap();
+    let config = state.config.read().unwrap().clone();
+    McpService::sync_snapshot_with_operation(&config, &mut operation).unwrap();
     assert_eq!(
         operation.receipts.len(),
         1,

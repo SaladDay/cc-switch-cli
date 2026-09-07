@@ -16,10 +16,13 @@ impl McpService {
     /// 获取所有 MCP 服务器（统一结构）
     pub fn get_all_servers(state: &AppState) -> Result<HashMap<String, McpServer>, AppError> {
         let cfg = state.config.read()?;
+        Self::servers_from_config(&cfg).cloned()
+    }
 
+    fn servers_from_config(cfg: &MultiAppConfig) -> Result<&HashMap<String, McpServer>, AppError> {
         // 如果是新结构，直接返回
         if let Some(servers) = &cfg.mcp.servers {
-            return Ok(servers.clone());
+            return Ok(servers);
         }
 
         // 理论上不应该走到这里，因为 load 时会自动迁移
@@ -235,6 +238,10 @@ impl McpService {
     }
 
     fn remove_server_from_app(_state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
+        Self::remove_server_from_native(id, app)
+    }
+
+    fn remove_server_from_native(id: &str, app: &AppType) -> Result<(), AppError> {
         match app {
             AppType::Claude => mcp::remove_server_from_claude(id)?,
             AppType::Codex => mcp::remove_server_from_codex(id)?,
@@ -253,24 +260,38 @@ impl McpService {
     /// 一处损坏没有理由让其它应用的 MCP 状态保持陈旧。全部执行完后聚合错误，
     /// 保留调用方对部分失败的可见性。
     pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
-        Self::sync_all_enabled_with_operation(state, None)
+        let servers = Self::get_all_servers(state)?;
+        Self::sync_all_apps(|app| Self::project_servers_to_app(state, &servers, app))
     }
 
-    pub(crate) fn sync_all_enabled_with_operation(
-        state: &AppState,
-        mut gemini: Option<&mut crate::gemini_config::operation::GeminiOperation>,
+    // The caller owns the snapshot. No AppState locks or DAO calls may be
+    // nested here: coordinated switches already hold their write transaction.
+    pub(crate) fn sync_snapshot_with_operation(
+        cfg: &MultiAppConfig,
+        gemini: &mut crate::gemini_config::operation::GeminiOperation,
     ) -> Result<(), AppError> {
-        let servers = Self::get_all_servers(state)?;
+        let servers = Self::servers_from_config(cfg)?;
+        Self::sync_all_apps(|app| {
+            if matches!(app, AppType::Gemini) {
+                return Self::project_gemini_with_operation(servers, gemini);
+            }
+            for server in servers.values() {
+                if server.apps.is_enabled_for(app) {
+                    Self::sync_server_to_app_internal(cfg, server, app)?;
+                } else {
+                    Self::remove_server_from_native(&server.id, app)?;
+                }
+            }
+            Ok(())
+        })
+    }
 
+    fn sync_all_apps(
+        mut project: impl FnMut(&AppType) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
         let mut failures = Vec::new();
         for app in Self::supported_mcp_apps() {
-            let result = match (&app, gemini.as_deref_mut()) {
-                (AppType::Gemini, Some(operation)) => {
-                    Self::project_gemini_with_operation(&servers, operation)
-                }
-                _ => Self::project_servers_to_app(state, &servers, &app),
-            };
-            if let Err(err) = result {
+            if let Err(err) = project(&app) {
                 log::warn!("同步 MCP 到 {app:?} 失败: {err}");
                 failures.push(format!("{}: {err}", app.as_str()));
             }

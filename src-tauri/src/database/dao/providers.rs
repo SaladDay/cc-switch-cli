@@ -89,7 +89,16 @@ impl Database {
     ) -> Result<IndexMap<String, Provider>, AppError> {
         let mut conn = lock_conn!(self.conn);
         let transaction = conn.transaction().map_err(sqlite_write_error)?;
-        let provider_rows = cc_switch_store::read_provider_rows(&transaction, Some(app_type))
+        let providers = Self::read_providers_on(&transaction, app_type)?;
+        transaction.commit().map_err(sqlite_write_error)?;
+        Ok(providers)
+    }
+
+    pub(crate) fn read_providers_on(
+        conn: &rusqlite::Connection,
+        app_type: &str,
+    ) -> Result<IndexMap<String, Provider>, AppError> {
+        let provider_rows = cc_switch_store::read_provider_rows(conn, Some(app_type))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut providers = IndexMap::new();
@@ -98,7 +107,7 @@ impl Database {
             let id = provider.id.clone();
 
             // 加载 endpoints
-            let mut stmt_endpoints = transaction.prepare(
+            let mut stmt_endpoints = conn.prepare(
                 "SELECT url, added_at FROM provider_endpoints WHERE provider_id = ?1 AND app_type = ?2 ORDER BY added_at ASC, url ASC"
             ).map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -131,13 +140,19 @@ impl Database {
             providers.insert(id, provider);
         }
 
-        transaction.commit().map_err(sqlite_write_error)?;
         Ok(providers)
     }
 
     /// 获取当前激活的供应商 ID
     pub fn get_current_provider(&self, app_type: &str) -> Result<Option<String>, AppError> {
         let conn = lock_conn!(self.conn);
+        Self::read_current_provider_on(&conn, app_type)
+    }
+
+    pub(crate) fn read_current_provider_on(
+        conn: &rusqlite::Connection,
+        app_type: &str,
+    ) -> Result<Option<String>, AppError> {
         let mut stmt = conn
             .prepare("SELECT id FROM providers WHERE app_type = ?1 AND is_current = 1 LIMIT 1")
             .map_err(|e| AppError::Database(e.to_string()))?;

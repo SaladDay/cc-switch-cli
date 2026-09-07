@@ -801,13 +801,12 @@ impl ProviderService {
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        Self::run_staged_transaction(state, None, None, f)
+        Self::run_staged_transaction(state, None, f)
     }
 
     fn run_staged_transaction<R, F>(
         state: &AppState,
         preserved_current_apps: Option<&[AppType]>,
-        mut gemini: Option<&mut GeminiOperation>,
         f: F,
     ) -> Result<R, AppError>
     where
@@ -851,27 +850,18 @@ impl ProviderService {
         }
 
         if let Some(prepared) = prepared {
-            if let Err(failure) =
-                Self::apply_prepared_post_commit_action(state, &prepared, gemini.as_deref_mut())
-            {
+            if let Err(failure) = Self::apply_prepared_post_commit_action(state, &prepared) {
                 let err = *failure.error;
-                let backup = (failure.restore_live_snapshot && gemini.is_none())
+                let backup = failure
+                    .restore_live_snapshot
                     .then(|| prepared.action.backup.clone());
-                let native_rollback = gemini.map_or(Ok(()), GeminiOperation::rollback);
                 let rollback_result = match preserved_current_apps {
                     Some(apps) => Self::rollback_after_failure_preserving_current_providers(
                         state, original, apps, backup,
                     ),
                     None => Self::rollback_after_failure(state, original, backup),
                 };
-                let rollback_errors = native_rollback
-                    .err()
-                    .into_iter()
-                    .chain(rollback_result.err())
-                    .map(|error| error.to_string())
-                    .collect::<Vec<_>>();
-                if !rollback_errors.is_empty() {
-                    let rollback_err = rollback_errors.join("; ");
+                if let Err(rollback_err) = rollback_result {
                     return Err(AppError::localized(
                         "post_commit.rollback_failed",
                         format!("后置操作失败: {err}；回滚失败: {rollback_err}"),
@@ -893,7 +883,7 @@ impl ProviderService {
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        Self::run_staged_transaction(state, Some(preserved_current_apps), None, f)
+        Self::run_staged_transaction(state, Some(preserved_current_apps), f)
     }
 
     fn restore_config_only(state: &AppState, snapshot: MultiAppConfig) -> Result<(), AppError> {
@@ -1016,14 +1006,10 @@ impl ProviderService {
     fn apply_prepared_post_commit_action(
         state: &AppState,
         prepared: &PreparedPostCommitAction,
-        mut gemini: Option<&mut GeminiOperation>,
     ) -> Result<(), PostCommitFailure> {
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
-                let result = match gemini.as_deref_mut() {
-                    Some(operation) => Self::apply_gemini_with_operation(live, operation),
-                    None => Self::apply_prepared_live_snapshot(live),
-                };
+                let result = Self::apply_prepared_live_snapshot(live);
                 result.map_err(|error| PostCommitFailure {
                     error: Box::new(error),
                     // Core has already recovered a failed Codex two-file write.
@@ -1123,7 +1109,7 @@ impl ProviderService {
 
         if prepared.action.sync_mcp {
             use crate::services::mcp::McpService;
-            McpService::sync_all_enabled_with_operation(state, gemini)?;
+            McpService::sync_all_enabled(state)?;
         }
         if !prepared.action.takeover_active
             && prepared.action.refresh_snapshot
@@ -1343,32 +1329,6 @@ impl ProviderService {
                 state.save()?;
             }
             AppType::Gemini => {
-                use crate::gemini_config::{
-                    env_to_json, get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
-                };
-
-                let env_path = get_gemini_env_path();
-                if !env_path.exists() {
-                    return Err(AppError::localized(
-                        "gemini.live.missing",
-                        "Gemini .env 文件不存在，无法刷新快照",
-                        "Gemini .env file missing; cannot refresh snapshot",
-                    ));
-                }
-                let env_map = read_gemini_env()?;
-                let mut live_after = env_to_json(&env_map);
-
-                let settings_path = get_gemini_settings_path();
-                let config_value = if settings_path.exists() {
-                    read_json_file(&settings_path)?
-                } else {
-                    json!({})
-                };
-
-                if let Some(obj) = live_after.as_object_mut() {
-                    obj.insert("config".to_string(), config_value);
-                }
-
                 let (provider, common_snippet) = {
                     let guard = state.config.read().map_err(AppError::from)?;
                     (
@@ -1386,12 +1346,8 @@ impl ProviderService {
                         guard.common_config_snippets.gemini.clone(),
                     )
                 };
-                let live_after = Self::normalize_settings_config_for_storage(
-                    app_type,
-                    &provider,
-                    live_after,
-                    common_snippet.as_deref(),
-                )?;
+                let live_after =
+                    Self::read_gemini_provider_snapshot(&provider, common_snippet.as_deref())?;
 
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
@@ -3087,6 +3043,11 @@ impl ProviderService {
             }
         }
 
+        if matches!(app_type, AppType::Gemini) {
+            Self::switch_gemini_coordinated(state, provider_id)?;
+            return crate::settings::set_current_provider(&app_type, Some(provider_id));
+        }
+
         let app_type_clone = app_type.clone();
         let provider_id_owned = provider_id.to_string();
         let effective_current_provider = if app_type.is_additive_mode() {
@@ -3100,12 +3061,7 @@ impl ProviderService {
             state.db.get_config_snippet(app_type.as_str())?
         };
 
-        // Keep the first native observation and every owned write through the
-        // existing post-commit failure boundary. Force/takeover paths are separate.
-        let mut gemini = matches!(app_type, AppType::Gemini)
-            .then(GeminiOperation::observe_provider)
-            .transpose()?;
-        Self::run_staged_transaction(state, None, gemini.as_mut(), move |config| {
+        Self::run_staged_transaction(state, None, move |config| {
             let action = Self::prepare_switch_post_commit_action(
                 config,
                 &app_type_clone,
@@ -3115,8 +3071,6 @@ impl ProviderService {
             )?;
             Ok(((), Some(action)))
         })?;
-        drop(gemini);
-
         if !app_type.is_additive_mode() {
             crate::settings::set_current_provider(&app_type, Some(provider_id))?;
         }

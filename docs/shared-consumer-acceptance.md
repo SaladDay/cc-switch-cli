@@ -93,3 +93,47 @@ This sequential interleaving proves stale-snapshot data loss, not simultaneous
 writer behavior. Step 2 must make this test pass; step 3 still needs concurrent
 native-write and recovery evidence. Record both exact consumer revisions and
 Core/Store pins again when those steps pass.
+
+## Scoped ordinary Gemini switching
+
+The second slice replaces ordinary Gemini switching's whole-snapshot saves with
+one host-owned immediate transaction. It reads the Gemini provider catalog,
+common snippet and MCP catalog from that transaction. Store's guarded updates
+write only the previous/target provider settings and Gemini selection flags;
+metadata, endpoints, unknown columns, other Apps and the MCP/settings catalogs
+are not rewritten. Old selection flags are cleared before the new one is set.
+Provider settings retain unknown root fields alongside `env` and `config` in
+both the stored row and the published cache. The native-owned `env`/`config`
+sections keep their existing replacement and normalization behavior. This fixes
+root-field loss in ordinary Gemini switching only; other snapshot paths are not
+changed here.
+
+The native work still uses Core receipts and CLI's process-local Gemini session.
+The transaction stays open through native publication, the existing all-App MCP
+tail and target snapshot persistence. On failure, native compensation runs before
+database rollback; a failed commit is included. SQLite can itself abort a
+transaction, so this is not a SQLite/filesystem atomicity guarantee. The in-memory
+snapshot is published only after commit. Existing local-settings selection
+precedence and authentication policy are unchanged; the final local selection
+save remains outside this recovery boundary. Best-effort Skill sync runs after
+the provider transaction because it opens its own database and may migrate state.
+
+The CLI lock order is its in-memory config lock, database transaction, then
+process-local native session. Transaction work uses explicit snapshot/connection
+arguments and must not re-enter AppState or DAO locks. The old staged transaction
+no longer carries an unused Gemini operation option. Other workflows retain their
+existing save, projection and compensation paths.
+
+Acceptance includes the real Lite worker at
+`ccec9bc0b9f3a4add4e1464e32f78a96b9f2d52d` (Core/Store
+`743b1a963cda31be8cbbc55786a39488bb49c5a7`) against CLI's second-slice changes on
+`1dd4854f6679773300d462f9b3af8a8540aea365` (Core/Store
+`2bd92f0062f1e42bcc93336c5664f3b3d944f44c`). The previously red opt-in test now
+passes. Local regressions also cover fresh target/selection, deleted targets,
+unchanged peer and extension data after success or MCP failure, a unique-current
+index, and deferred foreign-key failure at commit with native recovery. The CLI
+commit carrying this record identifies the reviewed diff and validation results.
+
+This does not complete step 3: actual cross-process file locking, contention and
+release/recovery evidence remain required. No Core API, schema, UI, force-write,
+proxy, standalone MCP/Skill or full-product migration is included in this slice.

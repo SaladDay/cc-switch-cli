@@ -7,6 +7,7 @@ use crate::{
     gemini_config::{get_gemini_env_path, get_gemini_settings_path},
     settings,
     test_support::TestEnvGuard,
+    Database,
 };
 use std::{collections::HashMap, fs};
 use tempfile::TempDir;
@@ -166,6 +167,288 @@ fn gemini_switch_preserves_a_provider_committed_by_lite_after_cli_observation() 
             .unwrap()
             .is_some(),
         "ordinary switching must not remove a provider committed by Lite"
+    );
+}
+
+#[test]
+fn gemini_switch_preserves_peer_catalog_data_on_success_and_later_failure() {
+    for fail in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let _guard = TestEnvGuard::isolated(temp.path());
+        seed_native();
+        let state = state();
+        for app in ["gemini", "claude"] {
+            state
+                .db
+                .save_provider(
+                    app,
+                    &Provider::with_id(
+                        "peer".into(),
+                        "Peer".into(),
+                        json!({"env":{"GEMINI_API_KEY":"peer-fake"}}),
+                        None,
+                    ),
+                )
+                .unwrap();
+        }
+        for id in ["old", "new"] {
+            let mut provider = state.db.get_provider_by_id(id, "gemini").unwrap().unwrap();
+            provider.settings_config["futureRoot"] = json!({"keep":[null, true, {"opaque":id}]});
+            state.db.save_provider("gemini", &provider).unwrap();
+        }
+        let mcp = McpServer {
+            id: "peer-mcp".into(),
+            name: "Peer MCP".into(),
+            server: json!({"command":"peer-not-executed","opaque":{"future":true}}),
+            apps: McpApps {
+                gemini: true,
+                codex: fail,
+                ..Default::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: vec!["peer".into()],
+        };
+        state.db.save_mcp_server(&mcp).unwrap();
+        state
+            .db
+            .set_config_snippet("gemini", Some("{\"env\":{\"EXTRA\":\"peer\"}}".into()))
+            .unwrap();
+        state
+            .db
+            .set_config_snippet("claude", Some("{\"opaque\":true}".into()))
+            .unwrap();
+        let (before, before_mcp) = {
+            let conn = state.db.conn.lock().unwrap();
+            conn.execute_batch(
+                "ALTER TABLE providers ADD COLUMN fixture_extension BLOB;
+                UPDATE providers SET fixture_extension = x'0011ff',
+                    meta = '{ \"future\": { \"opaque\":true } }';
+                INSERT INTO provider_endpoints(provider_id, app_type, url, added_at)
+                    VALUES('new', 'gemini', 'https://fixture.invalid', 7);
+                CREATE UNIQUE INDEX fixture_one_current ON providers(app_type) WHERE is_current=1;",
+            )
+            .unwrap();
+            (
+                cc_switch_store::read_provider_rows(&conn, None).unwrap(),
+                cc_switch_store::read_mcp_server_rows(&conn).unwrap(),
+            )
+        };
+        if fail {
+            fs::create_dir_all(get_codex_config_path().parent().unwrap()).unwrap();
+            fs::write(get_codex_config_path(), "[invalid").unwrap();
+        }
+        let result = ProviderService::switch(&state, AppType::Gemini, "new");
+        if fail {
+            assert!(result.unwrap_err().to_string().contains("MCP"));
+            assert_restored_native_bytes();
+            assert_old_selection(&state);
+        } else {
+            result.unwrap();
+            assert_eq!(
+                read_json_file::<Value>(&get_gemini_settings_path()).unwrap()["mcpServers"]
+                    ["peer-mcp"]["opaque"],
+                json!({"future":true})
+            );
+        }
+        let cached = state.config.read().unwrap().clone();
+        let conn = state.db.conn.lock().unwrap();
+        let after = cc_switch_store::read_provider_rows(&conn, None).unwrap();
+        for row in &before {
+            let found = after
+                .iter()
+                .find(|value| value.id == row.id && value.app_type == row.app_type)
+                .unwrap();
+            if fail || row.app_type != "gemini" || row.id == "peer" {
+                assert_eq!(found, row);
+            } else {
+                assert_eq!(found.meta, row.meta);
+                assert_eq!(found.name, row.name);
+                let previous: Value = serde_json::from_str(&row.settings_config).unwrap();
+                let stored: Value = serde_json::from_str(&found.settings_config).unwrap();
+                assert_eq!(
+                    stored["futureRoot"], previous["futureRoot"],
+                    "snapshot must preserve unknown root fields"
+                );
+                assert_eq!(
+                    cached.get_manager(&AppType::Gemini).unwrap().providers[&row.id]
+                        .settings_config["futureRoot"],
+                    previous["futureRoot"]
+                );
+                let extra: Vec<u8> = conn
+                    .query_row(
+                        "SELECT fixture_extension FROM providers WHERE id=?1 AND app_type=?2",
+                        [&row.id, &row.app_type],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(extra, [0, 17, 255]);
+            }
+        }
+        assert_eq!(after.len(), before.len());
+        assert_eq!(
+            cc_switch_store::read_mcp_server_rows(&conn).unwrap(),
+            before_mcp
+        );
+        assert_eq!(
+            Database::read_setting_on(&conn, "common_config_gemini")
+                .unwrap()
+                .as_deref(),
+            Some("{\"env\":{\"EXTRA\":\"peer\"}}")
+        );
+        assert_eq!(
+            Database::read_setting_on(&conn, "common_config_claude")
+                .unwrap()
+                .as_deref(),
+            Some("{\"opaque\":true}")
+        );
+        let count: i64 = conn.query_row("SELECT count(*) FROM provider_endpoints WHERE provider_id='new' AND app_type='gemini' AND url='https://fixture.invalid'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+}
+
+#[test]
+fn gemini_switch_uses_fresh_target_and_selection_instead_of_loaded_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let _guard = TestEnvGuard::isolated(temp.path());
+    seed_native();
+    let state = state();
+    let mut target = new_provider();
+    target.settings_config["env"]["GEMINI_API_KEY"] = json!("edited-fake");
+    state.db.save_provider("gemini", &target).unwrap();
+    state
+        .db
+        .save_provider(
+            "gemini",
+            &Provider::with_id(
+                "peer".into(),
+                "Peer".into(),
+                json!({"env":{"GEMINI_API_KEY":"peer-fake"}}),
+                None,
+            ),
+        )
+        .unwrap();
+    state.db.set_current_provider("gemini", "peer").unwrap();
+    ProviderService::switch(&state, AppType::Gemini, "new").unwrap();
+    assert_eq!(
+        fs::read_to_string(get_gemini_env_path()).unwrap(),
+        "GEMINI_API_KEY=edited-fake"
+    );
+    let peer = state
+        .db
+        .get_provider_by_id("peer", "gemini")
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer.settings_config["env"]["OLD"], "keep");
+    let old = state
+        .db
+        .get_provider_by_id("old", "gemini")
+        .unwrap()
+        .unwrap();
+    assert!(old.settings_config["env"].get("OLD").is_none());
+}
+
+#[test]
+fn gemini_switch_keeps_local_selection_precedence_and_missing_id_fallback() {
+    for local in ["old", "missing"] {
+        let temp = TempDir::new().unwrap();
+        let _guard = TestEnvGuard::isolated(temp.path());
+        seed_native();
+        let state = state();
+        state
+            .db
+            .save_provider(
+                "gemini",
+                &Provider::with_id(
+                    "peer".into(),
+                    "Peer".into(),
+                    json!({"env":{"GEMINI_API_KEY":"peer-fake"}}),
+                    None,
+                ),
+            )
+            .unwrap();
+        state.db.set_current_provider("gemini", "peer").unwrap();
+        settings::set_current_provider(&AppType::Gemini, Some(local)).unwrap();
+        ProviderService::switch(&state, AppType::Gemini, "new").unwrap();
+        for id in ["old", "peer"] {
+            let provider = state.db.get_provider_by_id(id, "gemini").unwrap().unwrap();
+            let backfilled = if local == "old" {
+                id == "old"
+            } else {
+                id == "peer"
+            };
+            assert_eq!(
+                provider.settings_config["env"].get("OLD").is_some(),
+                backfilled
+            );
+        }
+        assert_eq!(
+            settings::get_current_provider(&AppType::Gemini).as_deref(),
+            Some("new")
+        );
+    }
+}
+
+#[test]
+fn gemini_switch_rejects_a_deleted_target_without_restoring_the_stale_catalog() {
+    let temp = TempDir::new().unwrap();
+    let _guard = TestEnvGuard::isolated(temp.path());
+    seed_native();
+    let state = state();
+    state.db.delete_provider("gemini", "new").unwrap();
+    assert!(ProviderService::switch(&state, AppType::Gemini, "new").is_err());
+    assert!(state
+        .db
+        .get_provider_by_id("new", "gemini")
+        .unwrap()
+        .is_none());
+    assert_restored_native_bytes();
+    assert_old_selection(&state);
+}
+
+#[test]
+fn gemini_switch_recovers_native_and_catalog_after_deferred_commit_failure() {
+    use crate::gemini_config::operation::with_hook;
+    let temp = TempDir::new().unwrap();
+    let _guard = TestEnvGuard::isolated(temp.path());
+    seed_native();
+    let state = state();
+    state
+        .db
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "PRAGMA foreign_keys=ON;
+        CREATE UNIQUE INDEX fixture_current_reference ON providers(id, app_type, is_current);
+        CREATE TABLE fixture_commit_guard(id TEXT, app_type TEXT, selected INTEGER,
+            FOREIGN KEY(id, app_type, selected) REFERENCES providers(id, app_type, is_current)
+            DEFERRABLE INITIALLY DEFERRED);
+        INSERT INTO fixture_commit_guard VALUES('old', 'gemini', 1);",
+        )
+        .unwrap();
+    let before = cc_switch_store::read_provider_rows(&state.db.conn.lock().unwrap(), None).unwrap();
+    let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = writes.clone();
+    let result = with_hook(
+        Box::new(move |_, _| {
+            observed.set(observed.get() + 1);
+            Ok(())
+        }),
+        || ProviderService::switch(&state, AppType::Gemini, "new"),
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        writes.get(),
+        4,
+        "native publication and compensation must both run"
+    );
+    assert_restored_native_bytes();
+    assert_old_selection(&state);
+    assert_eq!(
+        cc_switch_store::read_provider_rows(&state.db.conn.lock().unwrap(), None).unwrap(),
+        before
     );
 }
 

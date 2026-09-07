@@ -13,6 +13,13 @@ impl Database {
     /// 获取设置值
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, AppError> {
         let conn = lock_conn!(self.conn);
+        Self::read_setting_on(&conn, key)
+    }
+
+    pub(crate) fn read_setting_on(
+        conn: &Connection,
+        key: &str,
+    ) -> Result<Option<String>, AppError> {
         let mut stmt = conn
             .prepare("SELECT value FROM settings WHERE key = ?1")
             .map_err(|e| AppError::Database(e.to_string()))?;

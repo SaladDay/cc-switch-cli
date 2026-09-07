@@ -60,7 +60,13 @@ impl Database {
     /// 获取所有 MCP 服务器
     pub fn get_all_mcp_servers(&self) -> Result<IndexMap<String, McpServer>, AppError> {
         let conn = lock_conn!(self.conn);
-        let rows = cc_switch_store::read_mcp_server_rows(&conn).map_err(shared_store_error)?;
+        Self::read_mcp_servers_on(&conn)
+    }
+
+    pub(crate) fn read_mcp_servers_on(
+        conn: &rusqlite::Connection,
+    ) -> Result<IndexMap<String, McpServer>, AppError> {
+        let rows = cc_switch_store::read_mcp_server_rows(conn).map_err(shared_store_error)?;
         let mut servers = IndexMap::new();
         for row in rows {
             let apps = apps_from_shared_row(&row);
