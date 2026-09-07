@@ -8,6 +8,9 @@ use std::path::PathBuf;
 mod native_import;
 pub(crate) use native_import::read as read_gemini_live_settings;
 
+#[cfg(test)]
+mod env_render_tests;
+
 /// 获取 Gemini 配置目录路径（支持设置覆盖）
 pub fn get_gemini_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_gemini_override_dir() {
@@ -96,19 +99,10 @@ pub fn parse_env_file_strict(content: &str) -> Result<HashMap<String, String>, A
 
 /// 将键值对序列化为 .env 格式
 pub fn serialize_env_file(map: &HashMap<String, String>) -> String {
-    let mut lines = Vec::new();
-
-    // 按键排序以保证输出稳定
-    let mut keys: Vec<_> = map.keys().collect();
-    keys.sort();
-
-    for key in keys {
-        if let Some(value) = map.get(key) {
-            lines.push(format!("{key}={value}"));
-        }
-    }
-
-    lines.join("\n")
+    cc_switch_core::gemini::render_literal_env_assignments(
+        map.iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    )
 }
 
 /// 读取 Gemini .env 文件
