@@ -571,8 +571,9 @@ dependencies = [
 [[package]]
 name = "cc-switch-core"
 version = "0.1.0"
-source = "git+https://github.com/SaladDay/cc-switch-core?rev=2bd92f0062f1e42bcc93336c5664f3b3d944f44c#2bd92f0062f1e42bcc93336c5664f3b3d944f44c"
+source = "git+https://github.com/SaladDay/cc-switch-core?rev=d3570e075fd245e8bcbfd8f0ef364cbf730b5701#d3570e075fd245e8bcbfd8f0ef364cbf730b5701"
 dependencies = [
+ "fs4",
  "http",
  "json-five",
  "json5",
@@ -592,7 +593,7 @@ dependencies = [
 [[package]]
 name = "cc-switch-store"
 version = "0.1.0"
-source = "git+https://github.com/SaladDay/cc-switch-core?rev=2bd92f0062f1e42bcc93336c5664f3b3d944f44c#2bd92f0062f1e42bcc93336c5664f3b3d944f44c"
+source = "git+https://github.com/SaladDay/cc-switch-core?rev=d3570e075fd245e8bcbfd8f0ef364cbf730b5701#d3570e075fd245e8bcbfd8f0ef364cbf730b5701"
 dependencies = [
  "cc-switch-core",
  "libc",
@@ -1175,6 +1176,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix 1.1.2",
+ "windows-sys 0.61.1",
 ]
 
 [[package]]

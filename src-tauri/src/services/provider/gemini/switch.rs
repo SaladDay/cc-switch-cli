@@ -3,6 +3,9 @@
 
 use super::*;
 use crate::database::{shared_store_error, sqlite_write_error, Database};
+use cc_switch_core::fs::{
+    shared_live_config_lock_path, SharedLiveConfigLock, SharedLiveConfigLockError,
+};
 use cc_switch_store::{ProviderRow, ProviderWriteOutcome};
 
 impl ProviderService {
@@ -15,6 +18,9 @@ impl ProviderService {
         let mut config = state.config.write().map_err(AppError::from)?;
         let mut candidate = config.clone();
         let mut conn = state.db.conn.lock().map_err(AppError::from)?;
+        // Declare the file guard first so early returns drop the transaction
+        // before releasing it. Acquisition still follows the database lock.
+        let shared_lock;
         let mut transaction =
             cc_switch_store::begin_immediate_transaction(&mut conn).map_err(shared_store_error)?;
         let mut rows = cc_switch_store::read_provider_rows(&transaction, Some("gemini"))
@@ -43,8 +49,15 @@ impl ProviderService {
                 .collect(),
         );
 
-        // The shared cross-process file lock is a separate migration gate.
-        // Retain today's process-local session through commit or recovery.
+        shared_lock = SharedLiveConfigLock::try_acquire(&shared_live_config_lock_path(
+            &crate::config::get_home_dir(),
+        ))
+        .map_err(|error| match error {
+            SharedLiveConfigLockError::Unavailable => {
+                AppError::Conflict("Live configuration is locked by another operation".into())
+            }
+            SharedLiveConfigLockError::Io { path, source } => AppError::io(path, source),
+        })?;
         let mut native = GeminiOperation::observe_provider()?;
         let snippet = candidate.common_config_snippets.gemini.clone();
         let action = Self::prepare_switch_post_commit_action(
@@ -127,6 +140,7 @@ impl ProviderService {
         drop(transaction);
         *config = candidate;
         drop(native);
+        drop(shared_lock);
         drop(conn);
         drop(config);
         // This best-effort host tail opens its own database and may migrate

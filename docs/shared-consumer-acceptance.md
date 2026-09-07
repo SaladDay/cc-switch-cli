@@ -137,3 +137,57 @@ commit carrying this record identifies the reviewed diff and validation results.
 This does not complete step 3: actual cross-process file locking, contention and
 release/recovery evidence remain required. No Core API, schema, UI, force-write,
 proxy, standalone MCP/Skill or full-product migration is included in this slice.
+
+## Shared lock adoption in the provider workflow
+
+The next slice pins CLI and Lite to Core/Store
+`d3570e075fd245e8bcbfd8f0ef364cbf730b5701` and uses Core's
+`SharedLiveConfigLock`. Ordinary CLI Gemini switching acquires it after the
+database write transaction and before observing native files. It retains both
+protections through publication and native compensation, including failed commit;
+early validation errors release them too. The file guard is released before the
+independent best-effort Skill tail. Local selection/authentication policy is not
+made transactional by this change.
+
+Lite replaces its local file-lock implementation while keeping its process mutex,
+error codes and receipt lifetime. Its `switch_with_provider` keeps the database
+transaction alive on commit failure until native compensation finishes. The shared
+method retains existing selection and additive metadata rules; no App-specific
+switch policy is added. Standalone import, MCP, Skill and deletion transaction
+lifetimes are not migrated in this slice, even though their existing file guard
+now comes from Core.
+
+The opt-in `execution_tests::coordination` tests add three real-process cases:
+
+- A Lite native switch retains its receipt while CLI attempts an ordinary Gemini
+  switch. CLI must refuse without changing native files or catalog rows, and must
+  switch successfully after Lite restores its files and releases the receipt.
+- During CLI publication and compensation, a separate process calls Lite's real
+  native switch service. It must report file-lock contention, not a database-busy
+  error or an unrelated failure. It must succeed after CLI releases the lock.
+  Cases include success, native publication failure, MCP failure and failed commit.
+- Lite's real Store/native switching path and CLI's ordinary switch operate in
+  turn on the same catalog and profile, retaining the expected selection and
+  credentials. This checks the full service path separately from native probes.
+
+Run the three ignored tests together, using the isolated environment and
+independently built Lite binary described above:
+
+```sh
+cargo test --locked --lib \
+  services::provider::gemini::execution_tests::coordination \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+The ordinary suite also checks CLI validation-error release. Lite's
+`switch_commit_failure_keeps_database_and_native_locks_through_recovery` uses
+a deferred foreign key to fail COMMIT, verifies both protections in the native
+recovery callback, checks exact restored bytes, then retries successfully. Before
+the production changes, the Lite-held/CLI-refusal test failed because CLI wrote
+through the lock, and Lite's commit-failure test found the database unlocked during
+native compensation. Commit records contain the final validation and review results.
+
+This establishes only the tested provider workflow boundary. CLI's other Apps,
+force/proxy paths and standalone writers still need their own adoption gates;
+no all-writer or full-product concurrency guarantee follows. The lock is advisory
+and requires a stable shared lock file and aliases, as documented by Core.

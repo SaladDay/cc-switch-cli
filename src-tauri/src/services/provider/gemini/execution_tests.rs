@@ -1,5 +1,7 @@
 //! Force-write compatibility baselines and ordinary-switch recovery contracts.
 
+mod coordination;
+
 use super::*;
 use crate::{
     app_config::{McpApps, McpServer},
