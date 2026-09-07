@@ -2078,7 +2078,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_label_codex_anthropic_auth_field() -> &'static str {
+    fn tui_label_auth_field() -> &'static str {
         if is_chinese() {
             "认证字段"
         } else {
@@ -2086,12 +2086,28 @@ pub mod texts {
         }
     }
 
-    pub fn tui_codex_anthropic_auth_field_value(api_key_field: &str) -> &'static str {
+    pub fn tui_label_codex_anthropic_auth_field() -> &'static str {
+        tui_label_auth_field()
+    }
+
+    fn tui_auth_field_value(api_key_field: &str) -> &'static str {
         if api_key_field == "ANTHROPIC_API_KEY" {
             "ANTHROPIC_API_KEY (x-api-key)"
         } else {
             "ANTHROPIC_AUTH_TOKEN (Authorization)"
         }
+    }
+
+    pub fn tui_codex_anthropic_auth_field_value(api_key_field: &str) -> &'static str {
+        tui_auth_field_value(api_key_field)
+    }
+
+    pub fn tui_label_claude_auth_field() -> &'static str {
+        tui_label_auth_field()
+    }
+
+    pub fn tui_claude_auth_field_value(api_key_field: &str) -> &'static str {
+        tui_auth_field_value(api_key_field)
     }
 
     pub fn tui_label_codex_impersonate_claude_code() -> &'static str {
