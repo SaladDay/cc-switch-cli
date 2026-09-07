@@ -3959,6 +3959,9 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
 }
 
 #[cfg(test)]
+mod model_fetch_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;

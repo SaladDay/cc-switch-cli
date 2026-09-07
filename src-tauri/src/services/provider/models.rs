@@ -1,3 +1,4 @@
+use cc_switch_core::model_fetch::{parse_model_ids, COMPATIBLE_MODEL_LISTS};
 use reqwest::StatusCode;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -55,46 +56,9 @@ impl ProviderService {
                 Ok(resp) => {
                     if resp.status().is_success() {
                         if let Ok(json) = resp.json::<Value>().await {
-                            let mut models = Vec::new();
-
-                            // 测试格式 1: OpenAI 兼容格式 {"data": [{"id": "gpt-4o"}]}
-                            if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                                for item in data {
-                                    if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
-                                        models.push(id.to_string());
-                                    }
-                                }
-                            }
-
-                            // 测试格式 2: Gemini 格式 {"models": [{"name": "models/gemini-pro"}]}
-                            if models.is_empty() {
-                                if let Some(data) = json.get("models").and_then(|d| d.as_array()) {
-                                    for item in data {
-                                        if let Some(name) =
-                                            item.get("name").and_then(|i| i.as_str())
-                                        {
-                                            let id = name.strip_prefix("models/").unwrap_or(name);
-                                            models.push(id.to_string());
-                                        }
-                                    }
-                                }
-                            }
-
-                            // 测试格式 3: 直接的数组格式 [{"id": "llama-3"}]
-                            if models.is_empty() {
-                                if let Some(arr) = json.as_array() {
-                                    for item in arr {
-                                        if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
-                                            models.push(id.to_string());
-                                        }
-                                    }
-                                }
-                            }
+                            let models = parse_model_ids(&json, COMPATIBLE_MODEL_LISTS);
 
                             if !models.is_empty() {
-                                // 保序去重，避免非相邻重复项残留。
-                                let mut seen = HashSet::new();
-                                models.retain(|model| seen.insert(model.clone()));
                                 return Ok(models);
                             } else {
                                 last_err_zh =
@@ -185,6 +149,9 @@ fn strip_compat_suffix(base: &str) -> Option<&str> {
             .then(|| &base[..base.len() - suffix.len()])
     })
 }
+
+#[cfg(test)]
+mod model_fetch_tests;
 
 #[cfg(test)]
 mod tests {
