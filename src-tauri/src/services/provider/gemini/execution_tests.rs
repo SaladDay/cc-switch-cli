@@ -97,6 +97,79 @@ fn assert_restored_native_bytes() {
 }
 
 #[test]
+#[ignore = "requires the Lite library test binary; shared-consumer migration acceptance"]
+fn gemini_switch_preserves_a_provider_committed_by_lite_after_cli_observation() {
+    let lite_tests = std::env::var_os("CC_SWITCH_LITE_TEST_BINARY")
+        .expect("set CC_SWITCH_LITE_TEST_BINARY to the independently built Lite test binary");
+    let temp = TempDir::new().unwrap();
+    let _guard = TestEnvGuard::isolated(temp.path());
+    seed_native();
+    let db = std::sync::Arc::new(crate::Database::init().unwrap());
+    let old = Provider::with_id(
+        "old".into(),
+        "Old".into(),
+        json!({"env":{"GEMINI_API_KEY":"old-fake"}}),
+        None,
+    );
+    db.save_provider("gemini", &old).unwrap();
+    db.save_provider("gemini", &new_provider()).unwrap();
+    db.set_current_provider("gemini", "old").unwrap();
+    let state = AppState::new(db);
+    // The marker is created only under this test's owned temporary profile.
+    fs::write(temp.path().join("coordination-fixture"), "cli-lite-v1").unwrap();
+    let mut peer = std::process::Command::new(lite_tests)
+        .args([
+            "--ignored",
+            "--exact",
+            "consumer_coordination::create_provider_in_cli_fixture",
+            "--test-threads=1",
+        ])
+        .env("CC_SWITCH_COORDINATION_HOME", temp.path())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        match peer.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            outcome => {
+                let _ = peer.kill();
+                let _ = peer.wait();
+                panic!("Lite fixture writer did not finish: {outcome:?}");
+            }
+        }
+    };
+    assert!(status.success(), "Lite fixture writer failed: {status}");
+    let id = fs::read_to_string(temp.path().join("lite-provider-id")).unwrap();
+    assert!(state
+        .db
+        .get_provider_by_id(&id, "gemini")
+        .unwrap()
+        .is_some());
+
+    ProviderService::switch(&state, AppType::Gemini, "new").unwrap();
+
+    assert_eq!(
+        state.db.get_current_provider("gemini").unwrap().as_deref(),
+        Some("new")
+    );
+    assert_eq!(
+        fs::read_to_string(get_gemini_env_path()).unwrap(),
+        "GEMINI_API_KEY=new-fake"
+    );
+    assert!(
+        state
+            .db
+            .get_provider_by_id(&id, "gemini")
+            .unwrap()
+            .is_some(),
+        "ordinary switching must not remove a provider committed by Lite"
+    );
+}
+
+#[test]
 fn gemini_execution_baseline_stops_in_env_settings_host_flag_order() {
     for blocked in 0..3 {
         let temp = TempDir::new().unwrap();
