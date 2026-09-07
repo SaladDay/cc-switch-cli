@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl ProviderService {
     #[allow(dead_code)]
     pub(super) fn parse_common_gemini_config_snippet(snippet: &str) -> Result<Value, AppError> {
@@ -225,73 +228,49 @@ impl ProviderService {
             }
         };
 
-        let mut incoming_config = match content_to_write.get("config") {
-            Some(Value::Null) | None => json!({}),
-            Some(config_value) => {
-                if let Some(provider_config) = config_value.as_object() {
-                    Value::Object(provider_config.clone())
-                } else {
-                    return Err(AppError::localized(
-                        "gemini.validation.invalid_config",
-                        "Gemini 配置格式错误: config 必须是对象或 null",
-                        "Gemini config invalid: config must be an object or null",
-                    ));
-                }
-            }
+        use cc_switch_core::gemini::{AuthMode, PrepareLiveSnapshotError, SettingsOverlay};
+        let mode = match auth_type {
+            GeminiAuthType::GoogleOfficial => AuthMode::OAuthPersonal,
+            GeminiAuthType::ApiKey => AuthMode::ApiKey,
         };
-
-        let config_obj = incoming_config.as_object_mut().ok_or_else(|| {
-            AppError::localized(
-                "gemini.validation.invalid_config",
-                "Gemini 配置格式错误: config 必须是对象或 null",
-                "Gemini config invalid: config must be an object or null",
-            )
-        })?;
-        let security = config_obj
-            .entry("security".to_string())
-            .or_insert_with(|| json!({}));
-        let security_obj = security.as_object_mut().ok_or_else(|| {
-            AppError::localized(
-                "gemini.validation.invalid_security",
-                "Gemini 配置格式错误: security 必须是对象",
-                "Gemini config invalid: security must be an object",
-            )
-        })?;
-        let auth = security_obj
-            .entry("auth".to_string())
-            .or_insert_with(|| json!({}));
-        let auth_obj = auth.as_object_mut().ok_or_else(|| {
-            AppError::localized(
-                "gemini.validation.invalid_security_auth",
-                "Gemini 配置格式错误: security.auth 必须是对象",
-                "Gemini config invalid: security.auth must be an object",
-            )
-        })?;
-        auth_obj.insert(
-            "selectedType".to_string(),
-            Value::String(Self::gemini_security_selected_type(auth_type).to_string()),
-        );
+        let overlay = SettingsOverlay::from_config(content_to_write.get("config"))
+            .and_then(|overlay| overlay.with_auth_mode(mode))
+            .map_err(|error| match error {
+                PrepareLiveSnapshotError::ConfigNotObject => AppError::localized(
+                    "gemini.validation.invalid_config",
+                    "Gemini 配置格式错误: config 必须是对象或 null",
+                    "Gemini config invalid: config must be an object or null",
+                ),
+                PrepareLiveSnapshotError::SettingsFieldNotObject("security") => {
+                    AppError::localized(
+                        "gemini.validation.invalid_security",
+                        "Gemini 配置格式错误: security 必须是对象",
+                        "Gemini config invalid: security must be an object",
+                    )
+                }
+                PrepareLiveSnapshotError::SettingsFieldNotObject("auth") => AppError::localized(
+                    "gemini.validation.invalid_security_auth",
+                    "Gemini 配置格式错误: security.auth 必须是对象",
+                    "Gemini config invalid: security.auth must be an object",
+                ),
+                other => AppError::Message(format!("Gemini settings projection failed: {other}")),
+            })?;
 
         // Upstream parity (write_gemini_live): settings.json is a SHALLOW merge
         // of the provider's config keys into the existing file, preserving
         // unrelated user fields such as mcpServers. Only the .env file is a full
         // overwrite.
         let settings_path = get_gemini_settings_path();
-        let mut settings = if settings_path.exists() {
+        let settings = if settings_path.exists() {
             read_json_file::<Value>(&settings_path)?
         } else {
             json!({})
         };
-        if !settings.is_object() {
-            settings = json!({});
-        }
-        if let (Some(settings_obj), Some(incoming_obj)) =
-            (settings.as_object_mut(), incoming_config.as_object())
-        {
-            for (key, value) in incoming_obj {
-                settings_obj.insert(key.clone(), value.clone());
-            }
-        }
+        let existing = match settings {
+            Value::Object(object) => object,
+            _ => serde_json::Map::new(),
+        };
+        let settings = Value::Object(overlay.apply_to(existing));
 
         Ok(PreparedLiveWrite::Gemini {
             env,

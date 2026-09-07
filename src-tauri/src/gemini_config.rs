@@ -225,17 +225,11 @@ pub fn env_to_json(env_map: &HashMap<String, String>) -> Value {
 
 /// 从 Provider.settings_config (JSON Value) 提取 .env 格式
 pub fn json_to_env(settings: &Value) -> Result<HashMap<String, String>, AppError> {
-    let mut env_map = HashMap::new();
-
-    if let Some(env_obj) = settings.get("env").and_then(|v| v.as_object()) {
-        for (key, value) in env_obj {
-            if let Some(val_str) = value.as_str() {
-                env_map.insert(key.clone(), val_str.to_string());
-            }
-        }
-    }
-
-    Ok(env_map)
+    Ok(
+        cc_switch_core::gemini::select_string_env_values(settings.get("env"))
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// 验证 Gemini 配置的基本结构

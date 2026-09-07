@@ -3416,27 +3416,25 @@ impl ProviderService {
                                 json!({})
                             }
                         } else {
-                            let mut merged = if settings_path.exists() {
+                            let merged = if settings_path.exists() {
                                 read_json_file(&settings_path)?
                             } else {
                                 json!({})
                             };
 
-                            if !merged.is_object() {
-                                merged = json!({});
-                            }
-
-                            let merged_map = merged.as_object_mut().ok_or_else(|| {
-                                AppError::localized(
-                                    "gemini.validation.invalid_settings",
-                                    "Gemini 现有 settings.json 格式错误: 必须是对象",
-                                    "Gemini existing settings.json invalid: must be a JSON object",
-                                )
+                            let existing = match merged {
+                                Value::Object(object) => object,
+                                _ => serde_json::Map::new(),
+                            };
+                            let overlay = cc_switch_core::gemini::SettingsOverlay::from_config(
+                                Some(config_value),
+                            )
+                            .map_err(|error| {
+                                AppError::Message(format!(
+                                    "Gemini settings projection failed: {error}"
+                                ))
                             })?;
-                            for (key, value) in provider_config {
-                                merged_map.insert(key.clone(), value.clone());
-                            }
-                            merged
+                            Value::Object(overlay.apply_to(existing))
                         }
                     } else {
                         return Err(AppError::localized(
