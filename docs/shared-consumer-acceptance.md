@@ -191,3 +191,43 @@ This establishes only the tested provider workflow boundary. CLI's other Apps,
 force/proxy paths and standalone writers still need their own adoption gates;
 no all-writer or full-product concurrency guarantee follows. The lock is advisory
 and requires a stable shared lock file and aliases, as documented by Core.
+
+## Standalone MCP adoption gates
+
+The next work is split into three reviewed slices:
+
+1. Add an opt-in regression using a real Lite MCP service in a separate process.
+   Initialize CLI's state first, commit a different MCP record through Lite, then
+   enable CLI's Gemini MCP target. Both catalog records and unrelated native
+   settings/servers must survive. This slice changes only tests and this plan;
+   it does not migrate a writer or treat an expected baseline failure as a pass.
+2. Migrate the demonstrated CLI operation to fresh, scoped Store transactions and
+   Core native coordination. Validate success, stale state, contention and recovery
+   before publishing. Do not rewrite unrelated catalogs or replace AppState::save
+   globally. Preserve existing missing-target and repeated-toggle behavior.
+3. Extend adoption to the remaining standalone MCP mutations/imports in bounded
+   slices, with the same recovery and real-consumer checks for each write path.
+   Other provider workflows, Skill, proxy, UI and full-product integration remain
+   separate work; the first green MCP case will not establish all-App adoption.
+
+Build both library test binaries independently using their pinned toolchains and
+locked dependencies. Set `CC_SWITCH_LITE_TEST_BINARY` to the Lite test executable
+reported by Cargo's JSON compiler-artifact output, then run from CLI `src-tauri/`:
+
+```sh
+cargo test --locked --lib \
+  services::mcp::consumer_tests::gemini_toggle_preserves_mcp_created_by_lite_after_cli_startup \
+  -- --ignored --exact --test-threads=1 --nocapture
+```
+
+The test uses `TestEnvGuard` and a marked temporary file database. Its fake MCP
+commands are never executed. The Lite worker rejects profiles outside the
+temporary directory. Without the external test binary, the case remains ignored;
+ordinary one-repository test success is not evidence for this acceptance gate.
+
+The initial run against CLI production `168df3c3f8833d256968d22caea0b35e268036e7`
+and Lite production `a0d1f7605aa7ad8c27393d614599bfb1f44d037a` reproduces record
+loss: Lite commits successfully, CLI enables its target and preserves the checked
+native fields, but the independently committed `lite-peer` catalog row is absent
+after CLI returns. The acceptance test exits 101 at its retention assertion.
+This is the red pre-migration baseline, not a passing compatibility result.
