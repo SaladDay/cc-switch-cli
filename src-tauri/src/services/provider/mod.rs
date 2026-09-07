@@ -2468,9 +2468,7 @@ impl ProviderService {
                 v
             }
             AppType::Gemini => {
-                use crate::gemini_config::{
-                    env_to_json, get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
-                };
+                use crate::gemini_config::{get_gemini_env_path, read_gemini_live_settings};
 
                 // 读取 .env 文件（环境变量）
                 let env_path = get_gemini_env_path();
@@ -2482,23 +2480,7 @@ impl ProviderService {
                     ));
                 }
 
-                let env_map = read_gemini_env()?;
-                let env_json = env_to_json(&env_map);
-                let env_obj = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
-
-                // 读取 settings.json 文件（MCP 配置等）
-                let settings_path = get_gemini_settings_path();
-                let config_obj = if settings_path.exists() {
-                    read_json_file(&settings_path)?
-                } else {
-                    json!({})
-                };
-
-                // 返回完整结构：{ "env": {...}, "config": {...} }
-                json!({
-                    "env": env_obj,
-                    "config": config_obj
-                })
+                read_gemini_live_settings()?
             }
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
@@ -2560,9 +2542,7 @@ impl ProviderService {
                 read_json_file(&path)
             }
             AppType::Gemini => {
-                use crate::gemini_config::{
-                    env_to_json, get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
-                };
+                use crate::gemini_config::{get_gemini_env_path, read_gemini_live_settings};
 
                 // 读取 .env 文件（环境变量）
                 let env_path = get_gemini_env_path();
@@ -2574,23 +2554,7 @@ impl ProviderService {
                     ));
                 }
 
-                let env_map = read_gemini_env()?;
-                let env_json = env_to_json(&env_map);
-                let env_obj = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
-
-                // 读取 settings.json 文件（MCP 配置等）
-                let settings_path = get_gemini_settings_path();
-                let config_obj = if settings_path.exists() {
-                    read_json_file(&settings_path)?
-                } else {
-                    json!({})
-                };
-
-                // 返回完整结构：{ "env": {...}, "config": {...} }
-                Ok(json!({
-                    "env": env_obj,
-                    "config": config_obj
-                }))
+                read_gemini_live_settings()
             }
             AppType::OpenCode => {
                 let config_path = crate::opencode_config::get_opencode_config_path();

@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+mod native_import;
+pub(crate) use native_import::read as read_gemini_live_settings;
+
 /// 获取 Gemini 配置目录路径（支持设置覆盖）
 pub fn get_gemini_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_gemini_override_dir() {
@@ -26,29 +29,13 @@ pub fn get_gemini_env_path() -> PathBuf {
 /// 此函数宽松地解析 .env 文件，跳过无效行。
 /// 对于需要严格验证的场景，请使用 `parse_env_file_strict`。
 pub fn parse_env_file(content: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-
-        // 跳过空行和注释
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        // 解析 KEY=VALUE
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().to_string();
-            let value = value.trim().to_string();
-
-            // 验证 key 是否有效（不为空，只包含字母、数字和下划线）
-            if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                map.insert(key, value);
-            }
-        }
-    }
-
-    map
+    cc_switch_core::gemini::parse_env_assignments(
+        content,
+        cc_switch_core::gemini::EnvAssignmentSyntax::UnicodeLiteral,
+    )
+    .filter_map(Result::ok)
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .collect()
 }
 
 /// 严格解析 .env 文件内容，返回详细的错误信息
@@ -74,54 +61,37 @@ pub fn parse_env_file(content: &str) -> HashMap<String, String> {
 /// 已有完整的测试覆盖，可直接使用。
 #[allow(dead_code)]
 pub fn parse_env_file_strict(content: &str) -> Result<HashMap<String, String>, AppError> {
-    let mut map = HashMap::new();
-
-    for (line_num, line) in content.lines().enumerate() {
-        let line = line.trim();
-        let line_number = line_num + 1; // 行号从 1 开始
-
-        // 跳过空行和注释
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        // 检查是否包含 =
-        if !line.contains('=') {
-            return Err(AppError::localized(
+    use cc_switch_core::gemini::{
+        parse_env_assignments, EnvAssignmentErrorKind, EnvAssignmentSyntax,
+    };
+    parse_env_assignments(content, EnvAssignmentSyntax::UnicodeLiteral)
+        .map(|assignment| assignment.map(|(key, value)| (key.to_owned(), value.to_owned())))
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|error| {
+            let line_number = error.line;
+            let line = content.lines().nth(line_number - 1).unwrap_or_default().trim();
+            match error.kind {
+                EnvAssignmentErrorKind::MissingSeparator => AppError::localized(
                 "gemini.env.parse_error.no_equals",
                 format!("Gemini .env 文件格式错误（第 {line_number} 行）：缺少 '=' 分隔符\n行内容: {line}"),
                 format!("Invalid Gemini .env format (line {line_number}): missing '=' separator\nLine: {line}"),
-            ));
-        }
-
-        // 解析 KEY=VALUE
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
-
-            // 验证 key 不为空
-            if key.is_empty() {
-                return Err(AppError::localized(
+                ),
+                EnvAssignmentErrorKind::EmptyKey => AppError::localized(
                     "gemini.env.parse_error.empty_key",
                     format!("Gemini .env 文件格式错误（第 {line_number} 行）：环境变量名不能为空\n行内容: {line}"),
                     format!("Invalid Gemini .env format (line {line_number}): variable name cannot be empty\nLine: {line}"),
-                ));
-            }
-
-            // 验证 key 只包含字母、数字和下划线
-            if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return Err(AppError::localized(
+                ),
+                EnvAssignmentErrorKind::InvalidKey => {
+                    let key = line.split_once('=').map_or(line, |(key, _)| key.trim());
+                    AppError::localized(
                     "gemini.env.parse_error.invalid_key",
                     format!("Gemini .env 文件格式错误（第 {line_number} 行）：环境变量名只能包含字母、数字和下划线\n变量名: {key}"),
                     format!("Invalid Gemini .env format (line {line_number}): variable name can only contain letters, numbers, and underscores\nVariable: {key}"),
-                ));
+                    )
+                }
+                EnvAssignmentErrorKind::InvalidValue => AppError::Message(error.to_string()),
             }
-
-            map.insert(key.to_string(), value.to_string());
-        }
-    }
-
-    Ok(map)
+        })
 }
 
 /// 将键值对序列化为 .env 格式
@@ -143,15 +113,17 @@ pub fn serialize_env_file(map: &HashMap<String, String>) -> String {
 
 /// 读取 Gemini .env 文件
 pub fn read_gemini_env() -> Result<HashMap<String, String>, AppError> {
+    Ok(parse_env_file(&read_gemini_env_source()?))
+}
+
+fn read_gemini_env_source() -> Result<String, AppError> {
     let path = get_gemini_env_path();
 
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok(String::new());
     }
 
-    let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
-
-    Ok(parse_env_file(&content))
+    fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))
 }
 
 /// Remove exact `key=value` matches while preserving every unrelated byte of
