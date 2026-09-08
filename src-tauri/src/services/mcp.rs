@@ -5,6 +5,9 @@ use crate::error::AppError;
 use crate::mcp;
 use crate::store::AppState;
 
+mod bulk;
+#[cfg(test)]
+mod bulk_tests;
 mod claude_toggle;
 mod codex_toggle;
 #[cfg(test)]
@@ -185,8 +188,17 @@ impl McpService {
     /// 一处损坏没有理由让其它应用的 MCP 状态保持陈旧。全部执行完后聚合错误，
     /// 保留调用方对部分失败的可见性。
     pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
-        let servers = Self::get_all_servers(state)?;
-        Self::sync_all_apps(|app| Self::project_servers_to_app(state, &servers, app))
+        // Decide initialization before another App's publication creates paths.
+        let initialized = Self::supported_mcp_apps()
+            .filter(crate::sync_policy::should_sync_live)
+            .collect::<Vec<_>>();
+        Self::sync_all_apps(|app| {
+            if initialized.contains(app) {
+                Self::sync_catalog_for_app(state, app, true)
+            } else {
+                Ok(())
+            }
+        })
     }
 
     // The caller owns the snapshot. No AppState locks or DAO calls may be
@@ -254,24 +266,7 @@ impl McpService {
     /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做
     /// 定向重投影，避免把无关应用的失败面牵连进目标应用的关键路径。
     pub fn sync_enabled_for_app(state: &AppState, app: &AppType) -> Result<(), AppError> {
-        let servers = Self::get_all_servers(state)?;
-        Self::project_servers_to_app(state, &servers, app)
-    }
-
-    fn project_servers_to_app(
-        state: &AppState,
-        servers: &HashMap<String, McpServer>,
-        app: &AppType,
-    ) -> Result<(), AppError> {
-        for server in servers.values() {
-            if server.apps.is_enabled_for(app) {
-                Self::sync_server_to_app(state, server, app)?;
-            } else {
-                Self::remove_server_from_app(state, &server.id, app)?;
-            }
-        }
-
-        Ok(())
+        Self::sync_catalog_for_app(state, app, true)
     }
 
     // ========================================================================
@@ -311,15 +306,7 @@ impl McpService {
     /// [已废弃] 同步启用的 MCP 到指定应用（兼容旧 API）
     #[deprecated(since = "3.7.0", note = "Use sync_all_enabled instead")]
     pub fn sync_enabled(state: &AppState, app: AppType) -> Result<(), AppError> {
-        let servers = Self::get_all_servers(state)?;
-
-        for server in servers.values() {
-            if server.apps.is_enabled_for(&app) {
-                Self::sync_server_to_app(state, server, &app)?;
-            }
-        }
-
-        Ok(())
+        Self::sync_catalog_for_app(state, &app, false)
     }
 
     /// 从 Claude 导入 MCP（v3.7.0 已更新为统一结构）

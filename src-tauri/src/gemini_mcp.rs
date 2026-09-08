@@ -115,57 +115,65 @@ pub(crate) fn update_with_operation(
 /// Uses the same document observation for the shared snapshot and publication.
 /// Existing entry codecs, catalog-wrapper handling and metadata filtering stay
 /// host-owned. A removed entry may restore its Core snapshot on activation.
-pub(crate) fn prepare_toggle(
+pub(crate) fn prepare_toggles<'a>(
     path: &Path,
     original: Option<&str>,
-    id: &str,
-    server: &Value,
-    enabled: bool,
-    previous_snapshot: Option<&cc_switch_core::McpNativeSnapshot>,
-) -> Result<(String, Option<cc_switch_core::McpNativeSnapshot>), AppError> {
+    changes: impl IntoIterator<
+        Item = (
+            &'a str,
+            &'a Value,
+            bool,
+            Option<&'a cc_switch_core::McpNativeSnapshot>,
+        ),
+    >,
+) -> Result<(String, Vec<Option<cc_switch_core::McpNativeSnapshot>>), AppError> {
     let mut root = parse_json_value(path, original)?;
-    let entry = root.get("mcpServers").and_then(|servers| servers.get(id));
-    let restore = enabled && entry.is_none();
-    let snapshot = if enabled {
-        None
-    } else {
-        match entry.filter(|entry| entry.is_object()) {
-            Some(entry) => Some(
-                McpConfigTarget::Gemini
-                    .capture_native_entry(&entry.to_string())
-                    .map_err(|error| AppError::McpValidation(error.to_string()))?,
-            ),
-            None => previous_snapshot.cloned(),
+    let mut snapshots = Vec::new();
+    for (id, server, enabled, previous_snapshot) in changes {
+        let entry = root.get("mcpServers").and_then(|servers| servers.get(id));
+        let restore = enabled && entry.is_none();
+        let snapshot = if enabled {
+            None
+        } else {
+            match entry.filter(|entry| entry.is_object()) {
+                Some(entry) => Some(
+                    McpConfigTarget::Gemini
+                        .capture_native_entry(&entry.to_string())
+                        .map_err(|error| AppError::McpValidation(error.to_string()))?,
+                ),
+                None => previous_snapshot.cloned(),
+            }
+        };
+        let desired = enabled
+            .then(|| project_server(id, server, previous_snapshot.filter(|_| restore)))
+            .transpose()?;
+        let object = root
+            .as_object_mut()
+            .ok_or_else(|| AppError::Config("~/.gemini/settings.json 根必须是对象".into()))?;
+        let collection = object
+            .entry("mcpServers")
+            .or_insert_with(|| Value::Object(Map::new()));
+        // Retain the host's malformed-collection policy, but do not decode or
+        // re-encode siblings: a single toggle owns only its selected native entry.
+        if !collection.is_object() {
+            *collection = Value::Object(Map::new());
         }
-    };
-    let desired = enabled
-        .then(|| project_server(id, server, previous_snapshot.filter(|_| restore)))
-        .transpose()?;
-    let object = root
-        .as_object_mut()
-        .ok_or_else(|| AppError::Config("~/.gemini/settings.json 根必须是对象".into()))?;
-    let collection = object
-        .entry("mcpServers")
-        .or_insert_with(|| Value::Object(Map::new()));
-    // Retain the host's malformed-collection policy, but do not decode or
-    // re-encode siblings: a single toggle owns only its selected native entry.
-    if !collection.is_object() {
-        *collection = Value::Object(Map::new());
-    }
-    let servers = collection
-        .as_object_mut()
-        .expect("initialized MCP collection");
-    match desired {
-        Some(native) => {
-            servers.insert(id.to_owned(), native);
+        let servers = collection
+            .as_object_mut()
+            .expect("initialized MCP collection");
+        match desired {
+            Some(native) => {
+                servers.insert(id.to_owned(), native);
+            }
+            None => {
+                servers.shift_remove(id);
+            }
         }
-        None => {
-            servers.shift_remove(id);
-        }
+        snapshots.push(snapshot);
     }
     let contents =
         serde_json::to_string_pretty(&root).map_err(|source| AppError::JsonSerialize { source })?;
-    Ok((contents, snapshot))
+    Ok((contents, snapshots))
 }
 
 fn publish_servers(

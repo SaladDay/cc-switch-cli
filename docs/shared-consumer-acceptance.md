@@ -895,3 +895,65 @@ overlap). Formatting and
 locked all-target Clippy pass with existing warnings and the unrelated
 `reversed_empty_ranges` allowance; none points at a changed source file. Windows,
 crash recovery and noncooperating-writer races were not run locally.
+
+#### Public whole-catalog MCP synchronization
+
+`sync_all_enabled`, `sync_enabled_for_app` and the deprecated `sync_enabled`
+read current Store rows, not the caller's cached catalog. They do not save or
+refresh that cache. Full and targeted synchronization include disabled rows for
+native removal; the deprecated method keeps its enabled-only scope. Initialization
+is decided before all-App publication. Unsupported or uninitialized Apps stay
+untouched, and an empty applicable catalog does not open native files.
+
+Each App owns one database transaction, shared file lock and native observation.
+Its entries are prepared in Store order and published at most once. The existing
+native bindings serve single-entry operations and batches; the per-entry public
+sync loop is removed. A bad later entry cannot publish a valid prefix. Each App
+retains only one whole-file recovery record rather than one per catalog row.
+Catalog rows, unknown fields and other consumers' native links are not rewritten.
+
+Native-link persistence and commit share the existing completion/recovery code
+with selection, deletion and upsert. A failed App restores its own observation,
+including earlier committed writes when paths alias. Other Apps still run and
+their successful changes remain committed; this is not an all-App transaction.
+Recovery conflicts preserve external edits and remain visible in the aggregate
+error. Database and filesystem locks stay held through compensation. No AppState
+lock is taken while those locks are held.
+
+Per-App parsing, conversion, activation and unmanaged-field policies remain in
+place. Claude/Gemini removal snapshots exchange with Lite, while Codex/Hermes
+sync does not force native activation. Codex's tolerant null-entry conversion is
+unchanged. An unchanged removal snapshot keeps its exact stored representation,
+including unknown envelope fields; restoring its entry still clears the snapshot.
+Hermes retains safe-YAML checks and its backup policy, now with one
+pre-publication backup per batch. Large host documents do not acquire Core's
+bounded whole-document limits.
+
+Two tests fail against CLI `44eeb266` before adoption: fresh peer rows are omitted
+and a later invalid Claude entry leaves a published prefix. Acceptance also covers
+five native bindings, one-write batches, empty/uninitialized catalogs, targeted
+versus enabled-only removal, unknown snapshots, native-link/verification/commit
+failures, uncertain publication, external recovery conflicts and aliased paths.
+Real Lite tests check snapshot exchange, fresh peer preservation and writer
+exclusion through commit/recovery. The obsolete provider-side MCP hook test is
+removed; bulk lock assertions now use the publication path actually exercised.
+
+The provider-owned `sync_snapshot_with_operation` path remains separate because
+its caller already owns the database and native operation. Its behavior and
+provider/Skill tails are not migrated here. No Core API, dependency pin, schema,
+Lite source, UI, proxy or full-product change is needed. Cooperative compensation
+does not promise crash-proof atomicity; parent directories and recovery backups
+may remain after failure. CLI stays on its migration branch.
+
+Local acceptance against CLI `44eeb266` plus this slice and unchanged Lite
+`4d0a77b3` passes 259 ordinary MCP-related tests, 57 real-consumer MCP tests,
+14 MCP command tests, 543 config-related tests, 160 database-related tests,
+25 Gemini provider tests, 11 Gemini operation tests, 3 real Gemini provider tests
+and 121 Lite tests (some suites overlap). Formatting and locked all-target Clippy
+pass with existing warnings and the unrelated `reversed_empty_ranges` allowance;
+none points at a changed source file.
+
+The wider provider command suite passes 26 tests and fails 3 usage-query tests.
+All three fail with the same official-provider template diagnostic on unchanged
+CLI `44eeb266`; they are recorded baseline failures, not fixed in this MCP slice.
+Windows, abrupt-process recovery and noncooperating-writer races were not run.

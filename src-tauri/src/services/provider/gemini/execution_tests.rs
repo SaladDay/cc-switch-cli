@@ -881,31 +881,6 @@ fn gemini_switch_keeps_native_receipts_through_snapshot_persistence() {
     }
 }
 
-#[test]
-fn legacy_gemini_mcp_services_do_not_retain_state_guard_during_native_publication() {
-    use crate::gemini_config::operation::with_hook;
-    let temp = TempDir::new().unwrap();
-    let _guard = TestEnvGuard::isolated(temp.path());
-    seed_native();
-    let state = std::sync::Arc::new(state());
-    seed_mcp(&state);
-    let observed = state.clone();
-    let server = state.config.read().unwrap().mcp.servers.as_ref().unwrap()["fixture-0"].clone();
-    with_hook(
-        Box::new(move |_, _| {
-            assert!(
-                observed.config.try_write().is_ok(),
-                "native publication must not retain a state read guard"
-            );
-            Ok(())
-        }),
-        || {
-            McpService::upsert_server(&state, server).unwrap();
-            McpService::sync_all_enabled(&state).unwrap();
-        },
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn gemini_switch_handles_indirect_link_observations_and_recovery() {

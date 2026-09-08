@@ -4,7 +4,11 @@ use std::{path::PathBuf, sync::MutexGuard};
 
 use cc_switch_core::{McpConfigTarget, McpNativeSnapshot};
 
-use super::{native_file::NativeFile, toggle::NativeToggle, *};
+use super::{
+    native_file::NativeFile,
+    toggle::{NativeChange, NativeToggle},
+    *,
+};
 use crate::gemini_config::{
     get_gemini_settings_path,
     operation::{lock_live_write, resolve_entry},
@@ -32,13 +36,13 @@ pub(super) fn observe() -> Result<GeminiToggle, AppError> {
 }
 
 impl NativeToggle for GeminiToggle {
-    fn apply(
+    fn apply_batch(
         &mut self,
-        id: &str,
-        server: &serde_json::Value,
-        enabled: bool,
-        previous_snapshot: Option<&McpNativeSnapshot>,
-    ) -> Result<Option<McpNativeSnapshot>, AppError> {
+        changes: &[NativeChange<'_>],
+    ) -> Result<Vec<Option<McpNativeSnapshot>>, AppError> {
+        if changes.is_empty() {
+            return Ok(Vec::new());
+        }
         let original = self
             .file
             .original()
@@ -50,13 +54,17 @@ impl NativeToggle for GeminiToggle {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
             })?;
-        let (contents, snapshot) = crate::gemini_mcp::prepare_toggle(
+        let (contents, snapshots) = crate::gemini_mcp::prepare_toggles(
             self.file.path(),
             original,
-            id,
-            server,
-            enabled,
-            previous_snapshot,
+            changes.iter().map(|change| {
+                (
+                    change.id,
+                    change.server,
+                    change.enabled(),
+                    change.previous_snapshot,
+                )
+            }),
         )?;
         // Keep Gemini's logical-path check even though recovery is bound to the
         // original directory. A retargeted parent must not report a live success.
@@ -66,7 +74,7 @@ impl NativeToggle for GeminiToggle {
             ));
         }
         self.file.publish(&contents)?;
-        Ok(snapshot)
+        Ok(snapshots)
     }
 
     fn rollback(&mut self) -> Result<(), AppError> {

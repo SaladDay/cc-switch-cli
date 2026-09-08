@@ -5,7 +5,10 @@ use std::{fs, io::Read};
 use cc_switch_core::{McpConfigTarget, McpEntryEncodePolicy, McpNativeSnapshot};
 use serde_json::Value;
 
-use super::{native_file::NativeFile, toggle::NativeToggle};
+use super::{
+    native_file::NativeFile,
+    toggle::{NativeChange, NativeToggle},
+};
 use crate::{
     claude_mcp::project_server,
     config::{get_claude_mcp_path, get_default_claude_mcp_path},
@@ -50,13 +53,13 @@ impl ClaudeToggle {
 }
 
 impl NativeToggle for ClaudeToggle {
-    fn apply(
+    fn apply_batch(
         &mut self,
-        id: &str,
-        server: &Value,
-        enabled: bool,
-        previous_snapshot: Option<&McpNativeSnapshot>,
-    ) -> Result<Option<McpNativeSnapshot>, AppError> {
+        changes: &[NativeChange<'_>],
+    ) -> Result<Vec<Option<McpNativeSnapshot>>, AppError> {
+        if changes.is_empty() {
+            return Ok(Vec::new());
+        }
         let raw = self.file.original().or(self.migration_seed.as_deref());
         let mut root: Value = match raw {
             Some(bytes) => {
@@ -81,40 +84,51 @@ impl NativeToggle for ClaudeToggle {
             *collection = serde_json::json!({});
         }
         let servers = collection.as_object_mut().expect("normalized MCP object");
-        let existing = servers.get(id);
-        let target = McpConfigTarget::Claude;
-        let policy = McpEntryEncodePolicy::PreserveFields;
-        let snapshot = if enabled {
-            let projected = project_server(id, server)?;
-            let entry = if let Some(snapshot) = previous_snapshot.filter(|_| existing.is_none()) {
-                let restored = target
-                    .restore_native_entry_with_policy(snapshot, &projected, policy)
-                    .map_err(|error| AppError::Config(error.to_string()))?;
-                serde_json::from_str(&restored)
-                    .map_err(|error| AppError::json(self.file.path(), error))?
-            } else {
-                target
-                    .encode_server_with_policy(&projected, policy)
-                    .map_err(|error| AppError::McpValidation(error.to_string()))?
-            };
-            servers.insert(id.to_owned(), entry);
-            None
-        } else {
-            let snapshot = match existing.filter(|entry| entry.is_object()) {
-                Some(entry) => Some(
+        let mut snapshots = Vec::with_capacity(changes.len());
+        for change in changes {
+            let NativeChange {
+                id,
+                server,
+                previous_snapshot,
+                ..
+            } = *change;
+            let existing = servers.get(id);
+            let target = McpConfigTarget::Claude;
+            let policy = McpEntryEncodePolicy::PreserveFields;
+            let snapshot = if change.enabled() {
+                let projected = project_server(id, server)?;
+                let entry = if let Some(snapshot) = previous_snapshot.filter(|_| existing.is_none())
+                {
+                    let restored = target
+                        .restore_native_entry_with_policy(snapshot, &projected, policy)
+                        .map_err(|error| AppError::Config(error.to_string()))?;
+                    serde_json::from_str(&restored)
+                        .map_err(|error| AppError::json(self.file.path(), error))?
+                } else {
                     target
-                        .capture_native_entry(&entry.to_string())
-                        .map_err(|error| AppError::Config(error.to_string()))?,
-                ),
-                None => previous_snapshot.cloned(),
+                        .encode_server_with_policy(&projected, policy)
+                        .map_err(|error| AppError::McpValidation(error.to_string()))?
+                };
+                servers.insert(id.to_owned(), entry);
+                None
+            } else {
+                let snapshot = match existing.filter(|entry| entry.is_object()) {
+                    Some(entry) => Some(
+                        target
+                            .capture_native_entry(&entry.to_string())
+                            .map_err(|error| AppError::Config(error.to_string()))?,
+                    ),
+                    None => previous_snapshot.cloned(),
+                };
+                servers.shift_remove(id);
+                snapshot
             };
-            servers.shift_remove(id);
-            snapshot
-        };
+            snapshots.push(snapshot);
+        }
         let contents = serde_json::to_string_pretty(&root)
             .map_err(|source| AppError::JsonSerialize { source })?;
         self.file.publish(&contents)?;
-        Ok(snapshot)
+        Ok(snapshots)
     }
 
     fn rollback(&mut self) -> Result<(), AppError> {

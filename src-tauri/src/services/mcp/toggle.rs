@@ -10,14 +10,54 @@ use cc_switch_store::McpTransactionGuard;
 use super::*;
 use crate::database::{shared_store_error, Database};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NativeAction {
+    Enable,
+    Disable,
+    Sync,
+}
+
+pub(super) struct NativeChange<'a> {
+    pub id: &'a str,
+    pub server: &'a serde_json::Value,
+    pub action: NativeAction,
+    pub previous_snapshot: Option<&'a McpNativeSnapshot>,
+}
+
+impl NativeChange<'_> {
+    pub(super) fn enabled(&self) -> bool {
+        self.action != NativeAction::Disable
+    }
+}
+
 pub(super) trait NativeToggle {
+    /// Prepare all entries against one observation and publish at most once.
+    /// Results correspond to the input order. Recovery remains owned by `self`.
+    fn apply_batch(
+        &mut self,
+        changes: &[NativeChange<'_>],
+    ) -> Result<Vec<Option<McpNativeSnapshot>>, AppError>;
+
     fn apply(
         &mut self,
         id: &str,
         server: &serde_json::Value,
         enabled: bool,
         previous_snapshot: Option<&McpNativeSnapshot>,
-    ) -> Result<Option<McpNativeSnapshot>, AppError>;
+    ) -> Result<Option<McpNativeSnapshot>, AppError> {
+        self.apply_batch(&[NativeChange {
+            id,
+            server,
+            previous_snapshot,
+            action: if enabled {
+                NativeAction::Enable
+            } else {
+                NativeAction::Disable
+            },
+        }])?
+        .pop()
+        .ok_or_else(|| AppError::Config("Missing MCP native result".into()))
+    }
 
     /// Refresh an enabled catalog entry without forcing host-native activation.
     fn sync(
@@ -26,7 +66,14 @@ pub(super) trait NativeToggle {
         server: &serde_json::Value,
         previous_snapshot: Option<&McpNativeSnapshot>,
     ) -> Result<Option<McpNativeSnapshot>, AppError> {
-        self.apply(id, server, true, previous_snapshot)
+        self.apply_batch(&[NativeChange {
+            id,
+            server,
+            previous_snapshot,
+            action: NativeAction::Sync,
+        }])?
+        .pop()
+        .ok_or_else(|| AppError::Config("Missing MCP native result".into()))
     }
 
     fn rollback(&mut self) -> Result<(), AppError>;
@@ -119,17 +166,7 @@ impl McpService {
             })
             .collect();
         _shared_lock = if selections.iter().any(|(_, _, live)| *live) {
-            Some(
-                SharedLiveConfigLock::try_acquire(&shared_live_config_lock_path(
-                    &crate::config::get_home_dir(),
-                ))
-                .map_err(|error| match error {
-                    SharedLiveConfigLockError::Unavailable => AppError::Conflict(
-                        "Live configuration is locked by another operation".into(),
-                    ),
-                    SharedLiveConfigLockError::Io { path, source } => AppError::io(path, source),
-                })?,
-            )
+            Some(lock_live_config()?)
         } else {
             None
         };
@@ -221,39 +258,14 @@ impl McpService {
             }
             Ok(())
         })();
-        let failure = match result {
-            Ok(()) => match transaction.commit_preserving_on_error() {
-                Ok(()) => None,
-                Err((transaction, error)) => Some((transaction, shared_store_error(error))),
-            },
-            Err(error) => Some((transaction, error)),
+        let action = if delete {
+            "deletion"
+        } else if upsert {
+            "upsert"
+        } else {
+            "toggle"
         };
-        if let Some((transaction, error)) = failure {
-            let mut failures = Vec::new();
-            for (app, operation) in native.iter_mut().rev() {
-                if let Err(error) = operation.rollback() {
-                    failures.push(format!("native recovery for {}: {error}", app.as_str()));
-                }
-            }
-            let database_error = transaction.rollback().err();
-            if let Some(error) = database_error {
-                failures.push(format!("database rollback: {error}"));
-            }
-            if !failures.is_empty() {
-                let action = if delete {
-                    "deletion"
-                } else if upsert {
-                    "upsert"
-                } else {
-                    "toggle"
-                };
-                return Err(AppError::Config(format!(
-                    "MCP {action} failed: {error}; {}",
-                    failures.join("; ")
-                )));
-            }
-            return Err(error);
-        }
+        finish_operation(transaction, &mut native, result, action)?;
         // Publish only the target cache row after commit. Other host workflows
         // still own their own cache refresh and persistence boundaries.
         if delete {
@@ -271,8 +283,53 @@ impl McpService {
     }
 }
 
-/// The host's native bindings are shared by single and multi-App selection.
-fn observe_native(app: &AppType) -> Result<Box<dyn NativeToggle>, AppError> {
+pub(super) fn lock_live_config() -> Result<SharedLiveConfigLock, AppError> {
+    SharedLiveConfigLock::try_acquire(&shared_live_config_lock_path(&crate::config::get_home_dir()))
+        .map_err(|error| match error {
+            SharedLiveConfigLockError::Unavailable => {
+                AppError::Conflict("Live configuration is locked by another operation".into())
+            }
+            SharedLiveConfigLockError::Io { path, source } => AppError::io(path, source),
+        })
+}
+
+/// Callers retain their native bindings and file lock through commit or recovery.
+pub(super) fn finish_operation(
+    transaction: McpTransactionGuard<'_>,
+    native: &mut [(AppType, Box<dyn NativeToggle>)],
+    result: Result<(), AppError>,
+    action: &str,
+) -> Result<(), AppError> {
+    let failure = match result {
+        Ok(()) => match transaction.commit_preserving_on_error() {
+            Ok(()) => None,
+            Err((transaction, error)) => Some((transaction, shared_store_error(error))),
+        },
+        Err(error) => Some((transaction, error)),
+    };
+    if let Some((transaction, error)) = failure {
+        let mut failures = Vec::new();
+        for (app, operation) in native.iter_mut().rev() {
+            if let Err(error) = operation.rollback() {
+                failures.push(format!("native recovery for {}: {error}", app.as_str()));
+            }
+        }
+        if let Err(error) = transaction.rollback() {
+            failures.push(format!("database rollback: {error}"));
+        }
+        if !failures.is_empty() {
+            return Err(AppError::Config(format!(
+                "MCP {action} failed: {error}; {}",
+                failures.join("; ")
+            )));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// One factory serves standalone catalog mutations and whole-catalog sync.
+pub(super) fn observe_native(app: &AppType) -> Result<Box<dyn NativeToggle>, AppError> {
     Ok(match app {
         AppType::Claude => Box::new(claude_toggle::ClaudeToggle::observe()?),
         AppType::Codex => Box::new(codex_toggle::CodexToggle::observe()?),

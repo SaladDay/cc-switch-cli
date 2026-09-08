@@ -6,7 +6,10 @@ use cc_switch_core::{McpConfigTarget, McpNativeSnapshot};
 use serde_json::Value;
 use serde_yaml::Value as Yaml;
 
-use super::{native_file::NativeFile, toggle::NativeToggle};
+use super::{
+    native_file::NativeFile,
+    toggle::{NativeAction, NativeChange, NativeToggle},
+};
 use crate::{
     error::AppError,
     hermes_config::{self, get_hermes_config_path, lock_live_write},
@@ -26,22 +29,37 @@ impl HermesToggle {
             _guard: guard,
         })
     }
-    fn write_entry(
+}
+
+impl NativeToggle for HermesToggle {
+    fn apply_batch(
         &mut self,
-        id: &str,
-        server: &Value,
-        enabled: bool,
-        previous_snapshot: Option<&McpNativeSnapshot>,
-        activate: bool,
-    ) -> Result<Option<McpNativeSnapshot>, AppError> {
-        if previous_snapshot.is_some() {
+        changes: &[NativeChange<'_>],
+    ) -> Result<Vec<Option<McpNativeSnapshot>>, AppError> {
+        if changes.is_empty() {
+            return Ok(Vec::new());
+        }
+        if changes
+            .iter()
+            .any(|change| change.previous_snapshot.is_some())
+        {
             return Err(AppError::Database(
                 "Unsupported Hermes MCP native snapshot".into(),
             ));
         }
-        let entry = enabled
-            .then(|| convert_to_hermes_mcp_spec(server))
-            .transpose()?;
+        let entries = changes
+            .iter()
+            .map(|change| {
+                Ok((
+                    change.id,
+                    change
+                        .enabled()
+                        .then(|| convert_to_hermes_mcp_spec(change.server))
+                        .transpose()?,
+                    change.action == NativeAction::Enable,
+                ))
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
         let raw =
             std::str::from_utf8(self.file.original().unwrap_or_default()).map_err(|error| {
                 AppError::io(
@@ -49,9 +67,9 @@ impl HermesToggle {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
             })?;
-        let contents = prepare_toggle(raw, id, entry, activate)?;
+        let contents = prepare_batch(raw, entries)?;
         if contents == raw {
-            return Ok(None);
+            return Ok(vec![None; changes.len()]);
         }
         // Keep the host's existing pre-write backup and retention policy. A
         // later publication/commit failure does not erase recovery backups.
@@ -59,28 +77,7 @@ impl HermesToggle {
             hermes_config::create_hermes_backup(raw)?;
         }
         self.file.publish(&contents)?;
-        Ok(None)
-    }
-}
-
-impl NativeToggle for HermesToggle {
-    fn apply(
-        &mut self,
-        id: &str,
-        server: &Value,
-        enabled: bool,
-        previous_snapshot: Option<&McpNativeSnapshot>,
-    ) -> Result<Option<McpNativeSnapshot>, AppError> {
-        self.write_entry(id, server, enabled, previous_snapshot, true)
-    }
-
-    fn sync(
-        &mut self,
-        id: &str,
-        server: &Value,
-        previous_snapshot: Option<&McpNativeSnapshot>,
-    ) -> Result<Option<McpNativeSnapshot>, AppError> {
-        self.write_entry(id, server, true, previous_snapshot, false)
+        Ok(vec![None; changes.len()])
     }
 
     fn rollback(&mut self) -> Result<(), AppError> {
@@ -88,11 +85,9 @@ impl NativeToggle for HermesToggle {
     }
 }
 
-fn prepare_toggle(
+fn prepare_batch<'a>(
     raw: &str,
-    id: &str,
-    entry: Option<Value>,
-    activate: bool,
+    entries: impl IntoIterator<Item = (&'a str, Option<Value>, bool)>,
 ) -> Result<String, AppError> {
     let mut root = hermes_config::parse_hermes_config(raw)?;
     let mut untagged = &mut root;
@@ -105,7 +100,6 @@ fn prepare_toggle(
     let mapping = untagged
         .as_mapping_mut()
         .ok_or_else(|| AppError::Config("Hermes config must be a YAML mapping".into()))?;
-    let key = Yaml::String(id.into());
     // Preserve the old policy of replacing a non-mapping MCP section, but do
     // not convert sibling entries through JSON: they may contain YAML-only data.
     let section = Yaml::String("mcp_servers".into());
@@ -114,18 +108,23 @@ fn prepare_toggle(
         .and_then(Yaml::as_mapping)
         .cloned()
         .unwrap_or_default();
-    if let Some(entry) = entry {
-        let mut merged = match servers.get(&key) {
-            Some(existing) => merge_hermes_spec(&hermes_config::yaml_to_json(existing)?, &entry),
-            None => entry,
-        };
-        // Selection owns activation even when the native entry was disabled.
-        if activate {
-            merged["enabled"] = Value::Bool(true);
+    for (id, entry, activate) in entries {
+        let key = Yaml::String(id.into());
+        if let Some(entry) = entry {
+            let mut merged = match servers.get(&key) {
+                Some(existing) => {
+                    merge_hermes_spec(&hermes_config::yaml_to_json(existing)?, &entry)
+                }
+                None => entry,
+            };
+            // Selection owns activation even when the native entry was disabled.
+            if activate {
+                merged["enabled"] = Value::Bool(true);
+            }
+            servers.insert(key, hermes_config::json_to_yaml(&merged)?);
+        } else {
+            servers.shift_remove(&key);
         }
-        servers.insert(key, hermes_config::json_to_yaml(&merged)?);
-    } else {
-        servers.shift_remove(&key);
     }
     let servers = Yaml::Mapping(servers);
     let contents = hermes_config::replace_yaml_section(raw, "mcp_servers", &servers)?;
