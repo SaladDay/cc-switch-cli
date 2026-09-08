@@ -1075,3 +1075,116 @@ Only the CLI migration branch adopts this workflow. Lite source/pins, other prov
 workflows, global snapshot persistence, Skill writers, proxy, UI and full-product
 adoption are unchanged. Shared-Core migration remains incomplete outside these
 verified paths. No CLI merge to `main` is authorized.
+
+## Skill shared-consumer adoption
+
+Skill catalog DAOs already use Store, but that does not establish that a whole
+Skill operation coordinates its catalog observation, native deployment and final
+decision. Continue in four separately reviewed slices:
+
+1. **Establish real-consumer gates.** Use CLI's public toggle and Lite's actual
+   Skill Store/native services in marked temporary profiles. Verify same-row
+   selection retention, native restoration after database rejection, shared-lock
+   exclusion/release and Lite's protection at commit-failure recovery entry.
+   This slice adds tests, test-only observation points and this plan. It does not
+   change production behavior, dependencies or schema.
+2. **Confirm the shared contract.** Reuse Core's Skill registry, runtime, plans,
+   receipts and Store's guarded catalog writes. Add a shared primitive only when
+   the gates establish that the existing API cannot express the required lifetime
+   or write set. Keep CLI/Lite settings, path resolution and deployment choices
+   in their hosts. A future full-product host must not need CLI or Lite types.
+3. **Adopt the complete toggle workflow.** Use fresh guarded observations and
+   retain database/native protection through commit or compensation. Pass the
+   gates with actual consumers, preserve unowned fields and other App selections,
+   and extend coverage to every supported Skill App and deployment/storage mode
+   before making an all-App claim. Add real-peer probes during CLI publication,
+   commit and compensation, plus observations inside and at the end of Lite
+   recovery; entry-only checks do not establish the full lock lifetime. Delete
+   replaced toggle code, not unrelated installation or repository features.
+4. **Migrate the remaining Skill writers.** Inventory set-apps, install/reuse,
+   import, removal, synchronization and storage migration separately; migrate
+   shared planning/execution and remove their replaced implementations in bounded
+   follow-up changes. Keep repository acquisition, CLI presentation and product
+   policy outside Core. A green toggle alone does not complete Skill adoption.
+
+Each slice follows the independent two-reviewer protocol above. Production
+provider/MCP workflows, proxy, UI, market features and full-product integration
+are outside the first Skill slice. No normal app or real profile is started.
+
+The CLI tests live under `services::skill::consumer_tests`. The ordinary
+round-trip control covers Auto/Copy, repeated enable/disable, an unrelated row,
+unknown binary data, an unsupported App selection and host metadata. The explicit
+database-rejection gate exercises both enable and disable in both modes. The
+same-row peer gate accepts either a completed Lite Gemini toggle that CLI must
+preserve, or a specifically identified lock/busy refusal followed by successful
+retry after CLI finishes; arbitrary peer errors do not qualify. The native-holder
+gate deliberately holds no database write transaction, so a SQLite busy error
+alone cannot establish file-lock participation.
+
+Build independent CLI/Lite library test binaries as described above. With the
+isolated environment and `CC_SWITCH_LITE_TEST_BINARY` set, run:
+
+```sh
+cargo test --locked --lib services::skill::consumer_tests -- --include-ignored --test-threads=1
+```
+
+From Lite's `src-tauri/`, run its explicit deferred-commit gate with the same
+owned temporary `TMPDIR` and `CC_SWITCH_CONFIG_DIR`. The standalone test and the
+Skill peer fix every App path under their checked temporary home, including
+subsequent Skill runtime observations; ambient App overrides are not used:
+
+```sh
+cargo test --locked --lib skill::acceptance_tests -- --ignored --test-threads=1
+```
+
+The latter uses an actual deferred foreign-key failure and the real native
+receipt. It records lock observations immediately before native recovery, lets
+restoration and retry finish, then checks that entry observation. It does not
+prove protection inside or at the end of recovery. The CLI holder gate likewise
+does not observe CLI-owned publication/commit/compensation. Those full-lifecycle
+gates remain required in step 3 above. Acceptance failures
+remain explicit pending requirements, not passing coverage. Remove the temporary
+ignore on single-repository gates when their production adoption passes; real
+cross-repository workers remain opt-in and must still be run explicitly.
+
+### Initial Skill observations
+
+With these test-only additions on CLI `20930a9f` (Core/Store `f5b6b4cd`) and Lite
+`4d0a77b3` (Core/Store `7b7cfae5`), all four acceptance failures are reproduced:
+
+- Lite commits Gemini's selection for the target Skill after CLI reads its index.
+  CLI's Claude toggle succeeds and leaves both native Skills reachable, but
+  overwrites the peer's Gemini catalog selection back to false.
+- Lite holds a real Gemini native Skill receipt without a database write lock.
+  CLI's Claude toggle still succeeds. Lite recovery and subsequent retries succeed;
+  the gate fails because CLI did not refuse the protected native write.
+- A selection-rejecting SQLite trigger makes CLI return a conflict and preserves
+  the catalog, but leaves native changes in all four Auto/Copy enable/disable
+  cases. Removing the trigger permits successful retries.
+- Lite's deferred foreign-key failure reaches native recovery with the file lock
+  held but the database write lock released. Restoration and retry finish; the
+  gate then fails at its recorded lock-lifetime assertion.
+
+The fixture starts Gemini's disabled list in agreement with its catalog flags;
+it does not suppress Core's drift checks. Core may retain a disabled protected
+public link, so the holder test checks that no Skill remains reachable after
+recovery instead of requiring that internal reference to disappear. These gates
+do not yet establish all-App, copy/link interoperability or crash recovery.
+
+Local regression results: 54 CLI Skill tests pass, 139 database tests pass,
+28 Skill service integration tests pass, and all 121 ordinary Lite tests pass.
+The existing CLI `migration_tree_hash_preserves_non_utf8_names` test fails during
+fixture creation with macOS error 92 (`Illegal byte sequence`), before calling
+project logic. Its source is unchanged from the baseline; an isolated rerun has
+the same result. It is neither fixed nor counted as passing here. Ordinary runs
+ignore the explicit acceptance gates and real-consumer workers; those four
+failures above are reported separately.
+
+Both format checks and locked all-target Clippy pass. Lite uses `-D warnings`;
+CLI retains its 63 baseline warnings and the previously recorded unrelated
+`reversed_empty_ranges` allowance, with no new warning on the added test code.
+Windows and the complete CLI test suite were not run locally.
+
+The standalone Lite gate was also run with `CLAUDE_CONFIG_DIR` pointing at a
+different owned temporary path. It reached the expected lock-entry assertion,
+and the overridden path remained absent; no outside Skill was published.

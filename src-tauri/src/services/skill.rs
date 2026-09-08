@@ -4,6 +4,8 @@
 //! - SSOT（单一事实源）：`~/.cc-switch/skills/`
 //! - 数据库存储安装记录、启用状态与仓库列表（`~/.cc-switch/cc-switch.db`）
 
+#[cfg(test)]
+mod consumer_tests;
 mod discovery;
 
 use chrono::{DateTime, Utc};
@@ -3010,6 +3012,8 @@ impl SkillService {
     pub fn toggle_app(directory_or_id: &str, app: &AppType, enabled: bool) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
         let mut index = Self::load_index_unlocked()?;
+        #[cfg(test)]
+        consumer_tests::after_observation();
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
             return Err(AppError::Message(format!(
                 "未找到已安装的 Skill: {directory_or_id}"
