@@ -1,4 +1,4 @@
-//! Opt-in acceptance gates for MCP work inside an ordinary provider switch.
+//! Acceptance gates for MCP work inside an ordinary provider switch.
 
 use std::{
     fs,
@@ -48,6 +48,42 @@ fn files() -> Vec<(PathBuf, Option<Vec<u8>>)> {
     files
 }
 
+fn reject_provider_commit(state: &AppState) {
+    // The reference remains valid until selection changes, and is checked only
+    // at COMMIT. There are no trigger side writes rejected before native work.
+    state
+        .db
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "PRAGMA foreign_keys=ON;
+         CREATE UNIQUE INDEX fixture_current_reference ON providers(id,app_type,is_current);
+         CREATE TABLE fixture_commit_guard(id TEXT,app_type TEXT,selected INTEGER,
+           FOREIGN KEY(id,app_type,selected) REFERENCES providers(id,app_type,is_current)
+           DEFERRABLE INITIALLY DEFERRED);
+         INSERT INTO fixture_commit_guard VALUES('old','gemini',1);",
+        )
+        .unwrap();
+}
+
+fn with_publication_hook<T>(
+    hook: impl FnMut(&crate::config::ConfigWriteTarget, Option<&[u8]>) -> Result<(), AppError> + 'static,
+    action: impl FnOnce() -> T,
+) -> T {
+    let hook = std::rc::Rc::new(std::cell::RefCell::new(hook));
+    let provider_hook = hook.clone();
+    crate::gemini_config::operation::with_hook(
+        Box::new(move |resource, bytes| (provider_hook.borrow_mut())(resource, bytes)),
+        || {
+            native_file::with_exchange_hook(
+                Box::new(move |resource, bytes| (hook.borrow_mut())(resource, bytes)),
+                action,
+            )
+        },
+    )
+}
+
 fn assert_recovered(
     state: &AppState,
     before: &[(PathBuf, Option<Vec<u8>>)],
@@ -73,7 +109,6 @@ fn assert_recovered(
 }
 
 #[test]
-#[ignore = "provider-owned MCP adoption gate; expected to fail before migration"]
 fn later_mcp_error_recovers_every_app_touched_by_the_provider_switch() {
     let temp = tempdir();
     let _env = TestEnvGuard::isolated(temp.path());
@@ -94,7 +129,6 @@ fn later_mcp_error_recovers_every_app_touched_by_the_provider_switch() {
 }
 
 #[test]
-#[ignore = "provider-owned MCP adoption gate; expected to fail before migration"]
 fn provider_commit_failure_recovers_all_mcp_publications() {
     let mut published = Vec::new();
     for fail_commit in [false, true] {
@@ -105,22 +139,7 @@ fn provider_commit_failure_recovers_all_mcp_publications() {
         target.apps = all_apps();
         state.db.save_mcp_server(&target).unwrap();
         if fail_commit {
-            // No trigger side writes: those would be rejected before native work.
-            // Changing the current provider breaks this reference only at COMMIT.
-            state
-                .db
-                .conn
-                .lock()
-                .unwrap()
-                .execute_batch(
-                    "PRAGMA foreign_keys=ON;
-                 CREATE UNIQUE INDEX fixture_current_reference ON providers(id,app_type,is_current);
-                 CREATE TABLE fixture_commit_guard(id TEXT,app_type TEXT,selected INTEGER,
-                   FOREIGN KEY(id,app_type,selected) REFERENCES providers(id,app_type,is_current)
-                   DEFERRABLE INITIALLY DEFERRED);
-                 INSERT INTO fixture_commit_guard VALUES('old','gemini',1);",
-                )
-                .unwrap();
+            reject_provider_commit(&state);
         }
         let before = files();
         let cache = serde_json::to_value(&*state.config.read().unwrap()).unwrap();
@@ -183,6 +202,272 @@ fn provider_commit_failure_recovers_all_mcp_publications() {
             }
             published = before.iter().map(|(path, _)| fs::read(path).ok()).collect();
         }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn recovery_preserves_links_to_gemini_from_earlier_and_later_apps() {
+    use std::os::unix::fs::symlink;
+
+    for linked_app in [AppType::Claude, AppType::OpenCode] {
+        let temp = tempdir();
+        let _env = TestEnvGuard::isolated(temp.path());
+        let state = state();
+        let mut target = server("target");
+        target.apps = all_apps();
+        state.db.save_mcp_server(&target).unwrap();
+        let settings = crate::gemini_config::get_gemini_settings_path();
+        let link = paths()
+            .into_iter()
+            .find(|(app, _)| *app == linked_app)
+            .unwrap()
+            .1;
+        fs::remove_file(&link).unwrap();
+        symlink(&settings, &link).unwrap();
+        reject_provider_commit(&state);
+        let before = files();
+        let cache = serde_json::to_value(&*state.config.read().unwrap()).unwrap();
+        let error = ProviderService::switch(&state, AppType::Gemini, "new").unwrap_err();
+        assert!(
+            matches!(&error, AppError::Conflict(message)
+            if message.contains("FOREIGN KEY constraint failed")),
+            "{linked_app:?}: {error}"
+        );
+        assert_recovered(&state, &before, &cache);
+        assert_eq!(fs::read_link(link).unwrap(), settings);
+    }
+}
+
+#[test]
+fn database_failures_recover_in_publication_order_without_releasing_protection() {
+    use cc_switch_core::fs::{
+        shared_live_config_lock_path, SharedLiveConfigLock, SharedLiveConfigLockError,
+    };
+
+    for failure in ["suppressed", "provider-drift", "commit", "aborted"] {
+        let temp = tempdir();
+        let _env = TestEnvGuard::isolated(temp.path());
+        let state = Arc::new(state());
+        let mut target = server("target");
+        target.apps = all_apps();
+        state.db.save_mcp_server(&target).unwrap();
+        state.db.conn.lock().unwrap().execute_batch(
+            "ALTER TABLE providers ADD COLUMN fixture_private BLOB DEFAULT X'00ff';
+             ALTER TABLE mcp_servers ADD COLUMN fixture_private BLOB DEFAULT X'01fe';
+             UPDATE mcp_servers SET enabled_grokbuild=1 WHERE id='peer';
+             INSERT INTO mcp_native_links(server_id,app_id,native_snapshot) VALUES('peer','grokbuild','future opaque snapshot');",
+        ).unwrap();
+        if failure == "commit" {
+            reject_provider_commit(&state);
+        } else {
+            let (timing, action) = match failure {
+                "suppressed" => ("BEFORE", "SELECT RAISE(IGNORE);"),
+                "provider-drift" => (
+                    "AFTER",
+                    "UPDATE providers SET fixture_private=X'0203' WHERE id='old';",
+                ),
+                "aborted" => ("AFTER", "SELECT RAISE(ROLLBACK, 'fixture abort');"),
+                _ => unreachable!(),
+            };
+            state.db.conn.lock().unwrap().execute_batch(&format!(
+                "CREATE TRIGGER fixture_link {timing} INSERT ON mcp_native_links WHEN NEW.app_id='hermes' BEGIN {action} END;"
+            )).unwrap();
+        }
+        let providers =
+            cc_switch_store::read_provider_rows(&state.db.conn.lock().unwrap(), None).unwrap();
+        let servers =
+            cc_switch_store::read_mcp_server_rows(&state.db.conn.lock().unwrap()).unwrap();
+        let link = cc_switch_store::read_mcp_native_link(
+            &state.db.conn.lock().unwrap(),
+            "peer",
+            "grokbuild",
+        )
+        .unwrap();
+        let before = files();
+        let cache = serde_json::to_value(&*state.config.read().unwrap()).unwrap();
+        let trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = trace.clone();
+        let held = state.clone();
+        let home = temp.path().to_owned();
+        let error = with_publication_hook(
+            move |resource, _| {
+                assert!(held.config.try_write().is_err());
+                assert!(held.db.conn.try_lock().is_err());
+                assert!(matches!(
+                    SharedLiveConfigLock::try_acquire(&shared_live_config_lock_path(&home)),
+                    Err(SharedLiveConfigLockError::Unavailable)
+                ));
+                let conn =
+                    rusqlite::Connection::open(home.join(".cc-switch/cc-switch.db")).unwrap();
+                conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+                let attempt = conn.execute_batch("BEGIN IMMEDIATE");
+                if failure == "aborted" && observed.borrow().len() >= 7 {
+                    // SQLite itself releases this protection on RAISE(ROLLBACK).
+                    attempt.unwrap();
+                    conn.execute_batch("ROLLBACK").unwrap();
+                } else {
+                    assert_eq!(
+                        attempt.unwrap_err().sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::DatabaseBusy)
+                    );
+                }
+                observed.borrow_mut().push(resource.path().to_owned());
+                Ok(())
+            },
+            || ProviderService::switch(&state, AppType::Gemini, "new"),
+        )
+        .unwrap_err();
+        assert!(
+            !error.to_string().contains("回滚失败"),
+            "{failure}: {error}"
+        );
+        let mut expected = vec![
+            crate::gemini_config::get_gemini_env_path(),
+            crate::gemini_config::get_gemini_settings_path(),
+        ];
+        expected.extend(paths().into_iter().map(|(_, path)| path));
+        expected.extend(expected.clone().into_iter().rev());
+        assert_eq!(*trace.borrow(), expected, "{failure}");
+        assert_recovered(&state, &before, &cache);
+        let conn = state.db.conn.lock().unwrap();
+        assert_eq!(
+            cc_switch_store::read_provider_rows(&conn, None).unwrap(),
+            providers
+        );
+        assert_eq!(
+            cc_switch_store::read_mcp_server_rows(&conn).unwrap(),
+            servers
+        );
+        assert_eq!(
+            cc_switch_store::read_mcp_native_link(&conn, "peer", "grokbuild").unwrap(),
+            link
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM mcp_native_links", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
+        drop(
+            SharedLiveConfigLock::try_acquire(&shared_live_config_lock_path(temp.path())).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn other_app_publication_failures_recover_without_overwriting_external_edits() {
+    // Gemini's provider/MCP uncertain-write and dependent-env cases remain in
+    // provider::gemini::execution_tests. Here each other binding fails in turn.
+    for app in McpService::supported_mcp_apps().filter(|app| *app != AppType::Gemini) {
+        for failure in ["before", "after", "external"] {
+            let temp = tempdir();
+            let _env = TestEnvGuard::isolated(temp.path());
+            let state = state();
+            let mut target = server("target");
+            target.apps = all_apps();
+            state.db.save_mcp_server(&target).unwrap();
+            if failure == "external" {
+                reject_provider_commit(&state);
+            }
+            let mut before = files();
+            let cache = serde_json::to_value(&*state.config.read().unwrap()).unwrap();
+            let path = paths()
+                .into_iter()
+                .find(|(target, _)| *target == app)
+                .unwrap()
+                .1;
+            let observed_path = path.clone();
+            let mut calls = 0;
+            let error = with_publication_hook(
+                move |resource, replacement| {
+                    if resource.path() == observed_path {
+                        calls += 1;
+                        if failure == "external" && calls == 2 {
+                            fs::write(resource.path(), b"external fixture").unwrap();
+                        } else if failure != "external" && calls == 1 {
+                            if failure == "after" {
+                                resource.write(replacement.unwrap())?;
+                            }
+                            return Err(AppError::io(
+                                resource.path(),
+                                std::io::Error::other("fixture native failure"),
+                            ));
+                        }
+                    }
+                    Ok(())
+                },
+                || ProviderService::switch(&state, AppType::Gemini, "new"),
+            )
+            .unwrap_err();
+            if failure == "external" {
+                assert!(
+                    error.to_string().contains("native recovery"),
+                    "{app:?}: {error}"
+                );
+                before
+                    .iter_mut()
+                    .find(|(target, _)| *target == path)
+                    .unwrap()
+                    .1 = Some(b"external fixture".to_vec());
+            } else {
+                assert!(
+                    error.to_string().contains("fixture native failure"),
+                    "{app:?}: {error}"
+                );
+            }
+            assert_recovered(&state, &before, &cache);
+            assert_eq!(
+                state
+                    .db
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM mcp_native_links", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires the independently built Lite library test binary"]
+fn provider_mcp_excludes_real_lite_through_commit_and_recovery() {
+    for failure in [false, true] {
+        let temp = tempdir();
+        let _env = TestEnvGuard::isolated(temp.path());
+        let state = state();
+        let mut target = server("target");
+        target.apps = all_apps();
+        state.db.save_mcp_server(&target).unwrap();
+        if failure {
+            reject_provider_commit(&state);
+        }
+        let home = temp.path().to_owned();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = calls.clone();
+        let result = with_publication_hook(
+            move |_, _| {
+                LitePeer::run(
+                    &home,
+                    "consumer_coordination::native_switch_in_cli_fixture",
+                    "probe_locked",
+                );
+                observed.set(observed.get() + 1);
+                Ok(())
+            },
+            || ProviderService::switch(&state, AppType::Gemini, "new"),
+        );
+        assert_eq!(result.is_err(), failure, "{result:?}");
+        assert_eq!(calls.get(), if failure { 14 } else { 7 });
+        LitePeer::run(
+            temp.path(),
+            "consumer_coordination::native_switch_in_cli_fixture",
+            "probe_released",
+        );
     }
 }
 

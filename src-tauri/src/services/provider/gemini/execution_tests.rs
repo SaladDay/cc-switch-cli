@@ -679,7 +679,8 @@ fn seed_mcp(state: &AppState) {
 #[test]
 fn gemini_switch_recovers_each_native_and_mcp_publication_failure() {
     use crate::gemini_config::operation::with_hook;
-    for fail_at in 1..=4 {
+    // Provider env/settings, then one batch containing both MCP entries.
+    for fail_at in 1..=3 {
         for publish_first in [false, true] {
             let temp = TempDir::new().unwrap();
             let _guard = TestEnvGuard::isolated(temp.path());
@@ -725,7 +726,7 @@ fn gemini_switch_recovers_each_native_and_mcp_publication_failure() {
 #[test]
 fn gemini_switch_keeps_external_settings_and_does_not_restore_dependent_env() {
     use crate::gemini_config::operation::with_hook;
-    for edit_at in [2, 4] {
+    for edit_at in [2, 3] {
         let temp = TempDir::new().unwrap();
         let _guard = TestEnvGuard::isolated(temp.path());
         seed_native();
@@ -777,7 +778,7 @@ fn gemini_switch_supports_large_native_documents_and_missing_env_recovery() {
         let error = with_hook(
             Box::new(move |resource, replacement| {
                 calls += 1;
-                if calls == 4 {
+                if calls == 3 {
                     resource.write(replacement.unwrap())?;
                     return Err(AppError::io(
                         resource.path(),
@@ -887,7 +888,7 @@ fn gemini_switch_handles_indirect_link_observations_and_recovery() {
     use crate::gemini_config::operation::with_hook;
     use std::os::unix::fs::symlink;
     for layout in ["missing", "intermediate", "cycle"] {
-        for (fail_at, publish_first) in [(0, false), (2, false), (2, true), (4, true)] {
+        for (fail_at, publish_first) in [(0, false), (2, false), (2, true), (3, true)] {
             let temp = TempDir::new().unwrap();
             let _guard = TestEnvGuard::isolated(temp.path());
             seed_native();
@@ -1037,8 +1038,8 @@ fn gemini_switch_handles_cross_target_links_at_each_publication_boundary() {
             (1, true),
             (2, false),
             (2, true),
-            (4, false),
-            (4, true),
+            (3, false),
+            (3, true),
         ] {
             let temp = TempDir::new().unwrap();
             let _guard = TestEnvGuard::isolated(temp.path());

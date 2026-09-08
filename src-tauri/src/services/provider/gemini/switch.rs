@@ -1,12 +1,13 @@
-//! Ordinary Gemini switching owns only provider settings and selection flags.
+//! Ordinary Gemini switching owns provider settings, selection and its MCP tail.
 //! Other product workflows still use the legacy snapshot persistence path.
 
 use super::*;
-use crate::database::{shared_store_error, sqlite_write_error, Database};
+use crate::database::{shared_store_error, Database};
+use crate::services::mcp::ProviderMcpSync;
 use cc_switch_core::fs::{
     shared_live_config_lock_path, SharedLiveConfigLock, SharedLiveConfigLockError,
 };
-use cc_switch_store::{ProviderRow, ProviderWriteOutcome};
+use cc_switch_store::{McpTransactionGuard, ProviderRow, ProviderWriteOutcome};
 
 impl ProviderService {
     pub(crate) fn switch_gemini_coordinated(
@@ -21,7 +22,7 @@ impl ProviderService {
         // Declare the file guard first so early returns drop the transaction
         // before releasing it. Acquisition still follows the database lock.
         let shared_lock;
-        let mut transaction =
+        let transaction =
             cc_switch_store::begin_immediate_transaction(&mut conn).map_err(shared_store_error)?;
         let mut rows = cc_switch_store::read_provider_rows(&transaction, Some("gemini"))
             .map_err(shared_store_error)?;
@@ -48,6 +49,9 @@ impl ProviderService {
                 .into_iter()
                 .collect(),
         );
+        let mut transaction = McpTransactionGuard::from_provider_transaction(transaction)
+            .map_err(shared_store_error)?;
+        let mut mcp = ProviderMcpSync::new();
 
         shared_lock = SharedLiveConfigLock::try_acquire(&shared_live_config_lock_path(
             &crate::config::get_home_dir(),
@@ -88,7 +92,7 @@ impl ProviderService {
                 &effective_current,
             )?;
             Self::apply_gemini_with_operation(&prepared, &mut native)?;
-            McpService::sync_snapshot_with_operation(&candidate, &mut native)?;
+            mcp.sync(&mut transaction, &mut native)?;
             if crate::sync_policy::should_sync_live(&AppType::Gemini) {
                 let snapshot = Self::read_gemini_provider_snapshot(
                     &action.provider,
@@ -107,24 +111,25 @@ impl ProviderService {
                     &effective_current,
                 )?;
             }
-            // Borrow rather than consume the transaction so a failed COMMIT
-            // does not drop its rollback guard before native compensation.
-            transaction
-                .execute_batch("COMMIT")
-                .map_err(sqlite_write_error)
+            Ok(())
         })();
-        if let Err(error) = result {
+        let failure = match result {
+            Ok(()) => transaction
+                .commit_preserving_on_error()
+                .err()
+                .map(|(transaction, error)| (transaction, shared_store_error(error))),
+            Err(error) => Some((transaction, error)),
+        };
+        if let Some((transaction, error)) = failure {
+            let mut errors = mcp.rollback(&mut native);
             let native_error = native.rollback().err();
-            let database_error = if transaction.is_autocommit() {
-                None // SQLite may already have aborted the transaction.
-            } else {
-                transaction.rollback().map_err(sqlite_write_error).err()
-            };
-            let errors = native_error
-                .into_iter()
-                .chain(database_error)
-                .map(|error| error.to_string())
-                .collect::<Vec<_>>();
+            let database_error = transaction.rollback().map_err(shared_store_error).err();
+            errors.extend(
+                native_error
+                    .into_iter()
+                    .chain(database_error)
+                    .map(|error| error.to_string()),
+            );
             if errors.is_empty() {
                 return Err(error);
             }
@@ -137,8 +142,9 @@ impl ProviderService {
                 ),
             ));
         }
-        drop(transaction);
+        drop(failure);
         *config = candidate;
+        drop(mcp);
         drop(native);
         drop(shared_lock);
         drop(conn);
@@ -153,7 +159,7 @@ impl ProviderService {
 }
 
 fn persist_switch_rows(
-    transaction: &mut rusqlite::Transaction<'_>,
+    transaction: &mut McpTransactionGuard<'_>,
     rows: &mut [ProviderRow],
     config: &mut MultiAppConfig,
     previous: &str,
@@ -185,16 +191,17 @@ fn persist_switch_rows(
             let settings = serde_json::to_string(&provider.settings_config)
                 .map_err(|source| AppError::JsonSerialize { source })?;
             require_applied(
-                cc_switch_store::update_provider_settings_config_if_unchanged(
-                    transaction,
-                    &row.id,
-                    "gemini",
-                    row.source_fingerprint(),
-                    &settings,
-                )
-                .map_err(shared_store_error)?,
+                transaction
+                    .update_provider_settings_config_if_unchanged(
+                        &row.id,
+                        "gemini",
+                        row.source_fingerprint(),
+                        &settings,
+                    )
+                    .map_err(shared_store_error)?,
             )?;
-            *row = cc_switch_store::read_provider_row(transaction, &row.id, "gemini")
+            *row = transaction
+                .read_provider(&row.id, "gemini")
                 .map_err(shared_store_error)?
                 .ok_or_else(|| {
                     AppError::Conflict("Gemini provider changed during switching".into())
@@ -212,16 +219,17 @@ fn persist_switch_rows(
                 continue;
             }
             require_applied(
-                cc_switch_store::set_provider_current_if_unchanged(
-                    transaction,
-                    &row.id,
-                    "gemini",
-                    row.source_fingerprint(),
-                    selected,
-                )
-                .map_err(shared_store_error)?,
+                transaction
+                    .set_provider_current_if_unchanged(
+                        &row.id,
+                        "gemini",
+                        row.source_fingerprint(),
+                        selected,
+                    )
+                    .map_err(shared_store_error)?,
             )?;
-            *row = cc_switch_store::read_provider_row(transaction, &row.id, "gemini")
+            *row = transaction
+                .read_provider(&row.id, "gemini")
                 .map_err(shared_store_error)?
                 .ok_or_else(|| {
                     AppError::Conflict("Gemini provider changed during switching".into())

@@ -21,6 +21,8 @@ mod import_tests;
 mod imports;
 mod native_file;
 mod opencode_toggle;
+mod provider_sync;
+pub(crate) use provider_sync::ProviderMcpSync;
 #[cfg(test)]
 mod provider_sync_tests;
 #[cfg(test)]
@@ -203,28 +205,6 @@ impl McpService {
         })
     }
 
-    // The caller owns the snapshot. No AppState locks or DAO calls may be
-    // nested here: coordinated switches already hold their write transaction.
-    pub(crate) fn sync_snapshot_with_operation(
-        cfg: &MultiAppConfig,
-        gemini: &mut crate::gemini_config::operation::GeminiOperation,
-    ) -> Result<(), AppError> {
-        let servers = Self::servers_from_config(cfg)?;
-        Self::sync_all_apps(|app| {
-            if matches!(app, AppType::Gemini) {
-                return Self::project_gemini_with_operation(servers, gemini);
-            }
-            for server in servers.values() {
-                if server.apps.is_enabled_for(app) {
-                    Self::sync_server_to_app_internal(cfg, server, app)?;
-                } else {
-                    Self::remove_server_from_native(&server.id, app)?;
-                }
-            }
-            Ok(())
-        })
-    }
-
     fn sync_all_apps(
         mut project: impl FnMut(&AppType) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
@@ -244,25 +224,6 @@ impl McpService {
                 failures.join("; ")
             )))
         }
-    }
-
-    fn project_gemini_with_operation(
-        servers: &HashMap<String, McpServer>,
-        operation: &mut crate::gemini_config::operation::GeminiOperation,
-    ) -> Result<(), AppError> {
-        if !crate::sync_policy::should_sync_live(&AppType::Gemini) {
-            return Ok(());
-        }
-        for server in servers.values() {
-            crate::gemini_mcp::update_with_operation(operation, |native| {
-                if server.apps.is_enabled_for(&AppType::Gemini) {
-                    native.insert(server.id.clone(), server.server.clone());
-                } else {
-                    native.remove(&server.id);
-                }
-            })?;
-        }
-        Ok(())
     }
 
     /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做

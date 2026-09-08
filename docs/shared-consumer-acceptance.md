@@ -1029,3 +1029,49 @@ gates, 25 Gemini provider tests, 11 Gemini operation tests and 121 unchanged Lit
 tests. Formatting and locked all-target Clippy pass with the previously recorded
 baseline lint warnings. The three expected failures above are reported separately
 and do not count as passing coverage.
+
+#### Provider-owned MCP adoption
+
+CLI now pins Core/Store to `f5b6b4cd` and transfers its ordinary Gemini switch
+transaction to the shared provider/MCP guard before publishing files. Provider
+settings and selection, MCP catalog checks and native removal snapshots share
+one final commit. Host extension settings are read before transfer; the caller
+does not regain an unchecked connection afterward. Unknown provider fields,
+catalog columns, unsupported App selections and unrelated links remain intact.
+This uses the shared contract established in Core PR #18; it adds no Core API.
+
+The old per-entry provider MCP path is removed. Public sync and the provider tail
+reuse one batch/link implementation with the existing App-specific native bindings.
+Each initialized App receives at most one MCP publication. Later Apps are still
+attempted after an earlier native error, and their errors are aggregated. Public
+sync keeps its independent per-App commits; a failed provider switch instead
+recovers every native publication it owns before rolling back the database.
+
+Bindings and locks remain held through the final decision. Gemini's provider and
+MCP publications retain separate Core receipts so all Apps can recover in reverse
+publication order, including leaf links that refer to Gemini from earlier or later
+Apps. Recovery remains conditional and preserves external edits. SQLite-triggered
+transaction aborts release the database lock themselves; the shared native lock
+still spans recovery. Local selection/authentication and the post-commit best-effort
+Skill tail retain their existing boundaries. This is not crash-atomic execution.
+
+The original three provider-entry gates now pass against unchanged Lite `4d0a77b3`
+(Core/Store `7b7cfae5`), including the actual remove/enable snapshot round trip.
+The two single-repository gates are no longer ignored. Added cases check shared
+and database protection during every publication/recovery, suppressed writes,
+provider-row drift, deferred commit failure, SQLite abort, uncertain publication,
+external edits, linked paths and real Lite exclusion/release. The large-document
+test checks one MCP publication for 64 entries, not one write per entry.
+
+Local validation passes 264 ordinary MCP-filtered tests, 59 real-Lite MCP gates,
+29 Gemini provider tests including real consumers, 11 Gemini operation tests,
+139 database tests, 14 MCP command tests, 71 provider service tests, one provider
+model round-trip test, one provider-selection settings test and 121 Lite tests.
+Some suites overlap. Formatting and locked all-target Clippy pass with the recorded
+baseline warnings and unrelated `reversed_empty_ranges` allowance; no warning
+points at a changed source file. Windows was not run locally.
+
+Only the CLI migration branch adopts this workflow. Lite source/pins, other provider
+workflows, global snapshot persistence, Skill writers, proxy, UI and full-product
+adoption are unchanged. Shared-Core migration remains incomplete outside these
+verified paths. No CLI merge to `main` is authorized.

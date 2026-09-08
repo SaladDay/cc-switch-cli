@@ -143,6 +143,45 @@ impl GeminiOperation {
         replacements: Vec<(LogicalTarget, String)>,
         dependent: bool,
     ) -> Result<(), AppError> {
+        let receipt = self.publish(replacements, dependent)?;
+        if let Some(previous) = self.receipts.last_mut() {
+            if let Err(receipt) = previous.try_coalesce_last_write(receipt) {
+                // Keep both records recoverable, but do not continue accumulating
+                // versions if the shared ownership contract cannot combine them.
+                self.receipts.push(receipt);
+                return Err(AppError::Config(
+                    "Gemini recovery records are not consecutive".into(),
+                ));
+            }
+        } else {
+            self.receipts.push(receipt);
+        }
+        Ok(())
+    }
+
+    /// An outer operation may publish other Apps between provider and MCP work.
+    /// It retains this separate receipt and recovers it in that publication order,
+    /// before calling `rollback` for the earlier provider writes. Keep this session
+    /// alive throughout; recovery is terminal, not preparation for another write.
+    pub(crate) fn write_settings_retained(
+        &mut self,
+        contents: String,
+    ) -> Result<OperationReceipt<ConfigWriteTarget>, AppError> {
+        self.publish(vec![(LogicalTarget::GeminiSettings, contents)], false)
+    }
+
+    pub(crate) fn rollback_retained(
+        &mut self,
+        receipt: OperationReceipt<ConfigWriteTarget>,
+    ) -> Result<(), AppError> {
+        recover_receipts(&mut self.host, [receipt])
+    }
+
+    fn publish(
+        &mut self,
+        replacements: Vec<(LogicalTarget, String)>,
+        dependent: bool,
+    ) -> Result<OperationReceipt<ConfigWriteTarget>, AppError> {
         let mut writes = Vec::new();
         let mut maximum = 0;
         for (target, contents) in &replacements {
@@ -210,18 +249,6 @@ impl GeminiOperation {
             execute_operation_plan_with_content_limit(&plan, &mut self.host, maximum)
         };
         let receipt = receipt.map_err(|error| map_execution_error(error, dependent))?;
-        if let Some(previous) = self.receipts.last_mut() {
-            if let Err(receipt) = previous.try_coalesce_last_write(receipt) {
-                // Keep both records recoverable, but do not continue accumulating
-                // versions if the shared ownership contract cannot combine them.
-                self.receipts.push(receipt);
-                return Err(AppError::Config(
-                    "Gemini recovery records are not consecutive".into(),
-                ));
-            }
-        } else {
-            self.receipts.push(receipt);
-        }
         // Advance only to bytes successfully published by this session. A later
         // arbitrary file observation never becomes a new ownership claim.
         for (target, contents) in replacements {
@@ -231,30 +258,37 @@ impl GeminiOperation {
                 .expect("published target was observed")
                 .original = Some(contents);
         }
-        Ok(())
+        Ok(receipt)
     }
 
     pub(crate) fn rollback(&mut self) -> Result<(), AppError> {
-        let mut failures = Vec::new();
-        while let Some(receipt) = self.receipts.pop() {
-            if let Err(error) = receipt.rollback(&mut self.host) {
-                failures.extend(
-                    error
-                        .into_failures()
-                        .into_iter()
-                        .map(|failure| failure.to_string()),
-                );
-            }
+        recover_receipts(&mut self.host, self.receipts.drain(..).rev())
+    }
+}
+
+fn recover_receipts(
+    host: &mut FileHost,
+    receipts: impl IntoIterator<Item = OperationReceipt<ConfigWriteTarget>>,
+) -> Result<(), AppError> {
+    let mut failures = Vec::new();
+    for receipt in receipts {
+        if let Err(error) = receipt.rollback(host) {
+            failures.extend(
+                error
+                    .into_failures()
+                    .into_iter()
+                    .map(|failure| failure.to_string()),
+            );
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(AppError::localized(
-                "gemini.live.rollback_failed",
-                format!("Gemini 配置回滚未完成: {}", failures.join("; ")),
-                format!("Gemini config rollback incomplete: {}", failures.join("; ")),
-            ))
-        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::localized(
+            "gemini.live.rollback_failed",
+            format!("Gemini 配置回滚未完成: {}", failures.join("; ")),
+            format!("Gemini config rollback incomplete: {}", failures.join("; ")),
+        ))
     }
 }
 

@@ -185,10 +185,10 @@ fn successful_mcp_receipt_holds_the_lock_and_recovers_large_original_bytes() {
 }
 
 #[test]
-fn gemini_mcp_followups_keep_one_recovery_record_for_large_settings() {
+fn gemini_mcp_followups_publish_one_batch_with_separate_provider_recovery() {
     use crate::{
         app_config::{McpApps, McpServer},
-        services::mcp::McpService,
+        services::mcp::ProviderMcpSync,
         store::AppState,
         Database,
     };
@@ -200,42 +200,63 @@ fn gemini_mcp_followups_keep_one_recovery_record_for_large_settings() {
     );
     let path = seed(Some(large.as_bytes()));
     let state = AppState::new(std::sync::Arc::new(Database::memory().unwrap()));
-    state.config.write().unwrap().mcp.servers = Some(
-        (0..64)
-            .map(|index| {
-                let id = format!("fixture-{index}");
-                (
-                    id.clone(),
-                    McpServer {
-                        id: id.clone(),
-                        name: id,
-                        server: json!({"command":"not-executed"}),
-                        apps: McpApps {
-                            gemini: index % 2 == 0,
-                            ..Default::default()
-                        },
-                        description: None,
-                        homepage: None,
-                        docs: None,
-                        tags: Vec::new(),
-                    },
-                )
+    for index in 0..64 {
+        let id = format!("fixture-{index}");
+        state
+            .db
+            .save_mcp_server(&McpServer {
+                id: id.clone(),
+                name: id,
+                server: json!({"command":"not-executed"}),
+                apps: McpApps {
+                    gemini: index % 2 == 0,
+                    ..Default::default()
+                },
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: Vec::new(),
             })
-            .collect(),
-    );
+            .unwrap();
+    }
+    let mut connection = state.db.conn.lock().unwrap();
+    let transaction = cc_switch_store::begin_immediate_transaction(&mut connection).unwrap();
+    let mut transaction =
+        cc_switch_store::McpTransactionGuard::from_provider_transaction(transaction).unwrap();
+    let _shared_lock = cc_switch_core::fs::SharedLiveConfigLock::try_acquire(
+        &cc_switch_core::fs::shared_live_config_lock_path(temp.path()),
+    )
+    .unwrap();
+    let mut mcp = ProviderMcpSync::new();
     let mut operation = GeminiOperation::observe_provider().unwrap();
-    operation
-        .write_provider("GEMINI_API_KEY=fixture".into(), large.clone())
-        .unwrap();
-    let config = state.config.read().unwrap().clone();
-    McpService::sync_snapshot_with_operation(&config, &mut operation).unwrap();
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = calls.clone();
+    with_hook(
+        Box::new(move |_, _| {
+            observed.set(observed.get() + 1);
+            Ok(())
+        }),
+        || {
+            operation
+                .write_provider("GEMINI_API_KEY=fixture".into(), large.clone())
+                .unwrap();
+            mcp.sync(&mut transaction, &mut operation).unwrap();
+        },
+    );
+    assert_eq!(
+        calls.get(),
+        3,
+        "two provider files and one MCP publication for 64 entries"
+    );
     assert_eq!(
         operation.receipts.len(),
         1,
-        "one bounded receipt must cover every follow-up"
+        "provider recovery must remain independent of the MCP batch"
     );
     assert_eq!(read_mcp_servers_map().unwrap().len(), 32);
+    assert!(mcp.rollback(&mut operation).is_empty());
     operation.rollback().unwrap();
+    transaction.rollback().unwrap();
     assert_eq!(fs::read(&path).unwrap(), large.as_bytes());
     assert!(!crate::gemini_config::get_gemini_env_path().exists());
 }
