@@ -632,3 +632,59 @@ allowance. No warning points at a changed source file. Windows was not run local
 The real toggle baseline is now 7 passing and 4 failing: all three OpenCode cases
 pass; Claude/Hermes peer-row loss and the two Hermes activation failures remain.
 This advances OpenCode's part of gates 2 and 3, not whole-gate completion.
+
+#### Hermes single-entry adoption
+
+This slice migrates standalone Hermes toggles to the shared catalog coordinator
+and single-file Core executor. Core continues to encode portable MCP connections;
+the CLI keeps its existing Hermes-private-field merge, YAML section renderer,
+initialization, path, permission and backup policies. The Hermes process lock is
+held from native observation through database commit or failure recovery. No
+Core/Store API, dependency pin or Lite source changes are needed.
+
+Enable now owns `enabled: true`; an older native disabled flag cannot override
+selection. Other Hermes-private fields retain their previous precedence. Disable
+still removes the selected entry. Sibling entries stay in YAML rather than being
+converted through JSON, and removal preserves their order. The existing parser
+continues to accept large files, long IDs, YAML-only values and tagged mappings.
+Missing/empty files and non-mapping MCP collections keep their initialization
+policy. Unsupported stored native snapshots are rejected without discarding them.
+
+Before publication, the rendered YAML must parse and equal the intended document.
+If text replacement cannot preserve that document, the toggle fails without
+changing native or catalog state or creating a backup. This covers unsafe quoted
+or flow sections, document markers and cross-section aliases, rather than writing
+invalid or unrelated configuration. It is scoped to this toggle, not a rewrite
+of the other Hermes writers. Changed nonempty source still receives the host's
+pre-write backup with existing retention. Byte-identical output neither writes
+nor backs up again; a failed publication or commit retains its recovery backup.
+
+The shared single-file host also retains the original leaf-link relationship
+for failure recovery. Codex, OpenCode and Hermes all use this host. Successful
+writes still replace the link without changing its referent. A recovery link is
+prepared before publication and renamed into place only if both the live file
+and original referent still match the expected bytes. Relative and dangling
+links are retained; changed links or referents cause an explicit recovery error
+without overwriting external edits. Cyclic links and other read errors fail
+before publication. Temporary recovery links are removed when the operation
+ends. This is host filesystem policy; Core still owns execution and receipts.
+
+Acceptance includes real CLI/Lite activation and peer preservation, backup
+preimages and retention, YAML-only siblings, private fields, malformed input,
+missing/large files, long IDs, database suppression/verification/commit failures,
+uncertain publication, external edits, failed disable and leaf links. Existing
+Codex, Gemini, OpenCode and Hermes config tests remain required. Other App writers,
+upsert/delete/set-apps/whole-map sync, providers, UI, proxy, Skill and the full
+product remain outside this slice. Noncooperating writers can still race the
+host's file comparison and replacement; the shared lock is not an OS-wide CAS.
+
+Local acceptance against CLI `fb171cb8` plus this slice and unchanged Lite
+`4d0a77b3` passes 213 ordinary MCP-related tests, 35 opt-in peer/lock tests,
+139 database-module tests, 11 Hermes config tests, 9 Codex executor tests,
+3 OpenCode config tests and 121 Lite tests (some suites overlap). Formatting
+and locked all-target Clippy pass with existing warnings
+and the same unrelated `reversed_empty_ranges` allowance; no warning points at a
+changed source file. Windows was not run locally. The real toggle baseline is
+now 10 passing and 1 failing: all three Hermes cases pass, while Claude's stale
+peer-row loss remains. This advances Hermes's part of gates 2 and 3, not whole-gate
+or shared-Core migration completion.

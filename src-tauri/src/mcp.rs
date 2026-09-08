@@ -1216,7 +1216,7 @@ fn should_sync_hermes_mcp() -> bool {
 }
 
 /// Convert CC Switch's unified MCP format to the Hermes YAML shape.
-fn convert_to_hermes_mcp_spec(spec: &Value) -> Result<Value, AppError> {
+pub(crate) fn convert_to_hermes_mcp_spec(spec: &Value) -> Result<Value, AppError> {
     cc_switch_core::McpConfigTarget::Hermes
         .encode_server(&portable_mcp_spec(spec)?)
         .map_err(|error| AppError::McpValidation(error.to_string()))
@@ -1231,7 +1231,7 @@ fn convert_from_hermes_mcp_spec(id: &str, spec: &Value) -> Result<Value, AppErro
 }
 /// Merge: core fields come from `new_spec`, Hermes-specific fields are
 /// preserved from `existing`.
-fn merge_hermes_spec(existing: &Value, new_spec: &Value) -> Value {
+pub(crate) fn merge_hermes_spec(existing: &Value, new_spec: &Value) -> Value {
     let mut result = serde_json::Map::new();
 
     if let Some(existing_obj) = existing.as_object() {

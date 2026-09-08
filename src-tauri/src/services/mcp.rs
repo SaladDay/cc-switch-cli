@@ -9,6 +9,7 @@ mod codex_toggle;
 #[cfg(test)]
 mod consumer_tests;
 mod gemini_toggle;
+mod hermes_toggle;
 #[cfg(test)]
 mod import_tests;
 mod imports;
@@ -132,6 +133,15 @@ impl McpService {
                 app,
                 enabled,
                 opencode_toggle::OpenCodeToggle::observe,
+            );
+        }
+        if matches!(app, AppType::Hermes) {
+            return Self::toggle_coordinated(
+                state,
+                server_id,
+                app,
+                enabled,
+                hermes_toggle::HermesToggle::observe,
             );
         }
         let server = {

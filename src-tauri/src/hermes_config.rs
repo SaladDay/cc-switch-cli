@@ -42,7 +42,7 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 pub const HERMES_DEFAULT_API_MODE: &str = "chat_completions";
 pub const HERMES_API_MODES: [&str; 4] = [
@@ -77,6 +77,12 @@ pub fn get_hermes_config_path() -> PathBuf {
 fn hermes_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub(crate) fn lock_live_write() -> Result<MutexGuard<'static, ()>, AppError> {
+    hermes_write_lock()
+        .lock()
+        .map_err(|e| AppError::Config(format!("Failed to acquire Hermes write lock: {e}")))
 }
 
 // ============================================================================
@@ -145,11 +151,15 @@ pub fn read_hermes_config() -> Result<serde_yaml::Value, AppError> {
     }
 
     let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
+    parse_hermes_config(&content)
+}
+
+pub(crate) fn parse_hermes_config(content: &str) -> Result<serde_yaml::Value, AppError> {
     if content.trim().is_empty() {
         return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
 
-    serde_yaml::from_str(&content)
+    serde_yaml::from_str(content)
         .map_err(|e| AppError::Config(format!("Failed to parse Hermes config as YAML: {e}")))
 }
 
@@ -238,7 +248,7 @@ fn serialize_yaml_section(key: &str, value: &serde_yaml::Value) -> Result<String
 
 /// Replace the named section in `raw`. If the section is absent, append it
 /// to the end of the file.
-fn replace_yaml_section(
+pub(crate) fn replace_yaml_section(
     raw: &str,
     section_key: &str,
     value: &serde_yaml::Value,
@@ -272,7 +282,7 @@ fn replace_yaml_section(
 // Backup & Cleanup
 // ============================================================================
 
-fn create_hermes_backup(source: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn create_hermes_backup(source: &str) -> Result<PathBuf, AppError> {
     let backup_dir = get_app_config_dir().join("backups").join("hermes");
     create_managed_config_dir_all(&backup_dir)?;
 
