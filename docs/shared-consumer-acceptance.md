@@ -271,3 +271,46 @@ Other Apps, upsert/delete/set-apps/import, provider/Skill workflows and full-pro
 adoption are not migrated here. The whole in-memory catalog is not refreshed by
 this toggle, and remaining snapshot-save paths can still overwrite peer data.
 Neither one green operation nor matching Core pins prove the complete goal.
+
+## Standalone MCP import gates
+
+1. Add a test-only real-consumer baseline for all five CLI MCP importers. Lite
+   commits a peer after CLI loads its cache. Importing a new entry, enabling an
+   existing entry, importing an already-enabled entry, and importing an empty
+   document must retain that peer. Existing catalog connections and other App
+   flags stay unchanged; the selected App is enabled and the count keeps its
+   existing meaning. The fixture's source document must remain byte-identical.
+2. Replace whole-snapshot persistence with one shared transaction boundary for
+   these importers. Keep host parsing, diagnostics, skipped entries, merge policy
+   and import order. Do not copy the transaction coordinator for every App or
+   change global AppState::save. Claude's legacy path-copy behavior needs its own
+   baseline before changing its read boundary; not every import is read-only.
+3. Validate fresh targets, no-op imports, catalog extensions, failures and native
+   ownership coexistence. CLI and Lite have different existing same-ID conflict
+   policies; sharing Core must not silently replace either policy. Provider,
+   Skill, other MCP writers and full-product adoption remain separate work.
+
+Each step uses the independent double-blind gate above. The first changes tests
+and this plan only. Run its opt-in cases with the independently built Lite binary
+and isolated environment described above:
+
+```sh
+cargo test --locked --lib services::mcp::consumer_tests::imports \
+  -- --ignored --test-threads=1
+```
+
+The fixture matrix covers Claude, Codex, Gemini, OpenCode and Hermes explicitly;
+OpenClaw and Pi have no CLI MCP importer. Existing targets carry a host-owned
+column value distinct from its SQL default, so rebuilding a row cannot pass its
+retention check merely by restoring that default. These are service-level sequential
+interleaving tests, not proof of concurrent native observation or full-product
+compatibility.
+
+Against CLI production `5520f3afa604ec23b035f038a0ef072e7b2a1fe6` and Lite
+`fec310fade692c2bbe6d6ab19788e91bb2ee47f5` (the same source tree as merged
+`52210e96c84300380bd72be60e07245733b07271`), both using Core/Store
+`7b7cfae53d997d7dd686427c3537dd359e560fe7`, all 20 opt-in cases fail at peer
+retention: the real Lite worker commits successfully, CLI import returns the
+expected count and preserves the checked target fields and native bytes, but
+the peer row is absent afterward. The command exits 101. This is the recorded
+red baseline; the ordinary MCP suite passing does not satisfy the import gate.

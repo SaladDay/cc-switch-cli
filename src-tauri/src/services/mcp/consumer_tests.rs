@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 use super::*;
 use crate::{database::Database, test_support::TestEnvGuard};
 
+mod imports;
+
 pub(super) struct LitePeer(Child);
 
 impl LitePeer {
