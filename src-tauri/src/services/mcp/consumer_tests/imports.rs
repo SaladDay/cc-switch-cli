@@ -1,5 +1,8 @@
 use super::*;
 
+mod native;
+mod scale;
+
 #[derive(Clone, Copy)]
 enum ImportCase {
     New,

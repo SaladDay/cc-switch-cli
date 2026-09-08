@@ -26,13 +26,23 @@ impl LitePeer {
     }
 
     pub(super) fn run(home: &Path, test: &str, mode: &str) {
+        Self::run_with_environment(home, test, mode, &[]);
+    }
+
+    fn run_with_environment(home: &Path, test: &str, mode: &str, environment: &[(&str, &Path)]) {
         let binary = std::env::var_os("CC_SWITCH_LITE_TEST_BINARY")
             .expect("set CC_SWITCH_LITE_TEST_BINARY to the built Lite library test binary");
         let mut peer = Self(
             Command::new(binary)
+                .envs(environment.iter().copied())
                 .args(["--ignored", "--exact", test, "--test-threads=1"])
                 .env("CC_SWITCH_COORDINATION_HOME", home)
                 .env("CC_SWITCH_COORDINATION_MODE", mode)
+                .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+                .env("CODEX_HOME", home.join(".codex"))
+                .env("HERMES_HOME", home.join(".hermes"))
+                .env("PI_CODING_AGENT_DIR", home.join(".pi/agent"))
+                .env("LOCALAPPDATA", home.join("AppData/Local"))
                 .stdin(Stdio::null())
                 .spawn()
                 .unwrap(),

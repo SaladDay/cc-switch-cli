@@ -353,3 +353,93 @@ skipped invalid entries, preserved host/App fields, parse errors, suppressed wri
 cross-row drift, deferred COMMIT failure, lock contention and retry, and ordered
 partial progress when import-all fails. These are catalog acceptance results,
 not evidence for the deferred native-ownership gate.
+
+### Native import interoperability baseline
+
+This test-only slice extends acceptance to native configuration outcomes. It
+does not change Core, production imports, toggle policy, schemas or UI. CLI stays
+on its migration branch; the full desktop repository is not accessed or changed.
+
+Run the nine opt-in cases with the same isolated build and peer-binary setup:
+
+```sh
+cargo test --locked --lib services::mcp::consumer_tests::imports::native \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+The new Lite worker is
+`consumer_coordination::mcp_lifecycle::mcp_lifecycle_in_cli_fixture`. It uses the
+real import, toggle and delete services against the marked CLI fixture. The
+five lifecycle cases import through CLI, disable and enable through Lite,
+repeat CLI import, delete through Lite, then import again through CLI. They
+check catalog flags, deletion, source-byte preservation on import, native-only
+fields and root settings, and retention of a separately created Lite catalog
+row. Every source also contains a second native MCP entry with a distinct
+extension; its complete content must survive each Lite mutation unchanged.
+Native entry comparisons allow only the existing Codex `type`/implicit
+enablement and Gemini timeout normalization. They do not require formatting
+identity after a native write.
+
+The peer launcher binds all supported environment path overrides to the fixture,
+including Hermes, Pi and Windows local application data. Before MCP observation
+or mutation, the new Lite worker checks its resolved MCP files and installation
+markers against the canonical fixture root. A separate case seeds a Lite command
+with outside synthetic path overrides before applying the fixture bindings,
+disables Hermes, and requires that the outside file and directory remain unchanged.
+It uses one Lite child and the existing bounded wait/reap path, without a nested
+CLI process or changing the test runner's ambient overrides. No real profile is used.
+
+Three further cases start with disabled Codex, OpenCode and Hermes entries.
+Lite imports their disabled state; CLI then imports the same source without
+rewriting it; a subsequent explicit Lite enable must activate the native entry.
+Codex may omit `enabled` to mean true. These cases are intentionally red until
+the shared-state discrepancy is resolved, not inverted into compatibility tests.
+
+Production baselines are CLI `6958d9ed205d6a715acb205d54a499fb13773773`
+(Core/Store `b2adcdd71e928eeea9e3eab900b67bc5d8f7c28e`) and Lite
+`fec310fade692c2bbe6d6ab19788e91bb2ee47f5` (tree equal to main `52210e96`,
+Core/Store `7b7cfae53d997d7dd686427c3537dd359e560fe7`), with these test additions.
+All five enabled-entry lifecycles and the path-isolation case pass. All three
+disabled-entry cases fail at
+the native activation assertion: CLI import marks the shared App flag true,
+while the native entry remains disabled; Lite's same-state toggle returns
+without applying native changes. Ordinary one-repository test success does
+not pass this interoperability gate. These sequential cases do not establish
+simultaneous-writer safety, HTTP transport coverage or full-product adoption.
+
+The next production slice must define how native observation, catalog selection
+and an explicit activation request relate before changing either consumer.
+Import must not silently activate a native entry. A successful activation must
+not rely solely on a cached catalog flag. Preserve each host's parser tolerance,
+same-ID conflict policy and unrelated fields. Any shared contract belongs in
+Core/Store and must also suit a future desktop consumer; Lite-specific UI
+restrictions must not enter Core. Test new and existing disabled entries, repeated
+requests, conflicting native connections, rollback and peer-row retention.
+Native observation drift and remaining writers still need separate gates.
+
+### Bounded import timing probe
+
+Run `services::mcp::consumer_tests::imports::scale::measure_import_scaling` with
+`--ignored --exact --test-threads=1 --nocapture` in the isolated CLI environment.
+It needs no Lite binary. The probe compares the guarded Gemini import with the
+former snapshot-save boundary, reproduced only inside the test. The latter is
+an unsafe shared-consumer baseline, never a production fallback. It measures
+new and repeated imports at 10, 100 and 500 records, excluding fixture creation
+and database startup, and checks counts, catalog size and unchanged native bytes.
+Results are single local debug-profile observations, not a benchmark distribution
+or release-build performance guarantee. No timing threshold is part of CI.
+
+One local run on the production revisions above measured milliseconds below
+(Rust 1.91.1, unoptimized test profile, debug info and incremental builds off):
+
+| Records | Guarded new / repeated | Former boundary new / repeated |
+| --- | --- | --- |
+| 10 | 4.95 / 1.01 | 4.90 / 3.97 |
+| 100 | 92.81 / 4.70 | 35.14 / 30.65 |
+| 500 | 1671.58 / 22.64 | 158.47 / 161.18 |
+
+Larger new imports require a separate Store batch-write design review: per-row
+whole-catalog verification can make the work grow quadratically. Any optimization
+must retain the initial two-table observation, unknown host fields, trigger-drift
+detection, transaction poisoning and rollback. Do not reset the expected baseline
+after writes or expose the raw connection to skip these guarantees.
