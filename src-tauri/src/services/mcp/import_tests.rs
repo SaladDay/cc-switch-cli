@@ -10,6 +10,8 @@ use crate::{
     test_support::TestEnvGuard,
 };
 
+mod enablement;
+
 #[test]
 fn claude_import_preserves_legacy_override_copy_policy() {
     for case in ["copy", "existing", "invalid", "missing", "blocked"] {

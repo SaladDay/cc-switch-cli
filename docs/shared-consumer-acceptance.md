@@ -443,3 +443,45 @@ whole-catalog verification can make the work grow quadratically. Any optimizatio
 must retain the initial two-table observation, unknown host fields, trigger-drift
 detection, transaction poisoning and rollback. Do not reset the expected baseline
 after writes or expose the raw connection to skip these guarantees.
+
+### Native enablement import contract
+
+This slice changes Codex, OpenCode and Hermes imports only. Import observes the
+accepted native entry's enabled flag; it does not activate that entry. New rows
+retain the observed state, and existing rows update only that App's selection in
+either direction. The count is new rows plus rows whose App flag changed. An
+unchanged repeated import returns zero. Missing entries do not clear selections.
+
+Core supplies the entry-local flag codec. CLI keeps its existing non-boolean
+Codex flag tolerance (accepted as enabled), parser bounds, extension selection
+and skipped-entry rules. Existing IDs still retain their catalog connection and
+metadata even when the source connection differs; observing that ID is not an
+ownership or connection-equivalence claim. Codex keeps its first valid entry in
+legacy-then-canonical order for both connection and flag, so conflicting copies
+cannot make every repeated import count transient flag changes.
+
+The guarded write updates the selected App column only. Unknown host columns,
+other App selections and native links survive; cache publication follows commit.
+Tests cover both flag directions, new/existing rows, stale cache, stdio/HTTP,
+malformed flags, duplicate Codex IDs, failed selection writes and retry. The
+opt-in disabled-entry cases exercise both CLI-first and Lite-first import orders,
+then require explicit Lite enable to change the actual native entry while keeping
+native siblings and extensions. Source bytes must remain unchanged by import.
+
+This does not repair arbitrary pre-existing catalog/native drift without an
+import, alter Lite's same-state toggle policy, claim simultaneous native-writer
+safety, or migrate other MCP writers. Grok Build's document-level override stays
+in Core's complete document importer; the entry-local codec is not a replacement
+for that importer. No UI, schema, proxy, provider, Skill or full-product change is
+included. CLI remains on its remote migration branch, outside `main`.
+
+Local acceptance for this diff on CLI `62bb54125d013738ccaa78a24f7a0427819ddebb`
+uses Core/Store `637b06dfb27a44deb0e95395a35d516813301d77` and unchanged Lite
+`4d0a77b3a7c675ef00cb84218d2cd1ae5120cde4` (tree equal to main `f65ad1b3`,
+Core/Store `7b7cfae53d997d7dd686427c3537dd359e560fe7`). All 31 opt-in
+`services::mcp::consumer_tests` cases, excluding the manual timing probe, pass.
+This includes the three formerly failing disabled-entry cases in both import
+orders. Ordinary CLI MCP tests pass (175), as do the database-filtered tests
+(153, with overlap), Lite library tests (121), formatting and locked all-target
+Clippy. CLI Clippy retains pre-existing warnings and the previously documented
+allowance for unrelated `reversed_empty_ranges`; none comes from this diff.

@@ -150,7 +150,7 @@ command = "historically-accepted"
         json!({"type":"http",
         "url":"https://example.com/mcp", "headers":{"KEEP":"native"}, "enabled":false})
     );
-    assert!(servers["remote"].apps.is_enabled_for(&AppType::Codex));
+    assert!(!servers["remote"].apps.is_enabled_for(&AppType::Codex));
     assert_eq!(
         servers["opaque-type"].server,
         json!({"command":"historically-accepted"})

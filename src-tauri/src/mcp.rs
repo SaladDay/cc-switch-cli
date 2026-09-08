@@ -395,7 +395,8 @@ pub fn import_from_claude(config: &mut MultiAppConfig) -> Result<usize, AppError
 /// - 正确格式：[mcp_servers.*]（Codex 官方标准）
 /// - 错误格式：[mcp.servers.*]（容错读取，用于迁移错误写入的配置）
 ///
-/// 已存在的服务器将启用 Codex 应用，不覆盖其他字段和应用状态
+/// 按原生配置更新 Codex 启用状态，不覆盖已有连接、其他字段和应用状态。
+/// 返回新增服务器数与启用状态发生变化的服务器数之和。
 pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError> {
     use crate::app_config::{McpApps, McpServer};
 
@@ -414,6 +415,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
     let servers = config.mcp.servers.as_mut().unwrap();
 
     let mut changed_total = 0usize;
+    let mut imported = std::collections::HashSet::new();
 
     // helper：处理一组 servers 表
     let mut import_servers_tbl = |servers_tbl: &toml::value::Table| {
@@ -437,15 +439,26 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                 continue;
             }
 
+            // Keep the first valid legacy/canonical entry authoritative for
+            // both its connection and state, including repeated imports.
+            if !imported.insert(id.clone()) {
+                continue;
+            }
+            // The CLI retains non-boolean flags as extensions and historically
+            // accepts them as enabled. Valid boolean flags follow Core.
+            let enabled = cc_switch_core::McpConfigTarget::Codex
+                .entry_enabled_flag(&spec_v)
+                .unwrap_or(true);
+
             if let Some(existing) = servers.get_mut(id) {
-                // 已存在：仅启用 Codex 应用
-                if !existing.apps.codex {
-                    existing.apps.codex = true;
+                // Import observes state; it does not activate the native entry.
+                if existing.apps.codex != enabled {
+                    existing.apps.codex = enabled;
                     changed += 1;
-                    log::info!("MCP 服务器 '{id}' 已启用 Codex 应用");
+                    log::info!("MCP 服务器 '{id}' Codex 启用状态: {enabled}");
                 }
             } else {
-                // 新建服务器：默认仅启用 Codex
+                // New records retain the native Codex state.
                 servers.insert(
                     id.clone(),
                     McpServer {
@@ -454,7 +467,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                         server: spec_v,
                         apps: McpApps {
                             claude: false,
-                            codex: true,
+                            codex: enabled,
                             gemini: false,
                             opencode: false,
                             hermes: false,
@@ -720,11 +733,15 @@ pub fn import_from_opencode(config: &mut MultiAppConfig) -> Result<usize, AppErr
             continue;
         }
 
+        let enabled = cc_switch_core::McpConfigTarget::OpenCode
+            .entry_enabled_flag(spec)
+            .map_err(|error| AppError::McpValidation(error.to_string()))?;
+
         if let Some(existing) = servers.get_mut(id) {
-            if !existing.apps.opencode {
-                existing.apps.opencode = true;
+            if existing.apps.opencode != enabled {
+                existing.apps.opencode = enabled;
                 changed += 1;
-                log::info!("MCP 服务器 '{id}' 已启用 OpenCode 应用");
+                log::info!("MCP 服务器 '{id}' OpenCode 启用状态: {enabled}");
             }
         } else {
             servers.insert(
@@ -737,7 +754,7 @@ pub fn import_from_opencode(config: &mut MultiAppConfig) -> Result<usize, AppErr
                         claude: false,
                         codex: false,
                         gemini: false,
-                        opencode: true,
+                        opencode: enabled,
                         hermes: false,
                     },
                     description: None,
@@ -1337,11 +1354,15 @@ pub fn import_from_hermes(config: &mut MultiAppConfig) -> Result<usize, AppError
             continue;
         }
 
+        let enabled = cc_switch_core::McpConfigTarget::Hermes
+            .entry_enabled_flag(&spec_json)
+            .map_err(|error| AppError::McpValidation(error.to_string()))?;
+
         if let Some(existing) = servers.get_mut(&id) {
-            if !existing.apps.hermes {
-                existing.apps.hermes = true;
+            if existing.apps.hermes != enabled {
+                existing.apps.hermes = enabled;
                 changed += 1;
-                log::info!("MCP server '{id}' enabled for Hermes");
+                log::info!("MCP server '{id}' Hermes enabled state: {enabled}");
             }
         } else {
             servers.insert(
@@ -1355,7 +1376,7 @@ pub fn import_from_hermes(config: &mut MultiAppConfig) -> Result<usize, AppError
                         codex: false,
                         gemini: false,
                         opencode: false,
-                        hermes: true,
+                        hermes: enabled,
                     },
                     description: None,
                     homepage: None,

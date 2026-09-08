@@ -68,9 +68,10 @@ impl McpService {
                 .expect("MCP import retains the initialized catalog")
             {
                 if let Some((fingerprint, was_enabled)) = existing.get(id) {
-                    if !was_enabled && server.apps.is_enabled_for(&app) {
+                    let enabled = server.apps.is_enabled_for(&app);
+                    if *was_enabled != enabled {
                         transaction
-                            .set_server_selection(id, fingerprint, column, true)
+                            .set_server_selection(id, fingerprint, column, enabled)
                             .map_err(shared_store_error)?;
                     }
                 } else {

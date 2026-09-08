@@ -136,37 +136,54 @@ fn lifecycle(app: AppType, import: fn(&AppState) -> Result<usize, AppError>) {
 }
 
 fn disabled_import(app: AppType, import: fn(&AppState) -> Result<usize, AppError>) {
+    for lite_first in [false, true] {
+        disabled_import_order(&app, import, lite_first);
+    }
+}
+
+fn disabled_import_order(
+    app: &AppType,
+    import: fn(&AppState) -> Result<usize, AppError>,
+    lite_first: bool,
+) {
     let temp = tempfile::tempdir().unwrap();
     let _env = TestEnvGuard::isolated(temp.path());
-    let (path, native) = fixture(&app, true);
+    let (path, native) = fixture(app, true);
     assert!(path.starts_with(temp.path()));
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, &native).unwrap();
     let state = AppState::new(Arc::new(Database::init().unwrap()));
     fs::write(temp.path().join("coordination-fixture"), "cli-lite-v1").unwrap();
-    peer(temp.path(), &app, "import");
-    let report: Value =
-        serde_json::from_slice(&fs::read(temp.path().join("lite-mcp-import-report.json")).unwrap())
-            .unwrap();
-    assert_eq!(report["newServers"], 2);
-    assert_eq!(report["failedApps"], json!([]));
+    if lite_first {
+        peer(temp.path(), app, "import");
+        let report: Value = serde_json::from_slice(
+            &fs::read(temp.path().join("lite-mcp-import-report.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["newServers"], 2);
+        assert_eq!(report["failedApps"], json!([]));
+        assert!(!state.db.get_all_mcp_servers().unwrap()["cli-import"]
+            .apps
+            .is_enabled_for(app));
+    }
+    assert_eq!(import(&state).unwrap(), if lite_first { 0 } else { 2 });
+    assert_eq!(import(&state).unwrap(), 0);
     assert!(!state.db.get_all_mcp_servers().unwrap()["cli-import"]
         .apps
-        .is_enabled_for(&app));
-    import(&state).unwrap();
+        .is_enabled_for(app));
     assert_eq!(fs::read(&path).unwrap(), native.as_bytes());
-    peer(temp.path(), &app, "enable");
+    peer(temp.path(), app, "enable");
     assert!(state.db.get_all_mcp_servers().unwrap()["cli-import"]
         .apps
-        .is_enabled_for(&app));
-    let enabled = document(&app, &fs::read(&path).unwrap());
-    let entry = &enabled[map_key(&app)]["cli-import"];
+        .is_enabled_for(app));
+    let enabled = document(app, &fs::read(&path).unwrap());
+    let entry = &enabled[map_key(app)]["cli-import"];
     assert_eq!(
         entry["command"],
-        document(&app, native.as_bytes())[map_key(&app)]["cli-import"]["command"]
+        document(app, native.as_bytes())[map_key(app)]["cli-import"]["command"]
     );
     assert_eq!(entry["x_native"], "preserve native extension");
-    assert_unrelated_native(&app, &enabled, &native);
+    assert_unrelated_native(app, &enabled, &native);
     let active = match entry.get("enabled") {
         None => matches!(app, AppType::Codex),
         Some(value) => value == true,
