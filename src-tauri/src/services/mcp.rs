@@ -8,6 +8,9 @@ use crate::store::AppState;
 #[cfg(test)]
 mod consumer_tests;
 mod gemini_toggle;
+#[cfg(test)]
+mod import_tests;
+mod imports;
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
 pub struct McpService;
@@ -406,47 +409,27 @@ impl McpService {
 
     /// 从 Claude 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_claude(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_claude(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_coordinated(state, AppType::Claude, mcp::import_from_claude)
     }
 
     /// 从 Codex 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_codex(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_codex(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_coordinated(state, AppType::Codex, mcp::import_from_codex)
     }
 
     /// 从 Gemini 导入 MCP（v3.7.0 已更新为统一结构）
     pub fn import_from_gemini(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_gemini(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_coordinated(state, AppType::Gemini, mcp::import_from_gemini)
     }
 
     /// 从 OpenCode 导入 MCP
     pub fn import_from_opencode(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_opencode(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_coordinated(state, AppType::OpenCode, mcp::import_from_opencode)
     }
 
     /// 从 Hermes 导入 MCP
     pub fn import_from_hermes(state: &AppState) -> Result<usize, AppError> {
-        let mut cfg = state.config.write()?;
-        let count = mcp::import_from_hermes(&mut cfg)?;
-        drop(cfg);
-        state.save()?;
-        Ok(count)
+        Self::import_coordinated(state, AppType::Hermes, mcp::import_from_hermes)
     }
 
     pub fn import_from_supported_apps(state: &AppState) -> Result<usize, AppError> {

@@ -314,3 +314,42 @@ retention: the real Lite worker commits successfully, CLI import returns the
 expected count and preserves the checked target fields and native bytes, but
 the peer row is absent afterward. The command exits 101. This is the recorded
 red baseline; the ordinary MCP suite passing does not satisfy the import gate.
+
+### MCP import catalog migration
+
+The five standalone import services now share a guarded MCP catalog transaction.
+Core/Store `b2adcdd71e928eeea9e3eab900b67bc5d8f7c28e` supplies the fresh catalog
+read; each unchanged host importer keeps its parsing, count, skipped-entry and
+same-ID policy. Only new records and changed selected-App flags are written.
+Other App flags, host fields, peer records, native links and unrelated catalogs
+are not rewritten. Successful imports refresh only the in-memory MCP catalog;
+parse, write and commit failures do not publish staged cache data.
+
+Lock order is config, database transaction, shared live-file lock. The file lock
+is held through database commit or rollback, including no-op imports. Contention
+returns a conflict before calling the native reader. Import-all still runs Claude,
+Codex, Gemini, OpenCode and Hermes in order; the first error stops later imports
+without undoing earlier Apps' committed imports.
+
+Claude's legacy override-copy policy was tested against the previous production
+implementation before changing this boundary: missing target copies the default
+file, existing target wins, malformed copied content reports an error but keeps
+the copy, and missing source or blocked destination retains the old no-op result.
+That compatibility copy remains a host path migration, not a reversible native
+write in this transaction. Ordinary source documents are not modified.
+
+This slice preserves existing native links without creating or refreshing them.
+Native observation verification and imported-entry ownership remain the next
+gate; noncooperating native writers, other MCP writes, provider/Skill workflows
+and full-product adoption are not covered by this catalog migration. The global
+AppState snapshot-save path is unchanged and is still unsafe for peer data where
+other workflows use it. CLI stays on the remote migration branch, not main.
+
+The 20 previously failing real-consumer import cases now pass against unchanged
+Lite `fec310fade692c2bbe6d6ab19788e91bb2ee47f5` with Core/Store `7b7cfae`.
+The local MCP suite passes 172 tests (23 external-consumer cases remain opt-in).
+Local import cases cover the Claude copy baseline, fresh and repeated imports,
+skipped invalid entries, preserved host/App fields, parse errors, suppressed writes,
+cross-row drift, deferred COMMIT failure, lock contention and retry, and ordered
+partial progress when import-all fails. These are catalog acceptance results,
+not evidence for the deferred native-ownership gate.
