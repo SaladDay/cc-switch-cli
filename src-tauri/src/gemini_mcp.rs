@@ -122,30 +122,47 @@ pub(crate) fn toggle_with_operation(
     enabled: bool,
     previous_snapshot: Option<&cc_switch_core::McpNativeSnapshot>,
 ) -> Result<Option<cc_switch_core::McpNativeSnapshot>, AppError> {
-    let root = parse_json_value(operation.settings_path(), operation.contents())?;
-    let mut servers = decode_servers(&root)?;
+    let mut root = parse_json_value(operation.settings_path(), operation.contents())?;
     let entry = root.get("mcpServers").and_then(|servers| servers.get(id));
     let restore = enabled && entry.is_none();
     let snapshot = if enabled {
-        servers.insert(id.to_owned(), server.clone());
         None
     } else {
-        let snapshot = match entry.filter(|entry| entry.is_object()) {
+        match entry.filter(|entry| entry.is_object()) {
             Some(entry) => Some(
                 McpConfigTarget::Gemini
                     .capture_native_entry(&entry.to_string())
                     .map_err(|error| AppError::McpValidation(error.to_string()))?,
             ),
             None => previous_snapshot.cloned(),
-        };
-        servers.remove(id);
-        snapshot
+        }
     };
-    let restore = previous_snapshot
-        .filter(|_| restore)
-        .map(|snapshot| (id, snapshot));
-    let projected = project_servers(root, &servers, restore)?;
-    publish_document(operation, &projected)?;
+    let desired = enabled
+        .then(|| project_server(id, server, previous_snapshot.filter(|_| restore)))
+        .transpose()?;
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| AppError::Config("~/.gemini/settings.json 根必须是对象".into()))?;
+    let collection = object
+        .entry("mcpServers")
+        .or_insert_with(|| Value::Object(Map::new()));
+    // Retain the host's malformed-collection policy, but do not decode or
+    // re-encode siblings: a single toggle owns only its selected native entry.
+    if !collection.is_object() {
+        *collection = Value::Object(Map::new());
+    }
+    let servers = collection
+        .as_object_mut()
+        .expect("initialized MCP collection");
+    match desired {
+        Some(native) => {
+            servers.insert(id.to_owned(), native);
+        }
+        None => {
+            servers.shift_remove(id);
+        }
+    }
+    publish_document(operation, &root)?;
     Ok(snapshot)
 }
 
@@ -154,60 +171,17 @@ fn publish_servers(
     root: Value,
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
-    publish_document(operation, &project_servers(root, servers, None)?)
+    publish_document(operation, &project_servers(root, servers)?)
 }
 
 fn project_servers(
     mut root: Value,
     servers: &std::collections::HashMap<String, Value>,
-    restore: Option<(&str, &cc_switch_core::McpNativeSnapshot)>,
 ) -> Result<Value, AppError> {
     // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
     let mut out: Map<String, Value> = Map::new();
     for (id, spec) in servers.iter() {
-        let obj = spec
-            .as_object()
-            .ok_or_else(|| AppError::McpValidation(format!("MCP 服务器 '{id}' 不是对象")))?;
-        let server = if let Some(server) = obj.get("server") {
-            if !server.is_object() {
-                return Err(AppError::McpValidation(format!(
-                    "MCP 服务器 '{id}' server 字段不是对象"
-                )));
-            }
-            server
-        } else {
-            spec
-        };
-        let native = if let Some((_, snapshot)) = restore.filter(|(target, _)| *target == id) {
-            let mut catalog = server
-                .as_object()
-                .expect("validated catalog MCP entry")
-                .clone();
-            // Filter catalog metadata before restoration. Native snapshot
-            // extensions are not catalog wrappers or UI metadata.
-            remove_catalog_metadata(&mut catalog);
-            let restored = McpConfigTarget::Gemini
-                .restore_native_entry_with_policy(
-                    snapshot,
-                    &Value::Object(catalog),
-                    McpEntryEncodePolicy::PreserveFields,
-                )
-                .map_err(|error| AppError::McpValidation(error.to_string()))?;
-            serde_json::from_str(&restored)
-                .map_err(|error| AppError::json(user_config_path(), error))?
-        } else {
-            let native = McpConfigTarget::Gemini
-                .encode_server_with_policy(server, McpEntryEncodePolicy::PreserveFields)
-                .map_err(|error| AppError::McpValidation(error.to_string()))?;
-            let Value::Object(mut obj) = native else {
-                return Err(AppError::McpValidation(
-                    "Gemini MCP entry codec did not return an object".into(),
-                ));
-            };
-            remove_catalog_metadata(&mut obj);
-            Value::Object(obj)
-        };
-        out.insert(id.clone(), native);
+        out.insert(id.clone(), project_server(id, spec, None)?);
     }
 
     {
@@ -218,6 +192,56 @@ fn project_servers(
     }
 
     Ok(root)
+}
+
+fn project_server(
+    id: &str,
+    spec: &Value,
+    restore: Option<&cc_switch_core::McpNativeSnapshot>,
+) -> Result<Value, AppError> {
+    let obj = spec
+        .as_object()
+        .ok_or_else(|| AppError::McpValidation(format!("MCP 服务器 '{id}' 不是对象")))?;
+    let server = if let Some(server) = obj.get("server") {
+        if !server.is_object() {
+            return Err(AppError::McpValidation(format!(
+                "MCP 服务器 '{id}' server 字段不是对象"
+            )));
+        }
+        server
+    } else {
+        spec
+    };
+    let native = if let Some(snapshot) = restore {
+        let mut catalog = server
+            .as_object()
+            .expect("validated catalog MCP entry")
+            .clone();
+        // Filter catalog metadata before restoration. Native snapshot
+        // extensions are not catalog wrappers or UI metadata.
+        remove_catalog_metadata(&mut catalog);
+        let restored = McpConfigTarget::Gemini
+            .restore_native_entry_with_policy(
+                snapshot,
+                &Value::Object(catalog),
+                McpEntryEncodePolicy::PreserveFields,
+            )
+            .map_err(|error| AppError::McpValidation(error.to_string()))?;
+        serde_json::from_str(&restored)
+            .map_err(|error| AppError::json(user_config_path(), error))?
+    } else {
+        let native = McpConfigTarget::Gemini
+            .encode_server_with_policy(server, McpEntryEncodePolicy::PreserveFields)
+            .map_err(|error| AppError::McpValidation(error.to_string()))?;
+        let Value::Object(mut obj) = native else {
+            return Err(AppError::McpValidation(
+                "Gemini MCP entry codec did not return an object".into(),
+            ));
+        };
+        remove_catalog_metadata(&mut obj);
+        Value::Object(obj)
+    };
+    Ok(native)
 }
 
 fn remove_catalog_metadata(obj: &mut Map<String, Value>) {

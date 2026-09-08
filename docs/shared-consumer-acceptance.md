@@ -531,3 +531,25 @@ but adds `timeout: 60000` to the unrelated native sibling. These failures show
 why updating only the catalog flag is insufficient: the migration must restrict
 both catalog writes and native document changes to the requested operation.
 The existing 31 peer tests and ordinary suites do not cover these failures.
+
+#### Gemini single-entry follow-up
+
+The Gemini part of gate 2 reuses the existing Core entry codec, snapshot restore,
+operation receipts and Store transaction guard. Single-App toggle now projects
+only the requested entry. Sibling values and their field order stay intact,
+including metadata and unrecognized entries; the whole JSON file still uses the
+host's existing pretty-printing. Full-map sync keeps its previous conversion and
+replacement semantics. No public Core API, dependency pin, schema, path policy,
+selection/link ownership rule, or other App writer changes in this step.
+
+Regression cases cover stdio and HTTP, wrapped and unwrapped catalog entries,
+repeated enable/disable/restore, opaque siblings, and invalid target input without
+native/catalog/link publication. Existing timeout, large-field, legacy-ID and
+failure-recovery cases remain acceptance requirements.
+
+Against CLI `771b13f8` plus this change and the unchanged Lite build above, the
+toggle baseline is now 4 passing and 7 failing: Gemini retains both the newer Lite
+row and its native sibling. The other four Apps' catalog-write failures and the
+three Codex/Hermes activation failures remain open. This is not completion of
+gate 2 or the shared-Core migration; their single-App writers still need scoped
+transactions, native projection and recovery before the whole gate can pass.

@@ -231,6 +231,98 @@ fn repeated_toggle_still_repairs_native_configuration() {
 }
 
 #[test]
+fn single_toggle_preserves_raw_siblings_for_all_transitions() {
+    for (connection, expected) in [
+        (
+            json!({"command":"not-executed", "startup_timeout_sec":1, "tool_timeout_sec":2}),
+            json!({"command":"not-executed", "timeout":2000}),
+        ),
+        (
+            json!({"type":"http", "url":"https://example.invalid/mcp", "headers":{"X-Test":"fixture"}}),
+            json!({"httpUrl":"https://example.invalid/mcp", "headers":{"X-Test":"fixture"}, "timeout":60000}),
+        ),
+    ] {
+        for wrapped in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let _env = TestEnvGuard::isolated(temp.path());
+            let state = state(temp.path(), true);
+            let mut target = server("target");
+            target.server = if wrapped {
+                json!({"server":connection,"name":"catalog-only"})
+            } else {
+                connection.clone()
+            };
+            state.db.save_mcp_server(&target).unwrap();
+            let siblings = json!({
+                "plain":{"command":"not-executed-sibling"},
+                "target":{"command":"old-not-executed"},
+                "opaque":{"httpUrl":"native-only", "type":"future", "enabled":false,
+                    "name":"native-name", "server":{"native":true}, "timeout":"leave-as-is"},
+                "null":null, "scalar":42, "list":["future-format"]
+            });
+            let mut fixture = json!({"security":{"keep":true}, "mcpServers":siblings});
+            fs::write(get_gemini_settings_path(), fixture.to_string()).unwrap();
+            fixture["mcpServers"]
+                .as_object_mut()
+                .unwrap()
+                .shift_remove("target");
+            for enabled in [true, true, false, false, true] {
+                McpService::toggle_app(&state, "target", AppType::Gemini, enabled).unwrap();
+                let mut actual = native();
+                let target = actual["mcpServers"]
+                    .as_object_mut()
+                    .unwrap()
+                    .shift_remove("target");
+                assert_eq!(target, enabled.then(|| expected.clone()));
+                assert_eq!(actual, fixture, "enabled={enabled}, wrapped={wrapped}");
+                // Unchanged entries retain field order as well as values.
+                assert_eq!(actual.to_string(), fixture.to_string());
+                assert_eq!(
+                    state.db.get_all_mcp_servers().unwrap()["target"]
+                        .apps
+                        .gemini,
+                    enabled
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_target_keeps_raw_document_catalog_and_links() {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = TestEnvGuard::isolated(temp.path());
+    let state = state(temp.path(), true);
+    let mut target = server("target");
+    target.server = json!({"server":null});
+    state.db.save_mcp_server(&target).unwrap();
+    let before = "{ \"mcpServers\": {\"sibling\": null}, \"fixture\": true }\n";
+    fs::write(get_gemini_settings_path(), before).unwrap();
+    let rows = cc_switch_store::read_mcp_server_rows(&state.db.conn.lock().unwrap()).unwrap();
+    assert!(McpService::toggle_app(&state, "target", AppType::Gemini, true).is_err());
+    assert_eq!(
+        fs::read(get_gemini_settings_path()).unwrap(),
+        before.as_bytes()
+    );
+    assert_eq!(
+        cc_switch_store::read_mcp_server_rows(&state.db.conn.lock().unwrap()).unwrap(),
+        rows
+    );
+    assert!(cc_switch_store::read_mcp_native_link(
+        &state.db.conn.lock().unwrap(),
+        "target",
+        "gemini"
+    )
+    .unwrap()
+    .is_none());
+    assert!(
+        !state.config.read().unwrap().mcp.servers.as_ref().unwrap()["target"]
+            .apps
+            .gemini
+    );
+}
+
+#[test]
 fn toggle_rejects_shared_lock_contention_without_mutating_state() {
     let temp = tempfile::tempdir().unwrap();
     let _env = TestEnvGuard::isolated(temp.path());
