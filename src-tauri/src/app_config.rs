@@ -30,6 +30,7 @@ impl McpApps {
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false,
             AppType::Pi => false,
+            AppType::Omp => false,
         }
     }
 
@@ -43,6 +44,7 @@ impl McpApps {
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {}
             AppType::Pi => {}
+            AppType::Omp => {}
         }
     }
 
@@ -88,6 +90,8 @@ pub struct SkillApps {
     pub hermes: bool,
     #[serde(default)]
     pub pi: bool,
+    #[serde(default)]
+    pub omp: bool,
 }
 
 impl SkillApps {
@@ -100,6 +104,7 @@ impl SkillApps {
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false,
             AppType::Pi => self.pi,
+            AppType::Omp => self.omp,
         }
     }
 
@@ -112,11 +117,18 @@ impl SkillApps {
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {}
             AppType::Pi => self.pi = enabled,
+            AppType::Omp => self.omp = enabled,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes && !self.pi
+        !self.claude
+            && !self.codex
+            && !self.gemini
+            && !self.opencode
+            && !self.hermes
+            && !self.pi
+            && !self.omp
     }
 
     pub fn only(app: &AppType) -> Self {
@@ -142,6 +154,7 @@ impl SkillApps {
         self.opencode |= other.opencode;
         self.hermes |= other.hermes;
         self.pi |= other.pi;
+        self.omp |= other.omp;
     }
 }
 
@@ -254,6 +267,8 @@ pub struct McpRoot {
     pub openclaw: McpConfig,
     #[serde(skip)]
     pub pi: McpConfig,
+    #[serde(skip)]
+    pub omp: McpConfig,
 }
 
 impl Default for McpRoot {
@@ -269,6 +284,7 @@ impl Default for McpRoot {
             hermes: McpConfig::default(),
             openclaw: McpConfig::default(),
             pi: McpConfig::default(),
+            omp: McpConfig::default(),
         }
     }
 }
@@ -297,6 +313,8 @@ pub struct PromptRoot {
     pub openclaw: PromptConfig,
     #[serde(default)]
     pub pi: PromptConfig,
+    #[serde(default)]
+    pub omp: PromptConfig,
 }
 
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
@@ -315,6 +333,8 @@ pub enum AppType {
     Hermes,
     OpenClaw,
     Pi,
+    #[cfg_attr(feature = "cli", value(alias = "oh-my-pi"))]
+    Omp,
 }
 
 impl AppType {
@@ -327,13 +347,14 @@ impl AppType {
             AppType::Hermes => "hermes",
             AppType::OpenClaw => "openclaw",
             AppType::Pi => "pi",
+            AppType::Omp => "omp",
         }
     }
 
     pub fn is_additive_mode(&self) -> bool {
         matches!(
             self,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Omp
         )
     }
 
@@ -350,6 +371,7 @@ impl AppType {
             AppType::Hermes,
             AppType::OpenClaw,
             AppType::Pi,
+            AppType::Omp,
         ]
         .into_iter()
     }
@@ -374,13 +396,14 @@ impl FromStr for AppType {
             "hermes" => Ok(AppType::Hermes),
             "openclaw" => Ok(AppType::OpenClaw),
             "pi" => Ok(AppType::Pi),
+            "omp" | "oh-my-pi" => Ok(AppType::Omp),
             other => Err(AppError::localized(
                 "unsupported_app",
                 format!(
-                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw, pi。"
+                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw, pi, omp。"
                 ),
                 format!(
-                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw, pi."
+                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw, pi, omp."
                 ),
             )),
         }
@@ -420,6 +443,7 @@ impl CommonConfigSnippets {
             AppType::Hermes => self.hermes.as_ref(),
             AppType::OpenClaw => self.openclaw.as_ref(),
             AppType::Pi => None,
+            AppType::Omp => None,
         }
     }
 
@@ -433,6 +457,7 @@ impl CommonConfigSnippets {
             AppType::Hermes => self.hermes = snippet,
             AppType::OpenClaw => self.openclaw = snippet,
             AppType::Pi => {}
+            AppType::Omp => {}
         }
     }
 }
@@ -476,6 +501,7 @@ impl Default for MultiAppConfig {
         apps.insert("hermes".to_string(), ProviderManager::default());
         apps.insert("openclaw".to_string(), ProviderManager::default());
         apps.insert("pi".to_string(), ProviderManager::default());
+        apps.insert("omp".to_string(), ProviderManager::default());
 
         Self {
             version: 2,
@@ -590,6 +616,13 @@ impl MultiAppConfig {
             updated = true;
         }
 
+        if !config.apps.contains_key("omp") {
+            config
+                .apps
+                .insert("omp".to_string(), ProviderManager::default());
+            updated = true;
+        }
+
         // 执行 MCP 迁移（v3.6.x → v3.7.0）
         let migrated = config.migrate_mcp_to_unified()?;
         if migrated {
@@ -657,6 +690,7 @@ impl MultiAppConfig {
             AppType::Hermes => &self.mcp.hermes,
             AppType::OpenClaw => &self.mcp.openclaw,
             AppType::Pi => &self.mcp.pi,
+            AppType::Omp => &self.mcp.omp,
         }
     }
 
@@ -670,6 +704,7 @@ impl MultiAppConfig {
             AppType::Hermes => &mut self.mcp.hermes,
             AppType::OpenClaw => &mut self.mcp.openclaw,
             AppType::Pi => &mut self.mcp.pi,
+            AppType::Omp => &mut self.mcp.omp,
         }
     }
 
@@ -708,6 +743,7 @@ impl MultiAppConfig {
                 AppType::Hermes => &self.mcp.hermes.servers,
                 AppType::OpenClaw => continue,
                 AppType::Pi => continue,
+                AppType::Omp => continue,
             };
 
             for (id, entry) in old_servers {
@@ -1064,5 +1100,18 @@ mod tests {
         }))
         .expect("deserialize MCP root");
         assert!(parsed.pi.is_empty());
+    }
+
+    #[test]
+    fn skill_apps_keep_pi_and_omp_independent_when_merged() {
+        let mut pi = SkillApps::only(&AppType::Pi);
+        let omp = SkillApps::only(&AppType::Omp);
+
+        assert!(pi.is_enabled_for(&AppType::Pi));
+        assert!(!pi.is_enabled_for(&AppType::Omp));
+        pi.merge_enabled(&omp);
+
+        assert!(pi.is_enabled_for(&AppType::Pi));
+        assert!(pi.is_enabled_for(&AppType::Omp));
     }
 }

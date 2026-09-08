@@ -14,6 +14,7 @@ pub mod failover;
 pub mod hermes;
 pub mod internal;
 pub mod mcp;
+pub mod omp;
 pub mod prompts;
 pub mod provider;
 pub mod provider_input;

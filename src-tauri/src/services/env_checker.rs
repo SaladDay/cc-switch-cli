@@ -37,6 +37,15 @@ fn get_keywords_for_app(app: &str) -> Vec<&str> {
         "claude" => vec!["ANTHROPIC"],
         "codex" => vec!["OPENAI"],
         "gemini" => vec!["GEMINI", "GOOGLE_GEMINI"],
+        // OMP inherits Pi's environment names. These variables affect the
+        // native agent directory and can make CC-Switch appear ineffective
+        // when a shell points `omp` at another profile.
+        "omp" | "oh-my-pi" => vec![
+            "PI_CONFIG_DIR",
+            "PI_PROFILE",
+            "OMP_PROFILE",
+            "PI_CODING_AGENT_DIR",
+        ],
         _ => vec![],
     }
 }
@@ -162,6 +171,15 @@ mod tests {
         assert_eq!(
             get_keywords_for_app("gemini"),
             vec!["GEMINI", "GOOGLE_GEMINI"]
+        );
+        assert_eq!(
+            get_keywords_for_app("omp"),
+            vec![
+                "PI_CONFIG_DIR",
+                "PI_PROFILE",
+                "OMP_PROFILE",
+                "PI_CODING_AGENT_DIR",
+            ]
         );
         assert_eq!(get_keywords_for_app("unknown"), Vec::<&str>::new());
     }

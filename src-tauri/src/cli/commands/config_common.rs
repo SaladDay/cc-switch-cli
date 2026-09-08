@@ -174,9 +174,9 @@ fn read_required_text(
 }
 
 fn ensure_common_config_mutation_supported(app_type: &AppType) -> Result<(), AppError> {
-    if matches!(app_type, AppType::Pi) {
+    if matches!(app_type, AppType::Pi | AppType::Omp) {
         return Err(AppError::InvalidInput(
-            "Pi does not support common config snippets".to_string(),
+            "Pi and OMP do not support common config snippets".to_string(),
         ));
     }
     Ok(())
@@ -194,7 +194,8 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
         | AppType::OpenCode
         | AppType::Hermes
         | AppType::OpenClaw
-        | AppType::Pi => {
+        | AppType::Pi
+        | AppType::Omp => {
             let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;
@@ -703,11 +704,14 @@ mod tests {
             set(AppType::Pi, Some("{}"), None, false),
             extract(AppType::Pi, None, Some("{}"), None, true),
             clear(AppType::Pi, false),
+            set(AppType::Omp, Some("{}"), None, false),
+            extract(AppType::Omp, None, Some("{}"), None, true),
+            clear(AppType::Omp, false),
         ] {
             assert!(matches!(
                 result,
                 Err(AppError::InvalidInput(message))
-                    if message == "Pi does not support common config snippets"
+                    if message == "Pi and OMP do not support common config snippets"
             ));
         }
     }

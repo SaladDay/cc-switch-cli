@@ -13,6 +13,9 @@ pub enum Route {
     Prompts,
     PiSystemPrompts,
     PiPromptTemplates,
+    OmpModels,
+    OmpRoles,
+    OmpSystemPrompts,
     HermesMemory,
     Config,
     ConfigOpenClawWorkspace,
@@ -43,6 +46,9 @@ pub enum NavItem {
     Prompts,
     PiSystemPrompts,
     PiPromptTemplates,
+    OmpModels,
+    OmpRoles,
+    OmpSystemPrompts,
     HermesMemory,
     Config,
     Skills,
@@ -108,11 +114,24 @@ impl NavItem {
         NavItem::Exit,
     ];
 
+    pub const OMP_ALL: [NavItem; 9] = [
+        NavItem::Main,
+        NavItem::Providers,
+        NavItem::OmpModels,
+        NavItem::OmpRoles,
+        NavItem::OmpSystemPrompts,
+        NavItem::Skills,
+        NavItem::Usage,
+        NavItem::Settings,
+        NavItem::Exit,
+    ];
+
     pub fn all_for_app(app_type: &AppType) -> &'static [NavItem] {
         match app_type {
             AppType::OpenClaw => &Self::OPENCLAW_ALL,
             AppType::Hermes => &Self::HERMES_ALL,
             AppType::Pi => &Self::PI_ALL,
+            AppType::Omp => &Self::OMP_ALL,
             _ => &Self::ALL,
         }
     }
@@ -127,6 +146,9 @@ impl NavItem {
             NavItem::Prompts => Some(Route::Prompts),
             NavItem::PiSystemPrompts => Some(Route::PiSystemPrompts),
             NavItem::PiPromptTemplates => Some(Route::PiPromptTemplates),
+            NavItem::OmpModels => Some(Route::OmpModels),
+            NavItem::OmpRoles => Some(Route::OmpRoles),
+            NavItem::OmpSystemPrompts => Some(Route::OmpSystemPrompts),
             NavItem::HermesMemory => Some(Route::HermesMemory),
             NavItem::Config => Some(Route::Config),
             NavItem::Skills => Some(Route::Skills),
@@ -208,6 +230,7 @@ mod tests {
             NavItem::OPENCLAW_ALL.as_slice(),
             NavItem::HERMES_ALL.as_slice(),
             NavItem::PI_ALL.as_slice(),
+            NavItem::OMP_ALL.as_slice(),
         ] {
             assert!(nav_items
                 .iter()
@@ -246,5 +269,13 @@ mod tests {
         assert!(NavItem::OPENCLAW_ALL
             .iter()
             .any(|item| matches!(item, NavItem::Config)));
+    }
+
+    #[test]
+    fn omp_nav_does_not_expose_pi_native_prompt_pages() {
+        assert!(!NavItem::OMP_ALL.iter().any(|item| matches!(
+            item,
+            NavItem::Prompts | NavItem::PiSystemPrompts | NavItem::PiPromptTemplates
+        )));
     }
 }

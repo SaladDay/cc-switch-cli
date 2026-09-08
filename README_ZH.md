@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw 和 Pi。**
+**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw、Pi 和 OMP（oh-my-pi）。**
 
 [![Version](https://img.shields.io/badge/version-5.10.4-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -184,8 +184,13 @@ cc-switch --app gemini prompts list     # 列出 Gemini 提示词
 cc-switch --app hermes provider list    # 管理 Hermes 供应商
 cc-switch --app openclaw provider list  # 管理 OpenClaw 供应商
 cc-switch --app pi provider list        # 管理 Pi 供应商
+cc-switch --app omp provider list       # 管理 OMP 供应商
+cc-switch --app omp provider set-default <provider> [--model <model>] # 设置 OMP 的 modelRoles.default
+cc-switch --app omp model list          # 列出 models.yml 中的模型并显示实际路径
+cc-switch --app omp role list           # 列出 config.yml 中的 modelRoles 并显示实际路径
+cc-switch --app omp env check           # 检查 OMP 官方路径与 CC-Switch 路径是否一致
 
-# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`、`pi`
+# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`、`pi`、`omp`
 ```
 
 需要在多个终端同时使用不同供应商时，请使用 `cc-switch start`。它只影响由该命令启动的 Claude 或 Codex 会话；`provider switch` 和 `use` 仍会切换全局供应商。在 TUI 的供应商页选中供应商后按 `o`，效果相同。
@@ -321,7 +326,21 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 供应商管理
 
-管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes**、**OpenClaw** 与 **Pi** 的 API 配置。
+管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes**、**OpenClaw**、**Pi** 与 **OMP** 的 API 配置。
+
+OMP 供应商遵循原生的累加管理模型：配置保存在 OMP 实际 agent 目录的 `models.yml` 的 `providers` 节点中，多个供应商可以同时存在。活动模型由生效配置中的 `modelRoles.default`（`provider/model[:thinking]`，也支持 `@smol`、`@slow`、`*` 等 OMP 角色别名）决定；如果 `modelRoleStorage: project`，角色会写入当前目录的 `.omp/config.yml` 并覆盖同名全局角色。在 OMP 页面按“设为默认”会更新该角色，不会删除其他供应商；`disabledProviders` 中的供应商会被明确标记为不可用，不能设为默认。CC-Switch 不会修改 OMP 登录凭据。OMP 路径始终遵循官方的 `PI_CODING_AGENT_DIR`、`PI_CONFIG_DIR`、`OMP_PROFILE` 和兼容的 `PI_PROFILE` 解析，CC-Switch 不再维护独立的 OMP 目录覆盖设置。
+
+OMP 的系统提示词文件遵循 project-first 查找：当前目录的 `.omp`、`.claude`、`.codex`、`.gemini` 文件优先，其次才是用户级文件。用户级 `.omp` 提示词目录遵循 `PI_CONFIG_DIR`/profile 解析；官方的 `PI_CODING_AGENT_DIR` 只迁移 OMP 运行时 agent 目录，不改变这类共享配置文件的查找位置。TUI 会显示并编辑实际生效的 `SYSTEM.md`、`APPEND_SYSTEM.md` 和 `TITLE_SYSTEM.md`，同时对 `models.yml`、`config.yml` 与提示词文件使用外部修改检测，发现文件在编辑期间被改动时会拒绝覆盖。
+
+要确认 CC-Switch 与 OMP 使用的是同一份文件，请分别运行：
+
+```bash
+cc-switch --app omp model list   # 显示 CC-Switch 正在读取的 models.yml
+cc-switch --app omp role list    # 显示 CC-Switch 正在读取的 config.yml
+omp config path                  # 显示 OMP 官方解析出的 agent 目录
+```
+
+旧版 CC-Switch 设置中的“自定义 OMP 目录”仅作为历史字段兼容读取，不会再决定 OMP 文件路径；否则会出现 CC-Switch 显示成功但 `omp` 读取另一份配置的问题。请使用 OMP 官方环境变量 `PI_CODING_AGENT_DIR`、`PI_CONFIG_DIR`、`OMP_PROFILE`（兼容 `PI_PROFILE`），并用 `omp config path` 与 `cc-switch --app omp env check` 校验两者是否一致。
 
 Pi 供应商遵循原生的增量管理模型：是否启用完全取决于 `models.json.providers` 中的成员关系。CC-Switch 不会修改 Pi 的登录凭据或全局默认供应商/模型。
 Pi TUI 延续其他应用的表格、表单与快捷键交互，并将预设、系统提示词和 Prompt Templates 分为独立页面。
@@ -394,6 +413,8 @@ cc-switch prompts show <id>          # 显示完整内容
 cc-switch prompts delete <id>        # 删除提示词
 cc-switch --app pi prompts system edit append # 编辑 APPEND_SYSTEM.md
 cc-switch --app pi prompts templates list     # 列出 Pi prompt templates
+cc-switch --app omp prompts system edit append # 编辑 OMP APPEND_SYSTEM.md
+cc-switch --app omp prompts system edit title  # 编辑 OMP TITLE_SYSTEM.md
 ```
 
 ### 🎯 Skills 管理
@@ -519,7 +540,7 @@ cc-switch proxy serve --takeover claude           # 前台调试模式；存在 
 ```bash
 cc-switch env check                  # 检查环境变量冲突
 cc-switch env list                   # 列出相关环境变量
-cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw/Pi CLI
+cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw/Pi/OMP CLI
 ```
 
 ### 🌐 多语言支持
@@ -586,6 +607,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 - Hermes: `~/.hermes/config.yaml`（供应商 + MCP + 记忆设置）, `~/.hermes/AGENTS.md`（提示词）, `~/.hermes/skills/`（技能）, `~/.hermes/memories/`（记忆）
 - OpenClaw: `~/.openclaw/openclaw.json`（供应商 + Env/Tools/Agents Defaults）, `~/.openclaw/AGENTS.md`（提示词）
 - Pi: `~/.pi/agent/models.json`（增量供应商）, `~/.pi/agent/settings.json`（只读默认项 / 会话位置）, `~/.pi/agent/AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`prompts/`、`skills/` 与 `sessions/`
+- OMP（oh-my-pi）: agent 目录下的 `models.yml`（增量供应商与模型；兼容 `models.yaml`/旧版 `models.json`）、`config.yml`（`modelRoles` 与原生设置），以及按 OMP project-first 规则查找的 `SYSTEM.md`、`APPEND_SYSTEM.md`、`TITLE_SYSTEM.md`。其中 `SYSTEM.md` 遵循原生 provider 的最近非空祖先 `.omp` 查找，并使用当前 native agent 目录（包括 `PI_CODING_AGENT_DIR`）；`APPEND_SYSTEM.md` 与 `TITLE_SYSTEM.md` 使用当前目录的通用 project-first 查找和 profile/config-root 用户目录。模型/角色 agent 目录由 `~/.omp/agent`、`PI_CONFIG_DIR` 与 profile 决定。CC-Switch 设置里的 OMP 配置目录不会自动改变已启动 shell 中 `omp` 的环境变量。
 
 ---
 

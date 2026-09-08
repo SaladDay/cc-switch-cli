@@ -93,10 +93,14 @@ impl App {
                     ProviderValidationTarget::Main(ProviderAddField::OpenCodeBaseUrl),
                     texts::base_url_empty_error().to_string(),
                 ))
-            } else if matches!(provider.app_type, crate::app_config::AppType::Pi)
-                && !provider.mode.is_edit()
-                && !crate::openclaw_config::OPENCLAW_API_PROTOCOLS
-                    .contains(&provider.opencode_npm_package.value.trim())
+            } else if !provider.mode.is_edit()
+                && ((matches!(provider.app_type, crate::app_config::AppType::Pi)
+                    && !crate::openclaw_config::OPENCLAW_API_PROTOCOLS
+                        .contains(&provider.opencode_npm_package.value.trim()))
+                    || (matches!(provider.app_type, crate::app_config::AppType::Omp)
+                        && !provider.opencode_npm_package.value.trim().is_empty()
+                        && !crate::omp_config::OMP_API_PROTOCOLS
+                            .contains(&provider.opencode_npm_package.value.trim())))
             {
                 Some((
                     ProviderValidationTarget::Main(ProviderAddField::OpenClawApiProtocol),
@@ -324,10 +328,10 @@ impl App {
                 Some(self.handle_provider_model_fetch(selected))
             }
             KeyCode::Char('f') if selected == ProviderAddField::OpenClawModels => {
-                let is_pi = self.form.as_ref().is_some_and(|form| {
-                    matches!(form, FormState::ProviderAdd(provider) if provider.app_type == AppType::Pi)
+                let supports_native_fetch = self.form.as_ref().is_some_and(|form| {
+                    matches!(form, FormState::ProviderAdd(provider) if matches!(provider.app_type, AppType::Pi | AppType::Omp))
                 });
-                is_pi.then(|| self.handle_provider_model_fetch(selected))
+                supports_native_fetch.then(|| self.handle_provider_model_fetch(selected))
             }
             KeyCode::Char('f')
                 if matches!(
@@ -492,6 +496,7 @@ impl App {
                 provider
                     .opencode_npm_package
                     .set(next_openclaw_api_protocol(
+                        &provider.app_type,
                         &provider.opencode_npm_package.value,
                     ));
                 Action::None
@@ -632,8 +637,13 @@ impl App {
                     let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
                         return Action::None;
                     };
+                    let title = if provider.app_type == AppType::Omp {
+                        texts::tui_omp_models_editor_title()
+                    } else {
+                        texts::tui_openclaw_models_editor_title()
+                    };
                     self.open_editor(
-                        texts::tui_openclaw_models_editor_title(),
+                        title,
                         EditorKind::Json,
                         provider.openclaw_models_editor_text(),
                         EditorSubmit::ProviderFormApplyOpenClawModels,
@@ -1273,6 +1283,7 @@ impl App {
                 .then(|| provider.custom_user_agent.value.clone()),
             api_protocol: None,
             request_headers: None,
+            discovery_timeout_ms: None,
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: ProviderAddField::CodexLocalRouting,
@@ -1523,6 +1534,7 @@ impl App {
                 .then(|| provider.custom_user_agent.value.clone()),
             api_protocol: None,
             request_headers: None,
+            discovery_timeout_ms: None,
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: ProviderAddField::HermesModels,
@@ -1563,47 +1575,183 @@ impl App {
             ProviderAddField::HermesModels => (!provider.hermes_api_key.value.trim().is_empty())
                 .then(|| provider.hermes_api_key.value.clone()),
             ProviderAddField::OpenClawModels => {
-                (!provider.opencode_api_key.value.trim().is_empty())
-                    .then(|| provider.opencode_api_key.value.clone())
+                if provider.opencode_api_key.value.trim().is_empty() {
+                    None
+                } else if matches!(provider.app_type, AppType::Omp) {
+                    let settings = provider.to_provider_json_value();
+                    let settings = settings.get("settingsConfig");
+                    let protocol = provider.omp_model_fetch_api_protocol().or_else(|| {
+                        settings
+                            .and_then(|settings| settings.get("api"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                    crate::omp_config::resolve_api_key_for_protocol(
+                        settings.and_then(|settings| settings.get("apiKey")),
+                        protocol.as_deref(),
+                    )
+                } else {
+                    Some(provider.opencode_api_key.value.clone())
+                }
             }
             _ => None,
         };
-        let base_url = match selected {
+        let mut base_url = match selected {
             ProviderAddField::CodexModel => provider.codex_base_url.value.clone(),
             ProviderAddField::GeminiModel => provider.gemini_base_url.value.clone(),
             ProviderAddField::OpenCodeModelId => provider.opencode_base_url.value.clone(),
             ProviderAddField::HermesModels => provider.hermes_base_url.value.clone(),
-            ProviderAddField::OpenClawModels if matches!(provider.app_type, AppType::Pi) => {
+            ProviderAddField::OpenClawModels
+                if matches!(provider.app_type, AppType::Pi | AppType::Omp) =>
+            {
                 provider.current_provider_base_url()
             }
             ProviderAddField::OpenClawModels => provider.opencode_base_url.value.clone(),
             _ => String::new(),
         };
-        let (api_protocol, mut request_headers) =
-            if selected == ProviderAddField::OpenClawModels && provider.app_type == AppType::Pi {
-                let settings = provider.to_provider_json_value()["settingsConfig"].clone();
-                let protocol = settings
+        let (api_protocol, mut request_headers) = if selected == ProviderAddField::OpenClawModels
+            && matches!(provider.app_type, AppType::Pi | AppType::Omp)
+        {
+            let settings = provider.to_provider_json_value()["settingsConfig"].clone();
+            let discovery_type = settings
+                .get("discovery")
+                .and_then(Value::as_object)
+                .and_then(|discovery| discovery.get("type"))
+                .and_then(Value::as_str);
+            if matches!(provider.app_type, AppType::Omp)
+                && matches!(
+                    discovery_type,
+                    Some("openai-models-list" | "lm-studio" | "litellm")
+                )
+            {
+                // The worker's generic candidate builder probes both
+                // `/models` and `/v1/models`. OMP's discovery.injectV1
+                // setting is authoritative, so shape the one-shot URL here
+                // to avoid probing the wrong route in the TUI.
+                let inject_v1 = settings
+                    .get("discovery")
+                    .and_then(Value::as_object)
+                    .and_then(|discovery| discovery.get("injectV1"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                if let Ok(mut parsed) = url::Url::parse(base_url.trim()) {
+                    parsed.set_query(None);
+                    parsed.set_fragment(None);
+                    let mut path = parsed.path().trim_end_matches('/').to_string();
+                    if inject_v1 {
+                        if !path.ends_with("/v1") && !path.ends_with("/models") {
+                            path.push_str("/v1");
+                        }
+                    } else if !path.ends_with("/models") {
+                        path.push_str("/models");
+                    }
+                    parsed.set_path(&path);
+                    base_url = parsed.to_string();
+                }
+            }
+            let protocol = if matches!(provider.app_type, AppType::Omp)
+                && discovery_type == Some("llama.cpp")
+            {
+                // OMP's llama.cpp discovery always probes the native
+                // `{baseUrl}/models` endpoint. Users commonly configure the
+                // OpenAI-compatible `/v1` URL, so remove that suffix before
+                // handing the request to the generic models worker.
+                if let Ok(mut parsed) = url::Url::parse(base_url.trim()) {
+                    let path = parsed.path().trim_end_matches('/').to_string();
+                    let native_path = path
+                        .strip_suffix("/v1")
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or(&path)
+                        .to_string();
+                    parsed.set_path(&native_path);
+                    parsed.set_query(None);
+                    parsed.set_fragment(None);
+                    base_url = parsed.to_string().trim_end_matches('/').to_string();
+                } else if base_url.trim_end_matches('/').ends_with("/v1") {
+                    base_url = base_url
+                        .trim_end_matches('/')
+                        .strip_suffix("/v1")
+                        .unwrap_or(base_url.trim_end_matches('/'))
+                        .to_string();
+                }
+                // Use a distinct marker so the worker selects an anonymous
+                // (or header-authenticated) OpenAI-compatible probe while
+                // preserving the native endpoint URL above.
+                Some("llama.cpp".to_string())
+            } else if matches!(provider.app_type, AppType::Omp) && discovery_type == Some("ollama")
+            {
+                // The OMP Ollama discovery endpoint is `/api/tags`, not an
+                // OpenAI-compatible `/models` route. Pass a synthetic worker
+                // protocol marker so the background fetch uses that native
+                // endpoint while retaining configured request headers.
+                Some("ollama".to_string())
+            } else if matches!(provider.app_type, AppType::Omp) {
+                if settings.get("discovery").is_some() {
+                    // OMP's native discovery clients use bearer auth for all
+                    // discovery types other than Ollama, independent of the
+                    // model wire protocol. Keep anonymous mode explicit when
+                    // no key (or auth: none) is configured.
+                    if api_key.is_none()
+                        || settings.get("auth").and_then(Value::as_str) == Some("none")
+                    {
+                        Some("none".to_string())
+                    } else {
+                        Some("omp-discovery".to_string())
+                    }
+                } else {
+                    provider.omp_model_fetch_api_protocol().or_else(|| {
+                        settings
+                            .get("api")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                }
+            } else {
+                settings
                     .get("api")
                     .and_then(Value::as_str)
-                    .map(str::to_string);
-                let headers = settings
-                    .get("headers")
-                    .and_then(Value::as_object)
-                    .map(|headers| {
-                        headers
-                            .iter()
-                            .filter_map(|(name, value)| {
-                                value
-                                    .as_str()
-                                    .map(|value| (name.clone(), value.to_string()))
-                            })
-                            .collect::<std::collections::BTreeMap<_, _>>()
-                    })
-                    .filter(|headers| !headers.is_empty());
-                (protocol, headers)
-            } else {
-                (None, None)
+                    .map(str::to_string)
             };
+            let protocol = if matches!(provider.app_type, AppType::Omp)
+                && settings.get("auth").and_then(Value::as_str) == Some("none")
+                && protocol.as_deref() != Some("ollama")
+            {
+                // Keep the authentication mode explicit for the worker. OMP
+                // model discovery is allowed to issue an unauthenticated GET
+                // even when the model's wire protocol is OpenAI-compatible.
+                Some("none".to_string())
+            } else {
+                protocol
+            };
+            let headers = settings
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            value.as_str().and_then(|value| {
+                                // OMP resolves header values using the same
+                                // env/.env/!command semantics as apiKey.
+                                // Resolve them before handing the request to
+                                // the background model-fetch worker; sending
+                                // the indirection token verbatim breaks
+                                // header-authenticated discovery in the TUI.
+                                let resolved = if matches!(provider.app_type, AppType::Omp) {
+                                    crate::omp_config::resolve_header_value(value)
+                                } else {
+                                    Some(value.to_string())
+                                }?;
+                                Some((name.clone(), resolved))
+                            })
+                        })
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                })
+                .filter(|headers| !headers.is_empty());
+            (protocol, headers)
+        } else {
+            (None, None)
+        };
         if api_protocol.as_deref() == Some("anthropic-messages") {
             if let Some(key) = api_key.take() {
                 request_headers
@@ -1612,6 +1760,14 @@ impl App {
                     .or_insert(key);
             }
         }
+        let discovery_timeout_ms = if matches!(provider.app_type, AppType::Omp)
+            && selected == ProviderAddField::OpenClawModels
+        {
+            let settings = provider.to_provider_json_value()["settingsConfig"].clone();
+            crate::omp_config::omp_discovery_timeout_ms(&settings)
+        } else {
+            None
+        };
         Action::ProviderModelFetch {
             base_url,
             is_full_url: provider.is_full_url && matches!(selected, ProviderAddField::CodexModel),
@@ -1620,6 +1776,7 @@ impl App {
                 .then(|| provider.custom_user_agent.value.clone()),
             api_protocol,
             request_headers,
+            discovery_timeout_ms,
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: selected,
@@ -2097,9 +2254,16 @@ fn is_provider_divider_field(field: Option<&ProviderAddField>) -> bool {
     )
 }
 
-fn next_openclaw_api_protocol(current: &str) -> &'static str {
+fn next_openclaw_api_protocol(
+    app_type: &crate::app_config::AppType,
+    current: &str,
+) -> &'static str {
     let current = current.trim();
-    let protocols = &form::OPENCLAW_API_PROTOCOLS;
+    let protocols: &[&str] = if matches!(app_type, crate::app_config::AppType::Omp) {
+        &crate::omp_config::OMP_API_PROTOCOLS
+    } else {
+        &form::OPENCLAW_API_PROTOCOLS
+    };
     let next_idx = protocols
         .iter()
         .position(|candidate| *candidate == current)

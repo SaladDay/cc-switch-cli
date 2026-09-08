@@ -217,7 +217,7 @@ impl McpService {
                 mcp::sync_single_server_to_hermes(cfg, &server.id, &server.server)?;
             }
             AppType::OpenClaw => {}
-            AppType::Pi => {}
+            AppType::Pi | AppType::Omp => {}
         }
         Ok(())
     }
@@ -243,7 +243,7 @@ impl McpService {
             AppType::OpenCode => mcp::remove_server_from_opencode(id)?,
             AppType::Hermes => mcp::remove_server_from_hermes(id)?,
             AppType::OpenClaw => {}
-            AppType::Pi => {}
+            AppType::Pi | AppType::Omp => {}
         }
         Ok(())
     }

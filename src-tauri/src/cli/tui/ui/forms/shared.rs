@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::app_config::AppType;
 use std::collections::BTreeSet;
 
 pub(crate) fn focus_block_style(active: bool, theme: &super::theme::Theme) -> Style {
@@ -15,6 +16,15 @@ pub(crate) fn add_form_key_items(
     focus: FormFocus,
     editing: bool,
     selected_field: Option<ProviderAddField>,
+) -> Vec<(&'static str, &'static str)> {
+    add_form_key_items_for_app(focus, editing, selected_field, None)
+}
+
+pub(crate) fn add_form_key_items_for_app(
+    focus: FormFocus,
+    editing: bool,
+    selected_field: Option<ProviderAddField>,
+    app_type: Option<&AppType>,
 ) -> Vec<(&'static str, &'static str)> {
     if editing && matches!(focus, FormFocus::Fields) {
         return vec![
@@ -85,6 +95,11 @@ pub(crate) fn add_form_key_items(
                             | ProviderAddField::OpenCodeModelId
                     )
                 ) {
+                    keys.push(("f", texts::tui_key_fetch_model()));
+                }
+                if matches!(selected_field, Some(ProviderAddField::OpenClawModels))
+                    && matches!(app_type, Some(AppType::Pi | AppType::Omp))
+                {
                     keys.push(("f", texts::tui_key_fetch_model()));
                 }
             }

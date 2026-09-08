@@ -2532,11 +2532,193 @@ pub mod texts {
         }
     }
 
-    pub fn tui_label_openclaw_models() -> &'static str {
+    pub fn tui_label_models() -> &'static str {
         if is_chinese() {
             "模型列表"
         } else {
             "Models"
+        }
+    }
+
+    pub fn tui_label_openclaw_models() -> &'static str {
+        tui_label_models()
+    }
+
+    pub fn tui_label_omp_models() -> &'static str {
+        tui_label_models()
+    }
+
+    pub fn tui_omp_models_summary(total: usize) -> String {
+        if is_chinese() {
+            format!("已配置 {total} 个模型")
+        } else if total == 1 {
+            "1 model configured".to_string()
+        } else {
+            format!("{total} models configured")
+        }
+    }
+
+    pub fn tui_omp_models_editor_title() -> &'static str {
+        if is_chinese() {
+            "模型列表"
+        } else {
+            "Models"
+        }
+    }
+
+    pub fn tui_omp_roles_summary(total: usize) -> String {
+        if is_chinese() {
+            format!("{total} 个角色")
+        } else if total == 1 {
+            "1 role".to_string()
+        } else {
+            format!("{total} roles")
+        }
+    }
+
+    pub fn tui_omp_system_prompts_summary(total: usize) -> String {
+        if is_chinese() {
+            format!("{total} 个原生提示词文件")
+        } else if total == 1 {
+            "1 native prompt file".to_string()
+        } else {
+            format!("{total} native prompt files")
+        }
+    }
+
+    pub fn tui_omp_config_error_title() -> &'static str {
+        if is_chinese() {
+            "配置需要处理"
+        } else {
+            "Configuration needs attention"
+        }
+    }
+
+    pub fn tui_omp_models_empty_title() -> &'static str {
+        if is_chinese() {
+            "暂无模型配置"
+        } else {
+            "No models configured"
+        }
+    }
+
+    pub fn tui_omp_models_empty_subtitle() -> &'static str {
+        if is_chinese() {
+            "按 e 编辑 models.yml"
+        } else {
+            "Press e to edit models.yml"
+        }
+    }
+
+    pub fn tui_omp_roles_empty_title() -> &'static str {
+        if is_chinese() {
+            "暂无模型角色配置"
+        } else {
+            "No model roles configured"
+        }
+    }
+
+    pub fn tui_omp_roles_empty_subtitle() -> &'static str {
+        if is_chinese() {
+            "按 e 编辑 config.yml"
+        } else {
+            "Press e to edit config.yml"
+        }
+    }
+
+    pub fn tui_omp_prompt_error_title() -> &'static str {
+        if is_chinese() {
+            "提示词文件需要处理"
+        } else {
+            "Prompt file needs attention"
+        }
+    }
+
+    pub fn tui_omp_models_provider_header() -> &'static str {
+        if is_chinese() {
+            "供应商"
+        } else {
+            "Provider"
+        }
+    }
+
+    pub fn tui_omp_models_model_header() -> &'static str {
+        if is_chinese() {
+            "模型"
+        } else {
+            "Model"
+        }
+    }
+
+    pub fn tui_omp_models_name_header() -> &'static str {
+        if is_chinese() {
+            "名称"
+        } else {
+            "Name"
+        }
+    }
+
+    pub fn tui_omp_models_api_header() -> &'static str {
+        if is_chinese() {
+            "API"
+        } else {
+            "API"
+        }
+    }
+
+    pub fn tui_omp_models_reasoning_header() -> &'static str {
+        if is_chinese() {
+            "思考"
+        } else {
+            "Reasoning"
+        }
+    }
+
+    pub fn tui_omp_models_context_header() -> &'static str {
+        if is_chinese() {
+            "上下文"
+        } else {
+            "Context"
+        }
+    }
+
+    pub fn tui_omp_models_max_tokens_header() -> &'static str {
+        if is_chinese() {
+            "最大 Token"
+        } else {
+            "Max Tokens"
+        }
+    }
+
+    pub fn tui_omp_roles_role_header() -> &'static str {
+        if is_chinese() {
+            "角色"
+        } else {
+            "Role"
+        }
+    }
+
+    pub fn tui_omp_roles_selector_header() -> &'static str {
+        if is_chinese() {
+            "模型选择器"
+        } else {
+            "Model Selector"
+        }
+    }
+
+    pub fn tui_omp_prompt_active_path_header() -> &'static str {
+        if is_chinese() {
+            "生效路径"
+        } else {
+            "Active Path"
+        }
+    }
+
+    pub fn tui_omp_default_model_label() -> &'static str {
+        if is_chinese() {
+            "默认模型"
+        } else {
+            "Default Model"
         }
     }
 
@@ -4035,6 +4217,14 @@ pub mod texts {
             "设为默认"
         } else {
             "set default"
+        }
+    }
+
+    pub fn tui_key_set_default_model() -> &'static str {
+        if is_chinese() {
+            "设置默认模型"
+        } else {
+            "set default model"
         }
     }
 
@@ -5819,14 +6009,15 @@ pub mod texts {
         opencode: usize,
         hermes: usize,
         pi: usize,
+        omp: usize,
     ) -> String {
         if is_chinese() {
             format!(
-                "Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes} · Pi: {pi}"
+                "Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes} · Pi: {pi} · OMP: {omp}"
             )
         } else {
             format!(
-                "Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes} · Pi: {pi}"
+                "Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes} · Pi: {pi} · OMP: {omp}"
             )
         }
     }
@@ -9595,6 +9786,45 @@ pub mod texts {
 
     pub fn menu_pi_prompt_templates_variants() -> (&'static str, &'static str) {
         ("📝 Prompt Templates", "📝 提示词模板")
+    }
+
+    pub fn menu_omp_models() -> &'static str {
+        let (en, zh) = menu_omp_models_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_omp_models_variants() -> (&'static str, &'static str) {
+        ("🧱 Models", "🧱 模型")
+    }
+
+    pub fn menu_omp_roles() -> &'static str {
+        let (en, zh) = menu_omp_roles_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_omp_roles_variants() -> (&'static str, &'static str) {
+        ("🎭 Model Roles", "🎭 模型角色")
+    }
+
+    pub fn menu_omp_system_prompts() -> &'static str {
+        let (en, zh) = menu_omp_system_prompts_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_omp_system_prompts_variants() -> (&'static str, &'static str) {
+        ("🧠 System Prompts", "🧠 系统提示词")
     }
 
     pub fn menu_manage_config() -> &'static str {
@@ -13589,6 +13819,27 @@ mod tests {
         assert!(!texts::tui_help_line_config().contains("Config:"));
         assert!(texts::tui_help_line_settings().contains("设置：Enter 应用"));
         assert!(!texts::tui_help_line_settings().contains("Settings:"));
+    }
+
+    #[test]
+    fn omp_menu_uses_shared_resource_wording() {
+        {
+            let _lang = use_test_language(Language::English);
+            assert_eq!(texts::menu_omp_models(), "🧱 Models");
+            assert_eq!(texts::menu_omp_roles(), "🎭 Model Roles");
+            assert_eq!(texts::menu_omp_system_prompts(), "🧠 System Prompts");
+            assert_eq!(texts::tui_omp_default_model_label(), "Default Model");
+            assert_eq!(texts::tui_omp_models_empty_title(), "No models configured");
+        }
+
+        {
+            let _lang = use_test_language(Language::Chinese);
+            assert_eq!(texts::menu_omp_models(), "🧱 模型");
+            assert_eq!(texts::menu_omp_roles(), "🎭 模型角色");
+            assert_eq!(texts::menu_omp_system_prompts(), "🧠 系统提示词");
+            assert_eq!(texts::tui_omp_default_model_label(), "默认模型");
+            assert_eq!(texts::tui_omp_models_empty_title(), "暂无模型配置");
+        }
     }
 
     #[test]

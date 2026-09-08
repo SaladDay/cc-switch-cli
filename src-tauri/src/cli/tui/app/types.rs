@@ -4367,6 +4367,19 @@ pub enum ConfirmAction {
         kind: crate::services::pi_prompt_files::PiPromptFileKind,
         expected_revision: String,
     },
+    OmpModelDelete {
+        provider_id: String,
+        model_id: String,
+        expected_revision: String,
+    },
+    OmpRoleDelete {
+        role: String,
+        expected_revision: String,
+    },
+    OmpSystemPromptDelete {
+        kind: crate::services::pi_prompt_files::PiPromptFileKind,
+        expected_revision: String,
+    },
     PiPromptTemplateDelete {
         slug: String,
         expected_revision: String,

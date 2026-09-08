@@ -507,7 +507,7 @@ fn build_proxy_overview_lines(
     takeovers: &crate::proxy::types::ProxyTakeoverStatus,
 ) -> Vec<String> {
     let current_providers = AppType::all()
-        .filter(|app| !matches!(app, AppType::Pi))
+        .filter(|app| !matches!(app, AppType::Pi | AppType::Omp))
         .map(|app| {
             let current = state
                 .db

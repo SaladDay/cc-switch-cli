@@ -144,7 +144,9 @@ pub fn common_snippet_has_effective_config(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|obj| !obj.is_empty()),
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Omp => {
+            false
+        }
     }
 }
 
@@ -209,7 +211,7 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
                 label: "Google OAuth",
             },
         ],
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Omp => {
             vec![ProviderAddTemplateChoice {
                 template: ProviderAddTemplate::Custom,
                 label: "Custom",
@@ -657,7 +659,7 @@ fn build_sponsor_template_settings_config(
                 })
             }
         }
-        AppType::Pi => Err(unsupported_template_error(ProviderAddTemplate::Custom)),
+        AppType::Pi | AppType::Omp => Err(unsupported_template_error(ProviderAddTemplate::Custom)),
     }
 }
 
@@ -713,10 +715,17 @@ pub fn apply_additive_template_field_overrides(
                 models_with_primary_override(current, model),
             )
         }
-        AppType::Pi => {
+        AppType::Pi | AppType::Omp => {
             let mut updated = current.clone();
             let object = updated.as_object_mut().ok_or_else(|| {
-                AppError::InvalidInput("Pi provider configuration must be an object".to_string())
+                AppError::InvalidInput(format!(
+                    "{} provider configuration must be an object",
+                    if matches!(app_type, AppType::Omp) {
+                        "OMP"
+                    } else {
+                        "Pi"
+                    }
+                ))
             })?;
             if let Some(api_key) = api_key {
                 object.insert("apiKey".to_string(), Value::String(api_key.to_string()));
@@ -2535,10 +2544,12 @@ requires_openai_auth = true
             }]
         });
 
-        assert!(validate_pi_prompt_request_url(None, &invalid).is_err());
-        assert!(validate_pi_prompt_request_url(Some(&invalid), &invalid).is_ok());
-        assert!(validate_pi_prompt_request_url(Some(&invalid), &changed_invalid).is_err());
-        assert!(validate_pi_prompt_request_url(None, &valid_model_url).is_ok());
+        assert!(validate_pi_prompt_request_url(None, &invalid, &AppType::Pi).is_err());
+        assert!(validate_pi_prompt_request_url(Some(&invalid), &invalid, &AppType::Pi).is_ok());
+        assert!(
+            validate_pi_prompt_request_url(Some(&invalid), &changed_invalid, &AppType::Pi).is_err()
+        );
+        assert!(validate_pi_prompt_request_url(None, &valid_model_url, &AppType::Pi).is_ok());
     }
 }
 
@@ -3774,10 +3785,14 @@ pub fn prompt_basic_fields(
     Ok((name, website_url))
 }
 
-fn prompt_pi_config(current: Option<&Value>) -> Result<Value, AppError> {
+fn prompt_pi_config(current: Option<&Value>, app_type: &AppType) -> Result<Value, AppError> {
+    let is_omp = matches!(app_type, AppType::Omp);
     let mut config = current.cloned().unwrap_or_else(|| json!({}));
     let object = config.as_object_mut().ok_or_else(|| {
-        AppError::InvalidInput("Pi provider configuration must be an object".to_string())
+        AppError::InvalidInput(format!(
+            "{} provider configuration must be an object",
+            if is_omp { "OMP" } else { "Pi" }
+        ))
     })?;
 
     let current_base_url = object
@@ -3801,24 +3816,55 @@ fn prompt_pi_config(current: Option<&Value>) -> Result<Value, AppError> {
         .get("apiKey")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let had_api_key = !current_api_key.trim().is_empty();
+    let had_explicit_api_key_auth = object.get("auth").and_then(Value::as_str) == Some("apiKey");
+    let had_models = object
+        .get("models")
+        .and_then(Value::as_array)
+        .is_some_and(|models| !models.is_empty());
     let api_key = Text::new("API Key:")
         .with_initial_value(current_api_key)
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
     if api_key.trim().is_empty() {
+        if is_omp {
+            let existing_auth = object.get("auth").and_then(Value::as_str);
+            // A native OMP override may intentionally omit both apiKey and
+            // auth, relying on OMP's environment/stored credential resolver.
+            // Preserve that implicit api-key mode while still representing a
+            // newly keyless custom-model provider (or an explicitly cleared
+            // existing key) as `auth: none`.
+            if !matches!(existing_auth, Some("none") | Some("oauth"))
+                && (current.is_none() || had_api_key || had_explicit_api_key_auth || had_models)
+            {
+                object.insert("auth".to_string(), json!("none"));
+            }
+        }
         object.remove("apiKey");
     } else {
         object.insert(
             "apiKey".to_string(),
             Value::String(api_key.trim().to_string()),
         );
+        if is_omp
+            && matches!(
+                object.get("auth").and_then(Value::as_str),
+                Some("none") | Some("oauth")
+            )
+        {
+            object.remove("auth");
+        }
     }
 
     let current_api = object
         .get("api")
         .and_then(Value::as_str)
         .unwrap_or(if current.is_none() {
-            "openai-completions"
+            if is_omp {
+                crate::omp_config::OMP_DEFAULT_API_PROTOCOL
+            } else {
+                "openai-completions"
+            }
         } else {
             ""
         });
@@ -3827,9 +3873,15 @@ fn prompt_pi_config(current: Option<&Value>) -> Result<Value, AppError> {
         .with_help_message("For example: openai-completions or anthropic-messages")
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
-    if current.is_none() && !crate::openclaw_config::OPENCLAW_API_PROTOCOLS.contains(&api.trim()) {
+    let protocols: &[&str] = if is_omp {
+        &crate::omp_config::OMP_API_PROTOCOLS
+    } else {
+        &crate::openclaw_config::OPENCLAW_API_PROTOCOLS
+    };
+    if current.is_none() && !protocols.contains(&api.trim()) {
         return Err(AppError::InvalidInput(format!(
-            "Unsupported Pi API protocol: {}",
+            "Unsupported {} API protocol: {}",
+            if is_omp { "OMP" } else { "Pi" },
             api.trim()
         )));
     }
@@ -3843,35 +3895,66 @@ fn prompt_pi_config(current: Option<&Value>) -> Result<Value, AppError> {
         let model = Text::new("Model ID:")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
-        if model.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "A custom Pi provider requires at least one model ID".to_string(),
-            ));
+        if model.trim().is_empty() && !is_omp {
+            return Err(AppError::InvalidInput(format!(
+                "A custom {} provider requires at least one model ID",
+                if is_omp { "OMP" } else { "Pi" }
+            )));
         }
-        object.insert("models".to_string(), json!([{ "id": model.trim() }]));
+        // OMP also supports override-only providers (for example a
+        // discovery/remote-compaction/header override with no custom model
+        // list). Allow an empty model prompt in that mode and leave `models`
+        // absent so the native semantic validator can accept the override.
+        if !model.trim().is_empty() {
+            object.insert("models".to_string(), json!([{ "id": model.trim() }]));
+        }
     }
 
-    validate_pi_prompt_request_url(current, &config)?;
+    validate_pi_prompt_request_url(current, &config, app_type)?;
 
     Ok(config)
 }
 
-fn validate_pi_prompt_request_url(current: Option<&Value>, edited: &Value) -> Result<(), AppError> {
+fn validate_pi_prompt_request_url(
+    current: Option<&Value>,
+    edited: &Value,
+    app_type: &AppType,
+) -> Result<(), AppError> {
     let request_url = |config: &Value| {
-        crate::pi_config::provider_base_url(config)
-            .ok()
-            .map(|url| url.trim().to_string())
+        let result = if matches!(app_type, AppType::Omp) {
+            crate::omp_config::provider_base_url(config)
+        } else {
+            crate::pi_config::provider_base_url(config)
+        };
+        result.ok().map(|url| url.trim().to_string())
     };
     let original_request_url = current.and_then(request_url);
     let edited_request_url = request_url(edited);
+    // OMP supports override-only providers (headers, compat settings,
+    // discovery, remote compaction, and similar native options) that do not
+    // define a request URL themselves.  Leave that semantic decision to the
+    // OMP provider validator instead of rejecting the interactive form solely
+    // because no URL can be derived.
+    if matches!(app_type, AppType::Omp) && edited_request_url.is_none() {
+        return Ok(());
+    }
     if (current.is_none() || edited_request_url != original_request_url)
-        && edited_request_url
-            .as_deref()
-            .is_none_or(|url| !crate::pi_config::is_valid_request_url(url))
+        && edited_request_url.as_deref().is_none_or(|url| {
+            if matches!(app_type, AppType::Omp) {
+                !crate::omp_config::is_valid_request_url(url)
+            } else {
+                !crate::pi_config::is_valid_request_url(url)
+            }
+        })
     {
-        return Err(AppError::InvalidInput(
-            "Pi Base URL must be an absolute HTTP(S) URL".to_string(),
-        ));
+        return Err(AppError::InvalidInput(format!(
+            "{} Base URL must be an absolute HTTP(S) URL",
+            if matches!(app_type, AppType::Omp) {
+                "OMP"
+            } else {
+                "Pi"
+            }
+        )));
     }
     Ok(())
 }
@@ -3917,9 +4000,9 @@ pub fn prompt_settings_config(
         AppType::OpenCode => prompt_opencode_config(current).map(SettingsConfigPromptResult::new),
         AppType::Hermes => prompt_hermes_config(current).map(SettingsConfigPromptResult::new),
         AppType::OpenClaw => prompt_openclaw_config(current).map(SettingsConfigPromptResult::new),
-        AppType::Pi => {
-            let mut config = prompt_pi_config(current)?;
-            if current.is_none() {
+        AppType::Pi | AppType::Omp => {
+            let mut config = prompt_pi_config(current, app_type)?;
+            if current.is_none() && matches!(app_type, AppType::Pi) {
                 config["name"] = Value::String(provider_name.trim().to_string());
             }
             Ok(SettingsConfigPromptResult::new(config))
@@ -4658,7 +4741,7 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 println!("  {}: {}", texts::model_label(), models.len());
             }
         }
-        AppType::Pi => {
+        AppType::Pi | AppType::Omp => {
             if provider.configured_api_key(app_type).is_some() {
                 println!(
                     "  {}: {}",

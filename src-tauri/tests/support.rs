@@ -18,6 +18,16 @@ pub fn ensure_test_home() -> &'static Path {
             let _ = std::fs::remove_dir_all(&base);
         }
         std::fs::create_dir_all(&base).expect("create test home");
+        // OMP's managed-file writer rejects group/other-writable ancestors.
+        // Keep the isolated test home equivalent to a real private config
+        // root so deeplink and integration tests exercise the writer rather
+        // than failing on tempfile's inherited 0775 mode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+                .expect("restrict test home permissions");
+        }
         base
     });
     std::env::set_var("HOME", home);

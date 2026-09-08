@@ -25,6 +25,7 @@ mod import_export;
 mod init_status;
 mod mcp;
 mod model_capabilities;
+mod omp_config;
 mod openclaw_config;
 mod opencode_config;
 mod pi_config;

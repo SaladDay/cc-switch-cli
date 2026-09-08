@@ -12,6 +12,7 @@ mod gemini_auth;
 mod live;
 pub(crate) mod live_merge;
 mod models;
+mod omp;
 mod pi;
 #[cfg(test)]
 mod tests;
@@ -38,6 +39,7 @@ use live::LiveSnapshot;
 pub use common::migrate_legacy_codex_config;
 #[cfg(test)]
 use common::strip_codex_common_config_from_full_text;
+pub(crate) use omp::is_opaque_extension_config;
 
 /// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
 /// live 配置，使开关即时生效（无需等下一次切换）。
@@ -317,7 +319,10 @@ enum PreparedCodexAuthWrite {
 
 impl ProviderService {
     pub fn is_provider_key_app(app_type: &AppType) -> bool {
-        matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi)
+        matches!(
+            app_type,
+            AppType::OpenClaw | AppType::Hermes | AppType::Pi | AppType::Omp
+        )
     }
 
     pub fn is_valid_provider_key(value: &str) -> bool {
@@ -391,6 +396,16 @@ impl ProviderService {
         app_type: &AppType,
         provider_id: &str,
     ) -> Result<(), AppError> {
+        // OMP provider keys are YAML map keys and the upstream catalog uses
+        // identifiers such as `llama.cpp`; unlike the other additive apps,
+        // they are not restricted to lowercase letters, digits, and hyphens.
+        // They are nevertheless part of OMP's provider/model selector grammar,
+        // so reject separators/control characters before a broken selector can
+        // be persisted.
+        if matches!(app_type, AppType::Omp) {
+            return crate::omp_config::validate_provider_key(provider_id)
+                .map_err(|_| provider_key_invalid_error());
+        }
         if Self::is_provider_key_app(app_type) && !Self::is_valid_provider_key(provider_id) {
             return Err(provider_key_invalid_error());
         }
@@ -429,6 +444,10 @@ impl ProviderService {
                 .map(|(id, _)| id)
                 .collect(),
             AppType::Pi => crate::pi_config::read_pi_native_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+            AppType::Omp => crate::omp_config::read_omp_native_providers()?
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect(),
@@ -506,6 +525,18 @@ impl ProviderService {
             let duplicate =
                 Self::duplicate_provider_with_overrides(source, provider_override, &existing_ids);
             pi::add(state, duplicate.clone(), false)?;
+            return Ok(duplicate);
+        }
+        if matches!(app_type, AppType::Omp) {
+            let providers = omp::list(state)?;
+            let source = providers.get(source_id).ok_or_else(|| {
+                AppError::InvalidInput(format!("OMP provider '{source_id}' not found"))
+            })?;
+            let mut existing_ids = providers.keys().cloned().collect::<HashSet<_>>();
+            existing_ids.extend(Self::live_provider_ids(&app_type)?);
+            let duplicate =
+                Self::duplicate_provider_with_overrides(source, provider_override, &existing_ids);
+            omp::add(state, duplicate.clone(), false)?;
             return Ok(duplicate);
         }
         let app_type_clone = app_type.clone();
@@ -604,15 +635,25 @@ impl ProviderService {
     }
 
     fn normalize_usage_script_credential_overrides(app_type: &AppType, provider: &mut Provider) {
-        let current_credentials = if matches!(app_type, AppType::Pi) {
+        let current_credentials = if matches!(app_type, AppType::Pi | AppType::Omp) {
             (
-                crate::pi_config::provider_base_url(&provider.settings_config).unwrap_or_default(),
-                provider
-                    .settings_config
-                    .get("apiKey")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                match app_type {
+                    AppType::Pi => crate::pi_config::provider_base_url(&provider.settings_config),
+                    AppType::Omp => crate::omp_config::provider_base_url(&provider.settings_config),
+                    _ => unreachable!(),
+                }
+                .unwrap_or_default(),
+                if matches!(app_type, AppType::Omp) {
+                    crate::omp_config::resolve_api_key(provider.settings_config.get("apiKey"))
+                        .unwrap_or_default()
+                } else {
+                    provider
+                        .settings_config
+                        .get("apiKey")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                },
             )
         } else {
             (String::new(), String::new())
@@ -1422,7 +1463,7 @@ impl ProviderService {
                 }
                 state.save()?;
             }
-            AppType::Pi => {}
+            AppType::Pi | AppType::Omp => {}
         }
         Ok(())
     }
@@ -1478,7 +1519,11 @@ impl ProviderService {
                 strict_current_provider_id,
                 old_snippet,
             ),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => Ok(()),
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Omp => Ok(()),
         };
 
         match result {
@@ -1608,7 +1653,11 @@ impl ProviderService {
             }
             AppType::Gemini => live_settings.get("env") != provider_settings.get("env"),
             AppType::Claude => live_settings != provider_settings,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Omp => false,
         }
     }
 
@@ -1766,7 +1815,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
             AppType::Hermes => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
-            AppType::Pi => Ok(String::new()),
+            AppType::Pi | AppType::Omp => Ok(String::new()),
         }
     }
 
@@ -2112,6 +2161,9 @@ impl ProviderService {
         if matches!(app_type, AppType::Pi) {
             return pi::list(state);
         }
+        if matches!(app_type, AppType::Omp) {
+            return omp::list(state);
+        }
         let config = state.config.read().map_err(AppError::from)?;
         let manager = config
             .get_manager(&app_type)
@@ -2141,6 +2193,9 @@ impl ProviderService {
     pub fn add(state: &AppState, app_type: AppType, provider: Provider) -> Result<bool, AppError> {
         if matches!(app_type, AppType::Pi) {
             return pi::add(state, provider, true);
+        }
+        if matches!(app_type, AppType::Omp) {
+            return omp::add(state, provider, true);
         }
         let mut provider = provider;
         // 归一化 Claude 模型键
@@ -2240,6 +2295,9 @@ impl ProviderService {
     ) -> Result<bool, AppError> {
         if matches!(app_type, AppType::Pi) {
             return pi::update(state, None, provider);
+        }
+        if matches!(app_type, AppType::Omp) {
+            return omp::update(state, None, provider);
         }
         let _mutation_guard = if app_type.is_additive_mode() {
             None
@@ -2473,7 +2531,7 @@ impl ProviderService {
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
             AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
-            AppType::Pi => unreachable!("Pi uses native provider import"),
+            AppType::Pi | AppType::Omp => unreachable!("native provider import"),
         };
 
         let mut provider = Provider::with_id(
@@ -2616,6 +2674,9 @@ impl ProviderService {
             AppType::Pi => Err(AppError::InvalidInput(
                 "Pi providers are read from models.json".to_string(),
             )),
+            AppType::Omp => Err(AppError::InvalidInput(
+                "OMP providers are read from models.yml".to_string(),
+            )),
         }
     }
 
@@ -2649,6 +2710,9 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         if matches!(app_type, AppType::Pi) {
             return pi::remove(state, provider_id);
+        }
+        if matches!(app_type, AppType::Omp) {
+            return omp::remove(state, provider_id);
         }
         if !app_type.is_additive_mode() {
             return Err(AppError::localized(
@@ -2741,6 +2805,7 @@ impl ProviderService {
             AppType::OpenClaw => Self::import_openclaw_providers_from_live(state),
             AppType::Hermes => Self::import_hermes_providers_from_live(state),
             AppType::Pi => Self::import_pi_providers_from_live(state),
+            AppType::Omp => Self::import_omp_providers_from_live(state),
             _ => Self::import_default_config(state, app_type).map(usize::from),
         }
     }
@@ -2757,12 +2822,20 @@ impl ProviderService {
                 Ok(provider_id.to_string())
             }
             AppType::OpenClaw => Self::set_openclaw_default_model(provider_id, model_id),
+            AppType::Omp => Self::set_omp_default_model(provider_id, model_id),
             _ => Err(AppError::localized(
                 "provider.set_default_model.unsupported",
-                "只有 Hermes 和 OpenClaw 支持设置默认供应商/模型",
-                "Only Hermes and OpenClaw support setting a default provider/model",
+                "只有 Hermes、OpenClaw 和 OMP 支持设置默认供应商/模型",
+                "Only Hermes, OpenClaw, and OMP support setting a default provider/model",
             )),
         }
+    }
+
+    fn set_omp_default_model(
+        provider_id: &str,
+        model_id: Option<&str>,
+    ) -> Result<String, AppError> {
+        crate::omp_config::set_omp_default_model(provider_id, model_id)
     }
 
     fn set_openclaw_default_model(
@@ -3031,7 +3104,7 @@ impl ProviderService {
             AppType::OpenCode => unreachable!("additive mode handled above"),
             AppType::Hermes => unreachable!("additive mode handled above"),
             AppType::OpenClaw => unreachable!("additive mode handled above"),
-            AppType::Pi => unreachable!("Pi switch is handled by the native provider service"),
+            AppType::Pi | AppType::Omp => unreachable!("native provider service"),
         };
 
         Ok(PostCommitAction {
@@ -3054,6 +3127,9 @@ impl ProviderService {
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
         if matches!(app_type, AppType::Pi) {
             return pi::enable(state, provider_id).map(|_| ());
+        }
+        if matches!(app_type, AppType::Omp) {
+            return omp::enable(state, provider_id).map(|_| ());
         }
         if !app_type.is_additive_mode() {
             let providers = state.db.get_all_providers(app_type.as_str())?;
@@ -3250,7 +3326,7 @@ impl ProviderService {
                     .map_err(Self::normalize_openclaw_live_write_error)?;
                 Ok(PreparedLiveWrite::OpenClaw { models })
             }
-            AppType::Pi => Ok(PreparedLiveWrite::Noop),
+            AppType::Pi | AppType::Omp => Ok(PreparedLiveWrite::Noop),
         }
     }
 
@@ -3492,6 +3568,9 @@ impl ProviderService {
             AppType::Pi => Err(AppError::Config(
                 "Pi does not support proxy takeover backups".into(),
             )),
+            AppType::Omp => Err(AppError::Config(
+                "OMP does not support proxy takeover backups".into(),
+            )),
         }
     }
 
@@ -3589,6 +3668,9 @@ impl ProviderService {
             AppType::Pi => {
                 crate::pi_config::validate_provider_node(&provider.id, &provider.settings_config)?
             }
+            AppType::Omp => {
+                crate::omp_config::validate_provider_node(&provider.id, &provider.settings_config)?
+            }
         }
 
         // 🔧 验证并清理 UsageScript 配置（所有应用类型通用）
@@ -3678,9 +3760,24 @@ impl ProviderService {
         pi::clear_usage_script(state, id)
     }
 
+    pub(crate) fn update_omp_usage_script(
+        state: &AppState,
+        id: &str,
+        script: UsageScript,
+    ) -> Result<bool, AppError> {
+        omp::update_usage_script(state, id, script)
+    }
+
+    pub(crate) fn clear_omp_usage_script(state: &AppState, id: &str) -> Result<bool, AppError> {
+        omp::clear_usage_script(state, id)
+    }
+
     pub fn delete(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
         if matches!(app_type, AppType::Pi) {
             return pi::delete(state, provider_id);
+        }
+        if matches!(app_type, AppType::Omp) {
+            return omp::delete(state, provider_id);
         }
         let (local_current_provider, stored_current_provider) = if app_type.is_additive_mode() {
             (None, None)
@@ -3789,7 +3886,7 @@ impl ProviderService {
             AppType::OpenClaw => {
                 let _ = provider_snapshot;
             }
-            AppType::Pi => unreachable!("Pi deletion is handled by the native provider service"),
+            AppType::Pi | AppType::Omp => unreachable!("native provider service"),
         }
 
         {
@@ -3825,6 +3922,10 @@ impl ProviderService {
 
     pub fn import_pi_providers_from_live(state: &AppState) -> Result<usize, AppError> {
         pi::import_from_live(state)
+    }
+
+    pub fn import_omp_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+        omp::import_from_live(state)
     }
 
     pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {

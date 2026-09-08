@@ -1755,7 +1755,8 @@ impl ProxyService {
                 | AppType::OpenCode
                 | AppType::Hermes
                 | AppType::OpenClaw
-                | AppType::Pi => {}
+                | AppType::Pi
+                | AppType::Omp => {}
             }
             if cached != original {
                 self.save_failover_live_snapshot(app_type, &provider.id, &cached)
@@ -2588,9 +2589,11 @@ impl ProxyService {
                     (None, _) => Ok(incoming_snapshot),
                 }
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-                Ok(backup_snapshot)
-            }
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Omp => Ok(backup_snapshot),
         }
     }
 

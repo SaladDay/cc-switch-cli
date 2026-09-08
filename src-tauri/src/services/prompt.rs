@@ -17,6 +17,12 @@ fn get_unix_timestamp() -> Result<i64, AppError> {
 
 pub struct PromptService;
 
+fn omp_native_prompt_error() -> AppError {
+    AppError::InvalidInput(
+        "OMP does not use CC Switch prompt presets; manage SYSTEM.md, APPEND_SYSTEM.md, or TITLE_SYSTEM.md with 'cc-switch --app omp prompts system ...'".to_string(),
+    )
+}
+
 impl PromptService {
     pub fn validate_prompt_id(id: &str) -> Result<(), AppError> {
         let trimmed = id.trim();
@@ -74,6 +80,9 @@ impl PromptService {
         state: &AppState,
         app: AppType,
     ) -> Result<IndexMap<String, Prompt>, AppError> {
+        if matches!(app, AppType::Omp) {
+            return Err(omp_native_prompt_error());
+        }
         if matches!(app, AppType::Pi) {
             return get_pi_prompts(state);
         }
@@ -86,6 +95,9 @@ impl PromptService {
         id: &str,
         prompt: Prompt,
     ) -> Result<(), AppError> {
+        if matches!(app, AppType::Omp) {
+            return Err(omp_native_prompt_error());
+        }
         if matches!(app, AppType::Pi) {
             return upsert_pi_prompt(state, id, prompt);
         }
@@ -103,6 +115,9 @@ impl PromptService {
     }
 
     pub fn delete_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        if matches!(app, AppType::Omp) {
+            return Err(omp_native_prompt_error());
+        }
         if matches!(app, AppType::Pi) {
             return delete_pi_prompt(state, id);
         }
@@ -152,6 +167,9 @@ impl PromptService {
         description: Option<String>,
         content: Option<String>,
     ) -> Result<Prompt, AppError> {
+        if matches!(app, AppType::Omp) {
+            return Err(omp_native_prompt_error());
+        }
         let new_id = new_id.trim();
         Self::validate_prompt_id(new_id)?;
 
@@ -258,6 +276,9 @@ impl PromptService {
     }
 
     pub fn enable_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        if matches!(app, AppType::Omp) {
+            return Err(omp_native_prompt_error());
+        }
         if matches!(app, AppType::Pi) {
             return enable_pi_prompt(state, id);
         }
@@ -325,6 +346,9 @@ impl PromptService {
     }
 
     pub fn disable_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        if matches!(app, AppType::Omp) {
+            return Err(omp_native_prompt_error());
+        }
         if matches!(app, AppType::Pi) {
             let mut prompt = get_pi_prompts(state)?
                 .get(id)
@@ -359,6 +383,9 @@ impl PromptService {
     }
 
     pub fn import_from_file(state: &AppState, app: AppType) -> Result<String, AppError> {
+        if matches!(app, AppType::Omp) {
+            return Err(omp_native_prompt_error());
+        }
         let content = if matches!(app, AppType::Pi) {
             PiAgentsFileGuard::acquire()?
                 .read()?
@@ -392,6 +419,9 @@ impl PromptService {
     }
 
     pub fn get_current_file_content(app: AppType) -> Result<Option<String>, AppError> {
+        if matches!(app, AppType::Omp) {
+            return Err(omp_native_prompt_error());
+        }
         if matches!(app, AppType::Pi) {
             return Ok(PiAgentsFileGuard::acquire()?.read()?.content);
         }
@@ -408,7 +438,7 @@ impl PromptService {
         let mut active_prompts = Vec::new();
 
         for app in AppType::all() {
-            if matches!(app, AppType::Pi) {
+            if matches!(app, AppType::Pi | AppType::Omp) {
                 continue;
             }
             let prompts = state.db.get_prompts(app.as_str())?;

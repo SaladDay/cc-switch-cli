@@ -447,6 +447,7 @@ fn search_provider_cancellable(
         "pi" => search_file_provider(metas, is_cancelled, |meta| {
             pi::search_session_cancellable(meta, needle, is_cancelled)
         }),
+        "omp" => Some(Vec::new()),
         _ => Some(Vec::new()),
     }
 }
@@ -501,6 +502,10 @@ pub(crate) fn load_messages_cancellable(
         "gemini" => gemini::load_messages_cancellable(path, is_cancelled),
         "hermes" => hermes::load_messages_cancellable(path, is_cancelled),
         "pi" => pi::load_messages_cancellable(path, is_cancelled),
+        "omp" => Err(
+            "OMP session browsing is not supported yet; use `sessions sync-usage` for usage import."
+                .to_string(),
+        ),
         _ => Err(format!("Unsupported provider: {provider_id}")),
     }
 }

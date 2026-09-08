@@ -29,6 +29,17 @@ pub enum EditorSubmit {
         kind: crate::services::pi_prompt_files::PiPromptFileKind,
         expected_revision: String,
     },
+    OmpModels {
+        expected_revision: String,
+    },
+    OmpConfig {
+        path: std::path::PathBuf,
+        expected_revision: String,
+    },
+    OmpSystemPrompt {
+        kind: crate::services::pi_prompt_files::PiPromptFileKind,
+        expected_revision: String,
+    },
     PiPromptTemplate {
         slug: String,
         original_slug: Option<String>,

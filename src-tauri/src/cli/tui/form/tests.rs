@@ -7991,6 +7991,112 @@ fn provider_add_form_pi_uses_native_api_default() {
 }
 
 #[test]
+fn provider_add_form_omp_preserves_omp_api_default_by_omission() {
+    let mut form = ProviderAddFormState::new(AppType::Omp);
+    form.name.set("Custom OMP");
+
+    assert!(form.opencode_npm_package.value.is_empty());
+    assert!(form.to_provider_json_value()["settingsConfig"]
+        .get("api")
+        .is_none());
+    assert!(form.to_provider_json_value()["settingsConfig"]
+        .get("name")
+        .is_none());
+}
+
+#[test]
+fn provider_edit_form_omp_preserves_missing_provider_api() {
+    let provider = Provider::with_id(
+        "proxy-discovery".to_string(),
+        "Proxy discovery".to_string(),
+        json!({
+            "apiKey": "secret",
+            "discovery": { "type": "proxy" },
+            "models": [{ "id": "model", "api": "openai-completions" }]
+        }),
+        None,
+    );
+    let mut form = ProviderAddFormState::from_provider(AppType::Omp, &provider);
+    form.name.set("Renamed proxy discovery");
+    let settings = form.to_provider_json_value()["settingsConfig"].clone();
+    assert!(settings.get("api").is_none());
+    assert_eq!(settings["discovery"]["type"], "proxy");
+}
+
+#[test]
+fn provider_edit_form_omp_preserves_implicit_api_key_auth() {
+    // OMP may resolve credentials from the environment or its native auth
+    // store when an override-only provider omits both apiKey and auth. Merely
+    // opening/saving the compact form must not convert that into auth: none.
+    let provider = Provider::with_id(
+        "env-backed".to_string(),
+        "Environment-backed".to_string(),
+        json!({
+            "baseUrl": "https://api.example.test/v1",
+            "api": "openai-completions"
+        }),
+        None,
+    );
+    let form = ProviderAddFormState::from_provider(AppType::Omp, &provider);
+    let settings = form.to_provider_json_value()["settingsConfig"].clone();
+    assert!(settings.get("apiKey").is_none());
+    assert!(settings.get("auth").is_none());
+}
+
+#[test]
+fn provider_add_form_omp_blank_api_key_uses_keyless_auth() {
+    let mut form = ProviderAddFormState::new(AppType::Omp);
+    form.name.set("Local OMP");
+    form.opencode_base_url.set("http://127.0.0.1:11434/v1");
+    form.openclaw_models = vec![json!({ "id": "local-model" })];
+
+    let settings = form.to_provider_json_value()["settingsConfig"].clone();
+    assert_eq!(settings["auth"], "none");
+    assert!(settings.get("apiKey").is_none());
+}
+
+#[test]
+fn provider_add_form_omp_model_fetch_uses_model_level_api_protocol() {
+    let provider = Provider::with_id(
+        "model-level-api".to_string(),
+        "Model-level API".to_string(),
+        json!({
+            "baseUrl": "https://api.example.test/v1",
+            "apiKey": "secret",
+            "models": [{
+                "id": "claude",
+                "api": "anthropic-messages"
+            }]
+        }),
+        None,
+    );
+    let form = ProviderAddFormState::from_provider(AppType::Omp, &provider);
+    assert_eq!(
+        form.omp_model_fetch_api_protocol().as_deref(),
+        Some("anthropic-messages")
+    );
+}
+
+#[test]
+fn provider_edit_form_omp_preserves_oauth_descriptor_when_key_is_blank() {
+    let provider = Provider::with_id(
+        "google-gemini-cli".to_string(),
+        "Gemini CLI".to_string(),
+        json!({
+            "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+            "api": "google-gemini-cli",
+            "oauth": "google-gemini-cli",
+            "models": [{ "id": "gemini-2.5-pro" }]
+        }),
+        None,
+    );
+    let form = ProviderAddFormState::from_provider(AppType::Omp, &provider);
+    let settings = form.to_provider_json_value()["settingsConfig"].clone();
+    assert_eq!(settings["oauth"], "google-gemini-cli");
+    assert!(settings.get("auth").is_none());
+}
+
+#[test]
 fn provider_edit_form_pi_updates_only_a_native_name_that_followed_the_display_name() {
     let following = Provider::with_id(
         "following".to_string(),

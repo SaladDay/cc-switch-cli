@@ -24,8 +24,8 @@ use crate::app_config::AppType;
 #[command(
     name = "cc-switch",
     version,
-    about = "All-in-One Assistant for Claude Code, Codex, Gemini & OpenCode CLI",
-    long_about = "Unified management for Claude Code, Codex, Gemini, and OpenCode CLI provider configurations, MCP servers, skills, prompts, local proxy routes, and environment checks.\n\nRun without arguments to enter interactive mode."
+    about = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode, Pi & OMP",
+    long_about = "Unified management for Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, Pi, and OMP (oh-my-pi) provider configurations, MCP servers, skills, prompts, local proxy routes, and environment checks.\n\nRun without arguments to enter interactive mode."
 )]
 pub struct Cli {
     /// Specify the application type
@@ -49,6 +49,14 @@ pub enum Commands {
     /// Manage providers (list, switch, export, speedtest, stream-check, fetch-models, quota)
     #[command(subcommand)]
     Provider(commands::provider::ProviderCommand),
+
+    /// Manage OMP-native models in models.yml (requires --app omp)
+    #[command(subcommand, name = "model")]
+    Model(commands::omp::OmpModelCommand),
+
+    /// Manage OMP-native model roles in config.yml (requires --app omp)
+    #[command(subcommand, name = "role")]
+    Role(commands::omp::OmpRoleCommand),
 
     /// Switch to a provider (shortcut for `provider switch <id>`)
     Use {
@@ -151,6 +159,7 @@ mod tests {
     fn long_help_mentions_prompts_and_proxy_routes() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(help.contains("prompts, local proxy routes, and environment checks"));
     }
@@ -223,6 +232,14 @@ mod tests {
         match cli.command {
             Some(Commands::Use { id }) => assert_eq!(id, "demo"),
             _ => panic!("expected use shortcut command"),
+        }
+    }
+
+    #[test]
+    fn parses_omp_app_and_oh_my_pi_alias() {
+        for app in ["omp", "oh-my-pi"] {
+            let cli = Cli::parse_from(["cc-switch", "--app", app, "provider", "list"]);
+            assert_eq!(cli.app, Some(AppType::Omp));
         }
     }
 
@@ -2160,5 +2177,33 @@ mod tests {
                 ),
             ))
         ));
+    }
+
+    #[test]
+    fn parses_omp_native_model_and_role_commands() {
+        let model = Cli::parse_from([
+            "cc-switch",
+            "--app",
+            "omp",
+            "model",
+            "add",
+            "openai",
+            "gpt-5",
+            "--reasoning",
+            "true",
+        ]);
+        assert!(matches!(model.command, Some(Commands::Model(_))));
+
+        let role = Cli::parse_from([
+            "cc-switch",
+            "--app",
+            "oh-my-pi",
+            "role",
+            "set",
+            "default",
+            "openai/gpt-5:high",
+        ]);
+        assert!(matches!(role.command, Some(Commands::Role(_))));
+        assert_eq!(role.app, Some(AppType::Omp));
     }
 }

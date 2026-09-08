@@ -29,26 +29,32 @@ pub fn import_provider_from_deeplink(
         .clone()
         .ok_or_else(|| AppError::InvalidInput("Missing 'app' field for provider".to_string()))?;
 
-    let api_key = merged_request.api_key.as_ref().ok_or_else(|| {
-        AppError::InvalidInput("API key is required (either in URL or config file)".to_string())
-    })?;
-    if api_key.is_empty() {
-        return Err(AppError::InvalidInput(
-            "API key cannot be empty".to_string(),
-        ));
+    let is_omp = matches!(app_str.as_str(), "omp" | "oh-my-pi");
+    if !is_omp {
+        let api_key = merged_request.api_key.as_ref().ok_or_else(|| {
+            AppError::InvalidInput("API key is required (either in URL or config file)".to_string())
+        })?;
+        if api_key.is_empty() {
+            return Err(AppError::InvalidInput(
+                "API key cannot be empty".to_string(),
+            ));
+        }
     }
 
-    let endpoint_str = merged_request.endpoint.as_ref().ok_or_else(|| {
-        AppError::InvalidInput("Endpoint is required (either in URL or config file)".to_string())
-    })?;
-    let all_endpoints: Vec<String> = endpoint_str
+    let all_endpoints: Vec<String> = merged_request
+        .endpoint
+        .as_deref()
+        .unwrap_or_default()
         .split(',')
         .map(|e| e.trim().to_string())
         .filter(|e| !e.is_empty())
         .collect();
-    let primary_endpoint = all_endpoints
-        .first()
-        .ok_or_else(|| AppError::InvalidInput("Endpoint cannot be empty".to_string()))?;
+    if all_endpoints.is_empty() && !is_omp {
+        return Err(AppError::InvalidInput(
+            "Endpoint is required (either in URL or config file)".to_string(),
+        ));
+    }
+    let primary_endpoint = all_endpoints.first().map(String::as_str);
 
     for (i, endpoint) in all_endpoints.iter().enumerate() {
         validate_url(endpoint, &format!("endpoint[{i}]"))?;
@@ -59,7 +65,7 @@ pub fn import_provider_from_deeplink(
         .as_ref()
         .is_none_or(|s| s.is_empty())
     {
-        merged_request.homepage = infer_homepage_from_endpoint(primary_endpoint);
+        merged_request.homepage = primary_endpoint.and_then(infer_homepage_from_endpoint);
 
         if merged_request.homepage.is_none() {
             merged_request.homepage = match merged_request.app.as_deref() {
@@ -68,6 +74,9 @@ pub fn import_provider_from_deeplink(
                 Some("gemini") => Some("https://ai.google.dev".to_string()),
                 Some("opencode") => Some("https://opencode.ai".to_string()),
                 Some("hermes") => Some("https://hermes.sh".to_string()),
+                Some("omp") | Some("oh-my-pi") => {
+                    Some("https://github.com/can1357/oh-my-pi".to_string())
+                }
                 _ => None,
             };
         }
@@ -147,6 +156,7 @@ fn build_provider_from_request(
                 "Pi providers must be added from the Pi provider page".to_string(),
             ));
         }
+        AppType::Omp => build_omp_settings(request),
     };
 
     let meta = build_provider_meta(request)?;
@@ -444,6 +454,96 @@ fn build_openclaw_settings(request: &DeepLinkImportRequest) -> serde_json::Value
     serde_json::Value::Object(settings)
 }
 
+fn build_omp_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    let endpoint = get_primary_endpoint(request);
+    let mut settings = request
+        .omp_config
+        .as_ref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    if !endpoint.is_empty() {
+        settings.insert("baseUrl".to_string(), json!(endpoint));
+    }
+    if let Some(api_key) = request.api_key.as_deref().filter(|value| !value.is_empty()) {
+        settings.insert("apiKey".to_string(), json!(api_key));
+        // URL parameters have higher precedence than inline config. Remove a
+        // conflicting auth mode so an explicit key is not silently ignored.
+        if matches!(
+            settings.get("auth").and_then(Value::as_str),
+            Some("none") | Some("oauth")
+        ) {
+            settings.remove("auth");
+        }
+    }
+    if request.omp_config.is_none() {
+        settings.insert(
+            "api".to_string(),
+            json!(crate::omp_config::OMP_DEFAULT_API_PROTOCOL),
+        );
+    }
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.insert("models".to_string(), json!([{ "id": model }]));
+        // A URL-level model replaces the inline model list. If the inline
+        // provider omitted a provider-level API, inherit the first model's
+        // protocol when available; otherwise use OMP's native default. This
+        // keeps the generated bare model valid under OMP's strict schema.
+        if !settings.contains_key("api") {
+            let inherited_api = request
+                .omp_config
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|config| config.get("models"))
+                .and_then(Value::as_array)
+                .and_then(|models| {
+                    models.iter().find_map(|model| {
+                        model
+                            .as_object()
+                            .and_then(|model| model.get("api"))
+                            .and_then(Value::as_str)
+                            .filter(|api| !api.trim().is_empty())
+                    })
+                });
+            settings.insert(
+                "api".to_string(),
+                json!(inherited_api.unwrap_or(crate::omp_config::OMP_DEFAULT_API_PROTOCOL)),
+            );
+        }
+    }
+
+    // A compact OMP deep link with a model but no credential is an explicit
+    // keyless provider (for example a local Ollama/llama.cpp endpoint). OMP's
+    // native validator requires that intent to be represented as `auth: none`;
+    // preserve an explicit auth mode, OAuth descriptor, or extension-owned
+    // entry instead of overriding it.
+    let has_models = settings
+        .get("models")
+        .and_then(Value::as_array)
+        .is_some_and(|models| !models.is_empty());
+    let has_api_key = settings
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_oauth_descriptor = settings.get("oauth").is_some_and(|value| {
+        value.as_str().is_some_and(|value| !value.trim().is_empty()) || value.is_object()
+    });
+    if has_models
+        && !has_api_key
+        && !settings.contains_key("auth")
+        && !has_oauth_descriptor
+        && !settings.contains_key("extension")
+    {
+        settings.insert("auth".to_string(), json!("none"));
+    }
+
+    Value::Object(settings)
+}
+
 /// Parse and merge configuration from Base64 encoded config or remote URL.
 ///
 /// Priority: URL params > inline config > remote config.
@@ -476,6 +576,12 @@ pub fn parse_and_merge_config(
             serde_json::to_value(toml_value)
                 .map_err(|e| AppError::Message(format!("Failed to convert TOML to JSON: {e}")))?
         }
+        "yaml" | "yml" => {
+            let yaml_value: serde_yaml::Value = serde_yaml::from_str(&config_content)
+                .map_err(|e| AppError::InvalidInput(format!("Invalid YAML config: {e}")))?;
+            serde_json::to_value(yaml_value)
+                .map_err(|e| AppError::Message(format!("Failed to convert YAML to JSON: {e}")))?
+        }
         _ => {
             return Err(AppError::InvalidInput(format!(
                 "Unsupported config format: {format}"
@@ -495,6 +601,7 @@ pub fn parse_and_merge_config(
         "opencode" => merge_additive_config(&mut merged, &config_value)?,
         "hermes" => merge_additive_config(&mut merged, &config_value)?,
         "openclaw" => merge_openclaw_config(&mut merged, &config_value)?,
+        "omp" | "oh-my-pi" => merge_omp_config(&mut merged, &config_value)?,
         "" => return Ok(merged),
         other => return Err(AppError::InvalidInput(format!("Invalid app type: {other}"))),
     }
@@ -650,6 +757,46 @@ fn merge_gemini_config(
     Ok(())
 }
 
+fn merge_omp_config(
+    request: &mut DeepLinkImportRequest,
+    config: &serde_json::Value,
+) -> Result<(), AppError> {
+    let object = config
+        .as_object()
+        .ok_or_else(|| AppError::InvalidInput("OMP config must be a JSON object".to_string()))?;
+
+    if request
+        .api_key
+        .as_ref()
+        .is_none_or(|value| value.is_empty())
+    {
+        if let Some(api_key) = object.get("apiKey").and_then(Value::as_str) {
+            request.api_key = Some(api_key.to_string());
+        }
+    }
+    if request
+        .endpoint
+        .as_ref()
+        .is_none_or(|value| value.is_empty())
+    {
+        if let Some(base_url) = object.get("baseUrl").and_then(Value::as_str) {
+            request.endpoint = Some(base_url.to_string());
+        }
+    }
+    if request
+        .homepage
+        .as_ref()
+        .is_none_or(|value| value.is_empty())
+    {
+        if let Some(endpoint) = request.endpoint.as_ref().filter(|value| !value.is_empty()) {
+            request.homepage = infer_homepage_from_endpoint(endpoint);
+        }
+    }
+
+    request.omp_config = Some(config.clone());
+    Ok(())
+}
+
 fn merge_additive_config(
     request: &mut DeepLinkImportRequest,
     config: &serde_json::Value,
@@ -792,6 +939,7 @@ fn reject_legacy_openclaw_aliases(config: &Map<String, Value>) -> Result<(), App
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     fn import_request() -> DeepLinkImportRequest {
         serde_json::from_value(json!({
@@ -839,5 +987,53 @@ wire_api = "responses"
         merge_codex_config(&mut request, &config).expect("merge config");
 
         assert_eq!(request.endpoint, None);
+    }
+
+    #[test]
+    fn omp_model_override_adds_api_for_inline_config_without_provider_api() {
+        let mut request = import_request();
+        request.model = Some("gpt-4o".to_string());
+        request.omp_config = Some(json!({
+            "baseUrl": "https://api.example/v1",
+            "apiKey": "KEY"
+        }));
+
+        let settings = build_omp_settings(&request);
+        assert_eq!(settings["api"], "openai-completions");
+        assert_eq!(settings["models"][0]["id"], "gpt-4o");
+    }
+
+    #[test]
+    fn omp_model_override_inherits_inline_model_api() {
+        let mut request = import_request();
+        request.model = Some("claude-3".to_string());
+        request.omp_config = Some(json!({
+            "baseUrl": "https://api.example/v1",
+            "models": [{"id": "old", "api": "anthropic-messages"}]
+        }));
+
+        let settings = build_omp_settings(&request);
+        assert_eq!(settings["api"], "anthropic-messages");
+    }
+
+    #[test]
+    fn omp_yaml_config_is_decoded_and_merged() {
+        let yaml = "baseUrl: https://api.example/v1\napiKey: yaml-key\napi: openai-completions\n";
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(yaml);
+        let mut request = import_request();
+        request.app = Some("omp".to_string());
+        request.config = Some(encoded);
+        request.config_format = Some("yaml".to_string());
+
+        let merged = parse_and_merge_config(&request).expect("merge YAML config");
+        assert_eq!(merged.endpoint.as_deref(), Some("https://api.example/v1"));
+        assert_eq!(merged.api_key.as_deref(), Some("yaml-key"));
+        assert_eq!(
+            merged
+                .omp_config
+                .as_ref()
+                .and_then(|value| value["api"].as_str()),
+            Some("openai-completions")
+        );
     }
 }

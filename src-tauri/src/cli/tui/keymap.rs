@@ -270,13 +270,17 @@ pub(crate) mod providers {
     }
 
     fn set_default_shown(app: &App, data: &UiData) -> bool {
-        matches!(app.app_type, AppType::OpenClaw | AppType::Hermes)
-            && selected_row(app, data).is_some_and(|row| row.is_in_config)
+        matches!(
+            app.app_type,
+            AppType::OpenClaw | AppType::Hermes | AppType::Omp
+        ) && selected_row(app, data).is_some_and(|row| row.is_in_config)
     }
 
     fn set_default_label(app: &App, _data: &UiData) -> &'static str {
         if matches!(app.app_type, AppType::Hermes) {
             texts::tui_key_enable()
+        } else if matches!(app.app_type, AppType::Omp) {
+            texts::tui_key_set_default_model()
         } else {
             texts::tui_key_set_default()
         }
@@ -437,6 +441,167 @@ pub(crate) mod prompts {
         visible_prompts(&app.filter, data)
             .get(app.prompt_idx)
             .copied()
+            .is_some()
+    }
+}
+
+pub(crate) mod omp_models {
+    use crossterm::event::KeyCode;
+
+    use super::Binding;
+    use crate::cli::i18n::texts;
+    use crate::cli::tui::app::App;
+    use crate::cli::tui::data::UiData;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Intent {
+        View,
+        Edit,
+        Delete,
+    }
+
+    pub(crate) const BINDINGS: &[Binding<Intent>] = &[
+        Binding {
+            display: "Enter",
+            keys: &[KeyCode::Enter, KeyCode::Char('v')],
+            intent: Intent::View,
+            label: |_, _| texts::tui_key_view(),
+            shown: any_visible,
+        },
+        Binding {
+            // `a` remains a backwards-compatible alias for the full-file
+            // editor, while `e` is the canonical label shown to users.
+            display: "e",
+            keys: &[KeyCode::Char('e'), KeyCode::Char('a')],
+            intent: Intent::Edit,
+            label: |_, _| texts::tui_key_edit(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "d",
+            keys: &[KeyCode::Char('d')],
+            intent: Intent::Delete,
+            label: |_, _| texts::tui_key_delete(),
+            shown: any_visible,
+        },
+    ];
+
+    pub(crate) fn intent_for(key: KeyCode) -> Option<Intent> {
+        super::intent_for(BINDINGS, key)
+    }
+
+    pub(crate) fn key_bar_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::key_bar_items(BINDINGS, app, data)
+    }
+
+    fn any_visible(app: &App, data: &UiData) -> bool {
+        data.omp.models.get(app.omp_model_idx).is_some()
+    }
+}
+
+pub(crate) mod omp_roles {
+    use crossterm::event::KeyCode;
+
+    use super::Binding;
+    use crate::cli::i18n::texts;
+    use crate::cli::tui::app::App;
+    use crate::cli::tui::data::UiData;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Intent {
+        View,
+        Edit,
+        Delete,
+    }
+
+    pub(crate) const BINDINGS: &[Binding<Intent>] = &[
+        Binding {
+            display: "Enter",
+            keys: &[KeyCode::Enter, KeyCode::Char('v')],
+            intent: Intent::View,
+            label: |_, _| texts::tui_key_view(),
+            shown: any_visible,
+        },
+        Binding {
+            display: "e",
+            keys: &[KeyCode::Char('e'), KeyCode::Char('a')],
+            intent: Intent::Edit,
+            label: |_, _| texts::tui_key_edit(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "d",
+            keys: &[KeyCode::Char('d')],
+            intent: Intent::Delete,
+            label: |_, _| texts::tui_key_delete(),
+            shown: any_visible,
+        },
+    ];
+
+    pub(crate) fn intent_for(key: KeyCode) -> Option<Intent> {
+        super::intent_for(BINDINGS, key)
+    }
+
+    pub(crate) fn key_bar_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::key_bar_items(BINDINGS, app, data)
+    }
+
+    fn any_visible(app: &App, data: &UiData) -> bool {
+        data.omp.model_roles.iter().nth(app.omp_role_idx).is_some()
+    }
+}
+
+pub(crate) mod omp_system_prompts {
+    use crossterm::event::KeyCode;
+
+    use super::Binding;
+    use crate::cli::i18n::texts;
+    use crate::cli::tui::app::App;
+    use crate::cli::tui::data::UiData;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Intent {
+        View,
+        Edit,
+        Delete,
+    }
+
+    pub(crate) const BINDINGS: &[Binding<Intent>] = &[
+        Binding {
+            display: "Enter",
+            keys: &[KeyCode::Enter, KeyCode::Char('v')],
+            intent: Intent::View,
+            label: |_, _| texts::tui_key_view(),
+            shown: any_visible,
+        },
+        Binding {
+            display: "e",
+            keys: &[KeyCode::Char('e')],
+            intent: Intent::Edit,
+            label: |_, _| texts::tui_key_edit(),
+            shown: any_visible,
+        },
+        Binding {
+            display: "d",
+            keys: &[KeyCode::Char('d')],
+            intent: Intent::Delete,
+            label: |_, _| texts::tui_key_delete(),
+            shown: any_visible,
+        },
+    ];
+
+    pub(crate) fn intent_for(key: KeyCode) -> Option<Intent> {
+        super::intent_for(BINDINGS, key)
+    }
+
+    pub(crate) fn key_bar_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::key_bar_items(BINDINGS, app, data)
+    }
+
+    fn any_visible(app: &App, data: &UiData) -> bool {
+        data.pi_prompts
+            .system_files
+            .get(app.omp_system_prompt_idx)
             .is_some()
     }
 }

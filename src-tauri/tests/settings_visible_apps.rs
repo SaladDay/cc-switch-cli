@@ -17,6 +17,7 @@ mod app_config {
         OpenClaw,
         Hermes,
         Pi,
+        Omp,
     }
 
     impl AppType {
@@ -29,6 +30,7 @@ mod app_config {
                 AppType::OpenClaw => "openclaw",
                 AppType::Hermes => "hermes",
                 AppType::Pi => "pi",
+                AppType::Omp => "omp",
             }
         }
     }
@@ -397,6 +399,7 @@ fn default_visible_apps_hide_gemini() {
             AppType::Hermes,
             AppType::OpenClaw,
             AppType::Pi,
+            AppType::Omp,
         ]
     );
     assert!(!visible.is_enabled_for(&AppType::Gemini));
@@ -415,6 +418,7 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
         openclaw: true,
         pi: false,
         hermes: true,
+        omp: false,
     })
     .expect("persist visible apps");
 
@@ -433,6 +437,7 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
             "openclaw": true,
             "hermes": true,
             "pi": false,
+            "omp": false,
         })
     );
 }
@@ -468,6 +473,7 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
             openclaw: false,
             pi: true,
             hermes: true,
+            omp: true,
         }
     );
     assert_eq!(
@@ -478,6 +484,7 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
             AppType::OpenCode,
             AppType::Hermes,
             AppType::Pi,
+            AppType::Omp,
         ]
     );
 }
@@ -507,6 +514,7 @@ fn load_partial_visible_apps_object_uses_defaults_for_missing_keys() {
             openclaw: true,
             pi: true,
             hermes: true,
+            omp: true,
         }
     );
 }
@@ -583,6 +591,7 @@ fn set_visible_apps_rejects_zero_selection() {
         openclaw: false,
         pi: false,
         hermes: false,
+        omp: false,
     })
     .expect_err("zero visible apps should be rejected");
 
@@ -606,6 +615,7 @@ fn update_settings_rejects_all_false_visible_apps() {
             openclaw: false,
             pi: false,
             hermes: false,
+            omp: false,
         },
         ..Default::default()
     };
@@ -657,7 +667,8 @@ fn load_normalizes_all_false_visible_apps_to_defaults() {
                 "opencode": false,
                 "openclaw": false,
                 "hermes": false,
-                "pi": false
+                "pi": false,
+                "omp": false
             }
         }),
     );
@@ -703,6 +714,7 @@ fn next_visible_app_wraps_and_skips_hidden_entries() {
         openclaw: true,
         pi: false,
         hermes: true,
+        omp: false,
     };
 
     assert_eq!(

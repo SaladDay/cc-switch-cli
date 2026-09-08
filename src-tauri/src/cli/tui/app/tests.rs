@@ -971,6 +971,7 @@ mod tests {
                 hermes: false,
                 openclaw: false,
                 pi: false,
+                omp: false,
             },
         };
 
@@ -1166,6 +1167,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1192,6 +1194,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1226,6 +1229,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Gemini));
@@ -1268,6 +1272,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
 
@@ -1292,6 +1297,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
 
@@ -1320,6 +1326,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
 
@@ -1344,6 +1351,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
 
@@ -2345,6 +2353,7 @@ mod tests {
                 custom_user_agent: Some(custom_user_agent),
                 api_protocol: None,
                 request_headers: None,
+                discovery_timeout_ms: None,
                 codex_oauth: false,
                 codex_oauth_account_id: None,
                 field: ProviderAddField::HermesModels,
@@ -5410,6 +5419,97 @@ mod tests {
             headers.get("x-api-key").map(String::as_str),
             Some("pi-secret")
         );
+    }
+
+    #[test]
+    fn provider_omp_model_fetch_uses_selected_model_api_protocol() {
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let provider = Provider::with_id(
+            "omp-native".to_string(),
+            "OMP Native".to_string(),
+            json!({
+                "apiKey": "omp-secret",
+                "models": [{
+                    "id": "claude",
+                    "api": "anthropic-messages",
+                    "baseUrl": "https://omp.example.test/v1"
+                }]
+            }),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Omp, &provider);
+        form.focus = FormFocus::Fields;
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|field| *field == ProviderAddField::OpenClawModels)
+            .expect("OMP models field");
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data());
+        let Action::ProviderModelFetch {
+            api_key,
+            api_protocol,
+            request_headers,
+            field,
+            ..
+        } = action
+        else {
+            panic!("expected OMP model fetch action");
+        };
+        assert_eq!(api_key, None, "Anthropic auth is carried by x-api-key");
+        assert_eq!(api_protocol.as_deref(), Some("anthropic-messages"));
+        assert_eq!(field, ProviderAddField::OpenClawModels);
+        assert_eq!(
+            request_headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-api-key"))
+                .map(String::as_str),
+            Some("omp-secret")
+        );
+    }
+
+    #[test]
+    fn provider_omp_model_fetch_uses_provider_api_protocol_without_models() {
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let provider = Provider::with_id(
+            "omp-native".to_string(),
+            "OMP Native".to_string(),
+            json!({
+                "apiKey": "omp-secret",
+                "baseUrl": "https://omp.example.test/v1",
+                "api": "openai-responses"
+            }),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Omp, &provider);
+        form.focus = FormFocus::Fields;
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|field| *field == ProviderAddField::OpenClawModels)
+            .expect("OMP models field");
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data());
+        let Action::ProviderModelFetch {
+            base_url,
+            api_key,
+            api_protocol,
+            field,
+            ..
+        } = action
+        else {
+            panic!("expected OMP model fetch action");
+        };
+        assert_eq!(base_url, "https://omp.example.test/v1");
+        assert_eq!(api_key.as_deref(), Some("omp-secret"));
+        assert_eq!(api_protocol.as_deref(), Some("openai-responses"));
+        assert_eq!(field, ProviderAddField::OpenClawModels);
     }
 
     #[test]
@@ -11226,6 +11326,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
         crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
@@ -11277,6 +11378,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         })
         .expect("save visible apps");
 
@@ -11315,6 +11417,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11354,6 +11457,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11392,6 +11496,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         };
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = initial.clone();

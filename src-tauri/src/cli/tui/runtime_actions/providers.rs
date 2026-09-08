@@ -89,6 +89,9 @@ fn refresh_provider_data_after_write_with_config(
     state.reload_config_snapshot_from_db()?;
     ctx.data
         .refresh_current_app_provider_data(state, &app_type)?;
+    if matches!(app_type, crate::app_config::AppType::Omp) {
+        ctx.data.refresh_current_app_omp_data();
+    }
     if refresh_config {
         ctx.data.refresh_current_app_config_data(state, &app_type)?;
     }
@@ -428,7 +431,8 @@ pub(super) fn remove_from_config(
         }
         crate::app_config::AppType::OpenCode
         | crate::app_config::AppType::Hermes
-        | crate::app_config::AppType::Pi => {
+        | crate::app_config::AppType::Pi
+        | crate::app_config::AppType::Omp => {
             let state = load_state()?;
             ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
             ctx.app.push_toast(
@@ -445,11 +449,25 @@ pub(super) fn remove_from_config(
 pub(super) fn set_default_model(
     ctx: &mut RuntimeActionContext<'_>,
     provider_id: String,
-    _model_id: String,
+    model_id: String,
 ) -> Result<(), AppError> {
     let state = load_state()?;
-    let default =
-        ProviderService::set_default_model(&state, ctx.app.app_type.clone(), &provider_id, None)?;
+    // OMP's provider row is backed by its native model catalog, so the row's
+    // first model is the concrete selector that must be written to
+    // `modelRoles.default`. OpenClaw keeps resolving its live primary model
+    // here; the snapshot model id can be stale while another process edits the
+    // live config, so preserve that existing behavior for OpenClaw.
+    let selected_model = if matches!(ctx.app.app_type, crate::app_config::AppType::Omp) {
+        (!model_id.trim().is_empty()).then_some(model_id.as_str())
+    } else {
+        None
+    };
+    let default = ProviderService::set_default_model(
+        &state,
+        ctx.app.app_type.clone(),
+        &provider_id,
+        selected_model,
+    )?;
     let message = if matches!(ctx.app.app_type, crate::app_config::AppType::Hermes) {
         texts::tui_toast_provider_enabled(&provider_id)
     } else {
@@ -530,6 +548,7 @@ pub(super) fn model_fetch(
     custom_user_agent: Option<String>,
     api_protocol: Option<String>,
     request_headers: Option<std::collections::BTreeMap<String, String>>,
+    discovery_timeout_ms: Option<u64>,
     codex_oauth: bool,
     codex_oauth_account_id: Option<String>,
     field: ProviderAddField,
@@ -570,6 +589,7 @@ pub(super) fn model_fetch(
         custom_user_agent,
         api_protocol,
         request_headers,
+        discovery_timeout_ms,
         codex_oauth,
         codex_oauth_account_id,
         field,

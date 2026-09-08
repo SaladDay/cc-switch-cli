@@ -290,8 +290,12 @@ fn set(app_type: AppType, command: ProviderUsageQuerySetCommand) -> Result<(), A
     apply_template_credentials(&mut script, &template, &command);
     validate_usage_script_for_save(&script)?;
 
-    if app_type == AppType::Pi {
-        ProviderService::update_pi_usage_script(&state, &provider.id, script)?;
+    if matches!(app_type, AppType::Pi | AppType::Omp) {
+        if app_type == AppType::Omp {
+            ProviderService::update_omp_usage_script(&state, &provider.id, script)?;
+        } else {
+            ProviderService::update_pi_usage_script(&state, &provider.id, script)?;
+        }
     } else {
         provider
             .meta
@@ -333,8 +337,12 @@ fn validate_usage_template_compatibility(
 
 fn clear(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
-    if app_type == AppType::Pi {
-        ProviderService::clear_pi_usage_script(&state, id)?;
+    if matches!(app_type, AppType::Pi | AppType::Omp) {
+        if app_type == AppType::Omp {
+            ProviderService::clear_omp_usage_script(&state, id)?;
+        } else {
+            ProviderService::clear_pi_usage_script(&state, id)?;
+        }
         println!("{}", success("✓ Usage Query configuration cleared"));
         return Ok(());
     }
@@ -349,6 +357,22 @@ fn clear(app_type: AppType, id: &str) -> Result<(), AppError> {
 }
 
 fn find_provider(state: &AppState, app_type: &AppType, id: &str) -> Result<Provider, AppError> {
+    // Pi and OMP use additive native registries. Their live providers are
+    // imported lazily by ProviderService::list(), so a fresh invocation must
+    // sync before looking in the CC Switch catalog (the startup path
+    // intentionally does not import additive apps). Use the returned map
+    // directly because the in-memory config snapshot may still predate that
+    // import.
+    if matches!(app_type, AppType::Pi | AppType::Omp) {
+        let providers = ProviderService::list(state, app_type.clone())?;
+        return providers.get(id).cloned().ok_or_else(|| {
+            AppError::localized(
+                "provider.not_found",
+                format!("供应商不存在: {id}"),
+                format!("Provider not found: {id}"),
+            )
+        });
+    }
     let config = state.config.read().unwrap();
     let manager = config
         .get_manager(app_type)
@@ -749,6 +773,13 @@ fn provider_comment_credentials<'a>(
                 .map(str::to_string),
             settings.get("apiKey").and_then(Value::as_str),
         ),
+        AppType::Omp => (
+            settings
+                .get("baseUrl")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            settings.get("apiKey").and_then(Value::as_str),
+        ),
     }
 }
 
@@ -763,6 +794,8 @@ fn provider_codex_base_url(provider: &Provider) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::omp_config::test_support::TestAgentDir as OmpTestAgentDir;
+    use serial_test::serial;
 
     fn set_command(template: Option<UsageQueryTemplate>) -> ProviderUsageQuerySetCommand {
         ProviderUsageQuerySetCommand {
@@ -778,6 +811,27 @@ mod tests {
             access_token: Some("token-demo".to_string()),
             user_id: Some("user-demo".to_string()),
         }
+    }
+
+    #[test]
+    #[serial]
+    fn find_provider_imports_fresh_omp_native_entries_before_usage_query() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _agent = OmpTestAgentDir::new();
+        let native = serde_json::json!({
+            "baseUrl": "https://omp.example.test/v1",
+            "api": "openai-completions",
+            "apiKey": "test-key",
+            "models": [{"id": "test-model"}]
+        });
+        crate::omp_config::insert_omp_provider("native", &native)
+            .expect("seed native OMP provider");
+        let state = AppState::try_new().expect("create isolated app state");
+
+        let provider = find_provider(&state, &AppType::Omp, "native")
+            .expect("usage-query lookup imports native provider");
+        assert_eq!(provider.id, "native");
     }
 
     #[test]

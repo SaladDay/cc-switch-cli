@@ -4,7 +4,7 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 
 pub(crate) fn supported_app_target_labels() -> &'static str {
-    "claude, codex, gemini, opencode, hermes, pi"
+    "claude, codex, gemini, opencode, hermes, pi, omp"
 }
 
 fn supported_app_target_labels_for(feature: &str) -> &'static str {
@@ -58,7 +58,13 @@ pub(crate) fn parse_app_targets(
 }
 
 fn parse_app_target(value: &str, feature: &str) -> Result<AppType, AppError> {
-    let normalized = value.trim().to_lowercase().replace('-', "");
+    let raw = value.trim().to_lowercase();
+    let normalized = match raw.as_str() {
+        "open-code" => "opencode",
+        "open-claw" => "openclaw",
+        "oh-my-pi" => "omp",
+        other => other,
+    };
     let app = AppType::from_str(&normalized).map_err(|_| {
         AppError::InvalidInput(format!(
             "Unsupported app id: '{value}'. Supported apps: {}",
@@ -73,9 +79,9 @@ fn parse_app_target(value: &str, feature: &str) -> Result<AppType, AppError> {
         )));
     }
 
-    if matches!(app, AppType::Pi) && feature.eq_ignore_ascii_case("MCP") {
+    if matches!(app, AppType::Pi | AppType::Omp) && feature.eq_ignore_ascii_case("MCP") {
         return Err(AppError::InvalidInput(format!(
-            "{feature} does not support pi. Supported apps: {}",
+            "{feature} does not support pi or omp. Supported apps: {}",
             supported_app_target_labels_for(feature)
         )));
     }

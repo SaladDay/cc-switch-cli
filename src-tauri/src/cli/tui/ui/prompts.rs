@@ -120,6 +120,7 @@ pub(super) fn render_pi_system_prompts(
         let filename = match kind {
             crate::services::pi_prompt_files::PiPromptFileKind::SystemAppend => "APPEND_SYSTEM.md",
             crate::services::pi_prompt_files::PiPromptFileKind::SystemOverride => "SYSTEM.md",
+            crate::services::pi_prompt_files::PiPromptFileKind::TitleSystem => "TITLE_SYSTEM.md",
         };
         let mode = match kind {
             crate::services::pi_prompt_files::PiPromptFileKind::SystemAppend => {
@@ -134,6 +135,13 @@ pub(super) fn render_pi_system_prompts(
                     "覆盖"
                 } else {
                     "Override"
+                }
+            }
+            crate::services::pi_prompt_files::PiPromptFileKind::TitleSystem => {
+                if crate::cli::i18n::is_chinese() {
+                    "标题"
+                } else {
+                    "Title"
                 }
             }
         };

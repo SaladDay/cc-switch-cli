@@ -54,16 +54,43 @@ fn validate_provider_submit(
         }
     }
 
-    if matches!(app_type, AppType::Pi) {
+    if matches!(app_type, AppType::Pi | AppType::Omp) {
         let settings = &provider.settings_config;
-        let request_url = crate::pi_config::provider_base_url(settings).ok();
+
+        // OMP has a richer native schema than Pi: override-only and discovery
+        // providers may legitimately omit a provider-level URL/model list,
+        // while model-level URLs are resolved by the native validator. Defer
+        // add-form validation to that schema instead of imposing Pi's
+        // provider-level URL + model requirements here.
+        if matches!(app_type, AppType::Omp) {
+            if is_edit {
+                return None;
+            }
+            let provider_key = if provider.id.trim().is_empty() {
+                "omp-provider"
+            } else {
+                provider.id.as_str()
+            };
+            if crate::omp_config::validate_provider_for_live_write(provider_key, settings).is_err()
+            {
+                return Some(texts::tui_toast_provider_add_missing_fields());
+            }
+            return None;
+        }
+
+        let request_url = match app_type {
+            AppType::Pi => crate::pi_config::provider_base_url(settings).ok(),
+            _ => None,
+        };
         let unchanged_legacy_url = is_edit
-            && expected_pi_settings
-                .and_then(|expected| crate::pi_config::provider_base_url(expected).ok())
-                == request_url;
-        let valid_base_url = request_url
-            .as_deref()
-            .is_some_and(crate::pi_config::is_valid_request_url);
+            && expected_pi_settings.and_then(|expected| match app_type {
+                AppType::Pi => crate::pi_config::provider_base_url(expected).ok(),
+                _ => None,
+            }) == request_url;
+        let valid_base_url = request_url.as_deref().is_some_and(|url| match app_type {
+            AppType::Pi => crate::pi_config::is_valid_request_url(url),
+            _ => false,
+        });
         let missing_existing_url = is_edit && request_url.is_none();
         if !valid_base_url && !unchanged_legacy_url && !missing_existing_url {
             return Some(texts::base_url_empty_error());
@@ -83,9 +110,16 @@ fn validate_provider_submit(
                         .is_some_and(|id| !id.trim().is_empty())
                 })
             });
-        if api.is_none_or(|value| !crate::openclaw_config::OPENCLAW_API_PROTOCOLS.contains(&value))
-            || !has_model
-        {
+        let valid_api = match app_type {
+            AppType::Pi => api.is_some_and(|value| {
+                crate::openclaw_config::OPENCLAW_API_PROTOCOLS.contains(&value)
+            }),
+            AppType::Omp => {
+                api.is_some_and(|value| crate::omp_config::OMP_API_PROTOCOLS.contains(&value))
+            }
+            _ => false,
+        };
+        if !valid_api || !has_model {
             return Some(texts::tui_toast_provider_add_missing_fields());
         }
     }
@@ -299,6 +333,17 @@ pub(super) fn submit(
             kind,
             expected_revision,
         } => submit_pi_system_prompt(ctx, kind, expected_revision, content),
+        EditorSubmit::OmpModels { expected_revision } => {
+            submit_omp_models(ctx, expected_revision, content)
+        }
+        EditorSubmit::OmpConfig {
+            path,
+            expected_revision,
+        } => submit_omp_config(ctx, path, expected_revision, content),
+        EditorSubmit::OmpSystemPrompt {
+            kind,
+            expected_revision,
+        } => submit_omp_system_prompt(ctx, kind, expected_revision, content),
         EditorSubmit::PiPromptTemplate {
             slug,
             original_slug,
@@ -361,6 +406,55 @@ fn submit_pi_system_prompt(
     ctx.app.editor = None;
     ctx.app
         .push_toast(texts::tui_toast_prompt_edit_finished(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_omp_models(
+    ctx: &mut RuntimeActionContext<'_>,
+    expected_revision: String,
+    content: String,
+) -> Result<(), AppError> {
+    crate::omp_config::replace_omp_models_yaml(&content, &expected_revision)?;
+    ctx.app.editor = None;
+    ctx.app
+        .push_toast(crate::t!("Models saved", "模型已保存"), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_omp_config(
+    ctx: &mut RuntimeActionContext<'_>,
+    path: std::path::PathBuf,
+    expected_revision: String,
+    content: String,
+) -> Result<(), AppError> {
+    crate::omp_config::replace_omp_config_yaml_at(&path, &content, &expected_revision)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        crate::t!("Configuration saved", "配置已保存"),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_omp_system_prompt(
+    ctx: &mut RuntimeActionContext<'_>,
+    kind: crate::services::pi_prompt_files::PiPromptFileKind,
+    expected_revision: String,
+    content: String,
+) -> Result<(), AppError> {
+    crate::services::pi_prompt_files::OmpPromptFileService::replace(
+        kind,
+        &expected_revision,
+        &content,
+    )?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        crate::t!("System prompt saved", "系统提示词已保存"),
+        ToastKind::Success,
+    );
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
 }
@@ -1017,13 +1111,22 @@ fn submit_provider_add(
     }
 
     let state = load_state()?;
-    let existing_ids = {
+    let mut existing_ids = {
         let config = state.config.read().map_err(AppError::from)?;
         config
             .get_manager(&ctx.app.app_type)
             .map(|manager| manager.providers.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
     };
+    // Additive native registries reserve IDs independently of the CC Switch
+    // database. Include OMP's live keys when generating an ID for an
+    // interactive add/copy form, while keeping a malformed native file
+    // non-blocking (the service will surface a precise write error if needed).
+    if matches!(ctx.app.app_type, AppType::Omp) {
+        if let Ok(native) = crate::omp_config::read_omp_native_providers() {
+            existing_ids.extend(native.into_keys());
+        }
+    }
     let Some(provider_id) = crate::cli::tui::form::resolve_provider_id_for_submit(
         &ctx.app.app_type,
         &provider.name,

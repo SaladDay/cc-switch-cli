@@ -394,6 +394,11 @@ pub(crate) fn sync_all_session_usage_unlocked(
         "Pi",
         crate::services::session_usage_pi::sync_pi_usage(db),
     );
+    merge_sync_step(
+        &mut result,
+        "OMP",
+        crate::services::session_usage_omp::sync_omp_usage(db),
+    );
     if result.imported > 0 {
         crate::usage_events::notify_log_recorded();
     }
@@ -1152,6 +1157,161 @@ pub(crate) fn metadata_modified_nanos(metadata: &fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// Open a discovered session path without following symlinks in any path
+/// component. The descriptor walk keeps each opened directory pinned while
+/// resolving the next component, closing the discovery/read TOCTOU window.
+pub(crate) fn open_session_file_no_follow(path: &Path) -> std::io::Result<File> {
+    open_session_path_no_follow(path, false)
+}
+
+/// Read a directory through a descriptor opened with `O_NOFOLLOW`, then
+/// classify children with `fstatat(..., AT_SYMLINK_NOFOLLOW)`. This avoids the
+/// pathname TOCTOU window between a symlink check and `read_dir`.
+pub(crate) fn read_session_directory_entries_no_follow(
+    path: &Path,
+) -> std::io::Result<Vec<(std::ffi::OsString, bool, bool, bool)>> {
+    #[cfg(unix)]
+    {
+        use std::ffi::{CStr, CString};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let directory = open_session_path_no_follow(path, true)?;
+        let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
+        if duplicate < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            unsafe { libc::close(duplicate) };
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut entries = Vec::new();
+        loop {
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
+            }
+            let name_c = CString::new(name.to_bytes()).map_err(|_| {
+                unsafe { libc::closedir(stream) };
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "directory entry contains NUL",
+                )
+            })?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    name_c.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                continue;
+            }
+            let mode = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT;
+            entries.push((
+                std::ffi::OsStr::from_bytes(name.to_bytes()).to_os_string(),
+                mode == libc::S_IFDIR,
+                mode == libc::S_IFREG,
+                mode == libc::S_IFLNK,
+            ));
+        }
+        unsafe { libc::closedir(stream) };
+        Ok(entries)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::read_dir(path)?
+            .map(|entry| {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                Ok((
+                    entry.file_name(),
+                    kind.is_dir(),
+                    kind.is_file(),
+                    kind.is_symlink(),
+                ))
+            })
+            .collect()
+    }
+}
+
+fn open_session_path_no_follow(path: &Path, require_directory: bool) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        if !path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session path must be absolute",
+            ));
+        }
+
+        let mut current_fd = unsafe {
+            libc::open(
+                b"/\0".as_ptr().cast(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if current_fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut components = path.components().peekable();
+        while let Some(component) = components.next() {
+            let name = match component {
+                std::path::Component::RootDir | std::path::Component::CurDir => continue,
+                std::path::Component::Normal(name) => name,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_) => {
+                    unsafe { libc::close(current_fd) };
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "session path must be normalized and absolute",
+                    ));
+                }
+            };
+            let name = CString::new(name.as_bytes()).map_err(|_| {
+                unsafe { libc::close(current_fd) };
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "session path contains a NUL byte",
+                )
+            })?;
+            let is_last = components.peek().is_none();
+            let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+            if !is_last || require_directory {
+                flags |= libc::O_DIRECTORY;
+            }
+            let next_fd = unsafe { libc::openat(current_fd, name.as_ptr(), flags) };
+            unsafe { libc::close(current_fd) };
+            if next_fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            current_fd = next_fd;
+            if is_last {
+                return Ok(unsafe { File::from_raw_fd(current_fd) });
+            }
+        }
+        unsafe { libc::close(current_fd) };
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "session path is empty",
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(path)
+    }
+}
+
 /// 更新 session_log_sync 表中某条目的同步进度（连接版本）。
 ///
 /// 供批量事务复用：调用方已持有事务连接，直接在同一事务内写入同步状态。
@@ -1160,6 +1320,22 @@ pub(crate) fn update_sync_state_conn(
     file_path: &str,
     last_modified: i64,
     last_offset: i64,
+) -> Result<(), AppError> {
+    update_line_sync_state_conn(conn, file_path, last_modified, last_offset, None, None)
+}
+
+/// Update a line-oriented session cursor and, optionally, provider-specific
+/// revision metadata. The revision columns were added for Claude's byte
+/// cursor and are also suitable for Pi/OMP's append-proof state. Keeping the
+/// wall-clock sync time in `last_synced_at` is important because it is shown
+/// directly by the home page and must remain a real Unix timestamp.
+pub(crate) fn update_line_sync_state_conn(
+    conn: &rusqlite::Connection,
+    file_path: &str,
+    last_modified: i64,
+    last_offset: i64,
+    last_byte_offset: Option<i64>,
+    last_tail_fingerprint: Option<i64>,
 ) -> Result<(), AppError> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -1171,16 +1347,29 @@ pub(crate) fn update_sync_state_conn(
     // 快照的 mtime 可能相等，因此按 (mtime, line_offset) 字典序判定：
     // mtime 更新才整体覆盖；mtime 相等时只允许 offset 不回退。
     conn.execute(
-        "INSERT INTO session_log_sync (file_path, last_modified, last_line_offset, last_synced_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO session_log_sync
+             (file_path, last_modified, last_line_offset, last_synced_at,
+              last_byte_offset, last_tail_fingerprint)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(file_path) DO UPDATE SET
             last_modified = excluded.last_modified,
             last_line_offset = excluded.last_line_offset,
-            last_synced_at = excluded.last_synced_at
+            last_synced_at = excluded.last_synced_at,
+            last_byte_offset = COALESCE(excluded.last_byte_offset,
+                                        session_log_sync.last_byte_offset),
+            last_tail_fingerprint = COALESCE(excluded.last_tail_fingerprint,
+                                             session_log_sync.last_tail_fingerprint)
          WHERE excluded.last_modified > session_log_sync.last_modified
             OR (excluded.last_modified = session_log_sync.last_modified
                 AND excluded.last_line_offset >= session_log_sync.last_line_offset)",
-        rusqlite::params![file_path, last_modified, last_offset, now],
+        rusqlite::params![
+            file_path,
+            last_modified,
+            last_offset,
+            now,
+            last_byte_offset,
+            last_tail_fingerprint,
+        ],
     )
     .map_err(|e| AppError::Database(format!("更新同步状态失败: {e}")))?;
     Ok(())
@@ -1401,7 +1590,7 @@ pub(crate) fn delete_session_logs_covered_by_proxy_log(
 
     conn.execute(
         "DELETE FROM proxy_request_logs
-         WHERE COALESCE(data_source, 'proxy') IN ('session_log', 'codex_session', 'gemini_session', 'opencode_session')
+         WHERE COALESCE(data_source, 'proxy') IN ('session_log', 'codex_session', 'gemini_session', 'opencode_session', 'omp_session')
            AND app_type = ?1
            AND status_code >= 200
            AND status_code < 300
@@ -1412,7 +1601,7 @@ pub(crate) fn delete_session_logs_covered_by_proxy_log(
                cache_creation_tokens = ?6
                OR (
                    cache_creation_tokens = 0
-                   AND COALESCE(data_source, 'proxy') IN ('codex_session', 'gemini_session', 'opencode_session')
+                   AND COALESCE(data_source, 'proxy') IN ('codex_session', 'gemini_session', 'opencode_session', 'omp_session')
                )
            )
            AND created_at BETWEEN ?7 - ?8 AND ?7 + ?8
@@ -1438,6 +1627,56 @@ pub(crate) fn delete_session_logs_covered_by_proxy_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn open_session_file_no_follow_reads_normal_absolute_file() {
+        let temp = tempfile::tempdir().expect("isolated session root");
+        let path = temp.path().join("sessions").join("one.jsonl");
+        fs::create_dir_all(path.parent().expect("session parent")).expect("create session parent");
+        fs::write(&path, b"fixture\n").expect("write session");
+
+        let mut file = open_session_file_no_follow(&path).expect("open regular session file");
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .expect("read session file");
+        assert_eq!(content, "fixture\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_session_file_no_follow_rejects_relative_path() {
+        assert!(open_session_file_no_follow(Path::new("relative.jsonl")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_session_file_no_follow_rejects_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("isolated session root");
+        let target = temp.path().join("target.jsonl");
+        let link = temp.path().join("link.jsonl");
+        fs::write(&target, b"outside\n").expect("write target");
+        symlink(&target, &link).expect("create file symlink");
+
+        assert!(open_session_file_no_follow(&link).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_session_file_no_follow_rejects_intermediate_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("isolated session root");
+        let real_dir = temp.path().join("real");
+        let linked_dir = temp.path().join("linked");
+        fs::create_dir_all(&real_dir).expect("create real directory");
+        fs::write(real_dir.join("session.jsonl"), b"outside\n").expect("write target");
+        symlink(&real_dir, &linked_dir).expect("create directory symlink");
+
+        assert!(open_session_file_no_follow(&linked_dir.join("session.jsonl")).is_err());
+    }
 
     #[test]
     fn memory_database_session_guard_does_not_create_a_lock_file() -> Result<(), AppError> {

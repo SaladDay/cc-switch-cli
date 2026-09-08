@@ -125,6 +125,24 @@ struct SessionMessagesOutput<'a> {
 }
 
 pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppError> {
+    let provider_is_omp = match &cmd {
+        SessionsCommand::List { provider, .. }
+        | SessionsCommand::Show { provider, .. }
+        | SessionsCommand::Messages { provider, .. }
+        | SessionsCommand::Resume { provider, .. }
+        | SessionsCommand::Delete { provider, .. }
+        | SessionsCommand::SyncUsage { provider, .. } => {
+            provider.as_ref().is_some_and(|p| *p == AppType::Omp)
+        }
+        SessionsCommand::Search { .. } => false,
+    };
+    if (matches!(app, Some(AppType::Omp)) || provider_is_omp)
+        && !matches!(cmd, SessionsCommand::SyncUsage { .. })
+    {
+        return Err(AppError::InvalidInput(
+            "OMP session browsing is not supported yet; use `sessions sync-usage` for usage import.".to_string(),
+        ));
+    }
     match cmd {
         SessionsCommand::List {
             provider,
@@ -588,8 +606,9 @@ fn sync_usage_for_provider(
         AppType::Gemini => crate::services::session_usage_gemini::sync_gemini_usage(db),
         AppType::OpenCode => crate::services::session_usage_opencode::sync_opencode_usage(db),
         AppType::Pi => crate::services::session_usage_pi::sync_pi_usage(db),
+        AppType::Omp => crate::services::session_usage_omp::sync_omp_usage(db),
         other => Err(AppError::InvalidInput(format!(
-            "session usage sync is only supported for claude, codex, gemini, opencode, and pi; got {}",
+            "session usage sync is only supported for claude, codex, gemini, opencode, pi, and omp; got {}",
             other.as_str()
         ))),
     }
@@ -610,6 +629,12 @@ fn resolve_scanned_session(
         .as_ref()
         .and_then(|(provider, _)| app_type_from_provider_id(provider))
         .or(provider);
+    if matches!(forced_provider, Some(AppType::Omp)) {
+        return Err(AppError::InvalidInput(
+            "OMP session browsing is not supported yet; use `sessions sync-usage` for usage import."
+                .to_string(),
+        ));
+    }
     let include_all = all && forced_provider.is_none();
     let scope = session_scope(app, forced_provider, include_all);
     let reader =
@@ -769,9 +794,10 @@ fn parse_scoped_selector(selector: &str) -> Option<(String, String)> {
 }
 
 fn parse_session_provider(value: &str) -> Result<AppType, String> {
-    app_type_from_provider_id(value).ok_or_else(|| {
-        format!("unsupported provider '{value}'. Allowed: claude, codex, gemini, opencode, openclaw, hermes, pi")
-    })
+    let app = app_type_from_provider_id(value).ok_or_else(|| {
+        format!("unsupported provider '{value}'. Allowed: claude, codex, gemini, opencode, openclaw, hermes, pi, omp")
+    })?;
+    Ok(app)
 }
 
 fn app_type_from_provider_id(provider_id: &str) -> Option<AppType> {
