@@ -790,3 +790,56 @@ overlap). The three baseline failures now
 pass. Formatting and locked all-target Clippy pass with existing warnings and
 the same unrelated `reversed_empty_ranges` allowance; no warning points at a
 changed source file. Windows and abrupt-process/crash recovery were not run.
+
+#### MCP catalog deletion
+
+`delete_server` reads the current target through Store and removes only that row
+and its canonical native links. It no longer saves the caller's whole cached
+catalog. Native removal follows the current row's enabled CLI-supported Apps and
+the existing initialization policy. Disabled or uninitialized Apps are not written.
+The target row and all its links are explicitly owned by deletion, including links
+from other consumers; native Apps unsupported by this CLI are not newly managed.
+Their native cleanup remains outside this slice's App support boundary.
+
+Deletion shares the existing native bindings, lock lifetime and retained recovery
+with selection. Native entries are removed before the guarded catalog
+delete and commit. Later failures recover native writes in reverse order and roll
+back the database; conflicts preserve outside changes and do not skip recovery of
+other files. Only a successful commit removes the target cache entry. An absent
+database row returns false, removes its stale cache entry and leaves native files
+untouched. Deletion does not deserialize obsolete or future native snapshots.
+
+The host bindings preserve sibling entries and root fields rather than rebuilding
+whole native MCP maps. Existing strict JSON, tolerant Codex removal, missing-file
+rules, Claude read-only migration inputs and Hermes backups remain host-owned.
+The Hermes binding also retains its existing protection against invalid or unrelated
+YAML changes. A baseline comparison demonstrates one deliberate difference from the
+legacy removal helper: raw `null` previously returned success while appending invalid
+YAML. Shared removal reports an error and leaves the file and catalog intact. This
+slice does not rewrite the YAML editor to accept additional layouts.
+
+Two tests fail against CLI `1fd57961` before adoption: a stale caller deletes a new
+peer row, and a later native failure leaves the target catalog row deleted. Required
+acceptance includes all 32 supported selection matrices, peer fields and links,
+unknown snapshots, missing/stale caches, uninitialized Apps, native parser baselines,
+guarded deletion/cascade/verification/commit failures, lock retention and retry,
+uncertain writes, external recovery conflicts, shared destinations and leaf links.
+Real Lite tests cover new peer retention, deletion in both directions and writer
+exclusion through publication/recovery. Selection fixtures are shared unchanged by
+the two test modules; production initialization and App support are not broadened.
+
+No Core API, dependency pin, schema, Lite source, UI or proxy change is needed.
+Upsert, whole-map sync, other provider/Skill workflows and full-product migration
+remain separate. Recovery is cooperative compensation, not crash-proof atomicity;
+parent directories and host recovery backups may remain after failure. Core/Store
+remains pinned to `1abff9e801895438cf41440852243e9a30cb3454`; rollback of this CLI
+slice needs no data migration.
+
+Local validation against CLI `1fd57961` plus this slice and unchanged Lite
+`4d0a77b3` passes 241 ordinary MCP-related tests, 53 real-consumer MCP tests,
+14 MCP command tests, 11 Gemini operation tests, 190 config tests, 139 database
+tests, 3 real-consumer Gemini provider tests and 121 Lite tests (some suites
+overlap). The two failing baselines now pass. Formatting and locked all-target
+Clippy pass with existing warnings and the unrelated `reversed_empty_ranges`
+allowance; none points at a changed source file. Windows, crash recovery and
+noncooperating-writer races were not validated locally.

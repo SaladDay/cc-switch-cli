@@ -1,4 +1,4 @@
-//! One selection operation owns its catalog changes and retained native recovery.
+//! One catalog mutation owns its changes and retained native recovery.
 
 use cc_switch_core::{
     builtin_app_registry,
@@ -22,11 +22,28 @@ pub(super) trait NativeToggle {
     fn rollback(&mut self) -> Result<(), AppError>;
 }
 
+enum CatalogMutation {
+    Select(Vec<(AppType, bool)>),
+    Delete,
+}
+
 impl McpService {
     pub(super) fn select_coordinated(
         state: &AppState,
         id: &str,
         selections: impl FnOnce(&McpApps) -> Vec<(AppType, bool)>,
+    ) -> Result<bool, AppError> {
+        Self::mutate_coordinated(state, id, |apps| CatalogMutation::Select(selections(apps)))
+    }
+
+    pub(super) fn delete_coordinated(state: &AppState, id: &str) -> Result<bool, AppError> {
+        Self::mutate_coordinated(state, id, |_| CatalogMutation::Delete)
+    }
+
+    fn mutate_coordinated(
+        state: &AppState,
+        id: &str,
+        mutation: impl FnOnce(&McpApps) -> CatalogMutation,
     ) -> Result<bool, AppError> {
         let mut config = state.config.write()?;
         let mut connection = state.db.conn.lock().map_err(AppError::from)?;
@@ -44,8 +61,18 @@ impl McpService {
         };
         let mut fingerprint = *row.source_fingerprint();
         let mut server = Database::mcp_server_from_shared_row(row);
+        let (delete, selections) = match mutation(&server.apps) {
+            CatalogMutation::Select(selections) => (false, selections),
+            CatalogMutation::Delete => (
+                true,
+                Self::supported_mcp_apps()
+                    .filter(|app| server.apps.is_enabled_for(app))
+                    .map(|app| (app, false))
+                    .collect(),
+            ),
+        };
         // Decide initialization before any write can create another App's directory.
-        let selections: Vec<_> = selections(&server.apps)
+        let selections: Vec<_> = selections
             .into_iter()
             .map(|(app, enabled)| {
                 let live = crate::sync_policy::should_sync_live(&app);
@@ -76,9 +103,15 @@ impl McpService {
                     .mcp_contract()
                     .ok_or_else(|| AppError::Config("App does not declare MCP support".into()))?
                     .catalog_column();
-                let link = transaction
-                    .read_native_link(id, core_app.as_str())
-                    .map_err(shared_store_error)?;
+                // Deletion owns the row and its cascading links. A stale or
+                // future snapshot is not input to native entry removal.
+                let link = if delete {
+                    None
+                } else {
+                    transaction
+                        .read_native_link(id, core_app.as_str())
+                        .map_err(shared_store_error)?
+                };
                 let previous_snapshot: Option<McpNativeSnapshot> = link
                     .as_ref()
                     .and_then(|link| link.native_snapshot.as_deref())
@@ -94,7 +127,7 @@ impl McpService {
                     let operation = &mut native.last_mut().expect("inserted operation").1;
                     let snapshot =
                         operation.apply(id, &server.server, enabled, previous_snapshot.as_ref())?;
-                    if enabled || link.is_some() || snapshot.is_some() {
+                    if !delete && (enabled || link.is_some() || snapshot.is_some()) {
                         let snapshot = snapshot
                             .as_ref()
                             .map(serde_json::to_string)
@@ -105,15 +138,24 @@ impl McpService {
                             .map_err(shared_store_error)?;
                     }
                 }
+                if !delete {
+                    transaction
+                        .set_server_selection(id, &fingerprint, column, enabled)
+                        .map_err(shared_store_error)?;
+                    fingerprint = *transaction
+                        .read_server(id)
+                        .map_err(shared_store_error)?
+                        .ok_or_else(|| {
+                            AppError::Database("MCP selection target disappeared".into())
+                        })?
+                        .source_fingerprint();
+                    server.apps.set_enabled_for(&app, enabled);
+                }
+            }
+            if delete {
                 transaction
-                    .set_server_selection(id, &fingerprint, column, enabled)
+                    .delete_server(id, &fingerprint)
                     .map_err(shared_store_error)?;
-                fingerprint = *transaction
-                    .read_server(id)
-                    .map_err(shared_store_error)?
-                    .ok_or_else(|| AppError::Database("MCP selection target disappeared".into()))?
-                    .source_fingerprint();
-                server.apps.set_enabled_for(&app, enabled);
             }
             Ok(())
         })();
@@ -136,8 +178,9 @@ impl McpService {
                 failures.push(format!("database rollback: {error}"));
             }
             if !failures.is_empty() {
+                let action = if delete { "deletion" } else { "toggle" };
                 return Err(AppError::Config(format!(
-                    "MCP toggle failed: {error}; {}",
+                    "MCP {action} failed: {error}; {}",
                     failures.join("; ")
                 )));
             }
@@ -145,11 +188,17 @@ impl McpService {
         }
         // Publish only the target cache row after commit. Other host workflows
         // still own their own cache refresh and persistence boundaries.
-        config
-            .mcp
-            .servers
-            .get_or_insert_with(HashMap::new)
-            .insert(id.to_owned(), server);
+        if delete {
+            if let Some(servers) = config.mcp.servers.as_mut() {
+                servers.remove(id);
+            }
+        } else {
+            config
+                .mcp
+                .servers
+                .get_or_insert_with(HashMap::new)
+                .insert(id.to_owned(), server);
+        }
         Ok(true)
     }
 }

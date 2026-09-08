@@ -9,6 +9,8 @@ mod claude_toggle;
 mod codex_toggle;
 #[cfg(test)]
 mod consumer_tests;
+#[cfg(test)]
+mod deletion_tests;
 mod gemini_toggle;
 mod hermes_toggle;
 #[cfg(test)]
@@ -18,6 +20,8 @@ mod native_file;
 mod opencode_toggle;
 #[cfg(test)]
 mod selection_tests;
+#[cfg(test)]
+mod test_fixture;
 mod toggle;
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
@@ -89,25 +93,7 @@ impl McpService {
 
     /// 删除 MCP 服务器
     pub fn delete_server(state: &AppState, id: &str) -> Result<bool, AppError> {
-        let server = {
-            let mut cfg = state.config.write()?;
-
-            if let Some(servers) = &mut cfg.mcp.servers {
-                servers.remove(id)
-            } else {
-                None
-            }
-        };
-
-        if let Some(server) = server {
-            state.save()?;
-
-            // 从所有应用的 live 配置中移除
-            Self::remove_server_from_all_apps(state, id, &server)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Self::delete_coordinated(state, id)
     }
 
     /// 切换指定应用的启用状态
@@ -215,19 +201,6 @@ impl McpService {
             }
             AppType::OpenClaw => {}
             AppType::Pi => {}
-        }
-        Ok(())
-    }
-
-    /// 从所有曾启用过该服务器的应用中移除
-    fn remove_server_from_all_apps(
-        state: &AppState,
-        id: &str,
-        server: &McpServer,
-    ) -> Result<(), AppError> {
-        // 从所有曾启用的应用中移除
-        for app in server.apps.enabled_apps() {
-            Self::remove_server_from_app(state, id, &app)?;
         }
         Ok(())
     }
