@@ -231,3 +231,43 @@ loss: Lite commits successfully, CLI enables its target and preserves the checke
 native fields, but the independently committed `lite-peer` catalog row is absent
 after CLI returns. The acceptance test exits 101 at its retention assertion.
 This is the red pre-migration baseline, not a passing compatibility result.
+
+## Standalone Gemini MCP toggle
+
+This slice moves only `McpService::toggle_app` for Gemini to the common guarded
+MCP transaction. It reads the target from the database, changes its Gemini flag
+and native link, and publishes the target cache row only after commit. Other
+servers, App flags, host columns and catalogs are not rewritten. Missing targets
+remain a successful no-op, with a stale target removed from the local cache.
+Repeated toggles still repair the native entry; uninitialized Apps remain DB-only.
+
+CLI initialization ensures Core's existing native-link schema and delete trigger
+alongside its MCP catalog schema, without a new host schema version. This works
+without Lite having opened the database first. Core owns the schema's legacy
+ownership backfill and orphan cleanup, not the toggle transaction. Once started,
+the guard captures both MCP tables before any operation write.
+
+Lock order is config, database, shared file lock, Gemini native session. No DAO or
+AppState lock is re-entered during execution. Native compensation precedes database
+rollback, including failed COMMIT. SQLite-triggered transaction aborts cannot retain
+the database lock; native recovery still runs under the file lock. External file
+changes are preserved and incomplete recovery is reported, not silently replaced.
+
+CLI and Lite share the opaque native snapshot for removed Gemini entries. CLI keeps
+its document parser, legacy IDs, content limits, timeout defaults, catalog wrappers
+and metadata filtering. Restoring a captured native entry does not reinterpret its
+extensions as catalog wrappers. Core supplies entry restoration and receipts;
+hosts still choose their document and execution policies.
+
+The acceptance cases cover peer-record retention, snapshot round trips through
+both real services, and a real Lite native writer excluded during CLI publication
+and failed-commit recovery. Local cases cover fresh targets, host extensions,
+missing/uninitialized/repeated toggles, write suppression, cross-row drift, failed
+COMMIT, SQLite abort, recovery conflict and lock release. The legacy uncoordinated
+MCP-service lock test remains for upsert/sync; coordinated toggle tests check its
+new lock order explicitly.
+
+Other Apps, upsert/delete/set-apps/import, provider/Skill workflows and full-product
+adoption are not migrated here. The whole in-memory catalog is not refreshed by
+this toggle, and remaining snapshot-save paths can still overwrite peer data.
+Neither one green operation nor matching Core pins prove the complete goal.

@@ -69,21 +69,25 @@ impl Database {
         let rows = cc_switch_store::read_mcp_server_rows(conn).map_err(shared_store_error)?;
         let mut servers = IndexMap::new();
         for row in rows {
-            let apps = apps_from_shared_row(&row);
-            let server = McpServer {
-                id: row.id,
-                name: row.name,
-                server: serde_json::from_str(&row.server_config).unwrap_or_default(),
-                apps,
-                description: row.description,
-                homepage: row.homepage,
-                docs: row.docs,
-                tags: serde_json::from_str(&row.tags).unwrap_or_default(),
-            };
+            let server = Self::mcp_server_from_shared_row(row);
             let id = server.id.clone();
             servers.insert(id, server);
         }
         Ok(servers)
+    }
+
+    pub(crate) fn mcp_server_from_shared_row(row: SharedMcpServerRow) -> McpServer {
+        let apps = apps_from_shared_row(&row);
+        McpServer {
+            id: row.id,
+            name: row.name,
+            server: serde_json::from_str(&row.server_config).unwrap_or_default(),
+            apps,
+            description: row.description,
+            homepage: row.homepage,
+            docs: row.docs,
+            tags: serde_json::from_str(&row.tags).unwrap_or_default(),
+        }
     }
 
     /// 保存 MCP 服务器

@@ -7,6 +7,7 @@ use crate::store::AppState;
 
 #[cfg(test)]
 mod consumer_tests;
+mod gemini_toggle;
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
 pub struct McpService;
@@ -105,6 +106,9 @@ impl McpService {
         app: AppType,
         enabled: bool,
     ) -> Result<(), AppError> {
+        if matches!(app, AppType::Gemini) {
+            return Self::toggle_gemini_coordinated(state, server_id, enabled);
+        }
         let server = {
             let mut cfg = state.config.write()?;
 

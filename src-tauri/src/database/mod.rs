@@ -855,6 +855,7 @@ impl Database {
     fn ensure_shared_core_catalog_schemas_on_conn(conn: &mut Connection) -> Result<(), AppError> {
         cc_switch_store::ensure_mcp_server_schema(conn)
             .map_err(|error| AppError::Database(error.to_string()))?;
+        cc_switch_store::ensure_mcp_native_link_schema(conn).map_err(shared_store_error)?;
         let pi_backfill_initialized = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",

@@ -882,7 +882,7 @@ fn gemini_switch_keeps_native_receipts_through_snapshot_persistence() {
 }
 
 #[test]
-fn gemini_mcp_service_does_not_retain_state_guard_during_native_publication() {
+fn legacy_gemini_mcp_services_do_not_retain_state_guard_during_native_publication() {
     use crate::gemini_config::operation::with_hook;
     let temp = TempDir::new().unwrap();
     let _guard = TestEnvGuard::isolated(temp.path());
@@ -901,7 +901,6 @@ fn gemini_mcp_service_does_not_retain_state_guard_during_native_publication() {
         }),
         || {
             McpService::upsert_server(&state, server).unwrap();
-            McpService::toggle_app(&state, "fixture-0", AppType::Gemini, true).unwrap();
             McpService::sync_all_enabled(&state).unwrap();
         },
     );

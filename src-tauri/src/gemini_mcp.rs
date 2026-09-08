@@ -112,11 +112,56 @@ pub(crate) fn update_with_operation(
     publish_servers(operation, root, &servers)
 }
 
+/// Uses the same document observation for the shared snapshot and publication.
+/// Existing entry codecs, catalog-wrapper handling and metadata filtering stay
+/// host-owned. A removed entry may restore its Core snapshot on activation.
+pub(crate) fn toggle_with_operation(
+    operation: &mut GeminiOperation,
+    id: &str,
+    server: &Value,
+    enabled: bool,
+    previous_snapshot: Option<&cc_switch_core::McpNativeSnapshot>,
+) -> Result<Option<cc_switch_core::McpNativeSnapshot>, AppError> {
+    let root = parse_json_value(operation.settings_path(), operation.contents())?;
+    let mut servers = decode_servers(&root)?;
+    let entry = root.get("mcpServers").and_then(|servers| servers.get(id));
+    let restore = enabled && entry.is_none();
+    let snapshot = if enabled {
+        servers.insert(id.to_owned(), server.clone());
+        None
+    } else {
+        let snapshot = match entry.filter(|entry| entry.is_object()) {
+            Some(entry) => Some(
+                McpConfigTarget::Gemini
+                    .capture_native_entry(&entry.to_string())
+                    .map_err(|error| AppError::McpValidation(error.to_string()))?,
+            ),
+            None => previous_snapshot.cloned(),
+        };
+        servers.remove(id);
+        snapshot
+    };
+    let restore = previous_snapshot
+        .filter(|_| restore)
+        .map(|snapshot| (id, snapshot));
+    let projected = project_servers(root, &servers, restore)?;
+    publish_document(operation, &projected)?;
+    Ok(snapshot)
+}
+
 fn publish_servers(
     operation: &mut GeminiOperation,
-    mut root: Value,
+    root: Value,
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
+    publish_document(operation, &project_servers(root, servers, None)?)
+}
+
+fn project_servers(
+    mut root: Value,
+    servers: &std::collections::HashMap<String, Value>,
+    restore: Option<(&str, &cc_switch_core::McpNativeSnapshot)>,
+) -> Result<Value, AppError> {
     // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
     let mut out: Map<String, Value> = Map::new();
     for (id, spec) in servers.iter() {
@@ -133,26 +178,36 @@ fn publish_servers(
         } else {
             spec
         };
-        let native = McpConfigTarget::Gemini
-            .encode_server_with_policy(server, McpEntryEncodePolicy::PreserveFields)
-            .map_err(|error| AppError::McpValidation(error.to_string()))?;
-        let Value::Object(mut obj) = native else {
-            return Err(AppError::McpValidation(
-                "Gemini MCP entry codec did not return an object".into(),
-            ));
+        let native = if let Some((_, snapshot)) = restore.filter(|(target, _)| *target == id) {
+            let mut catalog = server
+                .as_object()
+                .expect("validated catalog MCP entry")
+                .clone();
+            // Filter catalog metadata before restoration. Native snapshot
+            // extensions are not catalog wrappers or UI metadata.
+            remove_catalog_metadata(&mut catalog);
+            let restored = McpConfigTarget::Gemini
+                .restore_native_entry_with_policy(
+                    snapshot,
+                    &Value::Object(catalog),
+                    McpEntryEncodePolicy::PreserveFields,
+                )
+                .map_err(|error| AppError::McpValidation(error.to_string()))?;
+            serde_json::from_str(&restored)
+                .map_err(|error| AppError::json(user_config_path(), error))?
+        } else {
+            let native = McpConfigTarget::Gemini
+                .encode_server_with_policy(server, McpEntryEncodePolicy::PreserveFields)
+                .map_err(|error| AppError::McpValidation(error.to_string()))?;
+            let Value::Object(mut obj) = native else {
+                return Err(AppError::McpValidation(
+                    "Gemini MCP entry codec did not return an object".into(),
+                ));
+            };
+            remove_catalog_metadata(&mut obj);
+            Value::Object(obj)
         };
-
-        // Catalog metadata stays host-owned; Core preserves unconsumed fields.
-        obj.remove("enabled");
-        obj.remove("source");
-        obj.remove("id");
-        obj.remove("name");
-        obj.remove("description");
-        obj.remove("tags");
-        obj.remove("homepage");
-        obj.remove("docs");
-
-        out.insert(id.clone(), Value::Object(obj));
+        out.insert(id.clone(), native);
     }
 
     {
@@ -162,7 +217,22 @@ fn publish_servers(
         obj.insert("mcpServers".into(), Value::Object(out));
     }
 
+    Ok(root)
+}
+
+fn remove_catalog_metadata(obj: &mut Map<String, Value>) {
+    obj.remove("enabled");
+    obj.remove("source");
+    obj.remove("id");
+    obj.remove("name");
+    obj.remove("description");
+    obj.remove("tags");
+    obj.remove("homepage");
+    obj.remove("docs");
+}
+
+fn publish_document(operation: &mut GeminiOperation, root: &Value) -> Result<(), AppError> {
     let json =
-        serde_json::to_string_pretty(&root).map_err(|e| AppError::JsonSerialize { source: e })?;
+        serde_json::to_string_pretty(root).map_err(|e| AppError::JsonSerialize { source: e })?;
     operation.write_settings(json)
 }

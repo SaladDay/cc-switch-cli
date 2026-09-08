@@ -12,21 +12,25 @@ use serde_json::{json, Value};
 use super::*;
 use crate::{database::Database, test_support::TestEnvGuard};
 
-struct LitePeer(Child);
+pub(super) struct LitePeer(Child);
 
 impl LitePeer {
     fn create_mcp(home: &Path) {
+        Self::run(
+            home,
+            "consumer_coordination::create_mcp_in_cli_fixture",
+            "unused",
+        );
+    }
+
+    pub(super) fn run(home: &Path, test: &str, mode: &str) {
         let binary = std::env::var_os("CC_SWITCH_LITE_TEST_BINARY")
             .expect("set CC_SWITCH_LITE_TEST_BINARY to the built Lite library test binary");
         let mut peer = Self(
             Command::new(binary)
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "consumer_coordination::create_mcp_in_cli_fixture",
-                    "--test-threads=1",
-                ])
+                .args(["--ignored", "--exact", test, "--test-threads=1"])
                 .env("CC_SWITCH_COORDINATION_HOME", home)
+                .env("CC_SWITCH_COORDINATION_MODE", mode)
                 .stdin(Stdio::null())
                 .spawn()
                 .unwrap(),
@@ -41,6 +45,52 @@ impl LitePeer {
             thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+#[test]
+#[ignore = "requires the independently built Lite library test binary"]
+fn gemini_mcp_snapshots_round_trip_between_real_consumers() {
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = TestEnvGuard::isolated(temp.path());
+    let settings = crate::gemini_config::get_gemini_settings_path();
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let entry =
+        json!({"command":"not-executed-cli-target", "timeout":123456, "trust":"native-only"});
+    fs::write(
+        &settings,
+        json!({"mcpServers":{"cli-target":entry}, "fixture":true}).to_string(),
+    )
+    .unwrap();
+    let db = Arc::new(Database::init().unwrap());
+    db.save_mcp_server(&McpServer {
+        id: "cli-target".into(),
+        name: "CLI target fixture".into(),
+        server: json!({"command":"not-executed-cli-target"}),
+        apps: McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: vec![],
+    })
+    .unwrap();
+    fs::write(temp.path().join("coordination-fixture"), "cli-lite-v1").unwrap();
+    let state = AppState::new(db);
+    let peer_test = "consumer_coordination::toggle_mcp_in_cli_fixture";
+    LitePeer::run(temp.path(), peer_test, "enable");
+    McpService::toggle_app(&state, "cli-target", AppType::Gemini, false).unwrap();
+    LitePeer::run(temp.path(), peer_test, "enable");
+    let actual: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(actual["mcpServers"]["cli-target"], entry);
+    LitePeer::run(temp.path(), peer_test, "disable");
+    McpService::toggle_app(&state, "cli-target", AppType::Gemini, true).unwrap();
+    let actual: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(actual["mcpServers"]["cli-target"], entry);
+    assert_eq!(actual["fixture"], true);
+    assert!(
+        state.db.get_all_mcp_servers().unwrap()["cli-target"]
+            .apps
+            .gemini
+    );
 }
 
 impl Drop for LitePeer {
