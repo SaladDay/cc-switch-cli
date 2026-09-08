@@ -485,3 +485,49 @@ orders. Ordinary CLI MCP tests pass (175), as do the database-filtered tests
 (153, with overlap), Lite library tests (121), formatting and locked all-target
 Clippy. CLI Clippy retains pre-existing warnings and the previously documented
 allowance for unrelated `reversed_empty_ranges`; none comes from this diff.
+
+### CLI toggle adoption
+
+The next migration has three gates, each with local validation and fresh double
+blind review:
+
+1. Record actual CLI enablement and shared-catalog outcomes using real Lite
+   services. This gate adds tests only; failing assertions remain requirements,
+   not accepted compatibility behavior.
+2. Move the affected single-App toggles onto shared Core native projection and
+   guarded Store writes. Update only the requested server/App, preserve native
+   siblings and unrelated catalog rows, and retain host parsing/path policies.
+   Do not replace the global snapshot save or migrate upsert/delete/set-apps here.
+3. Verify failure recovery, native contention and alternating CLI/Lite mutations
+   for the migrated paths. Keep database and native-file protections through
+   recovery, and remove replaced duplicate logic only within those paths.
+
+Run the opt-in baseline with the independently built CLI and Lite library test
+binaries and isolated environment described above:
+
+```sh
+cargo test --locked --lib \
+  services::mcp::consumer_tests::imports::native::cli_toggle \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+Six cases start with disabled Codex/OpenCode/Hermes entries and import through
+either CLI or Lite, then load a current CLI catalog and request CLI enable twice.
+They check the actual native command and enabled flag, not only the database flag.
+Five further cases let Lite commit a new MCP row after CLI has loaded its catalog,
+then repeat CLI enable for Claude/Codex/Gemini/OpenCode/Hermes. The complete newer
+Lite row must survive. Both families check root settings and a distinct native
+sibling exactly. These stdio cases do not claim simultaneous writer safety,
+HTTP coverage, preservation of every field on the edited native entry, or
+compatibility for other workflows. No production, UI, schema, provider, Skill,
+proxy or full-product changes belong to the baseline gate.
+
+On CLI `8a53cf4543651f4b324b440078281756bfad34e1` (Core/Store `637b06df`)
+and unchanged Lite `4d0a77b3a7c675ef00cb84218d2cd1ae5120cde4` (Core/Store
+`7b7cfae5`), plus these tests, 3 cases pass and 8 fail. Codex activation after
+CLI import and both Hermes activation cases leave the native entry disabled.
+The four non-Gemini toggles delete the newer Lite row. Gemini retains that row
+but adds `timeout: 60000` to the unrelated native sibling. These failures show
+why updating only the catalog flag is insufficient: the migration must restrict
+both catalog writes and native document changes to the requested operation.
+The existing 31 peer tests and ordinary suites do not cover these failures.

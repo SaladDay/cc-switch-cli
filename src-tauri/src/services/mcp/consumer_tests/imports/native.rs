@@ -1,5 +1,7 @@
 use super::*;
 
+mod cli_toggle;
+
 fn map_key(app: &AppType) -> &'static str {
     match app {
         AppType::Claude | AppType::Gemini => "mcpServers",
