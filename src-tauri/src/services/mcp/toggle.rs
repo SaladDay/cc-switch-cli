@@ -19,12 +19,23 @@ pub(super) trait NativeToggle {
         previous_snapshot: Option<&McpNativeSnapshot>,
     ) -> Result<Option<McpNativeSnapshot>, AppError>;
 
+    /// Refresh an enabled catalog entry without forcing host-native activation.
+    fn sync(
+        &mut self,
+        id: &str,
+        server: &serde_json::Value,
+        previous_snapshot: Option<&McpNativeSnapshot>,
+    ) -> Result<Option<McpNativeSnapshot>, AppError> {
+        self.apply(id, server, true, previous_snapshot)
+    }
+
     fn rollback(&mut self) -> Result<(), AppError>;
 }
 
 enum CatalogMutation {
     Select(Vec<(AppType, bool)>),
     Delete,
+    Upsert(McpServer),
 }
 
 impl McpService {
@@ -40,6 +51,11 @@ impl McpService {
         Self::mutate_coordinated(state, id, |_| CatalogMutation::Delete)
     }
 
+    pub(super) fn upsert_coordinated(state: &AppState, server: McpServer) -> Result<(), AppError> {
+        let id = server.id.clone();
+        Self::mutate_coordinated(state, &id, |_| CatalogMutation::Upsert(server)).map(|_| ())
+    }
+
     fn mutate_coordinated(
         state: &AppState,
         id: &str,
@@ -52,24 +68,47 @@ impl McpService {
         let _shared_lock;
         let mut transaction =
             McpTransactionGuard::begin(&mut connection).map_err(shared_store_error)?;
-        let Some(row) = transaction.read_server(id).map_err(shared_store_error)? else {
+        let row = transaction.read_server(id).map_err(shared_store_error)?;
+        let current = row.clone().map(Database::mcp_server_from_shared_row);
+        let before = current
+            .as_ref()
+            .map(|server| &server.apps)
+            .cloned()
+            .unwrap_or_default();
+        let mutation = mutation(&before);
+        if row.is_none() && !matches!(mutation, CatalogMutation::Upsert(_)) {
             transaction.commit().map_err(shared_store_error)?;
             if let Some(servers) = config.mcp.servers.as_mut() {
                 servers.remove(id);
             }
             return Ok(false);
-        };
-        let mut fingerprint = *row.source_fingerprint();
-        let mut server = Database::mcp_server_from_shared_row(row);
-        let (delete, selections) = match mutation(&server.apps) {
-            CatalogMutation::Select(selections) => (false, selections),
-            CatalogMutation::Delete => (
-                true,
-                Self::supported_mcp_apps()
+        }
+        let mut fingerprint = row.as_ref().map(|row| *row.source_fingerprint());
+        let delete = matches!(mutation, CatalogMutation::Delete);
+        let upsert = matches!(mutation, CatalogMutation::Upsert(_));
+        let (mut server, selections) = match mutation {
+            CatalogMutation::Upsert(server) => {
+                // Preserve removal-before-sync order. Unchanged enabled Apps
+                // still receive edits; unchanged disabled Apps are untouched.
+                let removals = Self::supported_mcp_apps()
+                    .filter(|app| before.is_enabled_for(app) && !server.apps.is_enabled_for(app))
+                    .map(|app| (app, false));
+                let updates = Self::supported_mcp_apps()
                     .filter(|app| server.apps.is_enabled_for(app))
+                    .map(|app| (app, true));
+                let selections = removals.chain(updates).collect::<Vec<_>>();
+                (server, selections)
+            }
+            CatalogMutation::Select(selections) => {
+                (current.expect("existing selection target"), selections)
+            }
+            CatalogMutation::Delete => {
+                let selections = Self::supported_mcp_apps()
+                    .filter(|app| before.is_enabled_for(app))
                     .map(|app| (app, false))
-                    .collect(),
-            ),
+                    .collect();
+                (current.expect("existing deletion target"), selections)
+            }
         };
         // Decide initialization before any write can create another App's directory.
         let selections: Vec<_> = selections
@@ -96,6 +135,18 @@ impl McpService {
         };
         let mut native: Vec<(AppType, Box<dyn NativeToggle>)> = Vec::new();
         let result = (|| {
+            if upsert {
+                let config = serde_json::to_string(&server.server)
+                    .map_err(|source| AppError::JsonSerialize { source })?;
+                let tags = serde_json::to_string(&server.tags)
+                    .map_err(|source| AppError::JsonSerialize { source })?;
+                let values = Database::mcp_catalog_values(&server, &config, &tags, row.as_ref());
+                match fingerprint.as_ref() {
+                    Some(fingerprint) => transaction.update_server_catalog(fingerprint, &values),
+                    None => transaction.insert_server_catalog(&values),
+                }
+                .map_err(shared_store_error)?;
+            }
             for (app, enabled, live) in selections {
                 let core_app = app.as_core();
                 let column = builtin_app_registry()
@@ -105,7 +156,8 @@ impl McpService {
                     .catalog_column();
                 // Deletion owns the row and its cascading links. A stale or
                 // future snapshot is not input to native entry removal.
-                let link = if delete {
+                // Catalog-only edits also leave opaque snapshots untouched.
+                let link = if delete || (upsert && !live) {
                     None
                 } else {
                     transaction
@@ -125,8 +177,11 @@ impl McpService {
                     let operation = observe_native(&app)?;
                     native.push((app.clone(), operation));
                     let operation = &mut native.last_mut().expect("inserted operation").1;
-                    let snapshot =
-                        operation.apply(id, &server.server, enabled, previous_snapshot.as_ref())?;
+                    let snapshot = if upsert && enabled {
+                        operation.sync(id, &server.server, previous_snapshot.as_ref())?
+                    } else {
+                        operation.apply(id, &server.server, enabled, previous_snapshot.as_ref())?
+                    };
                     if !delete && (enabled || link.is_some() || snapshot.is_some()) {
                         let snapshot = snapshot
                             .as_ref()
@@ -138,23 +193,30 @@ impl McpService {
                             .map_err(shared_store_error)?;
                     }
                 }
-                if !delete {
+                if !delete && !upsert {
                     transaction
-                        .set_server_selection(id, &fingerprint, column, enabled)
+                        .set_server_selection(
+                            id,
+                            fingerprint.as_ref().expect("existing selection target"),
+                            column,
+                            enabled,
+                        )
                         .map_err(shared_store_error)?;
-                    fingerprint = *transaction
-                        .read_server(id)
-                        .map_err(shared_store_error)?
-                        .ok_or_else(|| {
-                            AppError::Database("MCP selection target disappeared".into())
-                        })?
-                        .source_fingerprint();
+                    fingerprint = Some(
+                        *transaction
+                            .read_server(id)
+                            .map_err(shared_store_error)?
+                            .ok_or_else(|| {
+                                AppError::Database("MCP selection target disappeared".into())
+                            })?
+                            .source_fingerprint(),
+                    );
                     server.apps.set_enabled_for(&app, enabled);
                 }
             }
             if delete {
                 transaction
-                    .delete_server(id, &fingerprint)
+                    .delete_server(id, fingerprint.as_ref().expect("existing deletion target"))
                     .map_err(shared_store_error)?;
             }
             Ok(())
@@ -178,7 +240,13 @@ impl McpService {
                 failures.push(format!("database rollback: {error}"));
             }
             if !failures.is_empty() {
-                let action = if delete { "deletion" } else { "toggle" };
+                let action = if delete {
+                    "deletion"
+                } else if upsert {
+                    "upsert"
+                } else {
+                    "toggle"
+                };
                 return Err(AppError::Config(format!(
                     "MCP {action} failed: {error}; {}",
                     failures.join("; ")

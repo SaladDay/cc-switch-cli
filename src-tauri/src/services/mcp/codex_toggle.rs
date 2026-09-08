@@ -24,15 +24,13 @@ impl CodexToggle {
             _guard: guard,
         })
     }
-}
-
-impl NativeToggle for CodexToggle {
-    fn apply(
+    fn write_entry(
         &mut self,
         id: &str,
         server: &serde_json::Value,
         enabled: bool,
         previous_snapshot: Option<&McpNativeSnapshot>,
+        activate: bool,
     ) -> Result<Option<McpNativeSnapshot>, AppError> {
         // Codex has no removable-entry snapshot contract. Do not discard a
         // stored payload that this host cannot interpret.
@@ -71,9 +69,11 @@ impl NativeToggle for CodexToggle {
             let mut entry = json_server_to_codex_entry(server)?;
             // Selection owns this flag even when an imported catalog entry
             // contains an older native value. Other conversion rules stay put.
-            entry
-                .insert_native_value("enabled", "true")
-                .map_err(|error| AppError::McpValidation(error.to_string()))?;
+            if activate {
+                entry
+                    .insert_native_value("enabled", "true")
+                    .map_err(|error| AppError::McpValidation(error.to_string()))?;
+            }
             // Only migrate this ID; the old whole-section cleanup also removed
             // unrelated legacy entries during a single-server enable.
             document.remove_server(id);
@@ -88,6 +88,27 @@ impl NativeToggle for CodexToggle {
         }
         self.file.publish(&document.render())?;
         Ok(None)
+    }
+}
+
+impl NativeToggle for CodexToggle {
+    fn apply(
+        &mut self,
+        id: &str,
+        server: &serde_json::Value,
+        enabled: bool,
+        previous_snapshot: Option<&McpNativeSnapshot>,
+    ) -> Result<Option<McpNativeSnapshot>, AppError> {
+        self.write_entry(id, server, enabled, previous_snapshot, true)
+    }
+
+    fn sync(
+        &mut self,
+        id: &str,
+        server: &serde_json::Value,
+        previous_snapshot: Option<&McpNativeSnapshot>,
+    ) -> Result<Option<McpNativeSnapshot>, AppError> {
+        self.write_entry(id, server, true, previous_snapshot, false)
     }
 
     fn rollback(&mut self) -> Result<(), AppError> {

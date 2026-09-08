@@ -30,33 +30,33 @@ fn apps_from_shared_row(row: &SharedMcpServerRow) -> McpApps {
     apps
 }
 
-fn catalog_values<'a>(
-    server: &'a McpServer,
-    server_config: &'a str,
-    tags: &'a str,
-    current: Option<&SharedMcpServerRow>,
-) -> McpServerCatalogValues<'a> {
-    McpServerCatalogValues::new(
-        McpServerFields {
-            id: &server.id,
-            name: &server.name,
-            server_config,
-            description: server.description.as_deref(),
-            homepage: server.homepage.as_deref(),
-            docs: server.docs.as_deref(),
-            tags,
-        },
-        |core_app| {
-            AppType::all()
-                .find(|app| app.supports_mcp() && app.as_core() == *core_app)
-                .map(|app| server.apps.is_enabled_for(&app))
-                .or_else(|| current.and_then(|row| row.enabled_for(core_app)))
-                .unwrap_or(false)
-        },
-    )
-}
-
 impl Database {
+    pub(crate) fn mcp_catalog_values<'a>(
+        server: &'a McpServer,
+        server_config: &'a str,
+        tags: &'a str,
+        current: Option<&SharedMcpServerRow>,
+    ) -> McpServerCatalogValues<'a> {
+        McpServerCatalogValues::new(
+            McpServerFields {
+                id: &server.id,
+                name: &server.name,
+                server_config,
+                description: server.description.as_deref(),
+                homepage: server.homepage.as_deref(),
+                docs: server.docs.as_deref(),
+                tags,
+            },
+            |core_app| {
+                AppType::all()
+                    .find(|app| app.supports_mcp() && app.as_core() == *core_app)
+                    .map(|app| server.apps.is_enabled_for(&app))
+                    .or_else(|| current.and_then(|row| row.enabled_for(core_app)))
+                    .unwrap_or(false)
+            },
+        )
+    }
+
     /// 获取所有 MCP 服务器
     pub fn get_all_mcp_servers(&self) -> Result<IndexMap<String, McpServer>, AppError> {
         let conn = lock_conn!(self.conn);
@@ -102,7 +102,7 @@ impl Database {
             cc_switch_store::begin_immediate_transaction(&mut conn).map_err(shared_store_error)?;
         let current = cc_switch_store::read_mcp_server_row(&transaction, &server.id)
             .map_err(shared_store_error)?;
-        let values = catalog_values(server, &server_config, &tags, current.as_ref());
+        let values = Self::mcp_catalog_values(server, &server_config, &tags, current.as_ref());
         let outcome = match current.as_ref() {
             Some(row) => cc_switch_store::update_mcp_server_catalog_preserving_host_fields(
                 &mut transaction,

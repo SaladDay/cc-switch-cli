@@ -26,15 +26,13 @@ impl HermesToggle {
             _guard: guard,
         })
     }
-}
-
-impl NativeToggle for HermesToggle {
-    fn apply(
+    fn write_entry(
         &mut self,
         id: &str,
         server: &Value,
         enabled: bool,
         previous_snapshot: Option<&McpNativeSnapshot>,
+        activate: bool,
     ) -> Result<Option<McpNativeSnapshot>, AppError> {
         if previous_snapshot.is_some() {
             return Err(AppError::Database(
@@ -51,7 +49,7 @@ impl NativeToggle for HermesToggle {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
             })?;
-        let contents = prepare_toggle(raw, id, entry)?;
+        let contents = prepare_toggle(raw, id, entry, activate)?;
         if contents == raw {
             return Ok(None);
         }
@@ -63,13 +61,39 @@ impl NativeToggle for HermesToggle {
         self.file.publish(&contents)?;
         Ok(None)
     }
+}
+
+impl NativeToggle for HermesToggle {
+    fn apply(
+        &mut self,
+        id: &str,
+        server: &Value,
+        enabled: bool,
+        previous_snapshot: Option<&McpNativeSnapshot>,
+    ) -> Result<Option<McpNativeSnapshot>, AppError> {
+        self.write_entry(id, server, enabled, previous_snapshot, true)
+    }
+
+    fn sync(
+        &mut self,
+        id: &str,
+        server: &Value,
+        previous_snapshot: Option<&McpNativeSnapshot>,
+    ) -> Result<Option<McpNativeSnapshot>, AppError> {
+        self.write_entry(id, server, true, previous_snapshot, false)
+    }
 
     fn rollback(&mut self) -> Result<(), AppError> {
         self.file.rollback()
     }
 }
 
-fn prepare_toggle(raw: &str, id: &str, entry: Option<Value>) -> Result<String, AppError> {
+fn prepare_toggle(
+    raw: &str,
+    id: &str,
+    entry: Option<Value>,
+    activate: bool,
+) -> Result<String, AppError> {
     let mut root = hermes_config::parse_hermes_config(raw)?;
     let mut untagged = &mut root;
     while let Yaml::Tagged(tagged) = untagged {
@@ -96,7 +120,9 @@ fn prepare_toggle(raw: &str, id: &str, entry: Option<Value>) -> Result<String, A
             None => entry,
         };
         // Selection owns activation even when the native entry was disabled.
-        merged["enabled"] = Value::Bool(true);
+        if activate {
+            merged["enabled"] = Value::Bool(true);
+        }
         servers.insert(key, hermes_config::json_to_yaml(&merged)?);
     } else {
         servers.shift_remove(&key);

@@ -843,3 +843,55 @@ overlap). The two failing baselines now pass. Formatting and locked all-target
 Clippy pass with existing warnings and the unrelated `reversed_empty_ranges`
 allowance; none points at a changed source file. Windows, crash recovery and
 noncooperating-writer races were not validated locally.
+
+#### MCP catalog create and update
+
+`upsert_server` now saves only its requested row through the existing Store guard.
+The incoming fields and CLI-supported selection matrix replace that row's known
+values; fresh peer rows, host-owned columns, non-CLI selections and unrelated
+native links survive. The DAO's registry-driven value conversion is reused.
+No Core API, dependency pin, schema or Lite source change is required.
+
+Native work follows the current database row, not the caller's cached flags.
+Previously enabled Apps that are now disabled are removed first, then every
+incoming enabled App is refreshed, even when its flag did not change. Each group
+retains the host's App order. Unchanged disabled Apps are untouched. Initialization
+is decided before publication; uninitialized Apps only receive catalog changes
+and retain opaque native snapshots without interpreting them.
+
+Create/update, selection and deletion share the same transaction, filesystem lock
+and retained native recovery. Catalog insertion/update precedes native-link writes
+inside the uncommitted transaction. Native observation remains sequential for
+aliased paths. Any later failure attempts reverse-order native recovery before
+database rollback; only commit publishes the target cache row. Other cache rows
+are not refreshed or saved. Unknown snapshots needed for a native write fail safely.
+
+Editing retains the existing per-App conversion and activation policies. Codex's
+incoming native `enabled` value and Hermes's merge-preserved native activation are
+not forced on by an edit; explicit selection still activates them. Claude/Gemini
+removal snapshots exchange with Lite and restore native extensions using current
+catalog connection fields. Native siblings are not rebuilt or cleaned as part of
+a target edit. Existing Hermes safe-YAML checks and recovery backups remain in use.
+
+Two tests fail on CLI `be0d54bb` before adoption: whole-cache persistence removes a
+new peer, and a later native failure leaves the catalog already changed. Acceptance
+covers create/update across all 32 supported matrices, repeated edits, fresh flags,
+metadata, unknown columns, uninitialized Apps, opaque snapshots, conversion parity,
+catalog/link/verification/commit failures, lock retention, retry, uncertain writes,
+external recovery conflicts, shared destinations and cross-App links. Real Lite
+tests exchange snapshots and check peer preservation and writer exclusion through
+commit and recovery. All fixtures use isolated directories and synthetic credentials.
+
+Whole-map MCP sync, remaining provider/Skill workflows, UI, proxy and full-product
+adoption remain separate. This is cooperative compensation, not crash-proof
+filesystem/SQLite atomicity. Uncooperative writers can race comparison/replacement;
+parent directories and host recovery backups may remain after failure. Unsupported
+Apps do not acquire new native writers. CLI stays on its migration branch.
+
+Local acceptance passes 250 ordinary MCP-related tests, 55 real-consumer MCP
+tests, 14 MCP command tests, 11 Gemini operation tests, 190 config tests, 139
+database tests, 3 real Gemini provider tests and 121 Lite tests (some suites
+overlap). Formatting and
+locked all-target Clippy pass with existing warnings and the unrelated
+`reversed_empty_ranges` allowance; none points at a changed source file. Windows,
+crash recovery and noncooperating-writer races were not run locally.

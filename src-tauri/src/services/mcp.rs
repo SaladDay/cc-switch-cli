@@ -23,6 +23,8 @@ mod selection_tests;
 #[cfg(test)]
 mod test_fixture;
 mod toggle;
+#[cfg(test)]
+mod upsert_tests;
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
 pub struct McpService;
@@ -54,41 +56,7 @@ impl McpService {
 
     /// 添加或更新 MCP 服务器
     pub fn upsert_server(state: &AppState, server: McpServer) -> Result<(), AppError> {
-        let (server_id, apps_to_remove) = {
-            let mut cfg = state.config.write()?;
-
-            let servers = cfg.mcp.servers.get_or_insert_with(HashMap::new);
-            let server_id = server.id.clone();
-
-            let apps_to_remove = servers
-                .get(&server_id)
-                .map(|existing| {
-                    existing
-                        .apps
-                        .enabled_apps()
-                        .into_iter()
-                        .filter(|app| !server.apps.is_enabled_for(app))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            // 插入或更新
-            servers.insert(server_id.clone(), server.clone());
-
-            (server_id, apps_to_remove)
-        };
-
-        state.save()?;
-
-        // 如果是更新：对“由启用变为禁用”的应用，清理对应 live 配置
-        for app in apps_to_remove {
-            Self::remove_server_from_app(state, &server_id, &app)?;
-        }
-
-        // 同步到各个启用的应用
-        Self::sync_server_to_apps(state, &server)?;
-
-        Ok(())
+        Self::upsert_coordinated(state, server)
     }
 
     /// 删除 MCP 服务器
@@ -149,17 +117,6 @@ impl McpService {
                 })
                 .collect()
         })
-    }
-
-    /// 将 MCP 服务器同步到所有启用的应用
-    fn sync_server_to_apps(state: &AppState, server: &McpServer) -> Result<(), AppError> {
-        drop(state.config.read()?);
-
-        for app in server.apps.enabled_apps() {
-            Self::sync_server_to_app(state, server, &app)?;
-        }
-
-        Ok(())
     }
 
     /// 将 MCP 服务器同步到指定应用
