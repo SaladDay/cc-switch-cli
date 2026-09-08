@@ -5,6 +5,7 @@ use crate::error::AppError;
 use crate::mcp;
 use crate::store::AppState;
 
+mod claude_toggle;
 mod codex_toggle;
 #[cfg(test)]
 mod consumer_tests;
@@ -114,6 +115,15 @@ impl McpService {
         app: AppType,
         enabled: bool,
     ) -> Result<(), AppError> {
+        if matches!(app, AppType::Claude) {
+            return Self::toggle_coordinated(
+                state,
+                server_id,
+                app,
+                enabled,
+                claude_toggle::ClaudeToggle::observe,
+            );
+        }
         if matches!(app, AppType::Gemini) {
             return Self::toggle_gemini_coordinated(state, server_id, enabled);
         }

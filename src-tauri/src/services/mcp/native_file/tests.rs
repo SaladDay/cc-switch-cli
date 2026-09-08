@@ -5,7 +5,8 @@ mod links {
     use super::super::*;
     use crate::test_support::TestEnvGuard;
 
-    const TARGETS: [McpConfigTarget; 3] = [
+    const TARGETS: [McpConfigTarget; 4] = [
+        McpConfigTarget::Claude,
         McpConfigTarget::Codex,
         McpConfigTarget::OpenCode,
         McpConfigTarget::Hermes,
@@ -17,6 +18,47 @@ mod links {
             .file_name()
             .to_string_lossy()
             .starts_with(".cc-switch-mcp-recovery-")));
+    }
+
+    #[test]
+    fn creation_permissions_respect_existing_files_and_managed_privacy() {
+        for target in TARGETS {
+            for managed in [false, true] {
+                for existing in [false, true] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let _env = TestEnvGuard::isolated(temp.path());
+                    let path = temp.path().join(if managed {
+                        ".cc-switch/fixture.json"
+                    } else {
+                        "fixture.json"
+                    });
+                    if existing {
+                        fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        fs::write(&path, "old").unwrap();
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+                    }
+                    let mut file = NativeFile::observe(target, &path).unwrap();
+                    file.set_creation_permissions(fs::Permissions::from_mode(0o444))
+                        .unwrap();
+                    file.publish("new").unwrap();
+                    assert_eq!(
+                        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                        if managed {
+                            0o600
+                        } else if existing {
+                            0o640
+                        } else {
+                            0o444
+                        }
+                    );
+                    file.rollback().unwrap();
+                    assert_eq!(
+                        fs::read_to_string(&path).ok().as_deref(),
+                        existing.then_some("old")
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -141,3 +141,36 @@ acceptance_case!(
     hermes_keeps_lite_peer,
     retains_lite_peer(AppType::Hermes, McpService::import_from_hermes)
 );
+
+acceptance_case!(claude_snapshots_round_trip_between_real_consumers, {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = TestEnvGuard::isolated(temp.path());
+    let app = AppType::Claude;
+    let (path, native) = write_fixture(&app, temp.path(), false);
+    let state = AppState::new(Arc::new(Database::init().unwrap()));
+    McpService::import_from_claude(&state).unwrap();
+    let mut expected = document(&app, native.as_bytes());
+    // These are native extensions, not catalog metadata or a legacy wrapper.
+    expected["mcpServers"]["cli-import"]["server"] = json!({"extension":true});
+    expected["mcpServers"]["cli-import"]["name"] = json!("native-only");
+    fs::write(&path, expected.to_string()).unwrap();
+    for cli_disables in [true, false] {
+        if cli_disables {
+            McpService::toggle_app(&state, "cli-import", app.clone(), false).unwrap();
+            peer(temp.path(), &app, "enable");
+        } else {
+            peer(temp.path(), &app, "disable");
+            McpService::toggle_app(&state, "cli-import", app.clone(), true).unwrap();
+        }
+        assert_eq!(document(&app, &fs::read(&path).unwrap()), expected);
+        assert!(cc_switch_store::read_mcp_native_link(
+            &state.db.conn.lock().unwrap(),
+            "cli-import",
+            "claude"
+        )
+        .unwrap()
+        .unwrap()
+        .native_snapshot
+        .is_none());
+    }
+});

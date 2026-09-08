@@ -320,31 +320,7 @@ pub fn set_mcp_servers_map(
     // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
     let mut out: Map<String, Value> = Map::new();
     for (id, spec) in servers.iter() {
-        let mut obj = if let Some(map) = spec.as_object() {
-            map.clone()
-        } else {
-            return Err(AppError::McpValidation(format!(
-                "MCP 服务器 '{id}' 不是对象"
-            )));
-        };
-
-        if let Some(server_val) = obj.remove("server") {
-            let server_obj = server_val.as_object().cloned().ok_or_else(|| {
-                AppError::McpValidation(format!("MCP 服务器 '{id}' server 字段不是对象"))
-            })?;
-            obj = server_obj;
-        }
-
-        obj.remove("enabled");
-        obj.remove("source");
-        obj.remove("id");
-        obj.remove("name");
-        obj.remove("description");
-        obj.remove("tags");
-        obj.remove("homepage");
-        obj.remove("docs");
-
-        out.insert(id.clone(), Value::Object(obj));
+        out.insert(id.clone(), project_server(id, spec)?);
     }
 
     {
@@ -356,4 +332,30 @@ pub fn set_mcp_servers_map(
 
     write_json_value(&path, &root)?;
     Ok(())
+}
+
+/// Select one legacy wrapper and strip catalog-only fields before native encoding.
+pub(crate) fn project_server(id: &str, spec: &Value) -> Result<Value, AppError> {
+    let mut obj = spec
+        .as_object()
+        .cloned()
+        .ok_or_else(|| AppError::McpValidation(format!("MCP 服务器 '{id}' 不是对象")))?;
+    if let Some(server_val) = obj.remove("server") {
+        obj = server_val.as_object().cloned().ok_or_else(|| {
+            AppError::McpValidation(format!("MCP 服务器 '{id}' server 字段不是对象"))
+        })?;
+    }
+    for field in [
+        "enabled",
+        "source",
+        "id",
+        "name",
+        "description",
+        "tags",
+        "homepage",
+        "docs",
+    ] {
+        obj.remove(field);
+    }
+    Ok(Value::Object(obj))
 }

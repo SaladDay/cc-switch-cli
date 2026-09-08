@@ -329,7 +329,7 @@ fn atomic_write_with_privacy(
     force_private: bool,
 ) -> Result<(), AppError> {
     let target = prepare_config_write(path, force_private)?;
-    write_prepared_config(&target.path, data, target.restrict_file)
+    write_prepared_config(&target.path, data, target.restrict_file, None)
 }
 
 /// A resolved write entry with the original path's permission policy.
@@ -337,6 +337,7 @@ fn atomic_write_with_privacy(
 pub(crate) struct ConfigWriteTarget {
     path: PathBuf,
     restrict_file: bool,
+    creation_permissions: Option<fs::Permissions>,
 }
 
 impl PartialEq for ConfigWriteTarget {
@@ -352,10 +353,36 @@ impl ConfigWriteTarget {
         &self.path
     }
 
+    /// Inherit a migration source's permissions only when creating a new file.
+    pub(crate) fn set_creation_permissions(
+        &mut self,
+        permissions: fs::Permissions,
+    ) -> Result<(), AppError> {
+        // A copied read-only file cannot be replaced on Windows. Reject before
+        // publication rather than leave a destination that recovery cannot delete.
+        #[cfg(windows)]
+        if permissions.readonly() {
+            return Err(AppError::io(
+                &self.path,
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Read-only migration source",
+                ),
+            ));
+        }
+        self.creation_permissions = Some(permissions);
+        Ok(())
+    }
+
     pub(crate) fn write(&self, data: &[u8]) -> Result<(), AppError> {
         #[cfg(not(windows))]
         {
-            write_prepared_config(&self.path, data, self.restrict_file)
+            write_prepared_config(
+                &self.path,
+                data,
+                self.restrict_file,
+                self.creation_permissions.as_ref(),
+            )
         }
 
         // Conditional recovery needs replacement to either retain the old
@@ -419,6 +446,7 @@ fn prepare_config_write(path: &Path, force_private: bool) -> Result<ConfigWriteT
     Ok(ConfigWriteTarget {
         path: write_path,
         restrict_file: should_restrict_file,
+        creation_permissions: None,
     })
 }
 
@@ -426,6 +454,7 @@ fn write_prepared_config(
     write_path: &Path,
     data: &[u8],
     should_restrict_file: bool,
+    creation_permissions: Option<&fs::Permissions>,
 ) -> Result<(), AppError> {
     let parent = write_path
         .parent()
@@ -444,7 +473,7 @@ fn write_prepared_config(
 
     {
         #[cfg(unix)]
-        let mut f = if should_restrict_file {
+        let mut f = if should_restrict_file || creation_permissions.is_some() {
             use std::os::unix::fs::OpenOptionsExt;
             fs::OpenOptions::new()
                 .write(true)
@@ -471,8 +500,13 @@ fn write_prepared_config(
         } else if let Ok(meta) = fs::metadata(write_path) {
             let perm = meta.permissions().mode();
             let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
+        } else if let Some(permissions) = creation_permissions {
+            fs::set_permissions(&tmp, permissions.clone()).map_err(|e| AppError::io(&tmp, e))?;
         }
     }
+
+    #[cfg(not(unix))]
+    let _ = creation_permissions;
 
     #[cfg(windows)]
     {

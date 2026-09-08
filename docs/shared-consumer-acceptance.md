@@ -688,3 +688,51 @@ changed source file. Windows was not run locally. The real toggle baseline is
 now 10 passing and 1 failing: all three Hermes cases pass, while Claude's stale
 peer-row loss remains. This advances Hermes's part of gates 2 and 3, not whole-gate
 or shared-Core migration completion.
+
+#### Claude single-entry adoption
+
+Standalone Claude toggles now use the same guarded catalog transaction and Core
+MCP execution as the other migrated Apps. Both Core/Store pins move to
+`1abff9e801895438cf41440852243e9a30cb3454`. The shared entry policy preserves
+Claude-native fields; the CLI still owns one-level legacy wrapper selection,
+catalog metadata filtering, strict JSON, pretty printing, paths and initialization.
+The existing bulk writer reuses the same field selection without changing its
+whole-map behavior. Only the selected entry is projected by a standalone toggle;
+native siblings, unrelated top-level fields and newer shared catalog rows survive.
+
+Disable retains a Core native snapshot, including across repeated removal of an
+already absent entry. Enable restores it only when the entry is absent, using
+the current catalog's connection fields, then clears the stored snapshot. Existing
+native entries keep the previous enable/replacement policy. Real CLI/Lite tests
+must verify snapshot exchange in both directions as well as peer-row retention.
+Legacy IDs and large host-owned files do not acquire Core document-API limits.
+
+For a missing custom-path destination, the legacy file is read as input and the
+migration plus toggle is published once. Failure restores the original missing
+leaf or leaf link, rather than retaining a preliminary copy. The source is never
+written; later source edits do not change this operation's already-read input.
+Existing destination permissions and managed-file privacy take precedence over
+inherited Unix source permissions. Windows rejects a read-only migration source
+before publication. A dangling destination link's referent is never created by
+migration; successful writes replace the leaf, and failed writes restore its link.
+Parent directories may remain after failure. Other Claude readers, onboarding,
+imports and whole-map writers retain their existing eager migration behavior.
+
+Acceptance covers malformed input/snapshots, missing and uninitialized targets,
+native fields and siblings, permissions, custom-path migration, guarded database
+updates and failed commit, uncertain publication, external changes and leaf-link
+recovery. The Codex/OpenCode/Hermes shared file-host tests also cover inherited
+creation permissions. Noncooperating writers can still race comparison and
+replacement. Upsert, delete, set-apps, whole-map sync, other provider/Skill work,
+UI, proxy, schema and full-product adoption remain separate slices. This is not
+a claim that every CLI writer or the full product is coordinated.
+
+Local acceptance against CLI `a959847a` plus this slice and unchanged Lite
+`4d0a77b3` passes 223 ordinary MCP-related tests, 48 opt-in real-consumer tests,
+14 MCP command tests and 121 Lite tests (some suites overlap). The former
+11-case activation/peer baseline now passes in full; the opt-in set also covers
+Claude snapshot exchange and lock probes. Formatting and locked all-target
+Clippy pass with existing warnings and the same unrelated
+`reversed_empty_ranges` allowance; none points at a changed source file.
+Windows was not run locally. CLI remains on its migration branch, without a
+main merge or a PR opened merely to obtain CI.

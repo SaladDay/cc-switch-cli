@@ -61,6 +61,13 @@ impl NativeFile {
         self.original.as_deref()
     }
 
+    pub(super) fn set_creation_permissions(
+        &mut self,
+        permissions: fs::Permissions,
+    ) -> Result<(), AppError> {
+        self.resource.set_creation_permissions(permissions)
+    }
+
     pub(super) fn publish(&mut self, contents: &str) -> Result<(), AppError> {
         if !matches!(self.phase, Phase::Ready) {
             return Err(AppError::Config("MCP file already published".into()));
