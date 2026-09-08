@@ -553,3 +553,45 @@ row and its native sibling. The other four Apps' catalog-write failures and the
 three Codex/Hermes activation failures remain open. This is not completion of
 gate 2 or the shared-Core migration; their single-App writers still need scoped
 transactions, native projection and recovery before the whole gate can pass.
+
+#### Codex single-entry adoption
+
+The next slice migrates only standalone Codex toggles. It shares the existing
+Gemini catalog/commit/recovery coordinator, with native handling behind a private
+trait. Selection columns come from Core's App descriptor. The host keeps fresh
+Store rows and its shared live-file lock through native publication, database
+commit and failure recovery; only the target cache row is published afterward.
+
+Codex uses Core's native TOML editor and MCP executor at `6e28a236`, retaining the
+CLI's connection conversion, accepted grammar and file-size policy. Enable owns
+the native `enabled` flag even when an imported entry contains `false`. Only the
+selected legacy ID is removed; unrelated official and legacy entries survive.
+Disable still removes that ID, leaves a missing file absent, and skips malformed
+TOML as before. Existing UTF-8 errors remain errors. The operation never reads or
+writes `auth.json`. Live projection rejects unexpected stored native snapshots
+without discarding their payload. The existing path/privacy rules and Codex
+process lock remain host-owned; file comparison detects observed conflicts but cannot exclude writers
+that ignore the shared lock in the interval between comparison and replacement.
+
+Acceptance includes repeated enable/disable, fresh peer rows and host columns,
+native siblings/comments, uninitialized Apps, malformed input, large/missing
+files, leaf links, database suppression/verification/commit failure, uncertain
+native publication, external edits during recovery and real Lite lock probes.
+The existing Gemini suite must still pass after coordinator extraction. Real
+Codex CLI/Lite activation and peer-preservation cases verify adoption, not just
+compilation against Core.
+
+Claude/OpenCode/Hermes toggle migration remains open. Upsert, delete, set-apps,
+whole-map sync, provider writes, UI, proxy, Skill, schema and the full product are
+outside this slice. Their existing behavior is not changed or claimed as shared
+execution acceptance. Both Core/Store pins move together; rollback restores the
+host callers and pins together without a data migration.
+
+Local acceptance against CLI `e9290c8d` plus this slice and unchanged Lite
+`4d0a77b3` passes 187 ordinary MCP-related tests, 33 opt-in peer/lock tests,
+9 Codex executor tests and 153 database-filtered tests (with overlap; one ignored).
+Formatting and locked all-target Clippy pass with the existing warnings and
+documented allowance for unrelated `reversed_empty_ranges`.
+The real toggle baseline is 6 passing and 5 failing: all three Codex cases pass;
+Claude/OpenCode/Hermes peer-row loss and the two Hermes activation failures remain.
+This advances the Codex part of gates 2 and 3, not whole-gate completion.

@@ -12,7 +12,7 @@ use std::process::Command;
 use toml_edit::DocumentMut;
 
 mod native_import;
-mod operation;
+pub(crate) mod operation;
 
 #[cfg(test)]
 mod credential_tests;

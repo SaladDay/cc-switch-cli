@@ -5,12 +5,14 @@ use crate::error::AppError;
 use crate::mcp;
 use crate::store::AppState;
 
+mod codex_toggle;
 #[cfg(test)]
 mod consumer_tests;
 mod gemini_toggle;
 #[cfg(test)]
 mod import_tests;
 mod imports;
+mod toggle;
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
 pub struct McpService;
@@ -111,6 +113,15 @@ impl McpService {
     ) -> Result<(), AppError> {
         if matches!(app, AppType::Gemini) {
             return Self::toggle_gemini_coordinated(state, server_id, enabled);
+        }
+        if matches!(app, AppType::Codex) {
+            return Self::toggle_coordinated(
+                state,
+                server_id,
+                app,
+                enabled,
+                codex_toggle::CodexToggle::observe,
+            );
         }
         let server = {
             let mut cfg = state.config.write()?;

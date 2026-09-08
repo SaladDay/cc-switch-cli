@@ -909,7 +909,7 @@ fn json_value_to_toml_item(value: &Value, field_name: &str) -> Option<toml_edit:
 /// 1. 核心字段（type, command, args, url, headers, env, cwd）使用强类型处理
 /// 2. 扩展字段（timeout、retry 等）通过白名单列表自动转换
 /// 3. 其他未知字段使用通用转换器尝试转换
-fn json_server_to_codex_entry(spec: &Value) -> Result<CodexMcpEntry, AppError> {
+pub(crate) fn json_server_to_codex_entry(spec: &Value) -> Result<CodexMcpEntry, AppError> {
     let typ = spec.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
 
     // 定义核心字段（已在下方处理，跳过通用转换）
@@ -1042,7 +1042,7 @@ fn upsert_mcp_server_table(
 }
 
 // Keep the CLI's accepted grammar and native diagnostics before shared edits.
-fn parse_codex_mcp_document(
+pub(crate) fn parse_codex_mcp_document(
     contents: &str,
 ) -> Result<CodexMcpDocument, Box<dyn std::error::Error + Send + Sync>> {
     contents.parse::<toml_edit::DocumentMut>()?;

@@ -24,7 +24,7 @@ use crate::{
 
 static LIVE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-pub(super) fn lock_live_write() -> Result<MutexGuard<'static, ()>, AppError> {
+pub(crate) fn lock_live_write() -> Result<MutexGuard<'static, ()>, AppError> {
     LIVE_WRITE_LOCK.lock().map_err(AppError::from)
 }
 
