@@ -680,7 +680,7 @@ fn portable_mcp_spec(spec: &Value) -> Result<Value, AppError> {
     Ok(Value::Object(result))
 }
 
-fn convert_to_opencode_mcp_spec(spec: &Value) -> Result<Value, AppError> {
+pub(crate) fn convert_to_opencode_mcp_spec(spec: &Value) -> Result<Value, AppError> {
     cc_switch_core::McpConfigTarget::OpenCode
         .encode_server(&portable_mcp_spec(spec)?)
         .map_err(|error| AppError::McpValidation(error.to_string()))

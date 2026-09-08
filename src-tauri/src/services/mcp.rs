@@ -12,6 +12,8 @@ mod gemini_toggle;
 #[cfg(test)]
 mod import_tests;
 mod imports;
+mod native_file;
+mod opencode_toggle;
 mod toggle;
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
@@ -121,6 +123,15 @@ impl McpService {
                 app,
                 enabled,
                 codex_toggle::CodexToggle::observe,
+            );
+        }
+        if matches!(app, AppType::OpenCode) {
+            return Self::toggle_coordinated(
+                state,
+                server_id,
+                app,
+                enabled,
+                opencode_toggle::OpenCodeToggle::observe,
             );
         }
         let server = {

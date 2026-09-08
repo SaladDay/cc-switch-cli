@@ -595,3 +595,40 @@ documented allowance for unrelated `reversed_empty_ranges`.
 The real toggle baseline is 6 passing and 5 failing: all three Codex cases pass;
 Claude/OpenCode/Hermes peer-row loss and the two Hermes activation failures remain.
 This advances the Codex part of gates 2 and 3, not whole-gate completion.
+
+#### OpenCode single-entry adoption
+
+This slice migrates standalone OpenCode toggles to the same catalog transaction
+boundary. Core still owns entry conversion, file execution and retained recovery;
+Store protects fresh catalog rows and native links. Codex and OpenCode share one
+host file binding, while their format and initialization policies remain separate.
+Codex's existing local lock still covers observation through commit or recovery.
+No Core/Store API or dependency pin changes are needed.
+
+OpenCode retains strict JSON, portable connection fields, missing-file schema
+creation on either enable or disable, null-root promotion on enable, long legacy
+IDs and large-file support. A malformed `mcp` collection or non-object/non-null
+root now rejects enable without publishing file or catalog state, rather than
+silently claiming activation or panicking. Disable retains its tolerant container
+handling. Single-entry removal preserves sibling values and their order; JSON
+still uses the existing pretty-printing. Unsupported stored snapshots are rejected
+without discarding them. Path, permissions and leaf-link replacement keep the
+host's existing rules. Writers that ignore the shared lock remain outside its
+exclusion guarantee.
+
+Acceptance covers fresh peer rows and host columns, stdio/HTTP/SSE conversion,
+repeated selection, invalid input, missing/large files, long IDs, database failures,
+external edits during publication/recovery, failed disable, leaf links and real
+Lite activation, peer preservation and lock probes. The existing Codex and Gemini
+tests remain required. Upsert, delete, set-apps, whole-map sync, other App writers,
+provider behavior, UI, proxy, Skill and the full product remain outside this slice.
+
+Local acceptance against CLI `544b153a` plus this slice and unchanged Lite
+`4d0a77b3` passes 196 ordinary MCP-related tests, 34 opt-in peer/lock tests,
+9 Codex executor tests, 139 database-module tests, 3 OpenCode config tests and
+121 Lite tests (some suites overlap). Formatting and locked all-target Clippy
+pass with existing warnings and the same unrelated `reversed_empty_ranges`
+allowance. No warning points at a changed source file. Windows was not run locally.
+The real toggle baseline is now 7 passing and 4 failing: all three OpenCode cases
+pass; Claude/Hermes peer-row loss and the two Hermes activation failures remain.
+This advances OpenCode's part of gates 2 and 3, not whole-gate completion.

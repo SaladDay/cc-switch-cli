@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 use cc_switch_core::fs::{
     shared_live_config_lock_path, SharedLiveConfigLock, SharedLiveConfigLockError,
@@ -6,6 +6,7 @@ use cc_switch_core::fs::{
 use serde_json::json;
 
 use super::*;
+use crate::services::mcp::native_file::with_exchange_hook as with_hook;
 use crate::{
     app_config::{AppType, McpApps, McpServer},
     database::Database,
@@ -46,18 +47,6 @@ fn native() -> toml::Value {
 
 fn toggle(state: &AppState, enabled: bool) -> Result<(), AppError> {
     McpService::toggle_app(state, "target", AppType::Codex, enabled)
-}
-
-fn with_hook<T>(hook: ExchangeHook, action: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            BEFORE_EXCHANGE.with(|slot| slot.borrow_mut().take());
-        }
-    }
-    BEFORE_EXCHANGE.with(|slot| *slot.borrow_mut() = Some(hook));
-    let _reset = Reset;
-    action()
 }
 
 fn unchanged_selection(state: &AppState) {
