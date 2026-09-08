@@ -5,8 +5,9 @@ mod links {
     use super::super::*;
     use crate::test_support::TestEnvGuard;
 
-    const TARGETS: [McpConfigTarget; 4] = [
+    const TARGETS: [McpConfigTarget; 5] = [
         McpConfigTarget::Claude,
+        McpConfigTarget::Gemini,
         McpConfigTarget::Codex,
         McpConfigTarget::OpenCode,
         McpConfigTarget::Hermes,

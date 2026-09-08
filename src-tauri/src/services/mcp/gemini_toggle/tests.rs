@@ -44,6 +44,95 @@ fn native() -> Value {
     serde_json::from_slice(&fs::read(get_gemini_settings_path()).unwrap()).unwrap()
 }
 
+#[cfg(unix)]
+#[test]
+fn selections_reject_parent_alias_changes_after_observation() {
+    use std::{
+        io::Write,
+        os::unix::fs::{symlink, OpenOptionsExt},
+        process::Command,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    for matrix in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::isolated(temp.path());
+        let state = state(temp.path(), false);
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        fs::create_dir(&old).unwrap();
+        fs::create_dir(&new).unwrap();
+        let path = get_gemini_settings_path();
+        let alias = path.parent().unwrap().to_owned();
+        symlink(&old, &alias).unwrap();
+        let original = r#"{"fixture":true}"#;
+        fs::write(new.join("settings.json"), original).unwrap();
+        let fifo = old.join("settings.json");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let old_worker = old.clone();
+        let new_worker = new.clone();
+        let worker = thread::spawn(move || {
+            // Opening the writer succeeds only after observation opens the FIFO.
+            // Keep the wait bounded if the service rejects before reading it.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut pipe = loop {
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&fifo)
+                {
+                    Ok(pipe) => break pipe,
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ENXIO)
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("observation did not open fixture FIFO: {error}"),
+                }
+            };
+            fs::write(old_worker.join("staged.json"), original).unwrap();
+            fs::rename(old_worker.join("staged.json"), &fifo).unwrap();
+            fs::remove_file(&alias).unwrap();
+            symlink(&new_worker, &alias).unwrap();
+            pipe.write_all(original.as_bytes()).unwrap();
+        });
+        let before = serde_json::to_value(state.db.get_all_mcp_servers().unwrap()).unwrap();
+        let result = if matrix {
+            McpService::set_apps(
+                &state,
+                "target",
+                McpApps {
+                    gemini: true,
+                    ..McpApps::default()
+                },
+            )
+            .map(|_| ())
+        } else {
+            McpService::toggle_app(&state, "target", AppType::Gemini, true)
+        };
+        worker.join().unwrap();
+        assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
+        for file in [old.join("settings.json"), new.join("settings.json"), path] {
+            assert_eq!(fs::read_to_string(file).unwrap(), original);
+        }
+        assert_eq!(
+            serde_json::to_value(state.db.get_all_mcp_servers().unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(
+            serde_json::to_value(state.config.read().unwrap().mcp.servers.as_ref().unwrap())
+                .unwrap(),
+            before
+        );
+    }
+}
+
 #[test]
 fn toggle_reads_fresh_target_and_preserves_peer_fields_and_catalogs() {
     let temp = tempfile::tempdir().unwrap();
@@ -360,7 +449,7 @@ fn toggle_recovers_sqlite_abort_and_preserves_external_changes_during_recovery()
         ).unwrap();
         let before = fs::read(get_gemini_settings_path()).unwrap();
         let mut calls = 0;
-        let result = crate::gemini_config::operation::with_hook(
+        let result = crate::services::mcp::native_file::with_exchange_hook(
             Box::new(move |_, _| {
                 calls += 1;
                 if external_change && calls == 2 {
@@ -416,7 +505,7 @@ fn real_lite_native_writer_is_excluded_during_mcp_publication_and_recovery() {
         let home = temp.path().to_owned();
         let count = std::rc::Rc::new(std::cell::Cell::new(0));
         let calls = count.clone();
-        let result = crate::gemini_config::operation::with_hook(
+        let result = crate::services::mcp::native_file::with_exchange_hook(
             Box::new(move |_, _| {
                 let before = fs::read(get_gemini_settings_path()).unwrap();
                 LitePeer::run(
@@ -466,7 +555,7 @@ fn toggle_retains_both_guards_during_failure_recovery_and_releases_for_retry() {
         let calls = std::rc::Rc::new(std::cell::Cell::new(0));
         let count = calls.clone();
         let observed = state.clone();
-        let result = crate::gemini_config::operation::with_hook(
+        let result = crate::services::mcp::native_file::with_exchange_hook(
             Box::new(move |_, _| {
                 assert!(observed.config.try_write().is_err());
                 assert!(observed.db.conn.try_lock().is_err());

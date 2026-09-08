@@ -736,3 +736,57 @@ Clippy pass with existing warnings and the same unrelated
 `reversed_empty_ranges` allowance; none points at a changed source file.
 Windows was not run locally. CLI remains on its migration branch, without a
 main merge or a PR opened merely to obtain CI.
+
+#### Multi-App MCP selection
+
+`set_apps` now shares the standalone selection coordinator and native bindings.
+It reads the current target from Store, compares the requested matrix with that
+row, and writes only changed CLI-supported selection columns. Other consumers'
+records, unknown columns and selections outside the CLI's App catalog survive.
+Only the target cache row is refreshed after commit. A missing row returns false
+and removes its stale cache entry; an unchanged matrix does not touch native
+files or acquire their lock. Single toggles still repair repeated selections.
+
+Changed native files are handled in the CLI's existing App order under one
+database transaction and shared file lock. Each write observes the result of
+earlier writes, including custom paths that name the same file. Receipts and
+local App locks remain held until commit or recovery. A later observation,
+publication, catalog update or commit failure recovers the writes in reverse
+order; a recovery conflict is reported while other files still receive recovery
+attempts. Initialization is decided before writing, so one App's directory
+creation cannot initialize another App during the same operation.
+
+All five standalone MCP bindings now use the common single-file host. Gemini
+retains its JSON, field conversion and snapshot policy as a pure preparation
+step, plus the same process-local settings lock. Its provider/whole-map workflows
+keep their existing multi-file operation. The shared single-file host restores
+leaf links as well as bytes, which is needed when one App's MCP path links to
+another's. Gemini also retains its logical-path check before publication: a
+parent-directory alias retargeted after observation is a conflict, not a successful
+write to the old directory. Both public selection entry points test this case.
+No Core API, dependency pin, schema or Lite source change is required.
+
+Acceptance begins with CLI `d39b05cf`: two ordinary tests reproduce stale-target
+overwrite and missing compensation after a later App fails; a real Lite peer
+test reproduces deletion of its newly committed row. These are failing baseline
+results, not accepted behavior. The implementation must pass these assertions,
+all 32 supported selection matrices, fresh/missing targets, unchanged and
+uninitialized Apps, unknown fields, database and uncertain-publication failures,
+external recovery conflicts, shared destinations, cross-App links and real Lite
+snapshot exchange and lock probes. Existing single-App regressions remain required.
+
+The scope is matrix selection and the shared single-entry machinery it uses.
+Upsert/delete/whole-map migration, other provider/Skill workflows, UI, proxy and
+full-product integration remain separate. Parent directories and Hermes recovery
+backups may remain after failure under existing host policy. This is cooperative
+transaction/compensation, not crash-proof filesystem/SQLite atomicity; writers
+that ignore the shared lock can still race comparison and replacement.
+
+Local validation against CLI `d39b05cf` plus this slice and unchanged Lite
+`4d0a77b3` passes 233 ordinary MCP-related tests, 51 real-consumer MCP tests,
+14 MCP command tests, 11 Gemini operation tests, 190 config tests, 139 database
+tests, 3 real-consumer Gemini provider tests and 121 Lite tests (some suites
+overlap). The three baseline failures now
+pass. Formatting and locked all-target Clippy pass with existing warnings and
+the same unrelated `reversed_empty_ranges` allowance; no warning points at a
+changed source file. Windows and abrupt-process/crash recovery were not run.

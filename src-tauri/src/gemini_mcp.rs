@@ -115,14 +115,15 @@ pub(crate) fn update_with_operation(
 /// Uses the same document observation for the shared snapshot and publication.
 /// Existing entry codecs, catalog-wrapper handling and metadata filtering stay
 /// host-owned. A removed entry may restore its Core snapshot on activation.
-pub(crate) fn toggle_with_operation(
-    operation: &mut GeminiOperation,
+pub(crate) fn prepare_toggle(
+    path: &Path,
+    original: Option<&str>,
     id: &str,
     server: &Value,
     enabled: bool,
     previous_snapshot: Option<&cc_switch_core::McpNativeSnapshot>,
-) -> Result<Option<cc_switch_core::McpNativeSnapshot>, AppError> {
-    let mut root = parse_json_value(operation.settings_path(), operation.contents())?;
+) -> Result<(String, Option<cc_switch_core::McpNativeSnapshot>), AppError> {
+    let mut root = parse_json_value(path, original)?;
     let entry = root.get("mcpServers").and_then(|servers| servers.get(id));
     let restore = enabled && entry.is_none();
     let snapshot = if enabled {
@@ -162,8 +163,9 @@ pub(crate) fn toggle_with_operation(
             servers.shift_remove(id);
         }
     }
-    publish_document(operation, &root)?;
-    Ok(snapshot)
+    let contents =
+        serde_json::to_string_pretty(&root).map_err(|source| AppError::JsonSerialize { source })?;
+    Ok((contents, snapshot))
 }
 
 fn publish_servers(

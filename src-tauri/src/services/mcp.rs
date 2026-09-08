@@ -16,6 +16,8 @@ mod import_tests;
 mod imports;
 mod native_file;
 mod opencode_toggle;
+#[cfg(test)]
+mod selection_tests;
 mod toggle;
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
@@ -115,44 +117,10 @@ impl McpService {
         app: AppType,
         enabled: bool,
     ) -> Result<(), AppError> {
-        if matches!(app, AppType::Claude) {
-            return Self::toggle_coordinated(
-                state,
-                server_id,
-                app,
-                enabled,
-                claude_toggle::ClaudeToggle::observe,
-            );
-        }
-        if matches!(app, AppType::Gemini) {
-            return Self::toggle_gemini_coordinated(state, server_id, enabled);
-        }
-        if matches!(app, AppType::Codex) {
-            return Self::toggle_coordinated(
-                state,
-                server_id,
-                app,
-                enabled,
-                codex_toggle::CodexToggle::observe,
-            );
-        }
-        if matches!(app, AppType::OpenCode) {
-            return Self::toggle_coordinated(
-                state,
-                server_id,
-                app,
-                enabled,
-                opencode_toggle::OpenCodeToggle::observe,
-            );
-        }
-        if matches!(app, AppType::Hermes) {
-            return Self::toggle_coordinated(
-                state,
-                server_id,
-                app,
-                enabled,
-                hermes_toggle::HermesToggle::observe,
-            );
+        if app.supports_mcp() {
+            // A repeated single toggle still repairs its native entry.
+            return Self::select_coordinated(state, server_id, |_| vec![(app, enabled)])
+                .map(|_| ());
         }
         let server = {
             let mut cfg = state.config.write()?;
@@ -185,41 +153,16 @@ impl McpService {
 
     /// Replace the full supported-app matrix for one MCP server.
     pub fn set_apps(state: &AppState, server_id: &str, apps: McpApps) -> Result<bool, AppError> {
-        let (server, changes) = {
-            let mut cfg = state.config.write()?;
-
-            let Some(servers) = &mut cfg.mcp.servers else {
-                return Ok(false);
-            };
-            let Some(server) = servers.get_mut(server_id) else {
-                return Ok(false);
-            };
-
-            let before = server.apps.clone();
-            server.apps = apps;
-            let server = server.clone();
-            let changes = Self::supported_mcp_apps()
+        Self::select_coordinated(state, server_id, |before| {
+            // Matrix replacement writes only changed selections, in catalog order.
+            Self::supported_mcp_apps()
                 .filter_map(|app| {
                     let before_enabled = before.is_enabled_for(&app);
-                    let after_enabled = server.apps.is_enabled_for(&app);
+                    let after_enabled = apps.is_enabled_for(&app);
                     (before_enabled != after_enabled).then_some((app, after_enabled))
                 })
-                .collect::<Vec<_>>();
-
-            (server, changes)
-        };
-
-        state.save()?;
-
-        for (app, enabled) in changes {
-            if enabled {
-                Self::sync_server_to_app(state, &server, &app)?;
-            } else {
-                Self::remove_server_from_app(state, server_id, &app)?;
-            }
-        }
-
-        Ok(true)
+                .collect()
+        })
     }
 
     /// 将 MCP 服务器同步到所有启用的应用

@@ -24,6 +24,10 @@ use crate::{
 
 static SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+pub(crate) fn lock_live_write() -> Result<MutexGuard<'static, ()>, AppError> {
+    SETTINGS_WRITE_LOCK.lock().map_err(AppError::from)
+}
+
 struct ObservedFile {
     target: LogicalTarget,
     path: PathBuf,
@@ -88,7 +92,7 @@ impl GeminiOperation {
     }
 
     fn observe(targets: Vec<(LogicalTarget, PathBuf)>) -> Result<Self, AppError> {
-        let guard = SETTINGS_WRITE_LOCK.lock().map_err(AppError::from)?;
+        let guard = lock_live_write()?;
         let files = targets
             .into_iter()
             .map(|(target, path)| ObservedFile::observe(target, path))
@@ -257,7 +261,7 @@ impl GeminiOperation {
 // Resolve existing ancestors without following the leaf link or creating missing
 // directories. A changed parent alias must not move the write to a different file
 // merely because its contents happen to match the original observation.
-fn resolve_entry(path: &Path) -> Result<PathBuf, AppError> {
+pub(crate) fn resolve_entry(path: &Path) -> Result<PathBuf, AppError> {
     if path.is_relative() {
         let current = std::env::current_dir().map_err(|e| AppError::io(".", e))?;
         return resolve_entry(&current.join(path));
