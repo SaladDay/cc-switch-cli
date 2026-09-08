@@ -957,3 +957,75 @@ The wider provider command suite passes 26 tests and fails 3 usage-query tests.
 All three fail with the same official-provider template diagnostic on unchanged
 CLI `44eeb266`; they are recorded baseline failures, not fixed in this MCP slice.
 Windows, abrupt-process recovery and noncooperating-writer races were not run.
+
+#### MCP inside an ordinary provider switch
+
+The public sync gate does not cover `sync_snapshot_with_operation`. Ordinary
+Gemini switching already owns a provider transaction, the shared filesystem lock
+and a Gemini native operation when it calls that helper. Starting the public
+sync's independent transaction or reacquiring its native lock here is not valid.
+The embedded MCP work must share the caller's eventual commit or recovery.
+
+This migration has three reviewed steps:
+
+1. Add opt-in acceptance tests through the real provider entry point and Lite
+   service. Prove native removal snapshots survive across consumers and that
+   both later MCP errors and failed provider commit recover every touched App.
+   This step changes only tests and the plan, not production code or pins.
+2. Establish shared transaction composition and native recovery ownership.
+   Reuse Core/Store APIs where they enforce the required invariants; any new API
+   must support caller-owned transactions without Gemini, CLI, UI or proxy policy.
+   Validate success, failure, later writes and final commit, including a synthetic
+   composite consumer suitable for future full-desktop integration. Do not merely
+   nest the public sync entry point or expose an unchecked transaction escape.
+3. Adopt that contract in the ordinary Gemini provider MCP tail and remove the
+   replaced per-entry path. Preserve initialized-App support, error aggregation,
+   native formats, unknown fields, shared snapshots and existing provider auth
+   behavior. Keep receipts and locks through the caller's final decision, including
+   aliased native paths. Verify real CLI/Lite interchange and existing regressions.
+
+Each step requires two fresh independent blind reviews and cache cleanup. The
+whole migration remains incomplete until the opt-in gates pass through the
+provider-owned path. An ignored test or a passing public-sync control is not
+evidence that the embedded path works.
+
+Unlike independent public per-App synchronization, an abandoned provider
+transaction must recover all native MCP changes it owns. Later Apps still receive
+attempts when an earlier App fails, before aggregate failure triggers recovery.
+This does not make filesystem/SQLite updates crash-atomic or change the existing
+host-settings and best-effort Skill tail boundaries. Force writes, takeover/proxy,
+other provider workflows, UI, schema redesign and full-product adoption remain
+outside this slice. CLI changes stay on its migration branch.
+
+The first-step gates are in `services::mcp::provider_sync_tests`. Run them with
+the independently built Lite test binary and isolated environment described above:
+
+```sh
+cargo test --locked --lib services::mcp::provider_sync_tests \
+  -- --ignored --test-threads=1
+```
+
+Against unchanged production CLI `fce63d97` (Core/Store `1abff9e8`) and Lite
+`4d0a77b3` (Core/Store `7b7cfae5`), all three gates fail at their intended final
+assertions. A later MCP error leaves Claude/OpenCode writes behind. A deferred
+provider commit failure leaves Claude/Codex/OpenCode/Hermes writes behind, even
+though provider selection, cache and Gemini files recover. The no-failure control
+successfully projects the target to all five Apps before the failed-commit case.
+The failed case also observes every native file at its own COMMIT preparation,
+compares those bytes with the successful control and requires the deferred
+foreign-key diagnostic before checking recovery.
+
+The real Lite test first passes through public targeted sync, then fails through
+an ordinary provider switch with an otherwise equivalent profile. Lite can enable
+the removed entry in both cases, but its native `trust` extension is missing only
+after provider-owned removal. Both cases retain a fresh peer committed by Lite.
+No real commands or credentials are used. These failures are pending integration
+requirements, not accepted behavior or a reason to weaken the assertions. Remove
+the temporary ignore on the two single-repository gates after adoption; the
+cross-repository gate remains opt-in and must also pass explicitly.
+
+The test-only step also passes 259 existing MCP tests, 57 existing real-Lite MCP
+gates, 25 Gemini provider tests, 11 Gemini operation tests and 121 unchanged Lite
+tests. Formatting and locked all-target Clippy pass with the previously recorded
+baseline lint warnings. The three expected failures above are reported separately
+and do not count as passing coverage.

@@ -22,6 +22,8 @@ mod imports;
 mod native_file;
 mod opencode_toggle;
 #[cfg(test)]
+mod provider_sync_tests;
+#[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
 mod test_fixture;
