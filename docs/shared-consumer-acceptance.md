@@ -1128,18 +1128,18 @@ isolated environment and `CC_SWITCH_LITE_TEST_BINARY` set, run:
 cargo test --locked --lib services::skill::consumer_tests -- --include-ignored --test-threads=1
 ```
 
-From Lite's `src-tauri/`, run its explicit deferred-commit gate with the same
+From Lite's `src-tauri/`, run its recovery tests with the same
 owned temporary `TMPDIR` and `CC_SWITCH_CONFIG_DIR`. The standalone test and the
 Skill peer fix every App path under their checked temporary home, including
 subsequent Skill runtime observations; ambient App overrides are not used:
 
 ```sh
-cargo test --locked --lib skill::acceptance_tests -- --ignored --test-threads=1
+cargo test --locked --lib skill::acceptance_tests -- --test-threads=1
 ```
 
-The latter uses an actual deferred foreign-key failure and the real native
-receipt. It records lock observations immediately before native recovery, lets
-restoration and retry finish, then checks that entry observation. It does not
+The initial Lite gate used an actual deferred foreign-key failure and the real
+native receipt. It recorded lock observations immediately before native recovery,
+let restoration and retry finish, then checked that entry observation. It did not
 prove protection inside or at the end of recovery. The CLI holder gate likewise
 does not observe CLI-owned publication/commit/compensation. Those full-lifecycle
 gates remain required in step 3 above. Acceptance failures
@@ -1188,3 +1188,51 @@ Windows and the complete CLI test suite were not run locally.
 The standalone Lite gate was also run with `CLAUDE_CONFIG_DIR` pointing at a
 different owned temporary path. It reached the expected lock-entry assertion,
 and the overridden path remained absent; no outside Skill was published.
+
+### Shared contract check and Lite recovery adoption
+
+Core's existing Skill runtime, plans and receipts, plus Store's column-scoped
+catalog writes, already express the transaction lifetime needed by Lite. No new
+Core API or dependency pin is required for this correction. The host owns the
+database transaction and retains it until its Core native receipt has recovered.
+A failed COMMIT with an active SQLite transaction is not an uncertain commit:
+recover native state first, then roll back the database. If COMMIT reports an
+error after SQLite has ended the transaction, keep the existing committed-catalog
+decision path and native lock. Do not claim that an automatically aborted
+database lock can still be retained.
+
+Lite now keeps that transaction guard after statement or COMMIT failure. A native
+recovery error does not skip the database rollback; the operation and native
+recovery failures are both reported and
+external native edits are preserved. Its ordinary recovery tests cover Claude
+and Gemini, enable and disable, deferred COMMIT failure, statement ABORT, full
+transaction ROLLBACK, release/retry, unchanged catalog rows/opaque fields, exact
+Gemini configuration restoration and an external edit that prevents recovery.
+Observations bracket the real Core rollback while its native lock remains owned;
+they do not cover every filesystem instruction or the whole successful workflow.
+The replacement recovery tests run in the ordinary suite. The extended tests failed
+on the pre-fix production code and pass after this host-lifetime correction.
+
+CLI deployment remains a separate shared-contract task. Its Auto mode preserves
+existing copies and can fall back to copying; explicit Copy and Symlink modes
+also remain supported. Core's current protected-reference implementation cannot
+replace those operations unchanged. Define typed, product-neutral deployment and
+ownership choices before adopting CLI toggles; do not silently convert copies to
+links or wrap the old CLI planner and call that completed Core migration. The
+intended full-product API must admit these choices without CLI/Lite types. No
+full-product caller was inspected or changed; its compatibility remains unverified.
+
+This slice changes only Lite Skill recovery and these acceptance records. Core,
+CLI production code, provider/MCP workflows, UI, schema, pins and deployment modes
+are unchanged. The three CLI Skill gates remain unresolved; all-App deployment,
+successful-workflow lock lifetime and the remaining Skill writers still require
+their planned adoption and independent reviews.
+
+Local validation: 125 ordinary Lite tests pass (six opt-in workers remain ignored),
+including 13 recovery cases in four tests. Formatting and locked all-target
+Clippy with `-D warnings` pass. The four recovery tests also pass with Claude and
+Windows AppData overrides pointing at separate owned paths; neither is created.
+Against this Lite build, CLI's control passes and its three known Skill acceptance
+failures remain reproducible. Core/Store pins remain Lite `7b7cfae5` and CLI
+`f5b6b4cd`; the Skill implementation is identical at those Core revisions.
+Windows and the full CLI suite were not run locally.
