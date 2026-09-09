@@ -1263,6 +1263,16 @@ impl App {
             KeyCode::Char('r') => Action::ManagedAuthRefresh {
                 auth_provider: "codex_oauth".to_string(),
             },
+            KeyCode::Char('u') => match self.switch_selected_managed_account() {
+                Action::ManagedAuthSetDefault {
+                    auth_provider,
+                    account_id,
+                } => Action::ManagedAuthUse {
+                    auth_provider,
+                    account_id,
+                },
+                action => action,
+            },
             KeyCode::Char(' ') => self.switch_selected_managed_account(),
             KeyCode::Enter => self.activate_managed_account_row(),
             _ => Action::None,

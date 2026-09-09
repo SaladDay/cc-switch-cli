@@ -590,6 +590,10 @@ pub(crate) enum ManagedAuthReq {
         auth_provider: String,
         device_code: String,
     },
+    Use {
+        auth_provider: String,
+        account_id: String,
+    },
     SetDefault {
         auth_provider: String,
         account_id: String,
@@ -613,6 +617,9 @@ pub(crate) enum ManagedAuthMsg {
         auth_provider: String,
         device_code: String,
         result: Result<Option<crate::services::ManagedAuthAccount>, String>,
+    },
+    Used {
+        result: Result<crate::services::ManagedAuthStatus, String>,
     },
     DefaultSet {
         #[allow(dead_code)]

@@ -860,6 +860,7 @@ pub(super) fn render_managed_account_action_picker_overlay(
 
     let actions = [
         texts::tui_key_set_default().to_string(),
+        crate::t!("Use in Codex", "在 Codex 中使用").to_string(),
         texts::tui_key_delete().to_string(),
     ];
 
