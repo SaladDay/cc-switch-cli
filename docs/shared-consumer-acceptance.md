@@ -1236,3 +1236,13 @@ Against this Lite build, CLI's control passes and its three known Skill acceptan
 failures remain reproducible. Core/Store pins remain Lite `7b7cfae5` and CLI
 `f5b6b4cd`; the Skill implementation is identical at those Core revisions.
 Windows and the full CLI suite were not run locally.
+
+### Deployment composition follow-up
+
+The next slices follow Core's
+[Skill deployment plan](https://github.com/SaladDay/cc-switch-core/blob/main/docs/skill-deployment-composition.md).
+It separates directory deployment from native controls, requires representation
+and ownership compatibility, and starts production adoption with Claude toggles
+in all three CLI deployment modes and real Lite interoperability. This is a plan,
+not a passing gate: the three CLI failures above remain open. CLI work stays on
+`refactor/core-migration-validation`; it must not be merged into `main`.
