@@ -1246,3 +1246,53 @@ and ownership compatibility, and starts production adoption with Claude toggles
 in all three CLI deployment modes and real Lite interoperability. This is a plan,
 not a passing gate: the three CLI failures above remain open. CLI work stays on
 `refactor/core-migration-validation`; it must not be merged into `main`.
+
+### Deployment representation baseline
+
+The first composition gate adds tests only, against CLI `f9a06ffc` and Lite
+`a69bfb2c` production code. Core/Store pins remain CLI `f5b6b4cd` and Lite
+`7b7cfae5`. No native writer, dependency, ownership format, schema or UI changes.
+
+Three ordinary CLI tests cover 36 fixture cases: Claude/Gemini/Hermes/Pi with
+Auto/Copy/Symlink, fresh deployment and existing-copy refresh, repeated requests,
+missing-source enable/removal, and Pi's externally modified copy protection.
+For non-Pi existing copies, both source files change before the repeated enable;
+the deployed content must refresh, retaining a copy under Auto/Copy.
+They inspect directory/link type, exact link target, manifest and binary asset,
+catalog flags, unknown fields and retained source data. Gemini/Hermes documents
+must remain byte-identical after each toggle, even when native controls disagree
+with the requested catalog flag. This records CLI's directory-only behavior; it
+does not claim effective native enablement. Symlink cases need a filesystem and
+account that permit directory symlinks. Auto's failure fallback is not forced.
+
+Two opt-in tests cover nine Claude interoperation cases. CLI-first exercises all
+three modes. Lite-first starts with either its enabled reference or its disabled,
+dangling reference, then asks CLI to enable in each mode. Lite must subsequently
+disable and reenable the same installed Skill; a copied deployment must remain a
+copy. The peer runs Lite's real Skill Store and observation service and returns
+both the operation error and observed state. Successful worker exit alone is not
+a successful toggle. The existing bounded child wait/reap and isolated paths are
+reused; all profiles and credentials are synthetic.
+
+Run the new tests with the independent binaries and isolated environment above:
+
+```sh
+cargo test --locked --lib services::skill::consumer_tests::deployment \
+  -- --include-ignored --test-threads=1 --nocapture
+```
+
+Local macOS results: all 36 ordinary cases pass. All nine cross-consumer cases
+reach Lite's real disable service and fail with `skill_unavailable` /
+`NativeConflict`; catalog selection remains true, effective state is unknown,
+and Lite preserves the native entry and catalog on refusal. Thus both opt-in
+tests are red. Reenable/copy-retention assertions remain requirements but are
+not reached on this baseline. Running the whole Skill consumer group gives
+four passing tests and five failures, including the three previously recorded
+failures. These assertions must not be inverted to make the gate green.
+
+Lite's 125 ordinary tests and strict all-target Clippy pass. Both formatting
+checks pass. CLI all-target Clippy passes with its existing warnings and recorded
+`reversed_empty_ranges` allowance; no diagnostic names a changed test file.
+Windows/Linux execution, the full CLI suite, crash recovery and all-App
+interoperation were not tested in this slice. The next production slice must
+resolve representation ownership and deployment composition, not just locking.

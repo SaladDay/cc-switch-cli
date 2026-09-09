@@ -1,5 +1,7 @@
 //! Real-consumer acceptance gates, not a replacement Skill implementation.
 
+mod deployment;
+
 use super::*;
 use crate::test_support::TestEnvGuard;
 use std::{
