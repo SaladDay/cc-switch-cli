@@ -19,6 +19,8 @@ pub struct ManagedAuthStatus {
     pub authenticated: bool,
     pub default_account_id: Option<String>,
     pub migration_error: Option<String>,
+    #[serde(default)]
+    pub active_codex_account_id: Option<String>,
     pub accounts: Vec<ManagedAuthAccount>,
 }
 
@@ -133,6 +135,7 @@ impl AuthService {
                     authenticated: status.authenticated,
                     default_account_id: default_account_id.clone(),
                     migration_error: None,
+                    active_codex_account_id: super::codex_account::active_account_id(),
                     accounts: status
                         .accounts
                         .into_iter()

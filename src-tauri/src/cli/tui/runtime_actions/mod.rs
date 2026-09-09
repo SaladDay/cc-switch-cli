@@ -1128,6 +1128,10 @@ pub(crate) fn handle_action(
         Action::ManagedAuthStartLogin { auth_provider } => {
             settings::managed_auth_start_login(&mut ctx, auth_provider)
         }
+        Action::ManagedAuthUse {
+            auth_provider,
+            account_id,
+        } => settings::managed_auth_use(&mut ctx, auth_provider, account_id),
         Action::ManagedAuthSetDefault {
             auth_provider,
             account_id,

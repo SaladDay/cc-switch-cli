@@ -351,9 +351,32 @@ Manage ChatGPT/Codex OAuth accounts locally and reuse them across provider profi
 cc-switch auth status                # Show managed account status
 cc-switch auth login                 # Sign in with ChatGPT/Codex OAuth
 cc-switch auth list                  # List signed-in accounts
-cc-switch auth default <account-id>  # Set the default account
+cc-switch auth default <account-id>  # Set the managed/proxy default only
+cc-switch auth use <account-id>      # Activate the account for standalone Codex
 cc-switch auth remove <account-id>   # Remove an account
 ```
+
+`auth use` writes the selected ChatGPT login to the effective `CODEX_HOME/auth.json`,
+updates the current official Codex provider's auth snapshot (used by quota and temporary
+launches), and makes that account the managed default. It leaves `config.toml`, MCP,
+skills, and other provider snapshots unchanged. `auth status --json` distinguishes
+`default_account_id` from `active_codex_account_id`.
+
+In **Settings → Managed accounts**, press **u** or choose **Use in Codex** from the
+account menu. **Space / Set default** retains its existing managed/proxy-only meaning.
+Restart Codex or launch a new `codex` process after activation; `/new` in an existing
+process does not reload its login. Close old Codex processes before switching if they
+might still refresh the shared login file.
+
+Activation requires the official direct Codex provider and file-based credentials
+(the default). Third-party routing, proxy takeover, keyring/auto credential storage,
+and conflicting forced-login/workspace settings are rejected with an explanation.
+Existing refresh-token-only accounts are upgraded on activation through OAuth refresh;
+if the server cannot provide a complete login, sign in again with `cc-switch auth login`.
+Credentials refreshed by Codex are retained when switching away and back. Pending
+credential-copy updates are persisted with the new token and retried after temporary
+write failures, including across process restarts. Removing a
+managed account or changing `auth default` does not log out the standalone Codex process.
 
 ### 🛠️ MCP Server Management
 

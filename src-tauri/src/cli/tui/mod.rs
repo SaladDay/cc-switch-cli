@@ -2220,6 +2220,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::UsageLogDetailRefresh { .. }
         | Action::ManagedAuthRefresh { .. }
         | Action::ManagedAuthStartLogin { .. }
+        | Action::ManagedAuthUse { .. }
         | Action::ManagedAuthSetDefault { .. }
         | Action::ManagedAuthRemove { .. }
         | Action::SkillsInstall { .. }
@@ -3662,7 +3663,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if let Some(auth) = managed_auth.as_ref() {
             while let Ok(msg) = auth.result_rx.try_recv() {
                 frame_scheduler.mark_dirty();
+                let activated = matches!(
+                    &msg,
+                    runtime_systems::ManagedAuthMsg::Used { result: Ok(_) }
+                );
                 handle_managed_auth_msg(&mut app, msg);
+                if activated {
+                    match data::UiData::load(&app.app_type) {
+                        Ok(fresh) => data = fresh,
+                        Err(err) => app.push_toast(err.to_string(), ToastKind::Error),
+                    }
+                }
             }
         }
 
