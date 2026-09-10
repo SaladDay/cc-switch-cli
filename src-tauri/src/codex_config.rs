@@ -3404,6 +3404,8 @@ pub fn apply_codex_review_model(config: &str, model: Option<&str>) -> Result<Str
     Ok(doc.to_string())
 }
 
+pub(crate) const CODEX_REVIEW_MODEL_MARKER: &str = ".cc-switch-review-model";
+
 /// Undo the projection before importing live settings back into this provider.
 /// An explicit override is managed by cc-switch; preserve the underlying legacy
 /// value so clearing the override restores the previous behavior.
@@ -3411,9 +3413,15 @@ pub(crate) fn restore_codex_review_model(
     settings: &mut Value,
     provider: &crate::provider::Provider,
 ) {
-    if provider.codex_review_model().is_none() {
-        return;
+    if provider.codex_review_model().is_some() {
+        restore_codex_review_model_from_template(settings, provider);
     }
+}
+
+pub(crate) fn restore_codex_review_model_from_template(
+    settings: &mut Value,
+    provider: &crate::provider::Provider,
+) {
     let Some(text) = settings.get("config").and_then(Value::as_str) else {
         return;
     };

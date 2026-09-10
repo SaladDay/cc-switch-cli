@@ -172,6 +172,12 @@ where
 
         let config_path = codex_home.join("config.toml");
         write_secret_file(&config_path, launch_settings.config_text.as_bytes())?;
+        if provider.codex_review_model().is_some() {
+            write_secret_file(
+                &codex_home.join(crate::codex_config::CODEX_REVIEW_MODEL_MARKER),
+                b"1",
+            )?;
+        }
 
         if let Some(auth) = launch_settings.auth {
             let auth_path = codex_home.join("auth.json");
@@ -394,6 +400,9 @@ mod tests {
         });
         let temp = TempDir::new().unwrap();
         let path = write_temp_codex_home(temp.path(), &provider).unwrap();
+        assert!(path
+            .join(crate::codex_config::CODEX_REVIEW_MODEL_MARKER)
+            .exists());
         let config = std::fs::read_to_string(path.join("config.toml")).unwrap();
         let doc = config.parse::<toml_edit::DocumentMut>().unwrap();
         assert_eq!(doc["review_model"].as_str(), Some("vendor-review"));

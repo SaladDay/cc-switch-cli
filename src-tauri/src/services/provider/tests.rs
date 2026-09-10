@@ -7692,3 +7692,81 @@ fn codex_review_model_backfill_preserves_legacy_and_common_extraction_is_local()
     assert!(parsed.get("review_model").is_none());
     assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
 }
+
+#[test]
+fn codex_review_model_cleared_during_temp_launch_is_not_restored_on_exit() {
+    let home = TempDir::new().unwrap();
+    let _env = EnvGuard::isolated(home.path());
+    for baseline in ["", "review_model = 'legacy'\n"] {
+        let mut config = MultiAppConfig::default();
+        let provider = Provider::with_id(
+            "review".into(),
+            "Review".into(),
+            codex_settings(baseline),
+            None,
+        );
+        config
+            .get_manager_mut(&AppType::Codex)
+            .unwrap()
+            .providers
+            .insert("review".into(), provider);
+        let state = state_from_config(config);
+        // Simulate a launch created with an override before it was cleared.
+        let launch = TempDir::new().unwrap();
+        std::fs::write(
+            launch
+                .path()
+                .join(crate::codex_config::CODEX_REVIEW_MODEL_MARKER),
+            "1",
+        )
+        .unwrap();
+        std::fs::write(
+            launch.path().join("config.toml"),
+            "review_model = 'old-override'\nmodel = 'new-main'\n",
+        )
+        .unwrap();
+        ProviderService::capture_codex_temp_launch_snapshot(&state, "review", launch.path())
+            .unwrap();
+        let providers = ProviderService::list(&state, AppType::Codex).unwrap();
+        let saved = &providers["review"];
+        assert!(saved.codex_review_model().is_none());
+        let actual: toml::Value =
+            toml::from_str(saved.settings_config["config"].as_str().unwrap()).unwrap();
+        let expected: toml::Value = toml::from_str(baseline).unwrap();
+        assert_eq!(actual.get("review_model"), expected.get("review_model"));
+        assert_eq!(actual["model"].as_str(), Some("new-main"));
+    }
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn codex_review_model_official_form_clear_persists_through_service_update() {
+    let home = TempDir::new().unwrap();
+    let _env = EnvGuard::isolated(home.path());
+    let mut config = MultiAppConfig::default();
+    let mut provider = Provider::with_id(
+        "official".into(),
+        "Official".into(),
+        codex_settings(""),
+        None,
+    );
+    provider.category = Some("official".into());
+    config
+        .get_manager_mut(&AppType::Codex)
+        .unwrap()
+        .providers
+        .insert("official".into(), provider.clone());
+    let state = state_from_config(config);
+    for review in ["review-model", ""] {
+        let mut form =
+            crate::cli::tui::ProviderAddFormState::from_provider(AppType::Codex, &provider);
+        form.codex_review_model.set(review);
+        let edited: Provider = serde_json::from_value(form.to_provider_json_value()).unwrap();
+        ProviderService::update(&state, AppType::Codex, edited).unwrap();
+        provider = state.db.get_all_providers("codex").unwrap()["official"].clone();
+        assert_eq!(
+            provider.codex_review_model(),
+            (!review.is_empty()).then_some(review)
+        );
+    }
+}

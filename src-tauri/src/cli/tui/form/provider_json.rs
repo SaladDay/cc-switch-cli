@@ -1197,7 +1197,12 @@ impl ProviderAddFormState {
 
         self.update_usage_script_meta(meta_obj);
 
-        if meta_obj.is_empty() {
+        // An omitted meta means "preserve existing" to ProviderService::update.
+        // Keep an explicit empty object when clearing the last review override.
+        let clearing_review_model = matches!(self.app_type, AppType::Codex)
+            && self.codex_review_model.is_blank()
+            && self.extra.pointer("/meta/codexReviewModel").is_some();
+        if meta_obj.is_empty() && !clearing_review_model {
             provider_obj.remove("meta");
         }
     }

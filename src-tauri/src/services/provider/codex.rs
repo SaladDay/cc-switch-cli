@@ -76,6 +76,17 @@ impl ProviderService {
         raw_settings.insert("auth".to_string(), auth);
         raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
         let mut settings_to_store = Value::Object(raw_settings);
+        // The override may have been cleared while this launch was running.
+        // Its projected value must never become a legacy config on exit.
+        if codex_home
+            .join(crate::codex_config::CODEX_REVIEW_MODEL_MARKER)
+            .exists()
+        {
+            crate::codex_config::restore_codex_review_model_from_template(
+                &mut settings_to_store,
+                &provider,
+            );
+        }
         if Self::codex_live_write_category(&provider) == Some("official") {
             crate::codex_config::strip_codex_unified_session_bucket_from_settings(
                 &mut settings_to_store,

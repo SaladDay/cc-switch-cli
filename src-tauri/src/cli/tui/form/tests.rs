@@ -8156,4 +8156,12 @@ fn codex_review_model_creates_metadata_for_existing_official_provider() {
     form.codex_review_model.set("review-model");
     let saved: Provider = serde_json::from_value(form.to_provider_json_value()).unwrap();
     assert_eq!(saved.codex_review_model(), Some("review-model"));
+    let mut reopened = ProviderAddFormState::from_provider(AppType::Codex, &saved);
+    reopened.codex_review_model.set("");
+    let cleared: Provider = serde_json::from_value(reopened.to_provider_json_value()).unwrap();
+    assert!(
+        cleared.meta.is_some(),
+        "explicit empty meta must clear the stored override"
+    );
+    assert_eq!(cleared.codex_review_model(), None);
 }
