@@ -323,6 +323,8 @@ Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode
 Pi provider management follows Pi's native additive model: membership comes from `models.json.providers`. CC-Switch does not modify Pi login credentials or its global default provider/model.
 The Pi TUI keeps the same table/form/shortcut conventions as the other apps and exposes Presets, System Prompts, and Prompt Templates as separate pages.
 
+The Codex provider form includes **Review Model**. Enter a model ID to override `review_model` for that provider when switching or launching, taking precedence over common config. Leave it empty to preserve existing configuration behavior. The selection is stored as `meta.codexReviewModel` and does not require model mapping. Use a model supported by the provider and restart Codex after changing it.
+
 **Features:** One-click switching, standalone Claude settings export, multi-endpoint support, API key management, remote model discovery, and per-app diagnostics such as speed testing or stream health checks where supported.
 
 ```bash

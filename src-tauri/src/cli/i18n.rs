@@ -2302,9 +2302,9 @@ pub mod texts {
 
     pub fn tui_label_codex_review_model() -> &'static str {
         if is_chinese() {
-            "审查模型（可选）"
+            "审查模型"
         } else {
-            "Review Model (optional)"
+            "Review Model"
         }
     }
 

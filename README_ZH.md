@@ -326,6 +326,8 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 Pi 供应商遵循原生的增量管理模型：是否启用完全取决于 `models.json.providers` 中的成员关系。CC-Switch 不会修改 Pi 的登录凭据或全局默认供应商/模型。
 Pi TUI 延续其他应用的表格、表单与快捷键交互，并将预设、系统提示词和 Prompt Templates 分为独立页面。
 
+Codex 供应商表单提供「审查模型」：填写模型 ID 后，该供应商切换或启动时会使用独立的 `review_model`，优先于通用配置；留空保留原有配置行为。此设置以 `meta.codexReviewModel` 保存在供应商中，不依赖模型映射。模型必须受该供应商支持，修改后请重新启动 Codex。
+
 **功能：** 一键切换、Claude 独立 settings 导出、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 
 ```bash

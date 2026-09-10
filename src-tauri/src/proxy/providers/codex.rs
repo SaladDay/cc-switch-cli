@@ -1043,6 +1043,25 @@ wire_api = "chat"
     }
 
     #[test]
+    fn test_apply_codex_model_preserves_provider_review_model_without_catalog() {
+        let mut provider = create_provider(json!({
+            "base_url": "https://api.example.com/v1",
+            "api_format": "openai_chat",
+            "model": "main-model"
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_review_model: Some("review-model".into()),
+            ..Default::default()
+        });
+        let mut body = json!({"model": "review-model", "input": "hello"});
+        assert_eq!(
+            apply_codex_chat_upstream_model(&provider, &mut body).as_deref(),
+            Some("review-model")
+        );
+        assert_eq!(body["model"], "review-model");
+    }
+
+    #[test]
     fn test_resolve_codex_chat_reasoning_infers_deepseek_effort_support() {
         let provider = create_provider(json!({
             "base_url": "https://api.deepseek.com/v1",

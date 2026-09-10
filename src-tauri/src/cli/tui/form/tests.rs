@@ -8141,3 +8141,19 @@ fn codex_review_model_form_roundtrip_overrides_common_and_clears_to_legacy() {
         assert_eq!(preview["review_model"].as_str(), Some("shared"));
     }
 }
+
+#[test]
+fn codex_review_model_creates_metadata_for_existing_official_provider() {
+    let mut provider = Provider::with_id(
+        "official".into(),
+        "Official".into(),
+        json!({"auth": {}, "config": "model = 'main'\n"}),
+        None,
+    );
+    provider.category = Some("official".into());
+    assert!(provider.meta.is_none());
+    let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    form.codex_review_model.set("review-model");
+    let saved: Provider = serde_json::from_value(form.to_provider_json_value()).unwrap();
+    assert_eq!(saved.codex_review_model(), Some("review-model"));
+}

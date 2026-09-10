@@ -5196,3 +5196,39 @@ fn codex_review_model_is_independent_across_switches_and_clearing() {
         .unwrap()
         .contains("a-review"));
 }
+
+#[test]
+fn codex_review_model_clears_after_backfill_without_common_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+    write_codex_live_atomic(&json!({}), Some("")).unwrap();
+    let mut config = MultiAppConfig::default();
+    for id in ["a", "b"] {
+        let mut p = codex_provider(id, id, "test-key", "custom", "https://example.test/v1");
+        p.meta = Some(ProviderMeta {
+            codex_review_model: Some(format!("{id}-review")),
+            ..Default::default()
+        });
+        config
+            .get_manager_mut(&AppType::Codex)
+            .unwrap()
+            .providers
+            .insert(id.into(), p);
+    }
+    let state = state_from_config(config);
+    for id in ["a", "b", "a", "b"] {
+        ProviderService::switch(&state, AppType::Codex, id).unwrap();
+    }
+    let mut a = state.db.get_all_providers("codex").unwrap()["a"].clone();
+    let stored: toml::Value =
+        toml::from_str(a.settings_config["config"].as_str().unwrap()).unwrap();
+    assert!(stored.get("review_model").is_none());
+    a.meta.as_mut().unwrap().codex_review_model = None;
+    ProviderService::update(&state, AppType::Codex, a).unwrap();
+    ProviderService::switch(&state, AppType::Codex, "a").unwrap();
+    let live: toml::Value =
+        toml::from_str(&std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).unwrap())
+            .unwrap();
+    assert!(live.get("review_model").is_none());
+}
