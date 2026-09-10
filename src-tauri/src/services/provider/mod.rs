@@ -1667,6 +1667,10 @@ impl ProviderService {
         settings_config: Value,
         common_config_snippet: Option<&str>,
     ) -> Result<Value, AppError> {
+        let mut settings_config = settings_config;
+        if matches!(app_type, AppType::Codex) {
+            crate::codex_config::restore_codex_review_model(&mut settings_config, provider);
+        }
         let mut snapshot_provider = provider.clone();
         snapshot_provider.settings_config = settings_config;
         Self::normalize_provider_for_storage(

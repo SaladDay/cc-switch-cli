@@ -198,12 +198,12 @@ where
     }
 }
 
-struct CodexLaunchSettings<'a> {
-    config_text: &'a str,
+struct CodexLaunchSettings {
+    config_text: String,
     auth: Option<Value>,
 }
 
-fn parse_launch_settings(provider: &Provider) -> Result<CodexLaunchSettings<'_>, AppError> {
+fn parse_launch_settings(provider: &Provider) -> Result<CodexLaunchSettings, AppError> {
     let settings = provider.settings_config.as_object().ok_or_else(|| {
         AppError::localized(
             "codex.temp_launch_settings_not_object",
@@ -240,6 +240,8 @@ fn parse_launch_settings(provider: &Provider) -> Result<CodexLaunchSettings<'_>,
         }
     };
 
+    let config_text =
+        crate::codex_config::apply_codex_review_model(config_text, provider.codex_review_model())?;
     Ok(CodexLaunchSettings { config_text, auth })
 }
 

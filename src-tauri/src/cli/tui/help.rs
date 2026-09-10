@@ -679,6 +679,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Provider API key. After saving, it is written using this app's config rules. The UI shows the current value in plaintext.",
             ),
         ),
+        ProviderAddField::CodexReviewModel => HelpContent::new(
+            texts::tui_label_codex_review_model(),
+            help_lines(
+                "仅此供应商的审查模型，优先于通用配置中的 review_model。留空保留原有配置行为。模型必须受此供应商支持。保存后重新启动 Codex 生效。",
+                "Review model for this provider, overriding review_model in common config. Leave empty to preserve the existing configuration behavior. The model must be supported by this provider. Restart Codex after saving.",
+            ),
+        ),
         ProviderAddField::CodexModel => HelpContent::new(
             texts::model_label(),
             help_lines(

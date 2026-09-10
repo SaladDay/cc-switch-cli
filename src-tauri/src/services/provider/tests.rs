@@ -7660,3 +7660,35 @@ fn delete_rejects_last_failover_queue_provider_while_active() {
         .expect("read queued provider")
         .is_some());
 }
+
+#[test]
+fn codex_review_model_backfill_preserves_legacy_and_common_extraction_is_local() {
+    let provider = Provider::with_id(
+        "review".into(),
+        "Review".into(),
+        json!({"auth": {}, "config": "review_model = \"legacy\"\n"}),
+        None,
+    );
+    let mut provider = provider;
+    provider.meta = Some(crate::provider::ProviderMeta {
+        codex_review_model: Some("override".into()),
+        ..Default::default()
+    });
+    let restored = ProviderService::normalize_settings_config_for_storage(
+        &AppType::Codex,
+        &provider,
+        json!({"auth": {}, "config": "review_model = \"override\"\nmodel = \"main\"\n"}),
+        None,
+    )
+    .unwrap();
+    let parsed: toml::Value = toml::from_str(restored["config"].as_str().unwrap()).unwrap();
+    assert_eq!(parsed["review_model"].as_str(), Some("legacy"));
+    assert_eq!(parsed["model"].as_str(), Some("main"));
+    let common = ProviderService::extract_codex_common_config_from_config_toml(
+        "review_model = \"local\"\nmodel_reasoning_effort = \"high\"\n",
+    )
+    .unwrap();
+    let parsed: toml::Value = toml::from_str(&common).unwrap();
+    assert!(parsed.get("review_model").is_none());
+    assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
+}

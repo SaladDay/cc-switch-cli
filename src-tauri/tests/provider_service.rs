@@ -5134,3 +5134,65 @@ fn provider_service_sync_current_to_live_keeps_existing_prompt_file_without_acti
         "unmanaged prompt"
     );
 }
+
+#[test]
+fn codex_review_model_is_independent_across_switches_and_clearing() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+    write_codex_live_atomic(&json!({}), Some("")).unwrap();
+    let mut config = MultiAppConfig::default();
+    config.common_config_snippets.codex = Some("review_model = \"shared-review\"\n".into());
+    for (id, review) in [
+        ("a", Some("a-review")),
+        ("b", Some("shared-review")),
+        ("c", None),
+    ] {
+        let mut provider = codex_provider(id, id, "test-key", "custom", "https://example.test/v1");
+        provider.meta = Some(ProviderMeta {
+            apply_common_config: Some(true),
+            codex_review_model: review.map(str::to_string),
+            ..Default::default()
+        });
+        config
+            .get_manager_mut(&AppType::Codex)
+            .unwrap()
+            .providers
+            .insert(id.into(), provider);
+    }
+    let state = state_from_config(config);
+    for (id, expected) in [
+        ("a", "a-review"),
+        ("b", "shared-review"),
+        ("a", "a-review"),
+        ("c", "shared-review"),
+        ("b", "shared-review"),
+    ] {
+        ProviderService::switch(&state, AppType::Codex, id).unwrap();
+        let live: toml::Value = toml::from_str(
+            &std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(live["review_model"].as_str(), Some(expected));
+    }
+    // Equal shared/explicit values must survive storage deduplication.
+    assert_eq!(
+        state.db.get_all_providers("codex").unwrap()["b"].codex_review_model(),
+        Some("shared-review")
+    );
+    let mut a = state.db.get_all_providers("codex").unwrap()["a"].clone();
+    a.meta.as_mut().unwrap().codex_review_model = None;
+    ProviderService::update(&state, AppType::Codex, a).unwrap();
+    ProviderService::switch(&state, AppType::Codex, "a").unwrap();
+    let live: toml::Value =
+        toml::from_str(&std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).unwrap())
+            .unwrap();
+    assert_eq!(live["review_model"].as_str(), Some("shared-review"));
+    // Neither live projections nor metadata may leak to an unconfigured provider.
+    let c = state.db.get_all_providers("codex").unwrap()["c"].clone();
+    assert!(c.codex_review_model().is_none());
+    assert!(!c.settings_config["config"]
+        .as_str()
+        .unwrap()
+        .contains("a-review"));
+}

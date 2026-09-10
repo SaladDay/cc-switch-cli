@@ -1966,6 +1966,7 @@ pub(crate) fn provider_field_label_and_value(
             texts::tui_label_codex_max_output_tokens().to_string()
         }
         ProviderAddField::CodexModel => texts::model_label().to_string(),
+        ProviderAddField::CodexReviewModel => texts::tui_label_codex_review_model().to_string(),
         ProviderAddField::CodexPromptCacheRouting => {
             texts::tui_label_codex_prompt_cache_routing().to_string()
         }

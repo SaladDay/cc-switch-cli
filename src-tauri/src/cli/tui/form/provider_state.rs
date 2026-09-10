@@ -205,6 +205,7 @@ impl ProviderAddFormState {
             codex_max_output_tokens: TextInput::new(""),
             codex_base_url: TextInput::new(codex_defaults.0),
             codex_model: TextInput::new(codex_defaults.1),
+            codex_review_model: TextInput::new(""),
             codex_wire_api: codex_defaults.2,
             codex_requires_openai_auth: codex_defaults.3,
             codex_env_key: TextInput::new("OPENAI_API_KEY"),
@@ -519,6 +520,7 @@ impl ProviderAddFormState {
                 }
             }
             AppType::Codex => {
+                fields.push(ProviderAddField::CodexReviewModel);
                 if !self.is_codex_official_provider() {
                     fields.push(ProviderAddField::CodexBaseUrl);
                     fields.push(ProviderAddField::CodexApiKey);
@@ -727,6 +729,7 @@ impl ProviderAddFormState {
             ProviderAddField::CodexBaseUrl => Some(&self.codex_base_url),
             ProviderAddField::CodexMaxOutputTokens => Some(&self.codex_max_output_tokens),
             ProviderAddField::CodexModel => Some(&self.codex_model),
+            ProviderAddField::CodexReviewModel => Some(&self.codex_review_model),
             ProviderAddField::CodexEnvKey => Some(&self.codex_env_key),
             ProviderAddField::CodexApiKey => Some(&self.codex_api_key),
             ProviderAddField::GeminiApiKey => Some(&self.gemini_api_key),
@@ -793,6 +796,7 @@ impl ProviderAddFormState {
             ProviderAddField::CodexBaseUrl => Some(&mut self.codex_base_url),
             ProviderAddField::CodexMaxOutputTokens => Some(&mut self.codex_max_output_tokens),
             ProviderAddField::CodexModel => Some(&mut self.codex_model),
+            ProviderAddField::CodexReviewModel => Some(&mut self.codex_review_model),
             ProviderAddField::CodexEnvKey => Some(&mut self.codex_env_key),
             ProviderAddField::CodexApiKey => Some(&mut self.codex_api_key),
             ProviderAddField::GeminiApiKey => Some(&mut self.gemini_api_key),

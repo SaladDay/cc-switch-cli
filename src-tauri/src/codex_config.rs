@@ -3389,3 +3389,72 @@ experimental_bearer_token = "sk-live"
         );
     }
 }
+
+/// Project a cc-switch provider override into Codex's top-level config.
+/// Keeping the override outside TOML prevents common-config deduplication from
+/// erasing an explicit selection that happens to equal the shared value.
+pub fn apply_codex_review_model(config: &str, model: Option<&str>) -> Result<String, AppError> {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return Ok(config.to_string());
+    };
+    let mut doc = config
+        .parse::<DocumentMut>()
+        .map_err(|err| AppError::Config(format!("Invalid Codex config.toml: {err}")))?;
+    doc["review_model"] = toml_edit::value(model);
+    Ok(doc.to_string())
+}
+
+/// Undo the projection before importing live settings back into this provider.
+/// An explicit override is managed by cc-switch; preserve the underlying legacy
+/// value so clearing the override restores the previous behavior.
+pub(crate) fn restore_codex_review_model(
+    settings: &mut Value,
+    provider: &crate::provider::Provider,
+) {
+    if provider.codex_review_model().is_none() {
+        return;
+    }
+    let Some(text) = settings.get("config").and_then(Value::as_str) else {
+        return;
+    };
+    let Ok(mut doc) = text.parse::<DocumentMut>() else {
+        return;
+    };
+    let original = provider
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let Ok(original) = original.parse::<DocumentMut>() else {
+        return;
+    };
+    if let Some(value) = original.get("review_model") {
+        doc["review_model"] = value.clone();
+    } else {
+        doc.as_table_mut().remove("review_model");
+    }
+    settings["config"] = Value::String(doc.to_string());
+}
+
+#[cfg(test)]
+mod review_model_tests {
+    use super::*;
+
+    #[test]
+    fn review_model_override_is_top_level_escaped_and_optional() {
+        let original = "# keep\nmodel = \"main\"\n[model_providers.custom]\nname = \"Custom\"\n";
+        assert_eq!(apply_codex_review_model(original, None).unwrap(), original);
+        assert_eq!(
+            apply_codex_review_model(original, Some("  ")).unwrap(),
+            original
+        );
+        let result = apply_codex_review_model(original, Some("review\"model")).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(parsed["review_model"].as_str(), Some("review\"model"));
+        assert!(parsed["model_providers"]["custom"]
+            .get("review_model")
+            .is_none());
+        assert!(result.contains("# keep"));
+        assert!(apply_codex_review_model("[broken", Some("review")).is_err());
+    }
+}

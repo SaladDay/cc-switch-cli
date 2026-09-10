@@ -229,6 +229,8 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
 }
 
 fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    form.codex_review_model
+        .set(provider.codex_review_model().unwrap_or(""));
     if let Some(config) = provider
         .settings_config
         .get("config")

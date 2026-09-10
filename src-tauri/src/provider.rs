@@ -239,6 +239,15 @@ impl Provider {
             .unwrap_or(false)
     }
 
+    pub fn codex_review_model(&self) -> Option<&str> {
+        self.meta
+            .as_ref()?
+            .codex_review_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+    }
+
     pub fn codex_fast_mode_enabled(&self) -> bool {
         self.meta
             .as_ref()
@@ -510,6 +519,9 @@ pub struct ProviderMeta {
     /// Codex 官方供应商标记（官方无需填写 API Key，使用 codex login 凭证）
     #[serde(rename = "codexOfficial", skip_serializing_if = "Option::is_none")]
     pub codex_official: Option<bool>,
+    /// Provider-local review model override. None preserves the legacy config.
+    #[serde(rename = "codexReviewModel", skip_serializing_if = "Option::is_none")]
+    pub codex_review_model: Option<String>,
     /// 自定义端点列表（按 URL 去重存储）
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub custom_endpoints: HashMap<String, crate::settings::CustomEndpoint>,

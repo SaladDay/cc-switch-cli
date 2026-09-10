@@ -107,6 +107,7 @@ fn shared_config(provider: &Provider, sqlite_home: &Path) -> Result<String, AppE
         .get("config")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let text = crate::codex_config::apply_codex_review_model(text, provider.codex_review_model())?;
     let mut doc = text
         .parse::<DocumentMut>()
         .map_err(|err| AppError::Config(err.to_string()))?;

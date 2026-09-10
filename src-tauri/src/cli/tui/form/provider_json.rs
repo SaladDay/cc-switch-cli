@@ -249,7 +249,7 @@ impl ProviderAddFormState {
 
     pub(crate) fn effective_codex_config_text(&self) -> String {
         if self.is_codex_official_provider() {
-            return self.effective_official_codex_config_text();
+            return self.preview_codex_review_model(self.effective_official_codex_config_text());
         }
 
         let fallback_model = if self.codex_model.is_blank() {
@@ -266,7 +266,12 @@ impl ProviderAddFormState {
         } else {
             fallback_model
         };
-        self.effective_custom_codex_config_text(model)
+        self.preview_codex_review_model(self.effective_custom_codex_config_text(model))
+    }
+
+    fn preview_codex_review_model(&self, config: String) -> String {
+        crate::codex_config::apply_codex_review_model(&config, Some(&self.codex_review_model.value))
+            .unwrap_or(config)
     }
 
     pub(crate) fn effective_codex_config_text_with_common_config(
@@ -286,11 +291,13 @@ impl ProviderAddFormState {
         )
         .map_err(|err| err.to_string())?;
 
-        Ok(effective
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string())
+        Ok(self.preview_codex_review_model(
+            effective
+                .get("config")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        ))
     }
 
     fn codex_config_and_model_catalog_for_save(&self) -> (String, Vec<Value>) {
@@ -1101,6 +1108,10 @@ impl ProviderAddFormState {
                     meta_obj.remove("promptCacheRouting");
                 }
             }
+        }
+
+        if matches!(self.app_type, AppType::Codex) {
+            upsert_optional_trimmed(meta_obj, "codexReviewModel", &self.codex_review_model.value);
         }
 
         if matches!(self.app_type, AppType::Claude | AppType::Codex) {

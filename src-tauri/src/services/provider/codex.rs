@@ -116,6 +116,10 @@ impl ProviderService {
         // Remove provider-specific fields.
         let root = doc.as_table_mut();
         root.remove("model");
+        // The review model is selected by Codex alongside the primary model.
+        // Keep it provider-owned so switching providers can restore a
+        // different review model instead of inheriting one global value.
+        root.remove("review_model");
         root.remove("model_provider");
         // Legacy/alt formats might use a top-level base_url.
         root.remove("base_url");
