@@ -1258,6 +1258,10 @@ impl ProviderService {
                         obj.insert("auth".to_string(), sanitized);
                     }
                 }
+                crate::codex_config::restore_codex_review_model(
+                    &mut settings_for_storage,
+                    &provider,
+                );
                 let mut snapshot_provider = provider.clone();
                 snapshot_provider.settings_config = settings_for_storage;
 

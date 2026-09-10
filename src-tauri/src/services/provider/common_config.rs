@@ -229,9 +229,6 @@ fn restore_live_settings_for_provider_backfill(
     if matches!(app_type, AppType::Claude) {
         strip_injected_codex_oauth_context_defaults(&mut settings, provider);
     }
-    if matches!(app_type, AppType::Codex) {
-        crate::codex_config::restore_codex_review_model(&mut settings, provider);
-    }
     settings
 }
 

@@ -385,6 +385,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn codex_review_model_is_projected_for_launch_without_mutating_template() {
+        let original = "model = 'main'\nreview_model = 'legacy'\n";
+        let mut provider = provider_with(original, Some(serde_json::json!({})));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_review_model: Some("vendor-review".into()),
+            ..Default::default()
+        });
+        let temp = TempDir::new().unwrap();
+        let path = write_temp_codex_home(temp.path(), &provider).unwrap();
+        let config = std::fs::read_to_string(path.join("config.toml")).unwrap();
+        let doc = config.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(doc["review_model"].as_str(), Some("vendor-review"));
+        assert_eq!(provider.settings_config["config"], original);
+    }
+
+    #[test]
     fn unix_handoff_command_exports_codex_home_and_cleans_up_temp_dir() {
         let prepared = PreparedCodexLaunch {
             executable: PathBuf::from("/usr/local/bin/codex"),

@@ -982,6 +982,7 @@ impl ProviderAddFormState {
             && !self.has_usage_script_meta()
             && !self.usage_query_touched
             && !should_write_full_url
+            && self.codex_review_model.value.trim().is_empty()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
             return;

@@ -331,6 +331,20 @@ mod tests {
     }
 
     #[test]
+    fn codex_review_model_is_projected_for_launch_without_mutating_template() {
+        let original = "model = 'main'\nreview_model = 'legacy'\n";
+        let mut provider = provider("review", original);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_review_model: Some("vendor-review".into()),
+            ..Default::default()
+        });
+        let config = shared_config(&provider, Path::new("/shared/sqlite")).unwrap();
+        let doc = config.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(doc["review_model"].as_str(), Some("vendor-review"));
+        assert_eq!(provider.settings_config["config"], original);
+    }
+
+    #[test]
     fn shared_config_preserves_selected_endpoint_and_original_settings() {
         let original = "model_provider = 'relay'\nmodel = 'demo'\n[model_providers.relay]\nname = 'Relay'\nbase_url = 'https://relay.invalid/v1'\nexperimental_bearer_token = 'private-token'\nwire_api = 'responses'\n";
         let provider = provider("relay", original);

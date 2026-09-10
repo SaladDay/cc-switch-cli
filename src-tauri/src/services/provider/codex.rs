@@ -482,6 +482,10 @@ impl ProviderService {
                     &mut settings_for_storage,
                 )?;
             }
+            crate::codex_config::restore_codex_review_model(
+                &mut settings_for_storage,
+                &current_provider,
+            );
             snapshot_provider.settings_config = settings_for_storage;
             snapshot_provider = Self::migrate_provider_snapshot_for_storage(
                 &AppType::Codex,

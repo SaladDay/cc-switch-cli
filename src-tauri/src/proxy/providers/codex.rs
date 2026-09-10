@@ -247,7 +247,9 @@ pub fn apply_codex_upstream_model(provider: &Provider, body: &mut JsonValue) -> 
         .map(str::trim)
         .filter(|model| !model.is_empty())
     {
-        if catalog_model_ids.contains(request_model) {
+        if catalog_model_ids.contains(request_model)
+            || provider.codex_review_model() == Some(request_model)
+        {
             return Some(request_model.to_string());
         }
     }
