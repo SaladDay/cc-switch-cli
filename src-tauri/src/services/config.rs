@@ -352,6 +352,7 @@ impl ConfigService {
                     "auth": auth_after,
                     "config": cfg_text_after,
                 });
+                crate::codex_config::restore_codex_review_model(&mut restored, provider);
                 let restore_provider_token =
                     crate::codex_config::should_restore_codex_provider_token_for_backfill(
                         ProviderService::codex_live_write_category(provider),

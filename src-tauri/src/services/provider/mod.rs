@@ -1168,8 +1168,6 @@ impl ProviderService {
             AppType::Codex => {
                 let auth_path = get_codex_auth_path();
                 let cfg_text = crate::codex_config::read_and_validate_codex_config_text()?;
-                let common_snippet_extracted =
-                    Self::extract_codex_common_config_from_config_toml(&cfg_text)?;
                 let cfg_text_for_storage =
                     Self::strip_codex_mcp_servers_from_snapshot_config(&cfg_text)?;
 
@@ -1199,6 +1197,14 @@ impl ProviderService {
                     provider.settings_config.get("auth").cloned()
                 };
 
+                let mut extraction_settings = serde_json::json!({"config": &cfg_text});
+                crate::codex_config::restore_codex_review_model(
+                    &mut extraction_settings,
+                    &provider,
+                );
+                let common_snippet_extracted = Self::extract_codex_common_config_from_config_toml(
+                    extraction_settings["config"].as_str().unwrap_or(&cfg_text),
+                )?;
                 let effective_common_snippet = if common_snippet_for_strip
                     .as_deref()
                     .unwrap_or_default()
@@ -1258,6 +1264,10 @@ impl ProviderService {
                         obj.insert("auth".to_string(), sanitized);
                     }
                 }
+                crate::codex_config::restore_codex_review_model(
+                    &mut settings_for_storage,
+                    &provider,
+                );
                 let mut snapshot_provider = provider.clone();
                 snapshot_provider.settings_config = settings_for_storage;
 
@@ -1667,6 +1677,10 @@ impl ProviderService {
         settings_config: Value,
         common_config_snippet: Option<&str>,
     ) -> Result<Value, AppError> {
+        let mut settings_config = settings_config;
+        if matches!(app_type, AppType::Codex) {
+            crate::codex_config::restore_codex_review_model(&mut settings_config, provider);
+        }
         let mut snapshot_provider = provider.clone();
         snapshot_provider.settings_config = settings_config;
         Self::normalize_provider_for_storage(

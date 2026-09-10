@@ -249,7 +249,7 @@ impl ProviderAddFormState {
 
     pub(crate) fn effective_codex_config_text(&self) -> String {
         if self.is_codex_official_provider() {
-            return self.effective_official_codex_config_text();
+            return self.preview_codex_review_model(self.effective_official_codex_config_text());
         }
 
         let fallback_model = if self.codex_model.is_blank() {
@@ -266,7 +266,12 @@ impl ProviderAddFormState {
         } else {
             fallback_model
         };
-        self.effective_custom_codex_config_text(model)
+        self.preview_codex_review_model(self.effective_custom_codex_config_text(model))
+    }
+
+    fn preview_codex_review_model(&self, config: String) -> String {
+        crate::codex_config::apply_codex_review_model(&config, Some(&self.codex_review_model.value))
+            .unwrap_or(config)
     }
 
     pub(crate) fn effective_codex_config_text_with_common_config(
@@ -286,11 +291,13 @@ impl ProviderAddFormState {
         )
         .map_err(|err| err.to_string())?;
 
-        Ok(effective
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string())
+        Ok(self.preview_codex_review_model(
+            effective
+                .get("config")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        ))
     }
 
     fn codex_config_and_model_catalog_for_save(&self) -> (String, Vec<Value>) {
@@ -975,6 +982,7 @@ impl ProviderAddFormState {
             && !self.has_usage_script_meta()
             && !self.usage_query_touched
             && !should_write_full_url
+            && self.codex_review_model.value.trim().is_empty()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
             return;
@@ -1103,6 +1111,10 @@ impl ProviderAddFormState {
             }
         }
 
+        if matches!(self.app_type, AppType::Codex) {
+            upsert_optional_trimmed(meta_obj, "codexReviewModel", &self.codex_review_model.value);
+        }
+
         if matches!(self.app_type, AppType::Claude | AppType::Codex) {
             if should_write_full_url {
                 meta_obj.insert("isFullUrl".to_string(), json!(true));
@@ -1185,7 +1197,12 @@ impl ProviderAddFormState {
 
         self.update_usage_script_meta(meta_obj);
 
-        if meta_obj.is_empty() {
+        // An omitted meta means "preserve existing" to ProviderService::update.
+        // Keep an explicit empty object when clearing the last review override.
+        let clearing_review_model = matches!(self.app_type, AppType::Codex)
+            && self.codex_review_model.is_blank()
+            && self.extra.pointer("/meta/codexReviewModel").is_some();
+        if meta_obj.is_empty() && !clearing_review_model {
             provider_obj.remove("meta");
         }
     }

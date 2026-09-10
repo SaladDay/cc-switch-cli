@@ -281,6 +281,7 @@ pub enum ProviderAddField {
     // (loaded from config, used as the serialization fallback) are kept.
     #[allow(dead_code)]
     CodexModel,
+    CodexReviewModel,
     CodexAdvancedDivider,
     CodexPromptCacheRouting,
     CodexLocalRouting,
@@ -606,6 +607,7 @@ pub struct ProviderAddFormState {
 
     pub codex_base_url: TextInput,
     pub codex_model: TextInput,
+    pub codex_review_model: TextInput,
     pub codex_wire_api: CodexWireApi,
     pub codex_requires_openai_auth: bool,
     pub codex_env_key: TextInput,

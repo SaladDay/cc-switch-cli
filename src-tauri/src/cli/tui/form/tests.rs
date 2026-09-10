@@ -8094,3 +8094,74 @@ fn provider_add_form_pi_preserves_raw_native_settings_and_names_a_copy() {
         expected_copy
     );
 }
+
+#[test]
+fn codex_review_model_form_roundtrip_overrides_common_and_clears_to_legacy() {
+    let mut provider = Provider::with_id(
+        "review".into(),
+        "Review".into(),
+        json!({"auth": {}, "config": "model = \"main\"\nreview_model = \"legacy\"\n"}),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        apply_common_config: Some(true),
+        ..Default::default()
+    });
+    let common = "review_model = \"shared\"\n";
+    for official in [false, true] {
+        provider.category = official.then(|| "official".into());
+        let mut form = ProviderAddFormState::from_provider_with_common_snippet(
+            AppType::Codex,
+            &provider,
+            common,
+        );
+        assert!(form.fields().contains(&ProviderAddField::CodexReviewModel));
+        assert!(form.codex_review_model.is_blank());
+        form.codex_review_model.set("  vendor-review  ");
+        let saved: Provider = serde_json::from_value(form.to_provider_json_value()).unwrap();
+        assert_eq!(saved.codex_review_model(), Some("vendor-review"));
+        let mut reopened =
+            ProviderAddFormState::from_provider_with_common_snippet(AppType::Codex, &saved, common);
+        let preview: toml::Value = toml::from_str(
+            &reopened
+                .effective_codex_config_text_with_common_config(common)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preview["review_model"].as_str(), Some("vendor-review"));
+        reopened.codex_review_model.set("");
+        let cleared: Provider = serde_json::from_value(reopened.to_provider_json_value()).unwrap();
+        assert_eq!(cleared.codex_review_model(), None);
+        let preview: toml::Value = toml::from_str(
+            &reopened
+                .effective_codex_config_text_with_common_config(common)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preview["review_model"].as_str(), Some("shared"));
+    }
+}
+
+#[test]
+fn codex_review_model_creates_metadata_for_existing_official_provider() {
+    let mut provider = Provider::with_id(
+        "official".into(),
+        "Official".into(),
+        json!({"auth": {}, "config": "model = 'main'\n"}),
+        None,
+    );
+    provider.category = Some("official".into());
+    assert!(provider.meta.is_none());
+    let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    form.codex_review_model.set("review-model");
+    let saved: Provider = serde_json::from_value(form.to_provider_json_value()).unwrap();
+    assert_eq!(saved.codex_review_model(), Some("review-model"));
+    let mut reopened = ProviderAddFormState::from_provider(AppType::Codex, &saved);
+    reopened.codex_review_model.set("");
+    let cleared: Provider = serde_json::from_value(reopened.to_provider_json_value()).unwrap();
+    assert!(
+        cleared.meta.is_some(),
+        "explicit empty meta must clear the stored override"
+    );
+    assert_eq!(cleared.codex_review_model(), None);
+}

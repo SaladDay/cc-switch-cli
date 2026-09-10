@@ -14975,3 +14975,39 @@ fn home_usage_card_rail_falls_back_to_the_glyph_when_the_label_will_not_fit() {
     let wide_rail = line_at(&wide, wide_row);
     assert!(wide_rail.contains("⠸ Refreshing"), "{wide_rail}");
 }
+
+#[test]
+fn codex_review_model_field_renders_in_both_languages() {
+    let _lock = lock_env();
+    for language in [Language::English, Language::Chinese] {
+        let _lang = use_test_language(language);
+        let p = Provider::with_id(
+            "p".into(),
+            "Provider".into(),
+            json!({"auth": {}, "config": ""}),
+            None,
+        );
+        let mut form =
+            crate::cli::tui::form::ProviderAddFormState::from_provider(AppType::Codex, &p);
+        form.codex_review_model.set("vendor-review");
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|f| *f == ProviderAddField::CodexReviewModel)
+            .unwrap();
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(form));
+        let data = minimal_data(&AppType::Codex);
+        for width in [80, 120] {
+            let text = all_text(&render_with_size(&app, &data, width, 30));
+            let compact = text.replace(' ', "");
+            assert!(
+                compact.contains(&texts::tui_label_codex_review_model().replace(' ', "")),
+                "{text}"
+            );
+            assert!(compact.contains("vendor-review"), "{text}");
+        }
+    }
+}

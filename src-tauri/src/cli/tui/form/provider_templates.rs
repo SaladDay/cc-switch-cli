@@ -324,6 +324,7 @@ impl ProviderAddFormState {
         self.codex_api_key.set("");
         self.codex_base_url.set("");
         self.codex_model.set(CODEX_DEFAULT_MODEL);
+        self.codex_review_model.set("");
         self.codex_wire_api = CodexWireApi::Responses;
         self.codex_requires_openai_auth = true;
         self.codex_env_key.set("OPENAI_API_KEY");
@@ -561,6 +562,7 @@ impl ProviderAddFormState {
                     self.codex_api_key = defaults.codex_api_key;
                     self.codex_chat_reasoning = defaults.codex_chat_reasoning;
                     self.codex_prompt_cache_routing = defaults.codex_prompt_cache_routing;
+                    self.codex_review_model = defaults.codex_review_model;
                     self.codex_model_catalog = defaults.codex_model_catalog;
                     self.codex_local_routing_enabled = defaults.codex_local_routing_enabled;
                     self.codex_goal_mode = defaults.codex_goal_mode;

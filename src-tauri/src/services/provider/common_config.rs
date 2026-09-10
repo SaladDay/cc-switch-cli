@@ -766,6 +766,17 @@ pub(super) fn build_effective_settings_with_common_config(
         apply_codex_oauth_claude_context_defaults(&mut effective_settings, provider);
     }
 
+    if matches!(app_type, AppType::Codex) {
+        let config = effective_settings
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let config =
+            crate::codex_config::apply_codex_review_model(config, provider.codex_review_model())?;
+        if let Some(settings) = effective_settings.as_object_mut() {
+            settings.insert("config".into(), Value::String(config));
+        }
+    }
     Ok(effective_settings)
 }
 

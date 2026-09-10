@@ -76,6 +76,17 @@ impl ProviderService {
         raw_settings.insert("auth".to_string(), auth);
         raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
         let mut settings_to_store = Value::Object(raw_settings);
+        // The override may have been cleared while this launch was running.
+        // Its projected value must never become a legacy config on exit.
+        if codex_home
+            .join(crate::codex_config::CODEX_REVIEW_MODEL_MARKER)
+            .exists()
+        {
+            crate::codex_config::restore_codex_review_model_from_template(
+                &mut settings_to_store,
+                &provider,
+            );
+        }
         if Self::codex_live_write_category(&provider) == Some("official") {
             crate::codex_config::strip_codex_unified_session_bucket_from_settings(
                 &mut settings_to_store,
@@ -453,7 +464,15 @@ impl ProviderService {
         if config_path.exists() {
             let text =
                 std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-            Self::maybe_update_codex_common_config_snippet(config, &text)?;
+            let mut extraction_settings = serde_json::json!({"config": &text});
+            crate::codex_config::restore_codex_review_model(
+                &mut extraction_settings,
+                &current_provider,
+            );
+            Self::maybe_update_codex_common_config_snippet(
+                config,
+                extraction_settings["config"].as_str().unwrap_or(&text),
+            )?;
 
             let capture_auth = if is_official {
                 auth.clone()
@@ -478,6 +497,10 @@ impl ProviderService {
                     &mut settings_for_storage,
                 )?;
             }
+            crate::codex_config::restore_codex_review_model(
+                &mut settings_for_storage,
+                &current_provider,
+            );
             snapshot_provider.settings_config = settings_for_storage;
             snapshot_provider = Self::migrate_provider_snapshot_for_storage(
                 &AppType::Codex,
