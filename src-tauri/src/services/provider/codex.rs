@@ -127,10 +127,6 @@ impl ProviderService {
         // Remove provider-specific fields.
         let root = doc.as_table_mut();
         root.remove("model");
-        // The review model is selected by Codex alongside the primary model.
-        // Keep it provider-owned so switching providers can restore a
-        // different review model instead of inheriting one global value.
-        root.remove("review_model");
         root.remove("model_provider");
         // Legacy/alt formats might use a top-level base_url.
         root.remove("base_url");
@@ -468,7 +464,15 @@ impl ProviderService {
         if config_path.exists() {
             let text =
                 std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-            Self::maybe_update_codex_common_config_snippet(config, &text)?;
+            let mut extraction_settings = serde_json::json!({"config": &text});
+            crate::codex_config::restore_codex_review_model(
+                &mut extraction_settings,
+                &current_provider,
+            );
+            Self::maybe_update_codex_common_config_snippet(
+                config,
+                extraction_settings["config"].as_str().unwrap_or(&text),
+            )?;
 
             let capture_auth = if is_official {
                 auth.clone()

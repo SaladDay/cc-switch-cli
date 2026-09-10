@@ -7662,7 +7662,7 @@ fn delete_rejects_last_failover_queue_provider_while_active() {
 }
 
 #[test]
-fn codex_review_model_backfill_preserves_legacy_and_common_extraction_is_local() {
+fn codex_review_model_backfill_preserves_legacy_and_common_extraction() {
     let provider = Provider::with_id(
         "review".into(),
         "Review".into(),
@@ -7689,7 +7689,7 @@ fn codex_review_model_backfill_preserves_legacy_and_common_extraction_is_local()
     )
     .unwrap();
     let parsed: toml::Value = toml::from_str(&common).unwrap();
-    assert!(parsed.get("review_model").is_none());
+    assert_eq!(parsed["review_model"].as_str(), Some("local"));
     assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
 }
 
