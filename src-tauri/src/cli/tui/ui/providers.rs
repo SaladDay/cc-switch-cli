@@ -567,6 +567,94 @@ mod tests {
     }
 
     #[test]
+    fn official_provider_list_shows_compact_reset_countdown() {
+        let _lock = super::super::tests::lock_env();
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut data = current_official_claude_data();
+        let Some(ProviderUsageQuota::Subscription(mut quota)) =
+            data.quota.state_for("official").unwrap().quota.clone()
+        else {
+            panic!("expected subscription quota");
+        };
+        quota.tiers[0].resets_at =
+            Some((chrono::Utc::now() + chrono::Duration::seconds(12_630)).to_rfc3339());
+        quota.tiers[1].resets_at = Some("invalid".to_string());
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota
+            .finish(target, ProviderUsageQuota::Subscription(quota));
+
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 220, 40));
+        assert!(all.contains("5h 42%  7d 70%"), "{all}");
+        assert!(all.contains("(5h 3h30m)"), "{all}");
+        assert!(all.contains("7d 70%"), "{all}");
+        assert!(!all.contains("invalid"), "{all}");
+        assert!(!all.contains(texts::tui_header_quota()), "{all}");
+    }
+
+    #[test]
+    fn provider_quota_keeps_values_and_refresh_status_visible_on_narrow_terminals() {
+        let _lock = super::super::tests::lock_env();
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut data = current_official_claude_data();
+        let Some(ProviderUsageQuota::Subscription(mut quota)) =
+            data.quota.state_for("official").unwrap().quota.clone()
+        else {
+            panic!("expected subscription quota");
+        };
+        for tier in &mut quota.tiers {
+            tier.resets_at = Some((chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339());
+        }
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota
+            .finish(target.clone(), ProviderUsageQuota::Subscription(quota));
+        data.quota.mark_loading(target.clone(), true);
+
+        let mut baseline = current_official_claude_data();
+        baseline.quota.mark_loading(target, true);
+        let labels = ["5h 42%  7d 70%", "s ago", texts::tui_quota_loading()];
+        let mut compared = [0; 3];
+        for width in [120, 140, 160, 180, 200, 220] {
+            let before = all_text(&super::super::tests::render_with_size(
+                &app, &baseline, width, 40,
+            ));
+            let all = all_text(&super::super::tests::render_with_size(
+                &app, &data, width, 40,
+            ));
+            let Some(before_row) = before
+                .lines()
+                .find(|line| line.contains("Claude Official") && line.contains("5h 42%"))
+            else {
+                continue;
+            };
+            let after_row = all
+                .lines()
+                .find(|line| line.contains("Claude Official") && line.contains("5h 42%"))
+                .unwrap();
+            for (index, label) in labels.iter().enumerate() {
+                if before_row.contains(label) {
+                    compared[index] += 1;
+                    assert!(
+                        after_row.contains(label),
+                        "width={width}, label={label}\n{all}"
+                    );
+                }
+            }
+        }
+        assert!(
+            compared.iter().all(|count| *count > 0),
+            "cover all quota/status fields: {compared:?}"
+        );
+    }
+
+    #[test]
     fn official_provider_list_shows_inline_quota_and_refresh_hint() {
         let _lock = super::super::tests::lock_env();
         let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
