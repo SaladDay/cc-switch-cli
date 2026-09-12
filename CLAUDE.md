@@ -95,6 +95,7 @@ Request handling flows through `HandlerContext`, `ProviderRouter`, `RequestForwa
 ## Blind review protocol
 
 - After implementation and local validation are complete, send the full change set to two independent subagents for blind review.
+- Start each reviewer with fresh context, without inheriting the development conversation. Before review begins, tell the user the requirements, acceptance criteria, and task boundaries given to the reviewers.
 - For every reviewer in every round, including a later round reduced to one reviewer, provide the user's goal, intended behavior, acceptance criteria, and relevant constraints so they can judge whether the change actually satisfies the request. Do not disclose the implementation approach, fixes already made, or findings from any prior reviewer or round. Ask each reviewer to inspect all current modifications and report correctness, regression, security, performance, UX, and test-coverage issues.
 - Keep the two reviews independent. Reviewers must not receive or infer the other reviewer's findings before producing their own report.
 - Validate every finding against the code. Fix confirmed issues, then start a fresh two-reviewer blind round with new subagents under the same reviewer-context rules above.
