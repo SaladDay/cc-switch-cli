@@ -50,10 +50,11 @@ where
 pub(crate) fn run_with_sync_lock_sync<T>(
     operation: impl FnOnce() -> Result<T, AppError>,
 ) -> Result<T, AppError> {
-    futures::executor::block_on(async {
-        let _guard = sync_mutex().lock().await;
-        operation()
-    })
+    // Only drive lock acquisition in LocalPool. The synchronous restore and
+    // post-import projection call async helpers through block_on themselves.
+    // Keep the guard alive across the operation without nesting executors.
+    let _guard = futures::executor::block_on(sync_mutex().lock());
+    operation()
 }
 
 pub(crate) fn project_restored_state_best_effort(
@@ -486,6 +487,31 @@ pub(crate) fn normalize_device_name(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synchronous_restore_can_run_async_helpers_while_holding_sync_lock() {
+        let value = run_with_sync_lock_sync(|| {
+            assert!(sync_mutex().try_lock().is_err());
+            // Post-import projection acquires its own async mutation guard.
+            // It must be able to drive that future without nesting LocalPool.
+            let value = futures::executor::block_on(async { 42 });
+            assert!(sync_mutex().try_lock().is_err());
+            Ok(value)
+        })
+        .expect("synchronous restore should allow async helpers");
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn synchronous_restore_releases_sync_lock_after_error() {
+        let error = run_with_sync_lock_sync::<()>(|| {
+            assert!(sync_mutex().try_lock().is_err());
+            Err(AppError::Message("restore failed".to_string()))
+        })
+        .expect_err("restore error should propagate");
+        assert_eq!(error.to_string(), "restore failed");
+        run_with_sync_lock_sync(|| Ok(())).expect("next restore can acquire the lock");
+    }
 
     #[tokio::test]
     async fn cloud_and_synchronous_restore_paths_share_one_sync_mutex() {

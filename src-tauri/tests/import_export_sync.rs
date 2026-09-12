@@ -1120,9 +1120,26 @@ fn create_backup_retains_only_latest_entries() {
 
 #[test]
 fn import_config_from_path_overwrites_state_and_creates_backup() {
+    assert_sql_restore_overwrites_state_and_creates_backup(false);
+}
+
+#[test]
+fn restore_from_backup_id_overwrites_state_and_syncs_live() {
+    assert_sql_restore_overwrites_state_and_creates_backup(true);
+}
+
+fn assert_sql_restore_overwrites_state_and_creates_backup(restore_by_id: bool) {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
+
+    // Only initialized apps receive post-restore live projection.
+    fs::create_dir_all(home.join(".claude")).expect("initialize Claude directory");
+    fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"old-key"}}"#,
+    )
+    .expect("seed old live config");
 
     // Seed current DB with a provider so pre-import backup is meaningful.
     let mut config = MultiAppConfig::default();
@@ -1147,7 +1164,13 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
     app_state.save().expect("persist initial db");
 
     // Build an import SQL file using an in-memory database.
-    let import_path = home.join(".cc-switch").join("import.sql");
+    let source_backup_id = "desktop_20000101_000000";
+    let import_path = if restore_by_id {
+        let backup_dir = home.join(".cc-switch/backups");
+        backup_dir.join(format!("{source_backup_id}.sql"))
+    } else {
+        home.join(".cc-switch/import.sql")
+    };
     let import_db = Database::memory().expect("create import db");
     let provider = Provider::with_id(
         "p-new".to_string(),
@@ -1167,8 +1190,12 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
         .export_sql(&import_path)
         .expect("export import sql");
 
-    let backup_id = ConfigService::import_config_from_path(&import_path, &app_state)
-        .expect("import should succeed");
+    let backup_id = if restore_by_id {
+        ConfigService::restore_from_backup_id(source_backup_id, &app_state)
+    } else {
+        ConfigService::import_config_from_path(&import_path, &app_state)
+    }
+    .expect("SQL restore should succeed");
     assert!(
         !backup_id.is_empty(),
         "expected pre-import backup id when database exists"
@@ -1211,6 +1238,15 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
         !manager.providers.contains_key("p-old"),
         "import should drop providers that no longer exist in the imported database"
     );
+
+    let live: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.join(".claude/settings.json")).expect("read imported live config"),
+    )
+    .expect("parse imported live config");
+    assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "new-key");
+    let backup_sql = fs::read_to_string(&backup_path).expect("read pre-import backup");
+    assert!(backup_sql.contains("old-key"));
+    assert!(!backup_sql.contains("new-key"));
 }
 
 #[test]
