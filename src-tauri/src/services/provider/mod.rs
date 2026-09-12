@@ -1258,6 +1258,10 @@ impl ProviderService {
                         obj.insert("auth".to_string(), sanitized);
                     }
                 }
+                Self::preserve_codex_model_catalog_for_backfill(
+                    &provider,
+                    &mut settings_for_storage,
+                );
                 let mut snapshot_provider = provider.clone();
                 snapshot_provider.settings_config = settings_for_storage;
 

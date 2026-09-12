@@ -4,6 +4,19 @@ use std::fs;
 use std::path::Path;
 
 impl ProviderService {
+    /// Match upstream backfill: the stored catalog is authoritative; live files
+    /// only contain a lossy projection that clients or proxy cycles can remove.
+    pub(super) fn preserve_codex_model_catalog_for_backfill(
+        provider: &Provider,
+        settings: &mut Value,
+    ) {
+        if let Some(catalog) = provider.settings_config.get("modelCatalog") {
+            if let Some(settings) = settings.as_object_mut() {
+                settings.insert("modelCatalog".to_string(), catalog.clone());
+            }
+        }
+    }
+
     /// Shared launches derive their routing/storage settings at startup. Only
     /// login changes belong back in the provider record; never save AppState's
     /// full snapshot while other providers may be finishing concurrently.
@@ -76,6 +89,7 @@ impl ProviderService {
         raw_settings.insert("auth".to_string(), auth);
         raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
         let mut settings_to_store = Value::Object(raw_settings);
+        Self::preserve_codex_model_catalog_for_backfill(&provider, &mut settings_to_store);
         if Self::codex_live_write_category(&provider) == Some("official") {
             crate::codex_config::strip_codex_unified_session_bucket_from_settings(
                 &mut settings_to_store,
@@ -502,6 +516,10 @@ impl ProviderService {
             }
             snapshot_provider.settings_config = Value::Object(raw_settings);
         };
+        Self::preserve_codex_model_catalog_for_backfill(
+            &current_provider,
+            &mut snapshot_provider.settings_config,
+        );
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(current) = manager.providers.get_mut(current_id) {
                 *current = snapshot_provider;

@@ -277,6 +277,9 @@ disable_response_storage = true
 
 #[test]
 fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
+    let catalog = json!({"models": [{"model": "gpt-5.4", "reasoningLevels": ["high"]}]});
+    let mut settings = codex_settings("model_reasoning_effort = \"medium\"\n");
+    settings["modelCatalog"] = catalog.clone();
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
     {
@@ -289,7 +292,7 @@ fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
             Provider::with_id(
                 "official".to_string(),
                 "OpenAI Official".to_string(),
-                codex_settings("model_reasoning_effort = \"medium\"\n"),
+                settings,
                 None,
             ),
         );
@@ -312,6 +315,7 @@ fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
 
     let providers = ProviderService::list(&state, AppType::Codex).expect("list providers");
     let provider = providers.get("official").expect("provider should remain");
+    assert_eq!(provider.settings_config["modelCatalog"], catalog);
     assert_eq!(
         provider
             .settings_config
@@ -683,6 +687,85 @@ fn set_common_config_snippet_rejects_non_object_opencode_json() {
         err.to_string().contains("JSON object"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+#[serial]
+fn switch_codex_preserves_all_model_catalogs_and_reasoning_levels() {
+    for wire_api in ["responses", "chat"] {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("initialize Codex");
+        let mut config = MultiAppConfig::default();
+        config.ensure_app(&AppType::Codex);
+        let manager = config.get_manager_mut(&AppType::Codex).unwrap();
+        let mut expected = Vec::new();
+        for id in ["a", "b", "c"] {
+            let mut settings = codex_settings(&format!(
+                "model_provider = \"custom\"\nmodel = \"model-{id}\"\n[model_providers.custom]\nname = \"{id}\"\nbase_url = \"https://{id}.example/v1\"\nwire_api = \"{wire_api}\"\n"
+            ));
+            let catalog = json!({"models": [{
+                "model": format!("model-{id}"), "displayName": id,
+                "contextWindow": 128000,
+                "reasoningLevels": ["low", "high"], "defaultReasoningLevel": "high"
+            }]});
+            settings["modelCatalog"] = catalog.clone();
+            expected.push((id, catalog));
+            manager.providers.insert(
+                id.into(),
+                Provider::with_id(id.into(), id.into(), settings, None),
+            );
+        }
+        manager.current = "a".into();
+        let initial_config = manager.providers["a"].settings_config["config"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let state = state_from_config(config);
+        // The outgoing live config has lost its catalog pointer, as can happen
+        // after a client rewrite. Stored mappings must still win on backfill.
+        std::fs::write(get_codex_config_path(), initial_config).unwrap();
+        for target in ["b", "c", "a"] {
+            ProviderService::switch(&state, AppType::Codex, target).expect("switch Codex provider");
+            for (id, catalog) in &expected {
+                let stored = state.db.get_provider_by_id(id, "codex").unwrap().unwrap();
+                assert_eq!(
+                    stored.settings_config.get("modelCatalog"),
+                    Some(catalog),
+                    "{wire_api}: {id} after switching to {target}"
+                );
+            }
+            state
+                .refresh_config_from_db()
+                .expect("reload saved snapshots");
+            let live: Value =
+                read_json_file(&crate::codex_config::get_codex_model_catalog_path()).unwrap();
+            assert_eq!(live["models"][0]["slug"], format!("model-{target}"));
+            assert_eq!(live["models"][0]["default_reasoning_level"], "high");
+            assert_eq!(
+                live["models"][0]["supported_reasoning_levels"][0]["effort"],
+                "low"
+            );
+            // A missing generated file must not erase the next outgoing catalog.
+            std::fs::remove_file(crate::codex_config::get_codex_model_catalog_path()).unwrap();
+        }
+
+        let mut cleared = state.db.get_provider_by_id("a", "codex").unwrap().unwrap();
+        cleared
+            .settings_config
+            .as_object_mut()
+            .unwrap()
+            .remove("modelCatalog");
+        ProviderService::update(&state, AppType::Codex, cleared).expect("explicitly clear mapping");
+        ProviderService::switch(&state, AppType::Codex, "b").unwrap();
+        ProviderService::switch(&state, AppType::Codex, "a").unwrap();
+        let stored = state.db.get_provider_by_id("a", "codex").unwrap().unwrap();
+        assert!(stored.settings_config.get("modelCatalog").is_none());
+        assert!(!std::fs::read_to_string(get_codex_config_path())
+            .unwrap()
+            .contains("model_catalog_json"));
+    }
 }
 
 #[test]
