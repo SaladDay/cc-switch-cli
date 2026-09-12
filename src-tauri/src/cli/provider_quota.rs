@@ -47,6 +47,33 @@ pub(crate) enum ProviderUsageQuota {
     Script(UsageResult),
 }
 
+pub(crate) struct QuotaResetDisplay {
+    pub(crate) at: chrono::DateTime<chrono::FixedOffset>,
+    pub(crate) remaining: Option<String>,
+}
+
+pub(crate) fn quota_reset_display(
+    resets_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<QuotaResetDisplay> {
+    let at = chrono::DateTime::parse_from_rfc3339(resets_at?).ok()?;
+    let diff = at.signed_duration_since(now);
+    // Match upstream SubscriptionQuotaFooter.countdownStr: elapsed resets
+    // have no countdown, and future windows use whole minutes/hours/days.
+    let remaining = (diff > chrono::Duration::zero()).then(|| {
+        let minutes = diff.num_minutes();
+        let hours = minutes / 60;
+        if hours > 24 {
+            format!("{}d{}h", hours / 24, hours % 24)
+        } else if hours > 0 {
+            format!("{hours}h{}m", minutes % 60)
+        } else {
+            format!("{minutes}m")
+        }
+    });
+    Some(QuotaResetDisplay { at, remaining })
+}
+
 pub(crate) fn provider_display_name(app_type: &AppType, id: &str, provider: &Provider) -> String {
     let name = provider.name.trim();
     if !name.is_empty() {
@@ -209,6 +236,49 @@ mod tests {
 
     use super::*;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta, UsageScript};
+
+    #[test]
+    fn quota_reset_countdown_matches_upstream_windows() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        for (seconds, expected) in [
+            (1, "0m"),
+            (59, "0m"),
+            (60, "1m"),
+            (9_000, "2h30m"),
+            (86_400, "24h0m"),
+            (89_940, "24h59m"),
+            (90_000, "1d1h"),
+            (302_400, "3d12h"),
+        ] {
+            let resets_at = (now + chrono::Duration::seconds(seconds)).to_rfc3339();
+            let reset = quota_reset_display(Some(&resets_at), now).unwrap();
+            assert_eq!(reset.remaining.as_deref(), Some(expected), "{seconds}s");
+        }
+        let reset = quota_reset_display(Some("2026-09-12T20:43:00+08:00"), now).unwrap();
+        assert_eq!(reset.remaining.as_deref(), Some("43m"));
+        assert_eq!(reset.at.to_utc(), now + chrono::Duration::minutes(43));
+    }
+
+    #[test]
+    fn quota_reset_display_handles_missing_invalid_and_elapsed_times() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        for resets_at in [
+            None,
+            Some(""),
+            Some("invalid"),
+            Some("2026-99-99T00:00:00Z"),
+        ] {
+            assert!(quota_reset_display(resets_at, now).is_none());
+        }
+        for resets_at in ["2026-09-12T12:00:00Z", "2026-09-11T12:00:00Z"] {
+            let reset = quota_reset_display(Some(resets_at), now).unwrap();
+            assert!(reset.remaining.is_none());
+        }
+    }
 
     fn test_provider(id: &str, name: &str, settings_config: Value) -> Provider {
         Provider::with_id(id.to_string(), name.to_string(), settings_config, None)
