@@ -82,6 +82,12 @@ jobs:
           cargo check --lib --no-default-features
           cargo test --lib --no-default-features --no-run
 
+      - name: Test Windows session cache file synchronization
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        # These tests use only their own temporary directories.
+        run: cargo test --lib --no-default-features session_manager::paged_manifest::tests::sync_private_file -- --nocapture
+
       - name: Check default Windows CLI build
         if: runner.os == 'Windows'
         working-directory: src-tauri
