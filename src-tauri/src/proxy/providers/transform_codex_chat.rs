@@ -817,7 +817,8 @@ fn flush_pending_tool_calls(
     flush_pending_chat_tool_media(messages, pending_media);
     let mut message = json!({
         "role": "assistant",
-        "content": null,
+        // Some Chat backends reject null content on tool-call-only messages.
+        "content": "",
         "tool_calls": std::mem::take(pending_tool_calls)
     });
     attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
@@ -833,8 +834,9 @@ fn responses_message_item_to_chat_message(
     let chat_role = responses_role_to_chat_role(role);
     let content = item
         .get("content")
+        .filter(|value| !value.is_null())
         .map(|value| responses_content_to_chat_content(chat_role, value))
-        .unwrap_or(Value::Null);
+        .unwrap_or_else(|| json!(""));
 
     let mut message = json!({
         "role": chat_role,
@@ -1916,6 +1918,60 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_to_chat_normalizes_empty_message_content() {
+        for role in ["user", "assistant"] {
+            for content in [None, Some(Value::Null), Some(json!("")), Some(json!([]))] {
+                let mut item = json!({"type": "message", "role": role});
+                if let Some(content) = content {
+                    item["content"] = content;
+                }
+                let result = convert_test_input(vec![item]);
+                assert_eq!(result["messages"][0]["role"], role);
+                assert_eq!(result["messages"][0].get("content"), Some(&json!("")));
+            }
+        }
+    }
+
+    #[test]
+    fn responses_request_to_chat_tool_calls_use_empty_content() {
+        for stream in [false, true] {
+            let mut call = test_function_call("call_1");
+            call["arguments"] = json!(r#"{"content":null}"#);
+            call["reasoning_content"] = json!("Inspect the result.");
+            let result = responses_to_chat_completions(json!({
+                "model": "gpt-5.4",
+                "stream": stream,
+                "input": [
+                    call,
+                    test_function_call("call_2"),
+                    test_function_output("call_1", json!({"content": null})),
+                    test_function_output("call_2", Value::Null),
+                    test_function_call("call_3")
+                ]
+            }))
+            .unwrap();
+            let messages = result_messages(&result);
+            assert_eq!(
+                message_roles(&result),
+                ["assistant", "tool", "tool", "assistant"]
+            );
+            assert_eq!(messages[0]["content"], "");
+            assert_eq!(messages[3]["content"], "");
+            assert_eq!(messages[0]["reasoning_content"], "Inspect the result.");
+            assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 2);
+            assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+            assert_eq!(
+                messages[0]["tool_calls"][0]["function"]["arguments"],
+                r#"{"content":null}"#
+            );
+            assert_eq!(messages[1]["tool_call_id"], "call_1");
+            assert_eq!(messages[1]["content"], r#"{"content":null}"#);
+            assert_eq!(messages[2]["content"], "null");
+            assert_eq!(messages[3]["tool_calls"][0]["id"], "call_3");
+        }
+    }
+
+    #[test]
     fn responses_request_with_stream_injects_include_usage() {
         let input = json!({
             "model": "kimi-k2.6",
@@ -2203,6 +2259,7 @@ mod tests {
 
         assert!(tool_names.contains(&"tool_search"));
         assert!(tool_names.contains(&"mcp__codex_apps__gmail___search_emails"));
+        assert_eq!(result["messages"][0]["content"], "");
         assert_eq!(
             result["messages"][0]["tool_calls"][0]["function"]["name"],
             "tool_search"
@@ -2237,6 +2294,7 @@ mod tests {
         let result = responses_to_chat_completions(input).unwrap();
 
         assert_eq!(result["tools"][0]["function"]["name"], "apply_patch");
+        assert_eq!(result["messages"][0]["content"], "");
         assert_eq!(
             result["tools"][0]["function"]["parameters"]["required"][0],
             "input"
