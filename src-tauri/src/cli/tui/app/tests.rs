@@ -12968,6 +12968,53 @@ mod tests {
     }
 
     #[test]
+    fn provider_omp_add_form_rederives_id_from_final_name() {
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut form = ProviderAddFormState::new(AppType::Omp);
+        form.name.set("First Name");
+        assert!(form.ensure_generated_id(&[]));
+        let value = form.to_provider_json_value();
+        form.apply_provider_json_value_to_fields(value)
+            .expect("rehydrate OMP form");
+        assert!(!form.id_is_manual);
+
+        form.name.set("Final Name");
+        form.id.set("stale-hidden-id");
+        form.id_is_manual = true;
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
+        let Action::EditorSubmit { content, .. } = submit else {
+            panic!("Ctrl+S should submit the OMP add form");
+        };
+        assert!(content.contains("\"id\": \"final-name\""));
+    }
+
+    #[test]
+    fn provider_omp_long_derived_id_reports_name_length_error() {
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut form = ProviderAddFormState::new(AppType::Omp);
+        form.name.set("a".repeat(129));
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert_eq!(form.fields()[form.field_idx], ProviderAddField::Name);
+        assert!(form
+            .main_field_error(ProviderAddField::Name)
+            .is_some_and(|message| message.contains("128")));
+    }
+
+    #[test]
     fn provider_add_form_missing_fields_toast_mentions_name_only() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -13010,6 +13057,111 @@ mod tests {
         assert_eq!(form.fields()[form.field_idx], ProviderAddField::Id);
         assert!(form.main_field_error(ProviderAddField::Id).is_some());
         assert!(form.main_field_error(ProviderAddField::Name).is_none());
+    }
+
+    #[test]
+    fn provider_omp_save_focuses_name_when_derived_identity_is_missing() {
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Omp,
+        )));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert_eq!(form.fields()[form.field_idx], ProviderAddField::Name);
+        assert!(form.main_field_error(ProviderAddField::Name).is_some());
+        assert!(form.main_field_error(ProviderAddField::Id).is_none());
+    }
+
+    #[test]
+    fn provider_omp_edit_missing_name_describes_preserved_id() {
+        let provider = Provider::with_id(
+            "native-key".to_string(),
+            "Native key".to_string(),
+            serde_json::json!({"extension": "native"}),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Omp, &provider);
+        form.name.set("");
+
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(form));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert_eq!(
+            form.main_field_error(ProviderAddField::Name),
+            Some(texts::tui_omp_provider_name_required())
+        );
+    }
+
+    #[test]
+    fn provider_omp_inline_blank_name_describes_preserved_id() {
+        let provider = Provider::with_id(
+            "native-key".to_string(),
+            "Native key".to_string(),
+            serde_json::json!({"extension": "native"}),
+            None,
+        );
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::from_provider(
+            AppType::Omp,
+            &provider,
+        )));
+        select_provider_field(&mut app, ProviderAddField::Name);
+
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        let Some(FormState::ProviderAdd(form)) = app.form.as_mut() else {
+            panic!("expected provider form");
+        };
+        form.name.set("");
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert_eq!(
+            form.main_field_error(ProviderAddField::Name),
+            Some(texts::tui_omp_provider_name_required())
+        );
+    }
+    #[test]
+    fn provider_omp_inline_overlong_name_reports_derived_id_limit() {
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Omp,
+        )));
+        let data = UiData::default();
+        select_provider_field(&mut app, ProviderAddField::Name);
+        app.on_key(key(KeyCode::Enter), &data);
+        for _ in 0..129 {
+            app.on_key(key(KeyCode::Char('a')), &data);
+        }
+        app.on_key(key(KeyCode::Enter), &data);
+
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert_eq!(
+            form.main_field_error(ProviderAddField::Name),
+            Some(texts::tui_omp_provider_key_invalid())
+        );
     }
 
     #[test]

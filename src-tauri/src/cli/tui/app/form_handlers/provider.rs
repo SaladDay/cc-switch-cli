@@ -53,6 +53,13 @@ impl App {
             provider.refresh_usage_query_provider_kind();
             provider.field_errors.clear();
             provider.usage_query_field_errors.clear();
+            if matches!(provider.app_type, crate::app_config::AppType::Omp)
+                && !provider.mode.is_edit()
+            {
+                provider.id.set("");
+                provider.id_is_manual = false;
+                provider.ensure_generated_id(&data.existing_provider_ids());
+            }
             if let Some(message) = provider.usage_query_script_validation_error() {
                 provider.set_usage_query_field_error(form::UsageQueryField::Script, message);
             }
@@ -60,10 +67,35 @@ impl App {
                 matches!(provider.app_type, crate::app_config::AppType::Hermes)
                     .then(|| validate_hermes_base_url(&provider.hermes_base_url.value))
                     .flatten();
+            let provider_key_field = if matches!(provider.app_type, crate::app_config::AppType::Omp)
+            {
+                ProviderAddField::Name
+            } else {
+                ProviderAddField::Id
+            };
+            let provider_key_error = if matches!(provider.app_type, crate::app_config::AppType::Omp)
+            {
+                texts::tui_omp_provider_key_invalid()
+            } else {
+                texts::tui_hermes_provider_key_invalid()
+            };
 
-            if ProviderService::is_provider_key_app(&provider.app_type) && provider.id.is_blank() {
+            if matches!(provider.app_type, crate::app_config::AppType::Omp)
+                && provider.name.is_blank()
+            {
                 Some((
-                    ProviderValidationTarget::Main(ProviderAddField::Id),
+                    ProviderValidationTarget::Main(ProviderAddField::Name),
+                    if provider.mode.is_edit() {
+                        texts::tui_omp_provider_name_required().to_string()
+                    } else {
+                        texts::tui_toast_provider_add_missing_fields().to_string()
+                    },
+                ))
+            } else if ProviderService::is_provider_key_app(&provider.app_type)
+                && provider.id.is_blank()
+            {
+                Some((
+                    ProviderValidationTarget::Main(provider_key_field),
                     texts::tui_toast_provider_add_missing_fields().to_string(),
                 ))
             } else if ProviderService::validate_provider_key_for_add(
@@ -73,8 +105,8 @@ impl App {
             .is_err()
             {
                 Some((
-                    ProviderValidationTarget::Main(ProviderAddField::Id),
-                    texts::tui_hermes_provider_key_invalid().to_string(),
+                    ProviderValidationTarget::Main(provider_key_field),
+                    provider_key_error.to_string(),
                 ))
             } else if provider.name.is_blank() {
                 Some((
@@ -2101,13 +2133,26 @@ pub(super) fn validate_provider_inline_field(
 ) -> Option<String> {
     match field {
         ProviderAddField::Name if provider.name.is_blank() => Some(
-            if provider.mode.is_edit() {
+            if provider.mode.is_edit() && matches!(provider.app_type, AppType::Omp) {
+                texts::tui_omp_provider_name_required()
+            } else if provider.mode.is_edit() {
                 texts::tui_toast_provider_missing_name()
             } else {
                 texts::tui_toast_provider_add_missing_fields()
             }
             .to_string(),
         ),
+        ProviderAddField::Name
+            if !provider.mode.is_edit()
+                && matches!(provider.app_type, AppType::Omp)
+                && ProviderService::validate_provider_key_for_add(
+                    &provider.app_type,
+                    provider.id.value.as_str(),
+                )
+                .is_err() =>
+        {
+            Some(texts::tui_omp_provider_key_invalid().to_string())
+        }
         ProviderAddField::Id
             if ProviderService::is_provider_key_app(&provider.app_type)
                 && (provider.id.is_blank()

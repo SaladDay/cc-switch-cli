@@ -475,7 +475,9 @@ impl ProviderAddFormState {
     }
 
     pub fn is_id_editable(&self) -> bool {
-        !self.mode.is_edit() && self.copy_source_id.is_none()
+        !matches!(self.app_type, AppType::Omp)
+            && !self.mode.is_edit()
+            && self.copy_source_id.is_none()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
@@ -504,7 +506,7 @@ impl ProviderAddFormState {
 
         if matches!(
             self.app_type,
-            AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Omp
+            AppType::Hermes | AppType::OpenClaw | AppType::Pi
         ) && self.copy_source_id.is_none()
         {
             fields.insert(0, ProviderAddField::Id);
@@ -2703,6 +2705,9 @@ impl ProviderAddFormState {
 
         next.mode = previous_mode.clone();
         next.copy_source_id = previous_copy_source_id;
+        if matches!(next.app_type, AppType::Omp) && !next.mode.is_edit() {
+            next.id_is_manual = false;
+        }
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
@@ -2812,6 +2817,9 @@ impl ProviderAddFormState {
 
         next.mode = previous_mode.clone();
         next.copy_source_id = previous_copy_source_id;
+        if matches!(next.app_type, AppType::Omp) && !next.mode.is_edit() {
+            next.id_is_manual = false;
+        }
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;

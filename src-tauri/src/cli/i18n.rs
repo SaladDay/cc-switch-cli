@@ -2786,6 +2786,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_omp_provider_key_invalid() -> &'static str {
+        if is_chinese() {
+            "根据名称生成的供应商标识不能超过 128 字节"
+        } else {
+            "Provider ID derived from Name cannot exceed 128 bytes"
+        }
+    }
+
+    pub fn tui_omp_provider_name_required() -> &'static str {
+        if is_chinese() {
+            "请填写 name；现有 id 保持不变。"
+        } else {
+            "Please fill in Name; the existing ID remains unchanged."
+        }
+    }
+
     pub fn tui_hermes_base_url_required() -> &'static str {
         if is_chinese() {
             "API 端点不能为空"

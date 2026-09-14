@@ -1624,9 +1624,12 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
     let manager = config
         .get_manager(&app_type)
         .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
-    let existing_ids: Vec<String> = manager.providers.keys().cloned().collect();
+    let mut existing_ids: Vec<String> = manager.providers.keys().cloned().collect();
     let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
+    if matches!(app_type, AppType::Omp) {
+        existing_ids.extend(crate::omp_config::read_omp_native_providers()?.into_keys());
+    }
 
     let template = args.template.unwrap_or(ProviderAddTemplate::Custom);
     validate_provider_add_template(&app_type, template)?;

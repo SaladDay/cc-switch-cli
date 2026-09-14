@@ -863,6 +863,30 @@ mod tests {
 
     #[test]
     #[serial]
+    fn duplicate_derives_omp_key_from_visible_copy_name() {
+        let _agent = TestAgentDir::new();
+        let state = state();
+        let mut source = input("model-a");
+        source.name = "Friendly Name".to_string();
+        add(&state, source.clone(), false).expect("save source provider");
+
+        let mut edited_copy = source;
+        edited_copy.id = "cc-switch-test-copy".to_string();
+        edited_copy.name = "Friendly Name copy".to_string();
+        let duplicate =
+            ProviderService::duplicate(&state, AppType::Omp, "cc-switch-test", Some(edited_copy))
+                .expect("duplicate OMP provider");
+
+        assert_eq!(duplicate.id, "friendly-name-copy");
+        assert!(state
+            .db
+            .get_provider_by_id("friendly-name-copy", OMP_APP)
+            .expect("query duplicate")
+            .is_some());
+    }
+
+    #[test]
+    #[serial]
     fn new_live_provider_requires_api_key_for_custom_models() {
         let _agent = TestAgentDir::new();
         let state = state();

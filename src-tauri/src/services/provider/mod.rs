@@ -392,6 +392,25 @@ impl ProviderService {
         }
     }
 
+    pub fn generate_omp_provider_key(name: &str, existing_ids: &[String]) -> String {
+        let base_id = Self::generate_provider_key(name, &[]);
+        if !existing_ids.iter().any(|existing| existing == &base_id) {
+            return base_id;
+        }
+
+        const KEY_LIMIT: usize = 128;
+        let mut counter = 1;
+        loop {
+            let suffix = format!("-{counter}");
+            let base_len = KEY_LIMIT.saturating_sub(suffix.len()).min(base_id.len());
+            let candidate = format!("{}{}", &base_id[..base_len], suffix);
+            if !existing_ids.iter().any(|existing| existing == &candidate) {
+                return candidate;
+            }
+            counter += 1;
+        }
+    }
+
     pub fn validate_provider_key_for_add(
         app_type: &AppType,
         provider_id: &str,
@@ -534,8 +553,10 @@ impl ProviderService {
             })?;
             let mut existing_ids = providers.keys().cloned().collect::<HashSet<_>>();
             existing_ids.extend(Self::live_provider_ids(&app_type)?);
-            let duplicate =
+            let mut duplicate =
                 Self::duplicate_provider_with_overrides(source, provider_override, &existing_ids);
+            let existing_ids = existing_ids.into_iter().collect::<Vec<_>>();
+            duplicate.id = Self::generate_omp_provider_key(&duplicate.name, &existing_ids);
             omp::add(state, duplicate.clone(), false)?;
             return Ok(duplicate);
         }

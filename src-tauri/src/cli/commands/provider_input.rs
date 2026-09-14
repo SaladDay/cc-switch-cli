@@ -3703,7 +3703,9 @@ pub fn generate_provider_id_for_app(
     name: &str,
     existing_ids: &[String],
 ) -> String {
-    if ProviderService::is_provider_key_app(app_type) {
+    if matches!(app_type, AppType::Omp) {
+        ProviderService::generate_omp_provider_key(name, existing_ids)
+    } else if ProviderService::is_provider_key_app(app_type) {
         ProviderService::generate_provider_key(name, existing_ids)
     } else {
         generate_provider_id(name, existing_ids)
