@@ -55,8 +55,12 @@ pub(crate) fn key_bar_items<I: Copy>(
 /// (hidden aliases, e.g. a reverse-direction key already covered by another
 /// chip). The help-sheet generator skips these by function identity — so use
 /// this named function rather than an inline `|_, _| false` closure.
+#[inline(never)]
 pub(crate) fn never(_: &super::app::App, _: &super::data::UiData) -> bool {
-    false
+    // `help_items` distinguishes this sentinel from `help_only` by function
+    // address. Keep the bodies observably distinct so optimized builds cannot
+    // fold the two functions together.
+    std::hint::black_box(false)
 }
 
 /// Hide a secondary binding from the compact key bar while retaining it in
