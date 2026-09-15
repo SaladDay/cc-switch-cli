@@ -104,6 +104,29 @@ impl App {
                         kind: *kind,
                         expected_revision: expected_revision.clone(),
                     },
+                    ConfirmAction::OmpModelDelete {
+                        provider_id,
+                        model_id,
+                        expected_revision,
+                    } => Action::OmpModelDelete {
+                        provider_id: provider_id.clone(),
+                        model_id: model_id.clone(),
+                        expected_revision: expected_revision.clone(),
+                    },
+                    ConfirmAction::OmpRoleDelete {
+                        role,
+                        expected_revision,
+                    } => Action::OmpRoleDelete {
+                        role: role.clone(),
+                        expected_revision: expected_revision.clone(),
+                    },
+                    ConfirmAction::OmpSystemPromptDelete {
+                        kind,
+                        expected_revision,
+                    } => Action::OmpSystemPromptDelete {
+                        kind: *kind,
+                        expected_revision: expected_revision.clone(),
+                    },
                     ConfirmAction::PiPromptTemplateDelete {
                         slug,
                         expected_revision,

@@ -812,6 +812,7 @@ pub(crate) enum ModelFetchReq {
         custom_user_agent: Option<String>,
         api_protocol: Option<String>,
         request_headers: Option<BTreeMap<String, String>>,
+        discovery_timeout_ms: Option<u64>,
         codex_oauth: bool,
         codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
@@ -836,9 +837,19 @@ pub(crate) struct ModelFetchSystem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelFetchStrategy {
+    /// Fetch a models endpoint without adding an authentication header.
+    /// OMP uses this for providers configured with `auth: none`.
+    Anonymous,
+    /// Fetch an OMP Ollama discovery registry (`GET /api/tags`) without
+    /// imposing OpenAI-compatible authentication or URL suffixes.
+    Ollama,
+    /// Fetch an OMP llama.cpp discovery registry (`GET /models`) from the
+    /// native server root, stripping a configured `/v1` request suffix.
+    LlamaCpp,
     Bearer,
     Anthropic,
     GoogleApiKey,
+    AzureApiKey,
 }
 
 pub(crate) fn model_fetch_strategy_for_field(field: ProviderAddField) -> ModelFetchStrategy {
@@ -854,10 +865,34 @@ pub(crate) fn build_model_fetch_candidate_urls(
     strategy: ModelFetchStrategy,
     is_full_url: bool,
 ) -> Vec<String> {
+    build_model_fetch_candidate_urls_with_inject_v1(base_url, strategy, is_full_url, None)
+}
+
+/// Build model-list endpoints, optionally honoring OMP's
+/// `discovery.injectV1` setting for `openai-models-list` providers.
+pub(crate) fn build_model_fetch_candidate_urls_with_inject_v1(
+    base_url: &str,
+    strategy: ModelFetchStrategy,
+    is_full_url: bool,
+    inject_v1: Option<bool>,
+) -> Vec<String> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Vec::new();
     }
+
+    // OMP ignores query strings while constructing discovery endpoints. Do
+    // the same here so a configured `baseUrl?token=...` does not become the
+    // malformed path `...?token=.../models`.
+    let base_without_query = match url::Url::parse(base) {
+        Ok(mut parsed) => {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string().trim_end_matches('/').to_string()
+        }
+        Err(_) => base.to_string(),
+    };
+    let base = base_without_query.as_str();
 
     if is_full_url {
         let mut urls = Vec::new();
@@ -887,7 +922,25 @@ pub(crate) fn build_model_fetch_candidate_urls(
     };
 
     let mut urls: Vec<String> = Vec::new();
+    // OMP's openai-models-list discovery defaults to `/v1/models`; callers
+    // can explicitly disable injection to probe the bare `/models` route.
+    if let Some(inject_v1) = inject_v1 {
+        if inject_v1 {
+            return vec![append_versioned_models.unwrap_or(append_models)];
+        }
+        return vec![append_models];
+    }
+
     match strategy {
+        ModelFetchStrategy::Ollama => {
+            let root = crate::omp_config::normalize_ollama_base_url(base)
+                .unwrap_or_else(|| base.to_string());
+            return vec![format!("{root}/api/tags")];
+        }
+        ModelFetchStrategy::LlamaCpp => {
+            let root = strip_trailing_v1(base);
+            return vec![format!("{root}/models")];
+        }
         ModelFetchStrategy::Anthropic => {
             if let Some(versioned) = append_versioned_models.as_ref() {
                 urls.push(versioned.clone());
@@ -905,7 +958,10 @@ pub(crate) fn build_model_fetch_candidate_urls(
                 urls.push(append_models);
             }
         }
-        ModelFetchStrategy::Bearer | ModelFetchStrategy::GoogleApiKey => {
+        ModelFetchStrategy::Anonymous
+        | ModelFetchStrategy::Bearer
+        | ModelFetchStrategy::GoogleApiKey
+        | ModelFetchStrategy::AzureApiKey => {
             urls.push(append_models);
             if let Some(v1) = append_versioned_models.as_ref() {
                 urls.push(v1.clone());
@@ -916,6 +972,17 @@ pub(crate) fn build_model_fetch_candidate_urls(
     let mut seen = HashSet::new();
     urls.retain(|url| seen.insert(url.clone()));
     urls
+}
+
+fn strip_trailing_v1(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.len() >= 3 && trimmed[trimmed.len() - 3..].eq_ignore_ascii_case("/v1") {
+        let root = trimmed[..trimmed.len() - 3].trim_end_matches('/');
+        if !root.is_empty() {
+            return root.to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn strip_compat_suffix(base: &str) -> Option<&str> {
@@ -930,33 +997,51 @@ fn strip_compat_suffix(base: &str) -> Option<&str> {
 pub(crate) fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
-    if let Some(data) = payload.get("data").and_then(|v| v.as_array()) {
-        for item in data {
-            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                out.push(id.to_string());
+    fn collect(value: &Value, in_collection: bool, out: &mut Vec<String>) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, true, out);
+                }
             }
+            Value::Object(object) => {
+                // OpenAI-style entries use `id`; Gemini/Ollama-style entries
+                // use `model` or `name`. Only accept names from collection members so an
+                // envelope's own descriptive `name` cannot become a model ID.
+                if in_collection {
+                    if let Some(id) = object.get("id").and_then(Value::as_str) {
+                        let id = id.trim();
+                        if !id.is_empty() {
+                            out.push(id.to_string());
+                        }
+                    } else if let Some(model) = object.get("model").and_then(Value::as_str) {
+                        let model = model.trim();
+                        if !model.is_empty() {
+                            out.push(model.to_string());
+                        }
+                    } else if let Some(name) = object.get("name").and_then(Value::as_str) {
+                        let name = name.trim();
+                        if !name.is_empty() {
+                            out.push(name.strip_prefix("models/").unwrap_or(name).to_string());
+                        }
+                    }
+                }
+
+                // Discovery servers commonly wrap their list in one or more
+                // of these keys (`data`, `models`, `result`, or `items`).
+                // Recurse through objects as well as arrays to tolerate
+                // envelopes such as {"result":{"items":[...]}}.
+                for key in ["data", "models", "result", "items"] {
+                    if let Some(nested) = object.get(key) {
+                        collect(nested, true, out);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    if out.is_empty() {
-        if let Some(models) = payload.get("models").and_then(|v| v.as_array()) {
-            for item in models {
-                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                    out.push(name.strip_prefix("models/").unwrap_or(name).to_string());
-                }
-            }
-        }
-    }
-
-    if out.is_empty() {
-        if let Some(arr) = payload.as_array() {
-            for item in arr {
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    out.push(id.to_string());
-                }
-            }
-        }
-    }
+    collect(payload, false, &mut out);
 
     let mut seen = HashSet::new();
     out.retain(|model| seen.insert(model.clone()));
@@ -971,7 +1056,56 @@ pub(crate) async fn fetch_provider_models_for_tui(
     strategy: ModelFetchStrategy,
     request_headers: Option<&BTreeMap<String, String>>,
 ) -> Result<Vec<String>, String> {
-    let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy, is_full_url);
+    fetch_provider_models_for_tui_with_inject_v1(
+        base_url,
+        is_full_url,
+        api_key,
+        custom_user_agent,
+        strategy,
+        request_headers,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn fetch_provider_models_for_tui_with_inject_v1(
+    base_url: &str,
+    is_full_url: bool,
+    api_key: Option<&str>,
+    custom_user_agent: Option<&str>,
+    strategy: ModelFetchStrategy,
+    request_headers: Option<&BTreeMap<String, String>>,
+    inject_v1: Option<bool>,
+) -> Result<Vec<String>, String> {
+    fetch_provider_models_for_tui_with_options(
+        base_url,
+        is_full_url,
+        api_key,
+        custom_user_agent,
+        strategy,
+        request_headers,
+        inject_v1,
+        None,
+    )
+    .await
+}
+
+/// Fetch provider models with optional OMP discovery URL and timeout
+/// overrides. Existing callers can continue using the two compatibility
+/// wrappers above, while OMP provider inspection/TUI flows pass through the
+/// native `discovery.timeoutMs` value.
+pub(crate) async fn fetch_provider_models_for_tui_with_options(
+    base_url: &str,
+    is_full_url: bool,
+    api_key: Option<&str>,
+    custom_user_agent: Option<&str>,
+    strategy: ModelFetchStrategy,
+    request_headers: Option<&BTreeMap<String, String>>,
+    inject_v1: Option<bool>,
+    discovery_timeout_ms: Option<u64>,
+) -> Result<Vec<String>, String> {
+    let candidate_urls =
+        build_model_fetch_candidate_urls_with_inject_v1(base_url, strategy, is_full_url, inject_v1);
     if candidate_urls.is_empty() {
         return Err(if is_full_url && !base_url.trim().is_empty() {
             "Cannot derive models endpoint from full URL".to_string()
@@ -986,7 +1120,12 @@ pub(crate) async fn fetch_provider_models_for_tui(
     let custom_user_agent = crate::provider::parse_custom_user_agent(custom_user_agent)
         .ok()
         .flatten();
-    if key.is_none() && request_headers.is_none_or(BTreeMap::is_empty) {
+    if !matches!(
+        strategy,
+        ModelFetchStrategy::Anonymous | ModelFetchStrategy::Ollama | ModelFetchStrategy::LlamaCpp
+    ) && key.is_none()
+        && request_headers.is_none_or(BTreeMap::is_empty)
+    {
         return Err("API Key or request headers are required to fetch models".to_string());
     }
     if request_headers.is_some_and(|headers| headers.len() > 64) {
@@ -995,15 +1134,27 @@ pub(crate) async fn fetch_provider_models_for_tui(
     let mut last_err = String::from("unknown error");
 
     for url in candidate_urls {
-        let mut req = client.get(&url).timeout(Duration::from_secs(5));
+        let timeout = discovery_timeout_ms
+            .map(|timeout| timeout.clamp(1, crate::omp_config::OMP_MAX_DISCOVERY_TIMEOUT_MS))
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_secs(5));
+        let mut req = client.get(&url).timeout(timeout);
+        if matches!(strategy, ModelFetchStrategy::Ollama) {
+            req = req.header(reqwest::header::ACCEPT, "application/json");
+        }
         if let Some(key) = key {
             req = match strategy {
+                ModelFetchStrategy::Anonymous | ModelFetchStrategy::Ollama => req,
+                ModelFetchStrategy::LlamaCpp => {
+                    req.header("Authorization", format!("Bearer {key}"))
+                }
                 ModelFetchStrategy::Bearer => req.header("Authorization", format!("Bearer {key}")),
                 ModelFetchStrategy::Anthropic => req
                     .header("Authorization", format!("Bearer {key}"))
                     .header("x-api-key", key)
                     .header("anthropic-version", "2023-06-01"),
                 ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
+                ModelFetchStrategy::AzureApiKey => req.header("api-key", key),
             };
         }
         if let Some(user_agent) = &custom_user_agent {

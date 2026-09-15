@@ -1171,6 +1171,8 @@ mod tests {
     #[serial(home_settings)]
     fn set_and_remove_provider_only_touch_target_entry() {
         let _guard = lock_test_home_and_settings();
+        let home = tempdir().expect("create test home");
+        let _home = HomeGuard::set(home.path());
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1220,6 +1222,8 @@ mod tests {
     #[serial(home_settings)]
     fn remove_last_provider_keeps_empty_providers_map() {
         let _guard = lock_test_home_and_settings();
+        let home = tempdir().expect("create test home");
+        let _home = HomeGuard::set(home.path());
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1248,6 +1252,8 @@ mod tests {
     #[serial(home_settings)]
     fn remove_last_provider_rewrites_models_section_like_upstream() {
         let _guard = lock_test_home_and_settings();
+        let home = tempdir().expect("create test home");
+        let _home = HomeGuard::set(home.path());
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1397,6 +1403,8 @@ mod tests {
     #[serial(home_settings)]
     fn default_model_round_trip_preserves_existing_providers() {
         let _guard = lock_test_home_and_settings();
+        let home = tempdir().expect("create test home");
+        let _home = HomeGuard::set(home.path());
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 

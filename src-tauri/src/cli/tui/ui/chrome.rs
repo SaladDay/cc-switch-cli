@@ -66,6 +66,7 @@ fn header_status_label(app_type: &AppType) -> &'static str {
     match app_type {
         AppType::OpenCode => texts::tui_opencode_config_status_label(),
         AppType::OpenClaw => texts::tui_openclaw_agents_primary_model(),
+        AppType::Omp => texts::tui_omp_default_model_label(),
         _ => strip_trailing_colon(texts::provider_label()),
     }
 }
@@ -81,6 +82,19 @@ pub(super) fn header_status_value(app: &App, data: &UiData, available_width: u16
     if matches!(app.app_type, AppType::OpenClaw) {
         return truncate_to_display_width(
             openclaw_header_default_model_value(data),
+            available_width.min(HEADER_STATUS_VALUE_MAX_WIDTH),
+        );
+    }
+
+    if matches!(app.app_type, AppType::Omp) {
+        let value = data
+            .omp
+            .model_roles
+            .get("default")
+            .cloned()
+            .unwrap_or_else(|| texts::none().to_string());
+        return truncate_to_display_width(
+            &value,
             available_width.min(HEADER_STATUS_VALUE_MAX_WIDTH),
         );
     }
@@ -260,6 +274,9 @@ pub(super) fn nav_label(item: NavItem) -> &'static str {
         NavItem::Prompts => texts::menu_manage_prompts(),
         NavItem::PiSystemPrompts => texts::menu_pi_system_prompts(),
         NavItem::PiPromptTemplates => texts::menu_pi_prompt_templates(),
+        NavItem::OmpModels => texts::menu_omp_models(),
+        NavItem::OmpRoles => texts::menu_omp_roles(),
+        NavItem::OmpSystemPrompts => texts::menu_omp_system_prompts(),
         NavItem::HermesMemory => texts::menu_hermes_memory(),
         NavItem::Config => texts::menu_manage_config(),
         NavItem::Skills => texts::menu_manage_skills(),
@@ -282,6 +299,9 @@ pub(super) fn nav_label_variants(item: NavItem) -> (&'static str, &'static str) 
         NavItem::Prompts => texts::menu_manage_prompts_variants(),
         NavItem::PiSystemPrompts => texts::menu_pi_system_prompts_variants(),
         NavItem::PiPromptTemplates => texts::menu_pi_prompt_templates_variants(),
+        NavItem::OmpModels => texts::menu_omp_models_variants(),
+        NavItem::OmpRoles => texts::menu_omp_roles_variants(),
+        NavItem::OmpSystemPrompts => texts::menu_omp_system_prompts_variants(),
         NavItem::HermesMemory => texts::menu_hermes_memory_variants(),
         NavItem::Config => texts::menu_manage_config_variants(),
         NavItem::Skills => texts::menu_manage_skills_variants(),
@@ -306,6 +326,8 @@ pub(super) fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
         .iter()
         .chain(NavItem::OPENCLAW_ALL.iter())
         .chain(NavItem::HERMES_ALL.iter())
+        .chain(NavItem::PI_ALL.iter())
+        .chain(NavItem::OMP_ALL.iter())
         .flat_map(|item| {
             let (en, zh) = nav_label_variants(*item);
             [en, zh]

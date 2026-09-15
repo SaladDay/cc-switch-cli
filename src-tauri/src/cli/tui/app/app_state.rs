@@ -134,6 +134,7 @@ pub enum Action {
         custom_user_agent: Option<String>,
         api_protocol: Option<String>,
         request_headers: Option<std::collections::BTreeMap<String, String>>,
+        discovery_timeout_ms: Option<u64>,
         codex_oauth: bool,
         codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
@@ -203,6 +204,19 @@ pub enum Action {
         id: String,
     },
     PiSystemPromptDelete {
+        kind: crate::services::pi_prompt_files::PiPromptFileKind,
+        expected_revision: String,
+    },
+    OmpModelDelete {
+        provider_id: String,
+        model_id: String,
+        expected_revision: String,
+    },
+    OmpRoleDelete {
+        role: String,
+        expected_revision: String,
+    },
+    OmpSystemPromptDelete {
         kind: crate::services::pi_prompt_files::PiPromptFileKind,
         expected_revision: String,
     },
@@ -772,6 +786,9 @@ pub struct App {
     pub prompt_idx: usize,
     pub pi_system_prompt_idx: usize,
     pub pi_prompt_template_idx: usize,
+    pub omp_model_idx: usize,
+    pub omp_role_idx: usize,
+    pub omp_system_prompt_idx: usize,
     pub skills_idx: usize,
     pub skills_discover_idx: usize,
     pub skills_repo_idx: usize,

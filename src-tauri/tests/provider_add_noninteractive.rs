@@ -919,3 +919,54 @@ fn add_official_template_rejects_field_overrides() {
         "error should reject overrides on official templates: {err}"
     );
 }
+
+#[test]
+#[serial]
+fn omp_add_name_deconflicts_native_only_provider_key() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+    let agent_dir = ensure_test_home().join(".omp/agent");
+    std::fs::create_dir_all(&agent_dir).expect("create OMP agent directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [
+            agent_dir.parent().expect("OMP config root"),
+            agent_dir.as_path(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .expect("restrict OMP config directory");
+        }
+    }
+    std::fs::write(
+        agent_dir.join("models.yml"),
+        r#"providers:
+  native:
+    baseUrl: https://native.example.com/v1
+    apiKey: secret
+    api: openai-completions
+    models:
+      - id: model-a
+"#,
+    )
+    .expect("seed native-only OMP provider");
+
+    run_add(
+        Some("Native"),
+        AppType::Omp,
+        AddOpts {
+            base_url: Some("https://copy.example.com/v1".to_string()),
+            api_key: Some("copy-secret".to_string()),
+            model: Some("model-b".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("add deconflicted OMP provider");
+
+    let state = cc_switch_lib::AppState::try_new().expect("reload app state");
+    assert!(state
+        .db
+        .get_provider_by_id("native-1", AppType::Omp.as_str())
+        .expect("query generated OMP provider")
+        .is_some());
+}

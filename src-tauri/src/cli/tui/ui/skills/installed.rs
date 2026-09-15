@@ -28,6 +28,7 @@ pub(super) fn render_skills_installed(
         Cell::from(crate::app_config::AppType::OpenCode.as_str()),
         Cell::from(crate::app_config::AppType::Hermes.as_str()),
         Cell::from(crate::app_config::AppType::Pi.as_str()),
+        Cell::from(crate::app_config::AppType::Omp.as_str()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -46,6 +47,7 @@ pub(super) fn render_skills_installed(
             Cell::from(skill_marker(skill.apps.opencode)),
             Cell::from(skill_marker(skill.apps.hermes)),
             Cell::from(skill_marker(skill.apps.pi)),
+            Cell::from(skill_marker(skill.apps.omp)),
         ])
     });
 
@@ -59,6 +61,7 @@ pub(super) fn render_skills_installed(
             Constraint::Length(10),
             Constraint::Length(8),
             Constraint::Length(5),
+            Constraint::Length(6),
         ],
     )
     .header(header)
@@ -114,6 +117,7 @@ fn installed_summary(app: &App, data: &UiData) -> String {
         .filter(|s| s.apps.hermes)
         .count();
     let enabled_pi = data.skills.installed.iter().filter(|s| s.apps.pi).count();
+    let enabled_omp = data.skills.installed.iter().filter(|s| s.apps.omp).count();
 
     let counts = texts::tui_skills_installed_counts(
         enabled_claude,
@@ -122,12 +126,13 @@ fn installed_summary(app: &App, data: &UiData) -> String {
         enabled_opencode,
         enabled_hermes,
         enabled_pi,
+        enabled_omp,
     );
     if app.skill_updates.is_empty() {
         counts
     } else {
         format!(
-            "{counts} · {}",
+            "{} · {counts}",
             texts::tui_skills_updates_available(app.skill_updates.len())
         )
     }

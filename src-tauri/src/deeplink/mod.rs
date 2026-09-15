@@ -93,4 +93,6 @@ pub struct DeepLinkImportRequest {
 
     #[serde(skip)]
     pub(crate) openclaw_config: Option<Value>,
+    #[serde(skip)]
+    pub(crate) omp_config: Option<Value>,
 }

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **OMP / Provider Form**: Derive provider IDs from the visible Name field and remove direct ID editing from add and edit forms.
+
 ## [5.10.4] - 2026-08-30
 
 ### Added

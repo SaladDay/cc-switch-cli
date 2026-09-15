@@ -121,7 +121,12 @@ impl ProviderAddFormState {
         let is_codex = matches!(app_type, AppType::Codex);
         let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
-            AppType::OpenClaw | AppType::Pi => OPENCLAW_DEFAULT_API_PROTOCOL,
+            AppType::OpenClaw => OPENCLAW_DEFAULT_API_PROTOCOL,
+            AppType::Pi => OPENCLAW_DEFAULT_API_PROTOCOL,
+            // OMP's provider-level `api` is optional when every model carries
+            // its own protocol or discovery uses a proxy. Keep a blank field
+            // as the native default rather than materializing a new key.
+            AppType::Omp => "",
             _ => "@ai-sdk/openai-compatible",
         };
 
@@ -272,7 +277,7 @@ impl ProviderAddFormState {
         };
         form.focus = FormFocus::Fields;
         form.extra = serde_json::to_value(provider).unwrap_or_else(|_| json!({}));
-        if matches!(app_type, AppType::Pi) {
+        if matches!(app_type, AppType::Pi | AppType::Omp) {
             form.initial_pi_settings_config = Some(provider.settings_config.clone());
         }
 
@@ -375,7 +380,11 @@ impl ProviderAddFormState {
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|env| !env.is_empty()),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Omp => false,
         }
     }
 
@@ -431,7 +440,11 @@ impl ProviderAddFormState {
                     app_type, settings, &snippet,
                 )
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Omp => false,
         }
     }
 
@@ -456,13 +469,15 @@ impl ProviderAddFormState {
     }
 
     pub fn initial_pi_settings_config(&self) -> Option<Value> {
-        (matches!(self.app_type, AppType::Pi) && self.mode.is_edit())
+        (matches!(self.app_type, AppType::Pi | AppType::Omp) && self.mode.is_edit())
             .then(|| self.initial_pi_settings_config.clone())
             .flatten()
     }
 
     pub fn is_id_editable(&self) -> bool {
-        !self.mode.is_edit() && self.copy_source_id.is_none()
+        !matches!(self.app_type, AppType::Omp)
+            && !self.mode.is_edit()
+            && self.copy_source_id.is_none()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
@@ -573,7 +588,7 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenClawUserAgent);
                 fields.push(ProviderAddField::OpenClawModels);
             }
-            AppType::Pi => {
+            AppType::Pi | AppType::Omp => {
                 fields.push(ProviderAddField::OpenClawApiProtocol);
                 fields.push(ProviderAddField::OpenCodeApiKey);
                 fields.push(ProviderAddField::OpenCodeBaseUrl);
@@ -1193,7 +1208,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => {}
+            | AppType::Pi
+            | AppType::Omp => {}
         }
         Ok(())
     }
@@ -1425,7 +1441,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => false,
+            | AppType::Pi
+            | AppType::Omp => false,
         }
     }
 
@@ -2233,9 +2250,16 @@ impl ProviderAddFormState {
             AppType::Gemini => self.gemini_base_url.value.clone(),
             AppType::Hermes => self.hermes_base_url.value.clone(),
             AppType::OpenCode | AppType::OpenClaw => self.opencode_base_url.value.clone(),
-            AppType::Pi => {
+            AppType::Pi | AppType::Omp => {
                 let provider = self.to_provider_json_value();
-                crate::pi_config::provider_base_url(&provider["settingsConfig"]).unwrap_or_default()
+                match self.app_type {
+                    AppType::Pi => crate::pi_config::provider_base_url(&provider["settingsConfig"]),
+                    AppType::Omp => {
+                        crate::omp_config::provider_base_url(&provider["settingsConfig"])
+                    }
+                    _ => unreachable!(),
+                }
+                .unwrap_or_default()
             }
         }
     }
@@ -2248,7 +2272,7 @@ impl ProviderAddFormState {
             );
         }
 
-        if matches!(self.app_type, AppType::Pi) {
+        if matches!(self.app_type, AppType::Pi | AppType::Omp) {
             let base_url = self.current_provider_base_url();
             return (
                 Self::usage_query_comment_value(&self.opencode_api_key.value),
@@ -2264,7 +2288,7 @@ impl ProviderAddFormState {
             AppType::OpenCode | AppType::OpenClaw => {
                 (&self.opencode_api_key.value, &self.opencode_base_url.value)
             }
-            AppType::Pi => unreachable!("Pi credentials are resolved above"),
+            AppType::Pi | AppType::Omp => unreachable!("native credentials are resolved above"),
         };
         (
             Self::usage_query_comment_value(api_key),
@@ -2518,7 +2542,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => false,
+            | AppType::Pi
+            | AppType::Omp => false,
         }
     }
 
@@ -2680,6 +2705,9 @@ impl ProviderAddFormState {
 
         next.mode = previous_mode.clone();
         next.copy_source_id = previous_copy_source_id;
+        if matches!(next.app_type, AppType::Omp) && !next.mode.is_edit() {
+            next.id_is_manual = false;
+        }
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
@@ -2789,6 +2817,9 @@ impl ProviderAddFormState {
 
         next.mode = previous_mode.clone();
         next.copy_source_id = previous_copy_source_id;
+        if matches!(next.app_type, AppType::Omp) && !next.mode.is_edit() {
+            next.id_is_manual = false;
+        }
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
@@ -3005,6 +3036,69 @@ impl ProviderAddFormState {
         }
     }
 
+    /// Return the API protocol that should be used when discovering models
+    /// for an OMP provider draft.
+    ///
+    /// OMP permits the provider-level `api` to be omitted when each model
+    /// carries its own protocol. The compact TUI form normally displays a
+    /// default provider protocol, so inspect the original native settings
+    /// first and fall back to the selected (or sole) model's `api` value.
+    pub(crate) fn omp_model_fetch_api_protocol(&self) -> Option<String> {
+        if !matches!(self.app_type, AppType::Omp) {
+            return None;
+        }
+
+        let settings = self
+            .extra
+            .pointer("/settingsConfig")
+            .and_then(Value::as_object);
+        if let Some(api) = settings
+            .and_then(|settings| settings.get("api"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|api| !api.is_empty())
+        {
+            return Some(api.to_string());
+        }
+
+        let models = if !self.openclaw_models.is_empty() {
+            &self.openclaw_models
+        } else {
+            settings
+                .and_then(|settings| settings.get("models"))
+                .and_then(Value::as_array)
+                .unwrap_or(&self.openclaw_models)
+        };
+        let selected_id = self.openclaw_primary_model_id();
+        if let Some(selected_id) = selected_id {
+            if let Some(api) = models
+                .iter()
+                .find(|model| model.get("id").and_then(Value::as_str) == Some(selected_id.as_str()))
+                .and_then(|model| model.get("api"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|api| !api.is_empty())
+            {
+                return Some(api.to_string());
+            }
+        }
+
+        let mut unique = None;
+        for api in models
+            .iter()
+            .filter_map(|model| model.get("api").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|api| !api.is_empty())
+        {
+            match unique {
+                None => unique = Some(api),
+                Some(previous) if previous == api => {}
+                Some(_) => return None,
+            }
+        }
+        unique.map(str::to_string)
+    }
+
     pub(crate) fn cycle_hermes_api_mode(&mut self) {
         let current = HERMES_API_MODES
             .iter()
@@ -3034,6 +3128,10 @@ impl ProviderAddFormState {
     pub(crate) fn openclaw_models_summary(&self) -> String {
         let total = self.openclaw_models.len();
         texts::tui_openclaw_models_summary(total)
+    }
+
+    pub(crate) fn omp_models_summary(&self) -> String {
+        texts::tui_omp_models_summary(self.openclaw_models.len())
     }
 
     pub(crate) fn codex_model_catalog_summary(&self) -> String {
@@ -3076,7 +3174,10 @@ impl ProviderAddFormState {
     }
 
     pub fn apply_openclaw_models_value(&mut self, models_value: Value) -> Result<(), String> {
-        if !matches!(self.app_type, AppType::OpenClaw | AppType::Pi) {
+        if !matches!(
+            self.app_type,
+            AppType::OpenClaw | AppType::Pi | AppType::Omp
+        ) {
             return Ok(());
         }
         if !models_value.is_array() {

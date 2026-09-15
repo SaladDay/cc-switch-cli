@@ -6,7 +6,11 @@ use crate::services::env_checker;
 use crate::services::local_env_check::{check_local_environment, ToolCheckStatus};
 use clap::Subcommand;
 use serde_json::Value;
+use std::io::Read;
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Subcommand)]
 pub enum EnvCommand {
@@ -96,6 +100,7 @@ fn run_app_doctor(app_type: &AppType) -> Result<(), AppError> {
         AppType::Claude => check_claude_doctor(),
         AppType::Codex => check_codex_doctor(),
         AppType::Gemini => check_gemini_doctor(),
+        AppType::Omp => check_omp_doctor(),
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
             println!(
                 "{}",
@@ -107,6 +112,187 @@ fn run_app_doctor(app_type: &AppType) -> Result<(), AppError> {
             Ok(())
         }
     }
+}
+
+/// Check that CC-Switch is editing the same native directory that the OMP
+/// executable resolves.  Unlike most apps, OMP's files are not projected into
+/// CC-Switch's database: a custom directory stored in CC-Switch settings is a
+/// local adapter override and cannot change an already-running shell's
+/// environment.  Reporting both paths makes that failure mode explicit.
+fn check_omp_doctor() -> Result<(), AppError> {
+    let agent_dir = match crate::omp_config::get_omp_agent_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            print_doctor_rows(vec![warn_row(
+                "OMP agent directory",
+                format!("cannot resolve CC-Switch path: {error}"),
+            )]);
+            return Ok(());
+        }
+    };
+    let mut rows = vec![
+        ok_row(
+            "CC-Switch OMP agent directory",
+            agent_dir.display().to_string(),
+        ),
+        check_file_exists("OMP models.yml", &crate::omp_config::get_omp_models_path()?),
+        check_file_exists(
+            "OMP config.yml",
+            &crate::omp_config::get_omp_settings_path()?,
+        ),
+    ];
+
+    match crate::omp_config::get_omp_shared_config_agent_dir() {
+        Ok(path) => rows.push(ok_row(
+            "OMP shared config directory",
+            path.display().to_string(),
+        )),
+        Err(error) => rows.push(warn_row(
+            "OMP shared config directory",
+            format!("cannot resolve: {error}"),
+        )),
+    }
+
+    if let Ok(roles) = crate::omp_config::read_omp_model_roles() {
+        rows.push(match roles.get("default") {
+            Some(selector) => ok_row("OMP default role", selector.clone()),
+            None => warn_row(
+                "OMP default role",
+                "modelRoles.default is not configured; OMP will use its built-in resolution"
+                    .to_string(),
+            ),
+        });
+    }
+
+    match crate::omp_config::read_omp_disabled_providers() {
+        Ok(disabled) if disabled.is_empty() => rows.push(ok_row(
+            "OMP disabledProviders",
+            "no providers are disabled for the current directory".to_string(),
+        )),
+        Ok(disabled) => rows.push(warn_row(
+            "OMP disabledProviders",
+            format!("{} (these providers cannot be selected)", {
+                let mut ids = disabled.into_iter().collect::<Vec<_>>();
+                ids.sort();
+                ids.join(", ")
+            }),
+        )),
+        Err(error) => rows.push(warn_row(
+            "OMP disabledProviders",
+            format!("cannot read effective disabledProviders: {error}"),
+        )),
+    }
+
+    match official_omp_agent_dir() {
+        Ok(Some(path)) => {
+            rows.push(ok_row(
+                "OMP executable agent directory",
+                path.display().to_string(),
+            ));
+            if path == agent_dir {
+                rows.push(ok_row(
+                    "OMP path alignment",
+                    "CC-Switch and the OMP executable resolve the same directory".to_string(),
+                ));
+            } else {
+                let detail = format!(
+                    "mismatch: CC-Switch edits {}, but omp reads {}; use the same official OMP environment selector before launching both",
+                    agent_dir.display(),
+                    path.display()
+                );
+                rows.push(warn_row("OMP path alignment", detail));
+            }
+        }
+        Ok(None) => rows.push(warn_row(
+            "OMP executable agent directory",
+            "omp config path returned no path".to_string(),
+        )),
+        Err(error) => rows.push(warn_row("OMP executable agent directory", error)),
+    }
+
+    print_doctor_rows(rows);
+    Ok(())
+}
+
+fn official_omp_agent_dir() -> Result<Option<std::path::PathBuf>, String> {
+    let mut child = Command::new("omp")
+        .args(["config", "path"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot run `omp config path`: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "`omp config path` stdout was not captured".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "`omp config path` stderr was not captured".to_string())?;
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::sync_channel(1);
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take((64 * 1024 + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = stdout_tx.send(result);
+    });
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stderr
+            .take((64 * 1024 + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = stderr_tx.send(result);
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| format!("failed waiting for `omp config path`: {error}"))?
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("`omp config path` timed out after 3 seconds".to_string());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let status = child
+        .try_wait()
+        .map_err(|error| format!("failed waiting for `omp config path`: {error}"))?
+        .ok_or_else(|| "`omp config path` exited unexpectedly".to_string())?;
+    let stdout = stdout_rx
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|_| "timed out reading `omp config path` stdout".to_string())?
+        .map_err(|error| format!("failed reading `omp config path` stdout: {error}"))?;
+    let stderr = stderr_rx
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|_| "timed out reading `omp config path` stderr".to_string())?
+        .map_err(|error| format!("failed reading `omp config path` stderr: {error}"))?;
+    if stdout.len() > 64 * 1024 || stderr.len() > 64 * 1024 {
+        return Err("`omp config path` output exceeded the 64 KiB limit".to_string());
+    }
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        return Err(format!(
+            "`omp config path` exited with {}; {}",
+            status,
+            truncate_value(stderr.trim(), 160)
+        ));
+    }
+    let path = String::from_utf8_lossy(&stdout)
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|line| !line.is_empty())
+        .map(std::path::PathBuf::from);
+    Ok(path)
 }
 
 fn check_claude_doctor() -> Result<(), AppError> {

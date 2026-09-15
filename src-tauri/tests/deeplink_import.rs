@@ -249,6 +249,144 @@ fn deeplink_import_openclaw_provider_defaults_to_openai_completions_api() {
 }
 
 #[test]
+fn deeplink_import_omp_provider_writes_native_shape() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let url = "ccswitch://v1/import?resource=provider&app=omp&name=DeepLink%20OMP&homepage=https%3A%2F%2Fomp.example&endpoint=https%3A%2F%2Fapi.omp.example%2Fv1&apiKey=sk-test-omp-key&model=gpt-4.1";
+    let request = parse_deeplink_url(url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Omp);
+    let state = state_from_config(config);
+
+    let provider_id = import_provider_from_deeplink(&state, request.clone())
+        .expect("import OMP provider from deeplink");
+
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::Omp.as_str())
+        .expect("read OMP provider")
+        .expect("OMP provider persisted");
+    assert_eq!(provider.name, request.name.expect("request name"));
+    assert_eq!(provider.settings_config["api"], "openai-completions");
+    assert_eq!(provider.settings_config["apiKey"], "sk-test-omp-key");
+    assert_eq!(
+        provider.settings_config["baseUrl"],
+        "https://api.omp.example/v1"
+    );
+    assert_eq!(provider.settings_config["models"][0]["id"], "gpt-4.1");
+    assert!(provider.settings_config.get("name").is_none());
+}
+
+#[test]
+fn deeplink_import_omp_keyless_provider_sets_auth_none() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let url = "ccswitch://v1/import?resource=provider&app=omp&name=Local%20OMP&endpoint=http%3A%2F%2F127.0.0.1%3A11434%2Fv1&model=local-model";
+    let request = parse_deeplink_url(url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Omp);
+    let state = state_from_config(config);
+
+    let provider_id = import_provider_from_deeplink(&state, request)
+        .expect("import keyless OMP provider from deeplink");
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::Omp.as_str())
+        .expect("read OMP provider")
+        .expect("OMP provider persisted");
+
+    assert_eq!(provider.settings_config["auth"], "none");
+    assert!(provider.settings_config.get("apiKey").is_none());
+}
+
+#[test]
+fn deeplink_import_omp_inline_config_preserves_native_fields() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let config = BASE64_URL_SAFE_NO_PAD.encode(
+        br#"{"baseUrl":"https://config.example/v1","api":"anthropic-messages","apiKey":"CONFIG_KEY","headers":{"x-team":"blue"},"models":[{"id":"claude"}]}"#,
+    );
+    let url = format!(
+        "ccswitch://v1/import?resource=provider&app=oh-my-pi&name=Inline%20OMP&homepage=https%3A%2F%2Fomp.example&config={config}&configFormat=json"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut app_config = MultiAppConfig::default();
+    app_config.ensure_app(&AppType::Omp);
+    let state = state_from_config(app_config);
+    let provider_id = import_provider_from_deeplink(&state, request)
+        .expect("import OMP provider with inline config");
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::Omp.as_str())
+        .expect("read OMP provider")
+        .expect("OMP provider persisted");
+
+    assert_eq!(provider.settings_config["api"], "anthropic-messages");
+    assert_eq!(provider.settings_config["apiKey"], "CONFIG_KEY");
+    assert_eq!(provider.settings_config["headers"]["x-team"], "blue");
+    assert_eq!(provider.settings_config["models"][0]["id"], "claude");
+}
+
+#[test]
+fn deeplink_import_omp_rejects_model_level_endpoint_without_top_level_endpoint() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let config = BASE64_URL_SAFE_NO_PAD.encode(
+        br#"{"api":"openai-completions","apiKey":"CONFIG_KEY","models":[{"id":"local-model","baseUrl":"https://model.example/v1"}]}"#,
+    );
+    let url = format!(
+        "ccswitch://v1/import?resource=provider&app=omp&name=Model%20URL%20OMP&homepage=https%3A%2F%2Fomp.example&config={config}&configFormat=json"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut app_config = MultiAppConfig::default();
+    app_config.ensure_app(&AppType::Omp);
+    let state = state_from_config(app_config);
+    let error = import_provider_from_deeplink(&state, request)
+        .expect_err("OMP custom models require a provider-level baseUrl");
+    assert!(error.to_string().contains("baseUrl"));
+}
+
+#[test]
+fn deeplink_omp_url_api_key_overrides_inline_auth_mode() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let config = BASE64_URL_SAFE_NO_PAD.encode(
+        br#"{"baseUrl":"https://config.example/v1","api":"openai-completions","auth":"none","models":[{"id":"model"}]}"#,
+    );
+    let url = format!(
+        "ccswitch://v1/import?resource=provider&app=omp&name=Override%20OMP&homepage=https%3A%2F%2Fomp.example&apiKey=URL_KEY&config={config}&configFormat=json"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut app_config = MultiAppConfig::default();
+    app_config.ensure_app(&AppType::Omp);
+    let state = state_from_config(app_config);
+    let provider_id = import_provider_from_deeplink(&state, request)
+        .expect("URL api key should override inline auth mode");
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::Omp.as_str())
+        .expect("read OMP provider")
+        .expect("OMP provider persisted");
+    assert_eq!(provider.settings_config["apiKey"], "URL_KEY");
+    assert!(provider.settings_config.get("auth").is_none());
+}
+
+#[test]
 fn deeplink_import_openclaw_provider_preserves_canonical_inline_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();

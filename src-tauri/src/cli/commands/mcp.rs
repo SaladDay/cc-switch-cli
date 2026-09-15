@@ -68,9 +68,9 @@ pub enum McpCommand {
 
 pub fn execute(cmd: McpCommand, app: Option<AppType>) -> Result<(), AppError> {
     let app_type = app.unwrap_or(AppType::Claude);
-    if matches!(app_type, AppType::Pi) {
+    if matches!(app_type, AppType::Pi | AppType::Omp) {
         return Err(AppError::InvalidInput(
-            "Pi does not support MCP management".to_string(),
+            "Pi and OMP do not support MCP management".to_string(),
         ));
     }
 
@@ -474,7 +474,8 @@ mod tests {
             let error = execute(command, Some(AppType::Pi)).expect_err("Pi MCP must be rejected");
             assert!(matches!(
                 error,
-                AppError::InvalidInput(message) if message == "Pi does not support MCP management"
+                AppError::InvalidInput(message)
+                    if message == "Pi and OMP do not support MCP management"
             ));
         }
     }

@@ -681,9 +681,15 @@ impl ProviderAddFormState {
                     &self.hermes_rate_limit_delay.value,
                 );
             }
-            AppType::OpenClaw | AppType::Pi => {
+            AppType::OpenClaw | AppType::Pi | AppType::Omp => {
                 let is_pi = matches!(self.app_type, AppType::Pi);
-                let original_pi_settings = is_pi
+                let is_omp = matches!(self.app_type, AppType::Omp);
+                // Keep the initial native snapshot for both Pi and OMP. OMP
+                // providers may intentionally omit `apiKey` and `auth` so
+                // runtime credentials can come from the environment; an edit
+                // that leaves the key field blank must not silently turn that
+                // implicit api-key mode into `auth: none`.
+                let original_pi_settings = (is_pi || is_omp)
                     .then(|| {
                         self.extra
                             .pointer("/settingsConfig")
@@ -707,6 +713,13 @@ impl ProviderAddFormState {
                         );
                     }
                 }
+                if is_omp
+                    && !crate::services::provider::is_opaque_extension_config(&Value::Object(
+                        settings_obj.clone(),
+                    ))
+                {
+                    settings_obj.remove("name");
+                }
                 if !is_pi {
                     settings_obj.remove("npm");
                     settings_obj.remove("options");
@@ -723,6 +736,52 @@ impl ProviderAddFormState {
                 {
                     set_or_remove_trimmed(settings_obj, "apiKey", &self.opencode_api_key.value);
                 }
+
+                // OMP supports keyless custom providers (for example local
+                // Ollama/llama.cpp servers) via `auth: none`.  The compact
+                // form has no separate auth selector, so an empty API-key
+                // field on an OMP provider is treated as an explicit keyless
+                // configuration unless an existing OAuth/none mode is already
+                // present.  Conversely, entering a key restores the default
+                // api-key mode when the form previously inserted `none`.
+                if is_omp {
+                    let is_opaque_extension = crate::services::provider::is_opaque_extension_config(
+                        &Value::Object(settings_obj.clone()),
+                    );
+                    if self.opencode_api_key.value.trim().is_empty() && !is_opaque_extension {
+                        let existing_auth = settings_obj.get("auth").and_then(Value::as_str);
+                        let has_oauth_descriptor = settings_obj.get("oauth").is_some_and(|value| {
+                            value.as_str().is_some_and(|value| !value.trim().is_empty())
+                                || value.is_object()
+                        });
+                        let had_api_key = original_pi_settings
+                            .and_then(|settings| settings.get("apiKey"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| !value.trim().is_empty());
+                        let had_explicit_api_key_auth = original_pi_settings
+                            .and_then(|settings| settings.get("auth"))
+                            .and_then(Value::as_str)
+                            == Some("apiKey");
+                        let has_models = settings_obj
+                            .get("models")
+                            .and_then(Value::as_array)
+                            .is_some_and(|models| !models.is_empty());
+                        if !matches!(existing_auth, Some("none") | Some("oauth"))
+                            && !has_oauth_descriptor
+                            && (!self.mode.is_edit()
+                                || had_api_key
+                                || had_explicit_api_key_auth
+                                || has_models)
+                        {
+                            settings_obj.insert("auth".to_string(), json!("none"));
+                        }
+                    } else if matches!(
+                        settings_obj.get("auth").and_then(Value::as_str),
+                        Some("none") | Some("oauth")
+                    ) {
+                        settings_obj.remove("auth");
+                    }
+                }
                 if !is_pi
                     || pi_native_string_field_changed(
                         original_pi_settings,
@@ -734,20 +793,24 @@ impl ProviderAddFormState {
                 }
 
                 let api_value = self.opencode_npm_package.value.trim();
-                if !is_pi
+                if !is_pi && !is_omp
                     || pi_native_string_field_changed(
                         original_pi_settings,
                         "api",
                         &self.opencode_npm_package.value,
                     )
                 {
-                    if is_pi && api_value.is_empty() {
+                    if (is_pi || is_omp) && api_value.is_empty() {
                         settings_obj.remove("api");
                     } else {
                         settings_obj.insert(
                             "api".to_string(),
                             json!(if api_value.is_empty() {
-                                OPENCLAW_DEFAULT_API_PROTOCOL
+                                if is_omp {
+                                    crate::omp_config::OMP_DEFAULT_API_PROTOCOL
+                                } else {
+                                    OPENCLAW_DEFAULT_API_PROTOCOL
+                                }
                             } else {
                                 api_value
                             }),
@@ -755,7 +818,7 @@ impl ProviderAddFormState {
                     }
                 }
 
-                if !is_pi {
+                if matches!(self.app_type, AppType::OpenClaw) {
                     let mut headers_obj = match settings_obj.remove("headers") {
                         Some(Value::Object(map)) => map,
                         _ => serde_json::Map::new(),
@@ -1503,7 +1566,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {}
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Omp => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

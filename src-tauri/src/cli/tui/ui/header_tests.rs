@@ -197,6 +197,7 @@ fn header_openclaw_sacrifices_tabs_before_losing_the_only_status_badge() {
         hermes: false,
         openclaw: true,
         pi: false,
+        omp: false,
     });
     let _lang = use_test_language(Language::English);
     let _no_color = super::tests::EnvGuard::remove("NO_COLOR");
@@ -238,6 +239,7 @@ fn header_openclaw_truncates_long_default_model_without_fake_proxy_gap() {
         hermes: false,
         openclaw: true,
         pi: false,
+        omp: false,
     });
     let _lang = use_test_language(Language::English);
     let _no_color = super::tests::EnvGuard::remove("NO_COLOR");

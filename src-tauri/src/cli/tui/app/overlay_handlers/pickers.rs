@@ -1071,6 +1071,7 @@ impl App {
                             .then(|| provider.custom_user_agent.value.clone()),
                         api_protocol: None,
                         request_headers: None,
+                        discovery_timeout_ms: None,
                         codex_oauth,
                         codex_oauth_account_id,
                         field: ProviderAddField::ClaudeModelConfig,
@@ -1627,7 +1628,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(6);
+                *selected = (*selected + 1).min(7);
                 Action::None
             }
             KeyCode::Char(' ') => {
@@ -1696,7 +1697,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(5);
+                *selected = (*selected + 1).min(6);
                 Action::None
             }
             KeyCode::Char(' ') => {

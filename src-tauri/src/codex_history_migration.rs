@@ -2737,7 +2737,7 @@ base_url = "https://proxy.example/v1"
 
         let backup_root = get_app_config_dir().join("backups").join("migration");
         let backup_path = backup_root.join("state").join(CODEX_STATE_DB_FILENAME);
-        fs::create_dir_all(backup_path.parent().expect("backup parent"))
+        crate::config::create_managed_config_dir_all(backup_path.parent().expect("backup parent"))
             .expect("create backup parent");
         let external_target = dir.path().join("external-state.sqlite");
         symlink(&external_target, &backup_path).expect("create dangling backup symlink");
@@ -2777,7 +2777,7 @@ base_url = "https://proxy.example/v1"
 
         let backup_root = get_app_config_dir().join("backups").join("migration");
         let backup_path = backup_root.join("state").join(CODEX_STATE_DB_FILENAME);
-        fs::create_dir_all(backup_path.parent().expect("backup parent"))
+        crate::config::create_managed_config_dir_all(backup_path.parent().expect("backup parent"))
             .expect("create backup parent");
         fs::write(&backup_path, b"existing").expect("write existing backup");
         #[cfg(unix)]

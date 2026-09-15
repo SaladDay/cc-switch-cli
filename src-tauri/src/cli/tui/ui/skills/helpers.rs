@@ -48,6 +48,9 @@ pub(super) fn enabled_skill_apps_text(apps: &crate::app_config::SkillApps) -> St
     if apps.pi {
         enabled.push("Pi");
     }
+    if apps.omp {
+        enabled.push("OMP");
+    }
 
     if enabled.is_empty() {
         texts::none().to_string()

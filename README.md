@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**Manage Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, and Pi from one interactive TUI or scriptable CLI.**
+**Manage Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, Pi, and OMP (oh-my-pi) from one interactive TUI or scriptable CLI.**
 
 [![Version](https://img.shields.io/badge/version-5.10.4-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -185,8 +185,13 @@ cc-switch --app gemini prompts list     # List Gemini prompts
 cc-switch --app hermes provider list    # Manage Hermes providers
 cc-switch --app openclaw provider list  # Manage OpenClaw providers
 cc-switch --app pi provider list        # Manage Pi providers
+cc-switch --app omp provider list       # Manage OMP providers
+cc-switch --app omp provider set-default <provider> [--model <model>] # Set modelRoles.default
+cc-switch --app omp model list          # List models and show the active native path
+cc-switch --app omp role list           # List model roles and show the active native path
+cc-switch --app omp env check           # Compare CC-Switch and official OMP paths
 
-# Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `hermes`, `openclaw`, `pi`
+# Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `hermes`, `openclaw`, `pi`, `omp`
 ```
 
 Use `cc-switch start` when you want different providers in multiple terminals. It only affects the Claude or Codex session launched by that command; `provider switch` and `use` still change the global provider. In the TUI, select a provider on the Providers page and press `o` for the same behavior.
@@ -318,7 +323,9 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 Provider Management
 
-Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, **Hermes**, **OpenClaw**, and **Pi**.
+Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, **Hermes**, **OpenClaw**, **Pi**, and **OMP**.
+
+OMP uses native additive YAML files. CC-Switch manages explicit `providers` and `models` in `models.yml`, and OMP's effective `modelRoles` in `config.yml`; providers remain side-by-side and the `default` role selects the active `provider/model` (or an OMP role alias such as `@smol`/`*`, optionally with a thinking suffix). When `modelRoleStorage: project` is effective, role assignments are written to the current directory's `.omp/config.yml` and overlaid on global roles. OMP login credentials are never rewritten. The OMP TUI also edits `SYSTEM.md`, `APPEND_SYSTEM.md`, and `TITLE_SYSTEM.md` using OMP's project-first lookup with revision checks, and shows the exact active prompt path. `SYSTEM.md` follows OMP's native provider (nearest non-empty ancestor `.omp` project directory, then the active native agent directory, including `PI_CODING_AGENT_DIR`); `APPEND_SYSTEM.md` and `TITLE_SYSTEM.md` use the generic cwd-only project lookup and profile/config-root user lookup. `disabledProviders` is honored when marking providers and setting defaults. Use `cc-switch --app omp model list`, `cc-switch --app omp role list`, and `cc-switch --app omp env check` to verify the files and effective settings OMP is using. OMP paths always follow the official `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, `OMP_PROFILE`, and legacy `PI_PROFILE` resolution; CC-Switch does not maintain a separate OMP directory override.
 
 Pi provider management follows Pi's native additive model: membership comes from `models.json.providers`. CC-Switch does not modify Pi login credentials or its global default provider/model.
 The Pi TUI keeps the same table/form/shortcut conventions as the other apps and exposes Presets, System Prompts, and Prompt Templates as separate pages.
@@ -391,6 +398,8 @@ cc-switch prompts show <id>          # Display full content
 cc-switch prompts delete <id>        # Delete prompt
 cc-switch --app pi prompts system edit append # Edit APPEND_SYSTEM.md
 cc-switch --app pi prompts templates list     # List Pi prompt templates
+cc-switch --app omp prompts system edit append # Edit OMP APPEND_SYSTEM.md
+cc-switch --app omp prompts system edit title  # Edit OMP TITLE_SYSTEM.md
 ```
 
 ### 🎯 Skills Management
@@ -517,7 +526,7 @@ Inspect environment conflicts and whether required local CLIs are installed.
 ```bash
 cc-switch env check                  # Check environment conflicts
 cc-switch env list                   # List relevant environment variables
-cc-switch env tools                  # Check Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw/Pi CLIs
+cc-switch env tools                  # Check Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw/Pi/OMP CLIs
 ```
 
 ### 🌐 Multi-language Support
@@ -584,6 +593,7 @@ When `CC_SWITCH_CONFIG_DIR` is set, CC-Switch uses that directory as its config 
 - Hermes: `~/.hermes/config.yaml` (providers + MCP + memory settings), `~/.hermes/AGENTS.md` (prompts), `~/.hermes/skills/` (skills), `~/.hermes/memories/` (memory)
 - OpenClaw: `~/.openclaw/openclaw.json` (providers + env/tools/agents defaults), `~/.openclaw/AGENTS.md` (prompts)
 - Pi: `~/.pi/agent/models.json` (additive providers), `~/.pi/agent/settings.json` (read-only defaults/session location), `~/.pi/agent/AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `prompts/`, `skills/`, and `sessions/`
+- OMP (oh-my-pi): `~/.omp/agent/models.yml` (additive providers and models; `models.yaml` and legacy `models.json` are also supported), `~/.omp/agent/config.yml` (`modelRoles` and native settings), plus optional `SYSTEM.md`, `APPEND_SYSTEM.md`, and `TITLE_SYSTEM.md` resolved with OMP's project-first lookup. `SYSTEM.md` follows the native nearest-ancestor/provider path (including `PI_CODING_AGENT_DIR`), while `APPEND_SYSTEM.md` and `TITLE_SYSTEM.md` use the generic cwd-only project lookup and profile/config-root user lookup. Model/role files follow `PI_CONFIG_DIR` and profile resolution. `cc-switch env check --app omp` compares the adapter path with `omp config path`.
 
 ---
 

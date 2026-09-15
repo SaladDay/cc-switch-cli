@@ -243,6 +243,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("create temp dir");
         let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
         let backup_dir = get_backup_dir().expect("get backup dir");
+        // The managed root must already satisfy the private-directory
+        // invariant before we exercise the intentional preservation of an
+        // existing backups/ mode below.
+        let config_root = backup_dir.parent().expect("config root");
+        std::fs::create_dir_all(config_root).expect("create config root");
+        std::fs::set_permissions(config_root, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict config root");
         std::fs::create_dir_all(&backup_dir).expect("create existing backup dir");
         std::fs::set_permissions(&backup_dir, std::fs::Permissions::from_mode(0o755))
             .expect("set existing backup dir permissions");

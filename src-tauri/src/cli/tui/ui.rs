@@ -41,6 +41,7 @@ mod forms;
 mod home_chart;
 mod main_page;
 mod mcp;
+mod omp;
 mod overlay;
 mod pricing;
 mod prompts;
@@ -64,6 +65,7 @@ use forms::*;
 use home_chart::*;
 use main_page::*;
 use mcp::*;
+use omp::*;
 use overlay::*;
 use pricing::*;
 use prompts::*;
@@ -173,6 +175,9 @@ fn render_content(
         Route::PiPromptTemplates => {
             render_pi_prompt_templates(frame, app, data, content_area, theme)
         }
+        Route::OmpModels => render_omp_models(frame, app, data, content_area, theme),
+        Route::OmpRoles => render_omp_roles(frame, app, data, content_area, theme),
+        Route::OmpSystemPrompts => render_omp_system_prompts(frame, app, data, content_area, theme),
         Route::HermesMemory => render_hermes_memory(frame, app, data, content_area, theme),
         Route::Config => render_config(frame, app, data, content_area, theme),
         Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
