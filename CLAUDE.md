@@ -94,15 +94,13 @@ Request handling flows through `HandlerContext`, `ProviderRouter`, `RequestForwa
 
 ## Blind review protocol
 
-- After implementation and local validation are complete, send the full change set to two independent subagents for blind review.
-- Start each reviewer with fresh context, without inheriting the development conversation. Before review begins, tell the user the requirements, acceptance criteria, and task boundaries given to the reviewers.
-- For every reviewer in every round, including a later round reduced to one reviewer, provide the user's goal, intended behavior, acceptance criteria, and relevant constraints so they can judge whether the change actually satisfies the request. Do not disclose the implementation approach, fixes already made, or findings from any prior reviewer or round. Ask each reviewer to inspect all current modifications and report correctness, regression, security, performance, UX, and test-coverage issues.
-- Keep the two reviews independent. Reviewers must not receive or infer the other reviewer's findings before producing their own report.
-- Validate every finding against the code. Fix confirmed issues, then start a fresh two-reviewer blind round with new subagents under the same reviewer-context rules above.
+- Before development, define the requirements, acceptance criteria, and task boundaries. Keep changes minimal and avoid unrelated refactoring or behavior changes.
+- After implementation and local validation are complete, send the full change set to one new subagent for blind review.
+- Start every reviewer with fresh context, without inheriting the development conversation. Provide only the user's goal, intended behavior, acceptance criteria, task boundaries, relevant constraints, repository location, and comparison baseline. Before review begins, tell the user the requirements, criteria, and boundaries given to the reviewer.
+- Do not disclose implementation details, change summaries, self-assessments, or findings from prior review rounds. Ask the reviewer to independently inspect all current modifications and report correctness, regression, security, performance, UX, and test-coverage issues.
+- Validate every finding against the code. Make minimal fixes for confirmed issues within scope, run the relevant checks, then start another blind review with a new subagent under the same context rules.
 - If a confirmed finding also exists upstream, fixing it would expand the task, and compatibility is the intended behavior, it may remain unchanged. Record that decision and prefer upstream parity over an unrelated local fix.
-- When the findings have clearly converged and remaining work is only small, local patch refinement, reduce subsequent rounds to one fresh blind reviewer.
-- If review and repair keep cycling without convergence, stop patching and reconsider the design as a whole: re-check boundaries, invariants, state flow, ownership, and whether the current abstraction is the real source of the repeated defects.
-- If a design-level reconsideration still cannot produce a sound resolution, stop changing code and report the unresolved issues, tradeoffs, and evidence to the user.
+- If review and repair keep cycling without convergence, stop patching and reconsider the overall design and task boundaries. If that still cannot produce a sound resolution, stop expanding the change set and report the unresolved issues, tradeoffs, and evidence to the user.
 
 ## Testing requirements
 

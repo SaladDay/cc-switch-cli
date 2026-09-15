@@ -3254,6 +3254,69 @@ fn model_pricing_delete_survives_reseed_until_user_upserts() {
 }
 
 #[test]
+fn model_pricing_gpt_6_astra_reseed_preserves_user_changes() {
+    use crate::proxy::usage::calculator::lookup_model_pricing;
+
+    let db = Database::memory().expect("create memory db");
+    // Simulate an existing catalog that predates Astra, without a user deletion marker.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM model_pricing WHERE model_id = 'gpt-6-astra'",
+            [],
+        )
+        .unwrap();
+    assert!(lookup_model_pricing(&db, "gpt-6-astra").is_none());
+    db.ensure_model_pricing_seeded().unwrap();
+    assert_eq!(
+        lookup_model_pricing(&db, "gpt-6-astra")
+            .unwrap()
+            .input_cost_per_million,
+        rust_decimal::Decimal::from(10)
+    );
+
+    let custom =
+        ModelPricingUpdate::new("gpt-6-astra", "Custom Astra", "2", "8", "0.2", "3").unwrap();
+    db.upsert_model_pricing(&custom).unwrap();
+    db.ensure_model_pricing_seeded().unwrap();
+    let row: (String, String, String, String, String) = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT display_name, input_cost_per_million, output_cost_per_million,
+                cache_read_cost_per_million, cache_creation_cost_per_million
+         FROM model_pricing WHERE model_id = 'gpt-6-astra'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            custom.display_name,
+            custom.input_cost_per_million,
+            custom.output_cost_per_million,
+            custom.cache_read_cost_per_million,
+            custom.cache_creation_cost_per_million
+        )
+    );
+
+    assert!(db.delete_model_pricing("gpt-6-astra").unwrap());
+    db.ensure_model_pricing_seeded().unwrap();
+    assert!(lookup_model_pricing(&db, "gpt-6-astra").is_none());
+}
+
+#[test]
 fn model_pricing_seeds_gpt_5_6_family_and_aliases() {
     let db = Database::memory().expect("create memory db");
     let conn = db.conn.lock().expect("lock conn");
@@ -3295,6 +3358,7 @@ fn model_pricing_seeds_synced_upstream_catalog() {
     let conn = db.conn.lock().expect("lock conn");
 
     let expected = [
+        ("gpt-6-astra", "10", "50", "1", "12.5"),
         ("claude-fable-5", "10", "50", "1.00", "12.50"),
         ("claude-opus-4-6", "5", "25", "0.50", "6.25"),
         ("claude-sonnet-4-6", "3", "15", "0.30", "3.75"),
