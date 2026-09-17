@@ -344,6 +344,9 @@ fn format_5h_usage_cell(item: &crate::kimi_config::KimiProfileQuotaItem) -> (Str
         return ("(no credentials)".to_string(), "-".to_string());
     }
     if let Some(ref err) = item.error {
+        if err.contains("缺少 refresh_token") || err.contains("未登录") {
+            return ("(unauthenticated)".to_string(), "-".to_string());
+        }
         return (format!("error: {err}"), "-".to_string());
     }
     if let Some(ref u) = item.usages {
