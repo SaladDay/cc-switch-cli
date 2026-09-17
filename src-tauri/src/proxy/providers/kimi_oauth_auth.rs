@@ -91,7 +91,9 @@ struct DeviceCodeResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct KimiTokenResponse {
-    pub access_token: String,
+    #[serde(default)]
+    pub access_token: Option<String>,
+    #[serde(default)]
     pub refresh_token: Option<String>,
     #[serde(default)]
     pub expires_in: Option<i64>,
@@ -338,11 +340,12 @@ impl KimiOAuthManager {
             }
         }
 
-        if token_resp.access_token.is_empty() {
-            return Err(KimiOAuthError::TokenFetchFailed(
-                "响应缺少 access_token".to_string(),
-            ));
-        }
+        let access_token = token_resp
+            .access_token
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| {
+                KimiOAuthError::TokenFetchFailed("响应缺少 access_token".to_string())
+            })?;
 
         let refresh_token = token_resp.refresh_token.ok_or_else(|| {
             KimiOAuthError::TokenFetchFailed("响应缺少 refresh_token".to_string())
@@ -355,7 +358,7 @@ impl KimiOAuthManager {
         }
 
         // 获取用户资料
-        let user_info = Self::fetch_user_info(&token_resp.access_token).await.ok();
+        let user_info = Self::fetch_user_info(&access_token).await.ok();
         let account_id = user_info
             .as_ref()
             .and_then(|u| u.user_id.clone())
@@ -386,7 +389,7 @@ impl KimiOAuthManager {
             tokens.insert(
                 account.id.clone(),
                 CachedAccessToken {
-                    token: token_resp.access_token.clone(),
+                    token: access_token.clone(),
                     expires_at_ms,
                 },
             );
@@ -395,7 +398,7 @@ impl KimiOAuthManager {
         // 如果是当前默认账号，同步写入 native ~/.kimi-code
         if self.default_account_id().await.as_deref() == Some(&account.id) {
             let _ = crate::kimi_config::sync_kimi_account_to_native(
-                &token_resp.access_token,
+                &access_token,
                 &refresh_token,
                 expires_in_sec,
                 expires_at_ms / 1000,
@@ -461,7 +464,12 @@ impl KimiOAuthManager {
         let token_resp: KimiTokenResponse = serde_json::from_str(&body_text)
             .map_err(|e| KimiOAuthError::ParseError(format!("{e}: {body_text}")))?;
 
-        if token_resp.access_token.is_empty() {
+        if token_resp
+            .access_token
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             return Err(KimiOAuthError::TokenFetchFailed(
                 "刷新响应中缺少 access_token".to_string(),
             ));
@@ -514,6 +522,12 @@ impl KimiOAuthManager {
         };
 
         let token_resp = self.refresh_access_token(&refresh_token).await?;
+        let access_token = token_resp
+            .access_token
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| {
+                KimiOAuthError::TokenFetchFailed("刷新响应中缺少 access_token".to_string())
+            })?;
         let expires_in_sec = token_resp.expires_in.unwrap_or(3600);
         let expires_at_ms = chrono::Utc::now().timestamp_millis() + expires_in_sec * 1000;
 
@@ -522,7 +536,7 @@ impl KimiOAuthManager {
             tokens.insert(
                 account_id.to_string(),
                 CachedAccessToken {
-                    token: token_resp.access_token.clone(),
+                    token: access_token.clone(),
                     expires_at_ms,
                 },
             );
@@ -545,7 +559,7 @@ impl KimiOAuthManager {
             };
             if let Some(rt) = rt {
                 let _ = crate::kimi_config::sync_kimi_account_to_native(
-                    &token_resp.access_token,
+                    &access_token,
                     &rt,
                     expires_in_sec,
                     expires_at_ms / 1000,
@@ -553,7 +567,7 @@ impl KimiOAuthManager {
             }
         }
 
-        Ok(token_resp.access_token)
+        Ok(access_token)
     }
 
     #[allow(dead_code)]
