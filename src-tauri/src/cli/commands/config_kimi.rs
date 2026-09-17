@@ -179,10 +179,11 @@ fn show_status(json: bool) -> Result<(), AppError> {
                     extras.push(status_tag.trim().to_string());
                 }
                 if let Some(d) = five_hour_detail {
-                    match (&d.used, &d.limit, &d.remaining) {
-                        (Some(u), Some(l), Some(r)) => extras.push(format!("[{}/{}, remaining: {}]", u, l, r)),
-                        (Some(u), Some(l), None) => extras.push(format!("[{}/{}]", u, l)),
-                        _ => {}
+                    let used_count = d.used.as_deref().unwrap_or("0");
+                    if let (Some(l), Some(r)) = (&d.limit, &d.remaining) {
+                        extras.push(format!("[{}/{}, remaining: {}]", used_count, l, r));
+                    } else if let Some(l) = &d.limit {
+                        extras.push(format!("[{}/{}]", used_count, l));
                     }
                 }
 
