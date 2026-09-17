@@ -33,6 +33,8 @@ pub enum AuthCommand {
         /// Account id to make default
         account_id: String,
     },
+    /// Activate an account for the next standalone Codex process
+    Use { account_id: String },
     /// Remove a ChatGPT account
     Remove {
         /// Account id to remove
@@ -64,6 +66,15 @@ pub fn execute(cmd: AuthCommand) -> Result<(), AppError> {
         AuthCommand::List { json } => list_accounts(&runtime, json),
         AuthCommand::Login { json } => login(&runtime, json),
         AuthCommand::Default { account_id } => set_default(&runtime, &account_id),
+        AuthCommand::Use { account_id } => {
+            runtime
+                .block_on(crate::services::codex_account::use_account(
+                    normalize_account_id(&account_id)?,
+                ))
+                .map_err(AppError::Message)?;
+            println!("{}", success("Codex account activated. Restart Codex or launch a new Codex process; /new does not reload login."));
+            Ok(())
+        }
         AuthCommand::Remove { account_id, yes } => remove_account(&runtime, &account_id, yes),
         AuthCommand::Logout { yes } => logout(&runtime, yes),
     }
@@ -105,6 +116,12 @@ fn status(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError>
     {
         println!("Migration:     {error}");
     }
+    println!(
+        "Codex active:  {}",
+        crate::services::codex_account::active_account_id()
+            .as_deref()
+            .unwrap_or("-")
+    );
     println!("Accounts:      {}", status.accounts.len());
 
     if !status.accounts.is_empty() {

@@ -94,6 +94,7 @@ mod tests {
             authenticated: true,
             default_account_id: Some("acc-default".to_string()),
             migration_error: None,
+            active_codex_account_id: None,
             accounts: vec![
                 crate::services::ManagedAuthAccount {
                     id: "acc-default".to_string(),
@@ -15499,6 +15500,15 @@ mod tests {
             auth_provider: "codex_oauth".to_string(),
             account_id: "acc-alt".to_string(),
             selected: 1,
+        };
+        assert!(
+            matches!(app.on_key(key(KeyCode::Enter), &data()), Action::ManagedAuthUse { account_id, .. } if account_id == "acc-alt")
+        );
+
+        app.overlay = Overlay::ManagedAccountActionPicker {
+            auth_provider: "codex_oauth".to_string(),
+            account_id: "acc-alt".to_string(),
+            selected: 2,
         };
         let action = app.on_key(key(KeyCode::Enter), &data());
         assert!(matches!(

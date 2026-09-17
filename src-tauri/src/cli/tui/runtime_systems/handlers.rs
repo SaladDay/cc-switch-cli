@@ -1194,6 +1194,7 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
                         authenticated: true,
                         default_account_id: Some(account.id.clone()),
                         migration_error: None,
+                        active_codex_account_id: None,
                         accounts: vec![account.clone()],
                     });
                 }
@@ -1222,6 +1223,22 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
                 );
             }
         },
+        ManagedAuthMsg::Used { result } => {
+            app.managed_auth_loading = false;
+            match result {
+                Ok(status) => {
+                    app.managed_auth_status = Some(status);
+                    app.push_toast(
+                        crate::t!(
+                            "Codex account activated. Restart Codex or launch a new process.",
+                            "Codex 账号已启用。请重启 Codex 或启动新进程。"
+                        ),
+                        ToastKind::Success,
+                    );
+                }
+                Err(err) => app.push_toast(err, ToastKind::Error),
+            }
+        }
         ManagedAuthMsg::DefaultSet {
             auth_provider: _,
             account_id: _,

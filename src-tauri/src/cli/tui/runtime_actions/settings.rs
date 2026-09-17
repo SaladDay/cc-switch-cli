@@ -486,6 +486,36 @@ pub(super) fn managed_auth_set_default(
     Ok(())
 }
 
+pub(super) fn managed_auth_use(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+    account_id: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::Use {
+        auth_provider,
+        account_id,
+    }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
 pub(super) fn managed_auth_remove(
     ctx: &mut RuntimeActionContext<'_>,
     auth_provider: String,

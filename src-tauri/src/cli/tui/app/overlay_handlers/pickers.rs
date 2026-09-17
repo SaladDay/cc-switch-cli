@@ -816,7 +816,7 @@ impl App {
             return None;
         };
 
-        *selected = (*selected).min(1);
+        *selected = (*selected).min(2);
 
         Some(match key.code {
             KeyCode::Esc => {
@@ -828,7 +828,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(1);
+                *selected = (*selected + 1).min(2);
                 Action::None
             }
             KeyCode::Enter => {
@@ -836,6 +836,10 @@ impl App {
                 let account_id = account_id.clone();
                 let action = match *selected {
                     0 => Action::ManagedAuthSetDefault {
+                        auth_provider,
+                        account_id,
+                    },
+                    1 => Action::ManagedAuthUse {
                         auth_provider,
                         account_id,
                     },

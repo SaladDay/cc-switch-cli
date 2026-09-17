@@ -14,8 +14,7 @@ pub(crate) use handlers::{
 #[cfg(test)]
 pub(crate) use types::{
     build_model_fetch_candidate_urls, model_fetch_strategy_for_field,
-    parse_model_ids_from_response, ManagedAuthMsg, ManagedSessionOutcome, ProxyMsg, QuotaMsg,
-    UpdateMsg,
+    parse_model_ids_from_response, ManagedSessionOutcome, ProxyMsg, QuotaMsg, UpdateMsg,
 };
 pub(crate) use types::{
     build_stream_check_result_lines, fetch_provider_models_for_tui, ModelFetchStrategy,
@@ -36,3 +35,5 @@ pub(crate) use workers::{
     start_speedtest_system, start_stream_check_system, start_update_system,
     start_usage_pricing_system, start_webdav_system,
 };
+
+pub(crate) use types::ManagedAuthMsg;

@@ -770,3 +770,11 @@ src-tauri/src/
 
 - MIT © 原作者：Jason Young
 - CLI 分支维护者：saladday
+
+### Codex 官方账号切换
+
+`cc-switch auth use <account-id>` 将托管账号用于下一次独立 Codex 启动，同时更新当前官方供应商的认证快照和托管默认账号，不改写 `config.toml`、MCP 或其他供应商。
+在设置的托管账号页面按 **u**，或从账号菜单选择 **在 Codex 中使用**。原有空格和 `auth default` 仍只设置托管默认账号。
+切换后请重启 Codex 或启动新进程；已有进程内的 `/new` 不会重新读取登录。切换前请关闭可能刷新共享登录文件的旧 Codex 进程。
+仅支持官方直连及文件凭据存储；第三方路由、代理接管、keyring/auto 和冲突的强制登录配置会被拒绝。旧账号首次使用时会通过 OAuth 刷新补全凭据，必要时需重新登录。
+`auth status --json` 分别显示 `default_account_id` 和 `active_codex_account_id`。
