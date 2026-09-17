@@ -46,9 +46,17 @@ pub fn get_kimi_config_dir() -> PathBuf {
             return PathBuf::from(env_val);
         }
     }
-    dirs::home_dir()
-        .map(|p| p.join(DEFAULT_KIMI_CONFIG_DIR))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_KIMI_CONFIG_DIR))
+    #[cfg(test)]
+    {
+        // 单元测试未显式设置 KIMI_CODE_HOME 时，绝不能回退到宿主真实目录，防止测试副作用篡改真实凭据
+        std::env::temp_dir().join("cc-switch-kimi-test-isolated")
+    }
+    #[cfg(not(test))]
+    {
+        dirs::home_dir()
+            .map(|p| p.join(DEFAULT_KIMI_CONFIG_DIR))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_KIMI_CONFIG_DIR))
+    }
 }
 
 /// 获取 cc-switch 管理的 Kimi 配置 profiles 存储目录
@@ -197,6 +205,11 @@ pub fn sync_kimi_account_to_native(
     expires_in: i64,
     expires_at_sec: i64,
 ) -> Result<()> {
+    #[cfg(test)]
+    if std::env::var_os(KIMI_HOME_ENV).is_none() {
+        return Ok(());
+    }
+
     let creds = KimiNativeCredentials {
         access_token: access_token.to_string(),
         refresh_token: refresh_token.to_string(),

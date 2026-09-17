@@ -396,6 +396,7 @@ impl KimiOAuthManager {
         }
 
         // 如果是当前默认账号，同步写入 native ~/.kimi-code
+        #[cfg(not(test))]
         if self.default_account_id().await.as_deref() == Some(&account.id) {
             let _ = crate::kimi_config::sync_kimi_account_to_native(
                 &access_token,
@@ -556,6 +557,7 @@ impl KimiOAuthManager {
         }
 
         // 如果是当前默认账号，同步写入 native ~/.kimi-code
+        #[cfg(not(test))]
         if self.default_account_id().await.as_deref() == Some(account_id) {
             let rt = {
                 let accounts = self.accounts.read().await;
@@ -616,6 +618,7 @@ impl KimiOAuthManager {
         self.save_to_disk().await?;
 
         // 切换默认账号时，自动同步激活至 native ~/.kimi-code
+        #[cfg(not(test))]
         if let Ok(token) = self.get_valid_token_for_account(account_id).await {
             let accounts = self.accounts.read().await;
             if let Some(acc) = accounts.get(account_id) {
