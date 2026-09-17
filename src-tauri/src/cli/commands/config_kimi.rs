@@ -72,6 +72,8 @@ struct KimiStatusInfo {
     has_credentials: bool,
     token_expires_at: Option<i64>,
     profiles_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usages: Option<crate::kimi_config::KimiUsagesResponse>,
 }
 
 pub fn execute(cmd: KimiConfigCommand) -> Result<(), AppError> {
@@ -115,12 +117,20 @@ fn show_status(json: bool) -> Result<(), AppError> {
     let creds = read_native_credentials().map_err(|e| AppError::Message(e.to_string()))?;
     let profiles = list_profiles().map_err(|e| AppError::Message(e.to_string()))?;
 
+    let usages = if let Some(token) = creds.as_ref().map(|c| &c.access_token).filter(|t| !t.is_empty()) {
+        let rt = tokio::runtime::Runtime::new().ok();
+        rt.and_then(|r| r.block_on(crate::kimi_config::fetch_kimi_usages(token)).ok())
+    } else {
+        None
+    };
+
     let info_obj = KimiStatusInfo {
         home_dir: home.clone(),
         active_profile: active_profile.clone(),
         has_credentials: creds.is_some(),
         token_expires_at: creds.as_ref().and_then(|c| c.expires_at),
         profiles_count: profiles.len(),
+        usages: usages.clone(),
     };
 
     if json {
@@ -144,6 +154,78 @@ fn show_status(json: bool) -> Result<(), AppError> {
         println!("Token Expires At: {}", dt);
     }
     println!("Profiles Count:   {}", profiles.len());
+
+    if let Some(u) = &usages {
+        if let Some(q) = &u.usages {
+            let now = chrono::Utc::now();
+            println!();
+            println!("Usage & Rate Limits:");
+
+            let five_hour_detail = u.limits.iter().find(|l| {
+                l.window.as_ref().and_then(|w| w.duration) == Some(300)
+            }).and_then(|l| l.detail.as_ref());
+
+            if let Some(item) = &q.limit_5h {
+                let ratio = item.used_ratio.unwrap_or(0.0);
+                let pct = ratio * 100.0;
+                let status_tag = if ratio >= 1.0 {
+                    " [EXCEEDED / 5小时额度已耗尽]"
+                } else {
+                    ""
+                };
+
+                let mut extras = Vec::new();
+                if !status_tag.is_empty() {
+                    extras.push(status_tag.trim().to_string());
+                }
+                if let Some(d) = five_hour_detail {
+                    match (&d.used, &d.limit, &d.remaining) {
+                        (Some(u), Some(l), Some(r)) => extras.push(format!("[{}/{}, remaining: {}]", u, l, r)),
+                        (Some(u), Some(l), None) => extras.push(format!("[{}/{}]", u, l)),
+                        _ => {}
+                    }
+                }
+
+                let extras_str = if extras.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", extras.join(" "))
+                };
+
+                let reset_str = if let Some(reset_info) = crate::cli::provider_quota::quota_reset_display(item.reset_time.as_deref(), now) {
+                    let local_time = reset_info.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S");
+                    let countdown = reset_info.remaining.map(|r| format!("in {r}")).unwrap_or_else(|| "soon".to_string());
+                    format!("resets {} at {}", countdown, local_time)
+                } else {
+                    format!("reset: {}", item.reset_time.as_deref().unwrap_or("-"))
+                };
+
+                println!("  5-Hour Limit:   {:.1}% used{} ({})", pct, extras_str, reset_str);
+            }
+            if let Some(item) = &q.limit_7d {
+                let pct = item.used_ratio.unwrap_or(0.0) * 100.0;
+                let reset_str = if let Some(reset_info) = crate::cli::provider_quota::quota_reset_display(item.reset_time.as_deref(), now) {
+                    let local_time = reset_info.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S");
+                    let countdown = reset_info.remaining.map(|r| format!("in {r}")).unwrap_or_else(|| "soon".to_string());
+                    format!("resets {} at {}", countdown, local_time)
+                } else {
+                    format!("reset: {}", item.reset_time.as_deref().unwrap_or("-"))
+                };
+                println!("  7-Day Limit:    {:.1}% used ({})", pct, reset_str);
+            }
+            if let Some(item) = &q.limit_month_total {
+                let pct = item.used_ratio.unwrap_or(0.0) * 100.0;
+                let reset_str = if let Some(reset_info) = crate::cli::provider_quota::quota_reset_display(item.reset_time.as_deref(), now) {
+                    let local_time = reset_info.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S");
+                    let countdown = reset_info.remaining.map(|r| format!("in {r}")).unwrap_or_else(|| "soon".to_string());
+                    format!("resets {} at {}", countdown, local_time)
+                } else {
+                    format!("reset: {}", item.reset_time.as_deref().unwrap_or("-"))
+                };
+                println!("  Monthly Total:  {:.1}% used ({})", pct, reset_str);
+            }
+        }
+    }
 
     Ok(())
 }

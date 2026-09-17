@@ -257,6 +257,80 @@ pub fn switch_profile(name: &str) -> Result<()> {
 }
 
 /// 删除指定的 Profile
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KimiQuotaItem {
+    #[serde(default)]
+    pub used_ratio: Option<f64>,
+    #[serde(default)]
+    pub reset_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KimiQuotaUsages {
+    #[serde(default)]
+    pub limit_5h: Option<KimiQuotaItem>,
+    #[serde(default)]
+    pub limit_7d: Option<KimiQuotaItem>,
+    #[serde(default)]
+    pub limit_month_total: Option<KimiQuotaItem>,
+    #[serde(default)]
+    pub limit_month_code: Option<KimiQuotaItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KimiLimitDetail {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub used: Option<String>,
+    #[serde(default)]
+    pub remaining: Option<String>,
+    #[serde(default, rename = "resetTime")]
+    pub reset_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KimiLimitWindowInfo {
+    #[serde(default)]
+    pub duration: Option<i64>,
+    #[serde(default, rename = "timeUnit")]
+    pub time_unit: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KimiLimitWindow {
+    #[serde(default)]
+    pub window: Option<KimiLimitWindowInfo>,
+    #[serde(default)]
+    pub detail: Option<KimiLimitDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KimiUsagesResponse {
+    #[serde(default)]
+    pub limits: Vec<KimiLimitWindow>,
+    #[serde(default)]
+    pub usages: Option<KimiQuotaUsages>,
+}
+
+pub async fn fetch_kimi_usages(access_token: &str) -> Result<KimiUsagesResponse> {
+    let client = crate::proxy::http_client::get();
+    let resp = client
+        .get("https://api.kimi.com/coding/v1/usages")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .context("请求 Kimi usages 接口失败")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Kimi usages 接口返回错误: {}", resp.status());
+    }
+
+    let usages: KimiUsagesResponse = resp.json().await.context("解析 Kimi usages 响应失败")?;
+    Ok(usages)
+}
+
 pub fn remove_profile(name: &str) -> Result<()> {
     let name = validate_profile_name(name)?;
     let profile_dir = get_kimi_profiles_dir().join(name);
