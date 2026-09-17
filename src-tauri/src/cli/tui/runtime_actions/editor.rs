@@ -1361,7 +1361,15 @@ fn submit_config_common_snippet(
     }
 
     ctx.app.editor = None;
-    ctx.app.push_toast(toast, ToastKind::Success);
+    let disables_monitor_traffic = next_snippet.as_deref().is_some_and(|snippet| {
+        ProviderService::common_config_snippet_disables_monitor_traffic(&app_type, snippet)
+    });
+    // Decide the final toast text/kind after reconciliation below runs, then
+    // push exactly once. `push_toast` replaces the app's single current toast
+    // (there is no toast queue), so pushing here first and potentially again
+    // in the reconciliation branch would let a later reconciliation-error
+    // toast silently swallow the Monitor-traffic warning.
+    let mut final_toast = (toast.to_string(), ToastKind::Success);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     if matches!(source, CommonSnippetViewSource::ProviderForm) {
         if let Some(next_form) = reconciled_codex_form {
@@ -1381,10 +1389,21 @@ fn submit_config_common_snippet(
                 _ => Ok(()),
             };
             if let Err(err) = refresh_result {
-                ctx.app.push_toast(err, ToastKind::Warning);
+                final_toast = (err, ToastKind::Warning);
             }
         }
     }
+    if disables_monitor_traffic {
+        final_toast = (
+            format!(
+                "{} {}",
+                final_toast.0,
+                texts::common_config_snippet_disables_monitor_traffic()
+            ),
+            ToastKind::Warning,
+        );
+    }
+    ctx.app.push_toast(final_toast.0, final_toast.1);
     if matches!(source, CommonSnippetViewSource::Global) {
         ctx.app.overlay = crate::cli::tui::app::Overlay::None;
     }
@@ -2215,6 +2234,187 @@ mod tests {
         assert!(!form.include_common_config);
         assert!(!form.claude_teammates);
         assert!(!form.claude_tool_search);
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_config_common_snippet_warns_when_disabling_monitor_traffic() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::Global,
+            },
+            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#.to_string(),
+        )
+        .expect("common snippet submit should succeed even when it disables Monitor traffic");
+
+        let toast = ctx.app.toast.as_ref().expect("expected a toast");
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert!(
+            toast
+                .message
+                .contains(texts::common_config_snippet_disables_monitor_traffic()),
+            "toast should surface the Monitor-traffic warning: {}",
+            toast.message
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_config_common_snippet_warns_when_disabling_monitor_traffic_via_provider_form() {
+        // Regression coverage for the ProviderForm reconciliation path
+        // (`replace_common_config_snippet`), which pushes its own toast on
+        // failure and previously could silently overwrite the Monitor
+        // warning. This exercises the successful-reconciliation case; the
+        // final-toast merge (see the fix at the `submit_config_common_snippet`
+        // call site) ensures the warning survives regardless of which branch
+        // sets `final_toast` first.
+        let mut fixture = runtime_ctx(AppType::Claude);
+        fixture.app.form = Some(FormState::ProviderAdd(
+            crate::cli::tui::form::ProviderAddFormState::new_with_common_snippet(
+                AppType::Claude,
+                r#"{"env":{"ENABLE_TOOL_SEARCH":"true"}}"#,
+            ),
+        ));
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::ProviderForm,
+            },
+            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#.to_string(),
+        )
+        .expect("common snippet submit should succeed via the ProviderForm source too");
+
+        let toast = ctx.app.toast.as_ref().expect("expected a toast");
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert!(
+            toast
+                .message
+                .contains(texts::common_config_snippet_disables_monitor_traffic()),
+            "warning must survive the ProviderForm reconciliation branch: {}",
+            toast.message
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_config_common_snippet_no_warning_when_key_absent() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::Global,
+            },
+            r#"{"env":{"ENABLE_TOOL_SEARCH":"true"}}"#.to_string(),
+        )
+        .expect("common snippet submit should succeed");
+
+        let toast = ctx.app.toast.as_ref().expect("expected a toast");
+        assert_eq!(toast.kind, ToastKind::Success);
+        assert!(!toast
+            .message
+            .contains(texts::common_config_snippet_disables_monitor_traffic()));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_config_common_snippet_no_warning_for_non_claude_app() {
+        let mut fixture = runtime_ctx(AppType::Codex);
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Codex,
+                source: crate::cli::tui::app::CommonSnippetViewSource::Global,
+            },
+            "model_reasoning_effort = \"high\"".to_string(),
+        )
+        .expect("common snippet submit should succeed for Codex");
+
+        let toast = ctx.app.toast.as_ref().expect("expected a toast");
+        assert_eq!(toast.kind, ToastKind::Success);
+        assert!(!toast
+            .message
+            .contains(texts::common_config_snippet_disables_monitor_traffic()));
     }
 
     #[test]
