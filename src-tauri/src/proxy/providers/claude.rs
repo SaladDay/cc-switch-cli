@@ -4,8 +4,10 @@ use serde_json::{json, Value};
 use crate::{provider::Provider, proxy::error::ProxyError};
 
 use super::{
-    gemini_shadow::GeminiShadowStore, transform_gemini::AnthropicToolSchemaHints, AuthInfo,
-    AuthStrategy, ProviderAdapter, ProviderType,
+    codex_oauth_auth::{CODEX_OAUTH_CLIENT_VERSION, CODEX_OAUTH_ORIGINATOR},
+    gemini_shadow::GeminiShadowStore,
+    transform_gemini::AnthropicToolSchemaHints,
+    AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
 };
 
 pub struct ClaudeAdapter;
@@ -13,10 +15,6 @@ pub struct ClaudeAdapter;
 const ANTHROPIC_THINKING_PLACEHOLDER: &str = "tool call";
 const ANTHROPIC_REDACTED_THINKING_PLACEHOLDER: &str = "[redacted thinking]";
 const REASONING_VENDOR_HINTS: &[&str] = &["moonshot", "kimi", "deepseek", "mimo", "xiaomimimo"];
-// ChatGPT Codex selects model cohorts from this header pair. Keep both values
-// aligned with a real Codex CLI release new enough for the newest preset model.
-const CODEX_OAUTH_ORIGINATOR: &str = "codex_cli_rs";
-const CODEX_OAUTH_CLIENT_VERSION: &str = "0.144.1";
 
 pub fn get_claude_api_format(provider: &Provider) -> &'static str {
     if let Some(meta) = provider.meta.as_ref() {
@@ -910,6 +908,30 @@ mod tests {
             .expect("codex oauth should resolve auth");
         assert_eq!(format!("{:?}", auth.strategy), "CodexOAuth");
         assert!(adapter.needs_transform(&provider));
+    }
+
+    #[test]
+    fn codex_oauth_generation_uses_gpt6_compatible_identity() {
+        let request = ClaudeAdapter::new()
+            .add_auth_headers(
+                reqwest::Client::new().get("https://example.com"),
+                &AuthInfo::new("test-token".into(), AuthStrategy::CodexOAuth),
+            )
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()["authorization"], "Bearer test-token");
+        assert_eq!(request.headers()["originator"], "codex_cli_rs");
+        let version: Vec<u32> = request.headers()["version"]
+            .to_str()
+            .unwrap()
+            .split('.')
+            .map(|part| part.parse().unwrap())
+            .collect();
+        // Official rust-v0.153.4 catalog: gpt-6-astra requires 0.153.0.
+        assert!(
+            version.as_slice() >= [0, 153, 0].as_slice(),
+            "gpt-6-astra requires Codex >= 0.153.0; sent {version:?}"
+        );
     }
 
     #[test]
