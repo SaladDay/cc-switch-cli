@@ -434,6 +434,10 @@ impl KimiOAuthManager {
     }
 
     async fn refresh_access_token(&self, refresh_token: &str) -> Result<KimiTokenResponse, KimiOAuthError> {
+        Self::refresh_token_raw(refresh_token).await
+    }
+
+    pub async fn refresh_token_raw(refresh_token: &str) -> Result<KimiTokenResponse, KimiOAuthError> {
         let params = [
             ("client_id", KIMI_CLIENT_ID),
             ("refresh_token", refresh_token),
@@ -657,6 +661,28 @@ impl KimiOAuthManager {
         let mut list: Vec<ManagedAuthAccount> = accounts.values().map(ManagedAuthAccount::from).collect();
         list.sort_by(|a, b| b.authenticated_at.cmp(&a.authenticated_at));
         list
+    }
+
+    pub fn find_account_sync(
+        &self,
+        refresh_token: &str,
+        account_id: Option<&str>,
+    ) -> Option<ManagedAuthAccount> {
+        if let Ok(accounts) = self.accounts.try_read() {
+            if !refresh_token.is_empty() {
+                for acc in accounts.values() {
+                    if acc.refresh_token == refresh_token {
+                        return Some(ManagedAuthAccount::from(acc));
+                    }
+                }
+            }
+            if let Some(id) = account_id {
+                if let Some(acc) = accounts.get(id) {
+                    return Some(ManagedAuthAccount::from(acc));
+                }
+            }
+        }
+        None
     }
 
     pub async fn get_status(&self) -> KimiOAuthStatus {

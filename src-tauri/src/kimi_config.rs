@@ -35,6 +35,8 @@ pub struct KimiProfileInfo {
     pub is_active: bool,
     pub has_credentials: bool,
     pub has_config: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// 解析 Kimi Code 根目录路径（遵循 KIMI_CODE_HOME 环境变量，默认 ~/.kimi-code）
@@ -108,6 +110,86 @@ pub fn write_native_credentials(credentials: &KimiNativeCredentials) -> Result<(
     Ok(())
 }
 
+/// 读取指定 profile 的 credentials
+pub fn read_profile_credentials(profile_name: &str) -> Result<Option<KimiNativeCredentials>> {
+    let cred_path = get_kimi_profiles_dir()
+        .join(profile_name)
+        .join(KIMI_CREDENTIALS_DIR)
+        .join(KIMI_DEFAULT_CREDENTIAL_FILE);
+
+    if !cred_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&cred_path)
+        .with_context(|| format!("读取 Profile 凭据文件失败: {}", cred_path.display()))?;
+
+    let parsed: KimiNativeCredentials = serde_json::from_str(&content)
+        .with_context(|| format!("解析 Profile 凭据文件失败: {}", cred_path.display()))?;
+
+    Ok(Some(parsed))
+}
+
+/// 确保获取有效的 access_token（若已过期，自动尝试 refresh 并写回对应文件）
+pub async fn get_valid_access_token(
+    creds: &mut KimiNativeCredentials,
+    save_path: Option<&Path>,
+) -> Result<String> {
+    let now = chrono::Utc::now().timestamp();
+    let expired = creds.expires_at.map(|exp| exp <= now + 30).unwrap_or(false);
+
+    if !expired && !creds.access_token.is_empty() {
+        return Ok(creds.access_token.clone());
+    }
+
+    if creds.refresh_token.is_empty() {
+        if !creds.access_token.is_empty() {
+            return Ok(creds.access_token.clone());
+        }
+        anyhow::bail!("缺少 refresh_token，无法刷新");
+    }
+
+    let refreshed = crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager::refresh_token_raw(&creds.refresh_token)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if let Some(new_at) = refreshed.access_token {
+        creds.access_token = new_at;
+        if let Some(exp_in) = refreshed.expires_in {
+            creds.expires_in = Some(exp_in);
+            creds.expires_at = Some(now + exp_in);
+        }
+        if let Some(new_rt) = refreshed.refresh_token {
+            creds.refresh_token = new_rt;
+        }
+
+        if let Some(path) = save_path {
+            let content = serde_json::to_string_pretty(creds)?;
+            let _ = write_file_atomic(path, &content, 0o600);
+        }
+    }
+
+    Ok(creds.access_token.clone())
+}
+
+/// 解析 JWT 中的 user_id
+pub fn extract_user_id_from_jwt(token: &str) -> Option<String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let payload_b64 = parts[1].trim_end_matches('=');
+    let decoded = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let val: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    val.get("user_id")
+        .or_else(|| val.get("sub"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// 同步账号认证信息至 native ~/.kimi-code
 pub fn sync_kimi_account_to_native(
     access_token: &str,
@@ -140,6 +222,15 @@ pub fn clear_native_credentials() -> Result<()> {
     Ok(())
 }
 
+/// 解析凭据对应的账号昵称
+pub fn resolve_account_nickname(cred: &KimiNativeCredentials) -> Option<String> {
+    let manager = crate::services::kimi_oauth::KimiOAuthService::manager();
+    let user_id = extract_user_id_from_jwt(&cred.access_token);
+    manager
+        .find_account_sync(&cred.refresh_token, user_id.as_deref())
+        .map(|a| a.login)
+}
+
 /// 列出所有已保存的 Kimi 配置 Profiles
 pub fn list_profiles() -> Result<Vec<KimiProfileInfo>> {
     let profiles_dir = get_kimi_profiles_dir();
@@ -160,18 +251,90 @@ pub fn list_profiles() -> Result<Vec<KimiProfileInfo>> {
             let has_config = path.join(KIMI_CONFIG_FILE).exists();
             let is_active = active_name.as_deref() == Some(&name);
 
+            let account = if has_credentials {
+                read_profile_credentials(&name).ok().flatten().and_then(|c| resolve_account_nickname(&c))
+            } else {
+                None
+            };
+
             profiles.push(KimiProfileInfo {
                 name,
                 path,
                 is_active,
                 has_credentials,
                 has_config,
+                account,
             });
         }
     }
 
     profiles.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(profiles)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KimiProfileQuotaItem {
+    pub profile: KimiProfileInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usages: Option<KimiUsagesResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// 批量查询所有 Profiles 的实时 Quota（并发查询）
+pub async fn fetch_all_profiles_quota() -> Vec<KimiProfileQuotaItem> {
+    let profiles = match list_profiles() {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+
+    let mut tasks = Vec::new();
+    for p in profiles {
+        tasks.push(async move {
+            let mut creds = match read_profile_credentials(&p.name) {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    return KimiProfileQuotaItem {
+                        profile: p,
+                        usages: None,
+                        error: None,
+                    };
+                }
+                Err(e) => {
+                    return KimiProfileQuotaItem {
+                        profile: p,
+                        usages: None,
+                        error: Some(e.to_string()),
+                    };
+                }
+            };
+
+            let cred_path = p.path.join(KIMI_CREDENTIALS_DIR).join(KIMI_DEFAULT_CREDENTIAL_FILE);
+            match get_valid_access_token(&mut creds, Some(&cred_path)).await {
+                Ok(token) => {
+                    match fetch_kimi_usages(&token).await {
+                        Ok(u) => KimiProfileQuotaItem {
+                            profile: p,
+                            usages: Some(u),
+                            error: None,
+                        },
+                        Err(e) => KimiProfileQuotaItem {
+                            profile: p,
+                            usages: None,
+                            error: Some(e.to_string()),
+                        },
+                    }
+                }
+                Err(e) => KimiProfileQuotaItem {
+                    profile: p,
+                    usages: None,
+                    error: Some(e.to_string()),
+                },
+            }
+        });
+    }
+
+    futures::future::join_all(tasks).await
 }
 
 /// 保存当前活动的 ~/.kimi-code 配置到指定名称的 Profile
