@@ -385,6 +385,39 @@ fn format_5h_usage_cell(item: &crate::kimi_config::KimiProfileQuotaItem) -> (Str
     ("-".to_string(), "-".to_string())
 }
 
+fn format_7d_usage_cell(item: &crate::kimi_config::KimiProfileQuotaItem) -> (String, String) {
+    if !item.profile.has_credentials {
+        return ("(no credentials)".to_string(), "-".to_string());
+    }
+    if let Some(ref err) = item.error {
+        if err.contains("缺少 refresh_token") || err.contains("未登录") {
+            return ("(unauthenticated)".to_string(), "-".to_string());
+        }
+        return (format!("error: {err}"), "-".to_string());
+    }
+    if let Some(ref u) = item.usages {
+        if let Some(ref q) = u.usages {
+            if let Some(ref l7) = q.limit_7d {
+                let ratio = l7.used_ratio.unwrap_or(0.0);
+                let pct = ratio * 100.0;
+                let status_tag = if ratio >= 1.0 { " [EXCEEDED]" } else { "" };
+                let usage_str = format!("{pct:.1}%{status_tag}");
+
+                let reset_str = if let Some(reset_info) = crate::cli::provider_quota::quota_reset_display(l7.reset_time.as_deref(), chrono::Utc::now()) {
+                    let local = reset_info.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
+                    let countdown = reset_info.remaining.unwrap_or_else(|| "soon".to_string());
+                    format!("{countdown} ({local})")
+                } else {
+                    l7.reset_time.as_deref().unwrap_or("-").to_string()
+                };
+
+                return (usage_str, reset_str);
+            }
+        }
+    }
+    ("-".to_string(), "-".to_string())
+}
+
 fn execute_profile(cmd: KimiProfileCommand) -> Result<(), AppError> {
     match cmd {
         KimiProfileCommand::List { quota, json } => {
@@ -406,15 +439,18 @@ fn execute_profile(cmd: KimiProfileCommand) -> Result<(), AppError> {
                 }
 
                 let mut table = create_table();
-                table.set_header(vec!["Active", "Profile", "Account", "5-Hour Usage", "Reset In", "Path"]);
+                table.set_header(vec!["Active", "Profile", "Account", "5-Hour Usage", "Reset In", "7-Day Usage", "7D Reset", "Path"]);
                 for item in items {
-                    let (usage_str, reset_str) = format_5h_usage_cell(&item);
+                    let (usage_5h_str, reset_5h_str) = format_5h_usage_cell(&item);
+                    let (usage_7d_str, reset_7d_str) = format_7d_usage_cell(&item);
                     table.add_row(vec![
                         if item.profile.is_active { "*" } else { " " },
                         &item.profile.name,
                         item.profile.account.as_deref().unwrap_or("-"),
-                        &usage_str,
-                        &reset_str,
+                        &usage_5h_str,
+                        &reset_5h_str,
+                        &usage_7d_str,
+                        &reset_7d_str,
                         &item.profile.path.display().to_string(),
                     ]);
                 }
