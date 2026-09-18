@@ -32,6 +32,9 @@ pub(super) enum LiveSnapshot {
     OpenClaw {
         config_source: Option<String>,
     },
+    Kimi {
+        config_source: Option<String>,
+    },
 }
 
 impl LiveSnapshot {
@@ -107,6 +110,14 @@ impl LiveSnapshot {
                     delete_file(&path)?;
                 }
             }
+            LiveSnapshot::Kimi { config_source } => {
+                let path = crate::kimi_config::get_kimi_config_path();
+                if let Some(source) = config_source {
+                    crate::kimi_config::write_kimi_config_source(source)?;
+                } else if path.exists() {
+                    delete_file(&path)?;
+                }
+            }
         }
         Ok(())
     }
@@ -174,6 +185,10 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
             let config_source = crate::openclaw_config::read_openclaw_config_source()?;
             Ok(LiveSnapshot::OpenClaw { config_source })
         }
+        AppType::Kimi => {
+            let config_source = crate::kimi_config::read_kimi_config_source()?;
+            Ok(LiveSnapshot::Kimi { config_source })
+        }
         AppType::Pi => Err(AppError::Config(
             "Pi providers use the Pi provider service".to_string(),
         )),
@@ -223,6 +238,54 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
 
         imported += 1;
         log::info!("Imported Hermes provider '{id}' from live config");
+    }
+
+    Ok(imported)
+}
+
+pub fn import_kimi_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    let providers = crate::kimi_config::get_providers()?;
+    if providers.is_empty() {
+        return Ok(0);
+    }
+
+    let mut imported = 0usize;
+    let existing_ids = state.db.get_provider_ids("kimi")?;
+
+    for (id, settings_config) in providers {
+        if id.trim().is_empty() {
+            log::warn!("Skipping Kimi provider with empty id");
+            continue;
+        }
+        if existing_ids.contains(&id) {
+            log::debug!("Kimi provider '{id}' already exists in database, skipping");
+            continue;
+        }
+        if !settings_config.is_object() {
+            log::warn!("Skipping Kimi provider '{id}': config is not an object");
+            continue;
+        }
+
+        let display_name = settings_config
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        let mut provider = Provider::with_id(id.clone(), display_name, settings_config, None);
+        provider.meta = Some(ProviderMeta {
+            live_config_managed: Some(true),
+            ..Default::default()
+        });
+
+        if let Err(err) = state.db.save_provider("kimi", &provider) {
+            log::warn!("Failed to import Kimi provider '{id}': {err}");
+            continue;
+        }
+
+        imported += 1;
+        log::info!("Imported Kimi provider '{id}' from live config");
     }
 
     Ok(imported)

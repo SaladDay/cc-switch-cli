@@ -144,7 +144,7 @@ pub fn common_snippet_has_effective_config(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|obj| !obj.is_empty()),
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => false,
     }
 }
 
@@ -209,7 +209,7 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
                 label: "Google OAuth",
             },
         ],
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => {
             vec![ProviderAddTemplateChoice {
                 template: ProviderAddTemplate::Custom,
                 label: "Custom",
@@ -657,7 +657,7 @@ fn build_sponsor_template_settings_config(
                 })
             }
         }
-        AppType::Pi => Err(unsupported_template_error(ProviderAddTemplate::Custom)),
+        AppType::Pi | AppType::Kimi => Err(unsupported_template_error(ProviderAddTemplate::Custom)),
     }
 }
 
@@ -726,6 +726,22 @@ pub fn apply_additive_template_field_overrides(
             }
             if let Some(model) = model {
                 object.insert("models".to_string(), json!([{ "id": model }]));
+            }
+            Ok(updated)
+        }
+        AppType::Kimi => {
+            let mut updated = current.clone();
+            let object = updated.as_object_mut().ok_or_else(|| {
+                AppError::InvalidInput("Kimi provider configuration must be an object".to_string())
+            })?;
+            if let Some(api_key) = api_key {
+                object.insert("api_key".to_string(), Value::String(api_key.to_string()));
+            }
+            if let Some(base_url) = base_url {
+                object.insert("base_url".to_string(), Value::String(base_url.to_string()));
+            }
+            if let Some(model) = model {
+                object.insert("model".to_string(), Value::String(model.to_string()));
             }
             Ok(updated)
         }
@@ -3876,6 +3892,52 @@ fn validate_pi_prompt_request_url(current: Option<&Value>, edited: &Value) -> Re
     Ok(())
 }
 
+fn prompt_kimi_config(current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", "Kimi Code".bright_cyan().bold());
+
+    let default_api_key = current
+        .and_then(|v| v.get("api_key").or_else(|| v.get("apiKey")))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let default_base_url = current
+        .and_then(|v| v.get("base_url").or_else(|| v.get("baseUrl")))
+        .and_then(Value::as_str)
+        .unwrap_or("https://api.moonshot.cn/v1");
+    let default_model = current
+        .and_then(|v| v.get("model"))
+        .and_then(Value::as_str)
+        .unwrap_or("kimi-k2.5");
+
+    let api_key = Text::new(texts::api_key_label())
+        .with_initial_value(default_api_key)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let base_url = Text::new(texts::base_url_label())
+        .with_initial_value(default_base_url)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model = Text::new(texts::model_label())
+        .with_initial_value(default_model)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "api_key".to_string(),
+        Value::String(api_key.trim().to_string()),
+    );
+    map.insert(
+        "base_url".to_string(),
+        Value::String(base_url.trim().to_string()),
+    );
+    if !model.trim().is_empty() {
+        map.insert("model".to_string(), Value::String(model.trim().to_string()));
+    }
+    Ok(Value::Object(map))
+}
+
 /// 根据应用类型收集 settings_config
 pub fn prompt_settings_config(
     app_type: &AppType,
@@ -3917,6 +3979,7 @@ pub fn prompt_settings_config(
         AppType::OpenCode => prompt_opencode_config(current).map(SettingsConfigPromptResult::new),
         AppType::Hermes => prompt_hermes_config(current).map(SettingsConfigPromptResult::new),
         AppType::OpenClaw => prompt_openclaw_config(current).map(SettingsConfigPromptResult::new),
+        AppType::Kimi => prompt_kimi_config(current).map(SettingsConfigPromptResult::new),
         AppType::Pi => {
             let mut config = prompt_pi_config(current)?;
             if current.is_none() {
@@ -4679,6 +4742,26 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 .and_then(Value::as_array)
             {
                 println!("  {}: {}", texts::model_label(), models.len());
+            }
+        }
+        AppType::Kimi => {
+            if let Some(api_key) = provider.configured_api_key(app_type) {
+                println!("  {}: {}", texts::api_key_display_label(), api_key);
+            }
+            if let Some(base_url) = provider
+                .settings_config
+                .get("base_url")
+                .or_else(|| provider.settings_config.get("baseUrl"))
+                .and_then(|v| v.as_str())
+            {
+                println!("  {}: {}", texts::base_url_display_label(), base_url);
+            }
+            if let Some(model) = provider
+                .settings_config
+                .get("model")
+                .and_then(|v| v.as_str())
+            {
+                println!("  {}: {}", texts::model_label(), model);
             }
         }
     }

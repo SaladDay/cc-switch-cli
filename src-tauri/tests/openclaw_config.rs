@@ -224,6 +224,8 @@ mod app_config {
         OpenCode,
         Hermes,
         OpenClaw,
+        Pi,
+        Kimi,
     }
 
     impl AppType {
@@ -235,6 +237,8 @@ mod app_config {
                 Self::OpenCode => "opencode",
                 Self::Hermes => "hermes",
                 Self::OpenClaw => "openclaw",
+                Self::Pi => "pi",
+                Self::Kimi => "kimi",
             }
         }
     }

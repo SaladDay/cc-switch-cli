@@ -498,7 +498,7 @@ fn prompt_and_apply_provider_api_format(
     match app_type {
         AppType::Claude => prompt_and_apply_claude_api_format(app_type, provider),
         AppType::Codex => prompt_and_apply_codex_api_format(app_type, provider),
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => {
             Ok(())
         }
     }
@@ -1441,7 +1441,7 @@ fn build_add_settings_config(
             }
             Ok(settings)
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Kimi => {
             let current = current.ok_or_else(|| add_additive_requires_config_error(app_type))?;
             let api_key = non_empty(args.api_key.clone());
             let base_url = non_empty(args.base_url.clone());
@@ -1528,7 +1528,7 @@ fn apply_add_provider_api_format(
             };
             apply_codex_api_format(provider, format);
         }
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => {
         }
     }
     Ok(())
@@ -1851,6 +1851,10 @@ fn existing_provider_ids_for_duplicate(
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>(),
             AppType::OpenClaw => crate::openclaw_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            AppType::Kimi => crate::kimi_config::get_providers()?
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>(),

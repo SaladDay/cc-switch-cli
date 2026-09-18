@@ -29,6 +29,7 @@ pub(super) fn populate_form_from_provider(
         AppType::Hermes => populate_hermes_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
         AppType::Pi => populate_openclaw_form(form, provider),
+        AppType::Kimi => populate_kimi_form(form, provider),
     }
     form.is_full_url = form.supports_full_url_mode()
         && provider
@@ -435,6 +436,30 @@ fn populate_hermes_form(form: &mut ProviderAddFormState, provider: &Provider) {
         if delay.is_finite() && delay >= 0.0 {
             form.hermes_rate_limit_delay.set(delay.to_string());
         }
+    }
+}
+
+fn populate_kimi_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    let settings = &provider.settings_config;
+    if let Some(base_url) = settings
+        .get("base_url")
+        .or_else(|| settings.get("baseUrl"))
+        .or_else(|| settings.get("baseURL"))
+        .or_else(|| settings.get("endpoint"))
+        .and_then(|value| value.as_str())
+    {
+        form.hermes_base_url.set(base_url);
+    }
+    if let Some(api_key) = settings
+        .get("api_key")
+        .or_else(|| settings.get("apiKey"))
+        .or_else(|| settings.get("auth_token"))
+        .and_then(|value| value.as_str())
+    {
+        form.hermes_api_key.set(api_key);
+    }
+    if let Some(model) = settings.get("model").and_then(|value| value.as_str()) {
+        form.claude_model.set(model);
     }
 }
 

@@ -865,6 +865,19 @@ impl ProviderAddFormState {
                     }
                 }
             }
+            AppType::Kimi => {
+                let base_url = self
+                    .hermes_base_url
+                    .value
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string();
+                set_or_remove_trimmed(settings_obj, "base_url", &base_url);
+                set_or_remove_trimmed(settings_obj, "api_key", &self.hermes_api_key.value);
+                if !self.claude_model.value.trim().is_empty() {
+                    set_or_remove_trimmed(settings_obj, "model", &self.claude_model.value);
+                }
+            }
         }
 
         Value::Object(provider_obj)
@@ -1503,7 +1516,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {}
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

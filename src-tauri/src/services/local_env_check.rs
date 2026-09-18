@@ -29,10 +29,11 @@ pub enum LocalTool {
     Hermes,
     OpenClaw,
     Pi,
+    Kimi,
 }
 
 impl LocalTool {
-    pub const ALL: [LocalTool; 7] = [
+    pub const ALL: [LocalTool; 8] = [
         LocalTool::Claude,
         LocalTool::Codex,
         LocalTool::Gemini,
@@ -40,6 +41,7 @@ impl LocalTool {
         LocalTool::Hermes,
         LocalTool::OpenClaw,
         LocalTool::Pi,
+        LocalTool::Kimi,
     ];
 
     pub fn all() -> &'static [LocalTool] {
@@ -55,6 +57,7 @@ impl LocalTool {
             LocalTool::Hermes => "Hermes",
             LocalTool::OpenClaw => "OpenClaw",
             LocalTool::Pi => "Pi",
+            LocalTool::Kimi => "Kimi",
         }
     }
 
@@ -67,6 +70,7 @@ impl LocalTool {
             LocalTool::Hermes => "hermes",
             LocalTool::OpenClaw => "openclaw",
             LocalTool::Pi => "pi",
+            LocalTool::Kimi => "kimi",
         }
     }
 
@@ -79,6 +83,7 @@ impl LocalTool {
             LocalTool::Hermes => &["--version", "version"],
             LocalTool::OpenClaw => &["--version", "version"],
             LocalTool::Pi => &["--version"],
+            LocalTool::Kimi => &["--version"],
         }
     }
 
@@ -106,6 +111,7 @@ impl LocalTool {
             AppType::Hermes => LocalTool::Hermes,
             AppType::OpenClaw => LocalTool::OpenClaw,
             AppType::Pi => LocalTool::Pi,
+            AppType::Kimi => LocalTool::Kimi,
         }
     }
 }
