@@ -1431,6 +1431,7 @@ command = "echo"
                 gemini: false,
                 opencode: false,
                 hermes: false,
+                kimi: false,
             },
             description: None,
             homepage: None,

@@ -690,8 +690,22 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "auth", "status", "--json"]);
 
         match cli.command {
-            Some(Commands::Auth(super::commands::auth::AuthCommand::Status { json })) => {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::Status { json, provider })) => {
                 assert!(json);
+                assert_eq!(provider, "codex_oauth");
+            }
+            _ => panic!("expected auth status command"),
+        }
+    }
+
+    #[test]
+    fn parses_auth_status_kimi_provider_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "auth", "status", "--provider", "kimi_oauth", "--json"]);
+
+        match cli.command {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::Status { json, provider })) => {
+                assert!(json);
+                assert_eq!(provider, "kimi_oauth");
             }
             _ => panic!("expected auth status command"),
         }
@@ -702,8 +716,9 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "auth", "login", "--json"]);
 
         match cli.command {
-            Some(Commands::Auth(super::commands::auth::AuthCommand::Login { json })) => {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::Login { json, provider })) => {
                 assert!(json);
+                assert_eq!(provider, "codex_oauth");
             }
             _ => panic!("expected auth login command"),
         }
@@ -721,8 +736,9 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "auth", "default", "acc-123"]);
 
         match cli.command {
-            Some(Commands::Auth(super::commands::auth::AuthCommand::Default { account_id })) => {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::Default { account_id, provider })) => {
                 assert_eq!(account_id, "acc-123");
+                assert_eq!(provider, "codex_oauth");
             }
             _ => panic!("expected auth default command"),
         }
@@ -736,9 +752,11 @@ mod tests {
             Some(Commands::Auth(super::commands::auth::AuthCommand::Remove {
                 account_id,
                 yes,
+                provider,
             })) => {
                 assert_eq!(account_id, "acc-123");
                 assert!(yes);
+                assert_eq!(provider, "codex_oauth");
             }
             _ => panic!("expected auth remove command"),
         }
@@ -749,8 +767,9 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "auth", "logout", "--yes"]);
 
         match cli.command {
-            Some(Commands::Auth(super::commands::auth::AuthCommand::Logout { yes })) => {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::Logout { yes, provider })) => {
                 assert!(yes);
+                assert_eq!(provider, "codex_oauth");
             }
             _ => panic!("expected auth logout command"),
         }
@@ -1713,6 +1732,31 @@ mod tests {
                 assert!(yes);
             }
             _ => panic!("expected config openclaw memory delete command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_kimi_path_and_profile_subcommands() {
+        let cli = Cli::parse_from(["cc-switch", "config", "kimi", "path", "--json"]);
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::Kimi(
+                super::commands::config_kimi::KimiConfigCommand::Path { json },
+            ))) => {
+                assert!(json);
+            }
+            _ => panic!("expected config kimi path command"),
+        }
+
+        let cli_switch = Cli::parse_from(["cc-switch", "config", "kimi", "profile", "switch", "work"]);
+        match cli_switch.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::Kimi(
+                super::commands::config_kimi::KimiConfigCommand::Profile(
+                    super::commands::config_kimi::KimiProfileCommand::Switch { name },
+                ),
+            ))) => {
+                assert_eq!(name, "work");
+            }
+            _ => panic!("expected config kimi profile switch command"),
         }
     }
 

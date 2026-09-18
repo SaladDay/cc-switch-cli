@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::app_config::AppType;
 use crate::cli::commands::config_common;
+use crate::cli::commands::config_kimi;
 use crate::cli::commands::config_openclaw;
 use crate::cli::commands::config_s3;
 use crate::cli::commands::config_webdav;
@@ -58,6 +59,10 @@ pub enum ConfigCommand {
     #[command(name = "openclaw", subcommand)]
     OpenClaw(config_openclaw::OpenClawCommand),
 
+    /// Manage Moonshot Kimi Code directory configuration and profiles
+    #[command(name = "kimi", subcommand)]
+    Kimi(config_kimi::KimiConfigCommand),
+
     /// Manage WebDAV sync settings and operations
     #[command(name = "webdav", subcommand)]
     WebDav(config_webdav::WebDavCommand),
@@ -81,6 +86,7 @@ pub fn execute(cmd: ConfigCommand, app: Option<AppType>) -> Result<(), AppError>
         ConfigCommand::Reset => reset_config(),
         ConfigCommand::Common(cmd) => config_common::execute(cmd, app.unwrap_or(AppType::Claude)),
         ConfigCommand::OpenClaw(cmd) => config_openclaw::execute(cmd),
+        ConfigCommand::Kimi(cmd) => config_kimi::execute(cmd),
         ConfigCommand::WebDav(cmd) => config_webdav::execute(cmd),
         ConfigCommand::S3(cmd) => config_s3::execute(cmd),
     }

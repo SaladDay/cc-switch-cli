@@ -5,6 +5,7 @@ mod codex;
 pub(crate) mod codex_chat_common;
 pub mod codex_chat_history;
 pub mod codex_oauth_auth;
+pub mod kimi_oauth_auth;
 pub(crate) mod codex_responses_sse;
 #[allow(dead_code)]
 pub mod copilot_auth;
@@ -146,7 +147,7 @@ impl ProviderType {
                 }
                 ProviderType::Gemini
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => {
                 ProviderType::Codex
             }
         }
@@ -200,6 +201,7 @@ pub fn get_adapter(app_type: &AppType) -> Option<Box<dyn ProviderAdapter>> {
         AppType::OpenCode => Box::new(CodexAdapter::new()),
         AppType::Hermes => Box::new(CodexAdapter::new()),
         AppType::OpenClaw => Box::new(CodexAdapter::new()),
+        AppType::Kimi => Box::new(CodexAdapter::new()),
         AppType::Pi => return None,
     })
 }

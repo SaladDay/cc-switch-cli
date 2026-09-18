@@ -6,43 +6,59 @@ use crate::cli::ui::{create_table, info, success, to_json};
 use crate::error::AppError;
 use crate::services::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse};
 
-const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
-
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuthCommand {
     /// Show ChatGPT Codex OAuth authentication status
     Status {
+        /// Auth provider (codex_oauth, kimi_oauth)
+        #[arg(long, default_value = "codex_oauth")]
+        provider: String,
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
     },
-    /// List signed-in ChatGPT accounts
+    /// List signed-in accounts
     List {
+        /// Auth provider (codex_oauth, kimi_oauth)
+        #[arg(long, default_value = "codex_oauth")]
+        provider: String,
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
     },
-    /// Sign in to ChatGPT with the Codex OAuth device flow
+    /// Sign in with device flow
     Login {
+        /// Auth provider (codex_oauth, kimi_oauth)
+        #[arg(long, default_value = "codex_oauth")]
+        provider: String,
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
     },
-    /// Set the default ChatGPT account
+    /// Set the default account
     Default {
         /// Account id to make default
         account_id: String,
+        /// Auth provider (codex_oauth, kimi_oauth)
+        #[arg(long, default_value = "codex_oauth")]
+        provider: String,
     },
-    /// Remove a ChatGPT account
+    /// Remove an account
     Remove {
         /// Account id to remove
         account_id: String,
+        /// Auth provider (codex_oauth, kimi_oauth)
+        #[arg(long, default_value = "codex_oauth")]
+        provider: String,
         /// Confirm removal without prompting
         #[arg(long)]
         yes: bool,
     },
-    /// Remove all ChatGPT Codex OAuth authentication data
+    /// Remove all authentication data for provider
     Logout {
+        /// Auth provider (codex_oauth, kimi_oauth)
+        #[arg(long, default_value = "codex_oauth")]
+        provider: String,
         /// Confirm logout without prompting
         #[arg(long)]
         yes: bool,
@@ -60,12 +76,19 @@ pub fn execute(cmd: AuthCommand) -> Result<(), AppError> {
     crate::services::global_proxy::initialize_http_client_from_disk_best_effort();
     let runtime = create_runtime()?;
     match cmd {
-        AuthCommand::Status { json } => status(&runtime, json),
-        AuthCommand::List { json } => list_accounts(&runtime, json),
-        AuthCommand::Login { json } => login(&runtime, json),
-        AuthCommand::Default { account_id } => set_default(&runtime, &account_id),
-        AuthCommand::Remove { account_id, yes } => remove_account(&runtime, &account_id, yes),
-        AuthCommand::Logout { yes } => logout(&runtime, yes),
+        AuthCommand::Status { provider, json } => status(&runtime, &provider, json),
+        AuthCommand::List { provider, json } => list_accounts(&runtime, &provider, json),
+        AuthCommand::Login { provider, json } => login(&runtime, &provider, json),
+        AuthCommand::Default {
+            account_id,
+            provider,
+        } => set_default(&runtime, &provider, &account_id),
+        AuthCommand::Remove {
+            account_id,
+            provider,
+            yes,
+        } => remove_account(&runtime, &provider, &account_id, yes),
+        AuthCommand::Logout { provider, yes } => logout(&runtime, &provider, yes),
     }
 }
 
@@ -76,9 +99,9 @@ fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
         .map_err(|error| AppError::Message(format!("failed to create async runtime: {error}")))
 }
 
-fn status(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError> {
+fn status(runtime: &tokio::runtime::Runtime, provider: &str, json: bool) -> Result<(), AppError> {
     let status = runtime
-        .block_on(AuthService::get_status(AUTH_PROVIDER_CODEX_OAUTH))
+        .block_on(AuthService::get_status(provider))
         .map_err(AppError::Message)?;
 
     if json {
@@ -89,7 +112,12 @@ fn status(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError>
         return Ok(());
     }
 
-    println!("Provider:      ChatGPT (Codex OAuth)");
+    let display_name = match provider {
+        "kimi_oauth" | "kimi" | "kimi-code" => "Moonshot AI Kimi (Device OAuth)",
+        _ => "ChatGPT (Codex OAuth)",
+    };
+
+    println!("Provider:      {display_name}");
     println!(
         "Authenticated: {}",
         if status.authenticated { "yes" } else { "no" }
@@ -115,9 +143,9 @@ fn status(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError>
     Ok(())
 }
 
-fn list_accounts(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError> {
+fn list_accounts(runtime: &tokio::runtime::Runtime, provider: &str, json: bool) -> Result<(), AppError> {
     let accounts = runtime
-        .block_on(AuthService::list_accounts(AUTH_PROVIDER_CODEX_OAUTH))
+        .block_on(AuthService::list_accounts(provider))
         .map_err(AppError::Message)?;
 
     if json {
@@ -129,7 +157,7 @@ fn list_accounts(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), Ap
     }
 
     if accounts.is_empty() {
-        println!("{}", info("No ChatGPT accounts are signed in."));
+        println!("{}", info(&format!("No accounts are signed in for {provider}.")));
         return Ok(());
     }
 
@@ -137,9 +165,9 @@ fn list_accounts(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), Ap
     Ok(())
 }
 
-fn login(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError> {
+fn login(runtime: &tokio::runtime::Runtime, provider: &str, json: bool) -> Result<(), AppError> {
     let device = runtime
-        .block_on(AuthService::start_login(AUTH_PROVIDER_CODEX_OAUTH))
+        .block_on(AuthService::start_login(provider))
         .map_err(AppError::Message)?;
 
     if json {
@@ -153,7 +181,7 @@ fn login(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError> 
         println!("{}", info("Waiting for authorization..."));
     }
 
-    let account = poll_until_authorized(runtime, &device)?;
+    let account = poll_until_authorized(runtime, provider, &device)?;
 
     if json {
         let completed = LoginCompleted { device, account };
@@ -173,6 +201,7 @@ fn login(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError> 
 
 fn poll_until_authorized(
     runtime: &tokio::runtime::Runtime,
+    provider: &str,
     device: &ManagedAuthDeviceCodeResponse,
 ) -> Result<ManagedAuthAccount, AppError> {
     let expires_at = Instant::now() + Duration::from_secs(device.expires_in);
@@ -181,7 +210,7 @@ fn poll_until_authorized(
     loop {
         match runtime
             .block_on(AuthService::poll_for_account(
-                AUTH_PROVIDER_CODEX_OAUTH,
+                provider,
                 &device.device_code,
             ))
             .map_err(AppError::Message)?
@@ -205,51 +234,52 @@ fn poll_interval_seconds(server_interval: u64) -> u64 {
     server_interval.max(1)
 }
 
-fn set_default(runtime: &tokio::runtime::Runtime, account_id: &str) -> Result<(), AppError> {
+fn set_default(runtime: &tokio::runtime::Runtime, provider: &str, account_id: &str) -> Result<(), AppError> {
     let account_id = normalize_account_id(account_id)?;
     runtime
         .block_on(AuthService::set_default_account(
-            AUTH_PROVIDER_CODEX_OAUTH,
+            provider,
             account_id,
         ))
         .map_err(AppError::Message)?;
-    println!("{}", success("Default ChatGPT account updated."));
+    println!("{}", success(&format!("Default account updated for {provider}.")));
     Ok(())
 }
 
 fn remove_account(
     runtime: &tokio::runtime::Runtime,
+    provider: &str,
     account_id: &str,
     yes: bool,
 ) -> Result<(), AppError> {
     let account_id = normalize_account_id(account_id)?;
-    if !yes && !confirm(&format!("Remove ChatGPT account '{account_id}'?"))? {
+    if !yes && !confirm(&format!("Remove account '{account_id}' from {provider}?"))? {
         println!("{}", info("Cancelled."));
         return Ok(());
     }
 
     runtime
         .block_on(AuthService::remove_account(
-            AUTH_PROVIDER_CODEX_OAUTH,
+            provider,
             account_id,
         ))
         .map_err(AppError::Message)?;
-    println!("{}", success("ChatGPT account removed."));
+    println!("{}", success(&format!("Account removed from {provider}.")));
     Ok(())
 }
 
-fn logout(runtime: &tokio::runtime::Runtime, yes: bool) -> Result<(), AppError> {
-    if !yes && !confirm("Remove all ChatGPT Codex OAuth authentication data?")? {
+fn logout(runtime: &tokio::runtime::Runtime, provider: &str, yes: bool) -> Result<(), AppError> {
+    if !yes && !confirm(&format!("Remove all authentication data for {provider}?"))? {
         println!("{}", info("Cancelled."));
         return Ok(());
     }
 
     runtime
-        .block_on(AuthService::logout(AUTH_PROVIDER_CODEX_OAUTH))
+        .block_on(AuthService::logout(provider))
         .map_err(AppError::Message)?;
     println!(
         "{}",
-        success("ChatGPT Codex OAuth authentication data removed.")
+        success(&format!("Authentication data removed for {provider}."))
     );
     Ok(())
 }

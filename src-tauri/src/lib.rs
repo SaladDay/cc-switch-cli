@@ -23,6 +23,7 @@ pub mod hermes_config;
 mod import_export;
 #[allow(dead_code)]
 mod init_status;
+pub mod kimi_config;
 mod mcp;
 mod model_capabilities;
 mod openclaw_config;

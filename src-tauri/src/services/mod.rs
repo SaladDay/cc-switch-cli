@@ -6,6 +6,7 @@ pub mod codex_oauth_models;
 pub mod coding_plan;
 pub mod config;
 pub mod copilot_auth;
+pub mod kimi_oauth;
 #[cfg(feature = "cli")]
 pub mod env_checker;
 #[allow(dead_code)]
@@ -45,6 +46,7 @@ pub mod webdav_sync;
 
 pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus};
 pub use codex_oauth::CodexOAuthService;
+pub use kimi_oauth::KimiOAuthService;
 pub use config::ConfigService;
 pub use copilot_auth::CopilotAuthService;
 pub use global_proxy::GlobalOutboundProxyConfig;
