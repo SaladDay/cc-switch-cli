@@ -700,6 +700,15 @@ where
     })
 }
 
+/// Number of parser workers to use for a batch.
+fn parse_worker_count(target_count: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1))
+        .unwrap_or(2)
+        .min(4)
+        .min(target_count)
+}
+
 /// Parse a fixed batch on a bounded worker pool and deliver results in actual
 /// completion order. The sync channel retains at most two results per worker;
 /// one slow target therefore cannot hold back unrelated completed metadata.
@@ -720,11 +729,7 @@ where
     if is_cancelled() {
         return Err(StreamScanStop::Cancelled);
     }
-    let workers = std::thread::available_parallelism()
-        .map(|n| (n.get() / 2).max(1))
-        .unwrap_or(2)
-        .min(4)
-        .min(targets.len());
+    let workers = parse_worker_count(targets.len());
     if workers <= 1 {
         for target in targets {
             if is_cancelled() {
@@ -1032,9 +1037,6 @@ mod tests {
 
     #[test]
     fn parser_results_are_delivered_in_completion_order() {
-        if std::thread::available_parallelism().map_or(1, |value| value.get()) < 2 {
-            return;
-        }
         let targets: Vec<_> = (0..8)
             .map(|index| FileScanTarget {
                 path: PathBuf::from(if index == 0 {
@@ -1047,6 +1049,9 @@ mod tests {
                 size: 1,
             })
             .collect();
+        if parse_worker_count(targets.len()) <= 1 {
+            return;
+        }
         let mut completed = Vec::new();
         parse_targets_completed_cancellable(
             &targets,
