@@ -700,6 +700,7 @@ where
     })
 }
 
+/// Number of parser workers to use for a batch.
 fn parse_worker_count(target_count: usize) -> usize {
     std::thread::available_parallelism()
         .map(|n| (n.get() / 2).max(1))
@@ -1036,9 +1037,6 @@ mod tests {
 
     #[test]
     fn parser_results_are_delivered_in_completion_order() {
-        if parse_worker_count(8) <= 1 {
-            return;
-        }
         let targets: Vec<_> = (0..8)
             .map(|index| FileScanTarget {
                 path: PathBuf::from(if index == 0 {
@@ -1051,6 +1049,9 @@ mod tests {
                 size: 1,
             })
             .collect();
+        if parse_worker_count(targets.len()) <= 1 {
+            return;
+        }
         let mut completed = Vec::new();
         parse_targets_completed_cancellable(
             &targets,
