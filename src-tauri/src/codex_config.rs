@@ -1196,9 +1196,9 @@ pub fn extract_codex_experimental_bearer_token(config_text: &str) -> Option<Stri
     let token = match provider_id.as_deref() {
         Some(id) if is_custom_codex_model_provider_id(id) => doc
             .get("model_providers")
-            .and_then(|item| item.as_table())
+            .and_then(|item| item.as_table_like())
             .and_then(|table| table.get(id))
-            .and_then(|item| item.as_table())
+            .and_then(|item| item.as_table_like())
             .and_then(|table| table.get("experimental_bearer_token"))
             .and_then(|item| item.as_str())
             .or_else(top_level_token),
@@ -1239,13 +1239,21 @@ fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result
 
     if let Some(model_providers) = doc
         .get_mut("model_providers")
-        .and_then(|item| item.as_table_mut())
+        .and_then(|item| item.as_table_like_mut())
     {
         if let Some(provider_table) = model_providers
             .get_mut(provider_id.as_str())
-            .and_then(|item| item.as_table_mut())
+            .and_then(|item| item.as_table_like_mut())
         {
-            provider_table["experimental_bearer_token"] = toml_edit::value(token);
+            // Provider-specific auth sources take precedence over a bearer
+            // token. Do not create conflicting credentials in Codex config.
+            if provider_table.get("env_key").is_some()
+                || provider_table.get("auth").is_some()
+                || provider_table.get("aws").is_some()
+            {
+                return Ok(doc.to_string());
+            }
+            provider_table.insert("experimental_bearer_token", toml_edit::value(token));
             return Ok(doc.to_string());
         }
     }
@@ -1269,9 +1277,9 @@ pub fn remove_codex_experimental_bearer_token_if(
     if let Some(provider_id) = active_codex_model_provider_id(&doc) {
         if let Some(provider_table) = doc
             .get_mut("model_providers")
-            .and_then(|item| item.as_table_mut())
+            .and_then(|item| item.as_table_like_mut())
             .and_then(|table| table.get_mut(provider_id.as_str()))
-            .and_then(|item| item.as_table_mut())
+            .and_then(|item| item.as_table_like_mut())
         {
             let should_remove = provider_table
                 .get("experimental_bearer_token")
@@ -1545,32 +1553,24 @@ pub fn write_codex_live_for_provider(
         };
     let config_text = unified_official_config.as_deref().or(config_text);
 
-    // A third-party provider must authenticate with its API key, never with a
-    // stray ChatGPT OAuth login that leaked into auth.json (e.g. from running
-    // `codex login` while it was active). Strip OAuth material for non-official
-    // providers, recovering the key from a config bearer token when auth.json
-    // only carried OAuth (issue #328). Official providers own auth.json.
-    let sanitized_auth = if category == Some("official") {
-        None
-    } else {
-        Some(sanitize_codex_third_party_auth(
-            Some(auth),
-            config_text,
-            None,
-            None,
-        ))
-    };
-    let auth = sanitized_auth.as_ref().unwrap_or(auth);
+    if category == Some("official") {
+        return if codex_auth_has_login_material(auth) {
+            write_codex_live_atomic(auth, config_text)
+        } else {
+            write_codex_live_config_atomic(config_text)
+        };
+    }
 
-    let should_write_auth = (category == Some("official") && codex_auth_has_login_material(auth))
-        || (category != Some("official")
-            && !crate::settings::preserve_codex_official_auth_on_switch());
-
-    if should_write_auth {
-        write_codex_live_atomic(auth, config_text)
-    } else {
-        let live_config = prepare_codex_provider_live_config(auth, config_text.unwrap_or(""))?;
+    let preserve_official_login = crate::settings::preserve_codex_official_auth_on_switch();
+    let live_config = prepare_codex_third_party_live_config(
+        auth,
+        config_text.unwrap_or(""),
+        preserve_official_login,
+    )?;
+    if preserve_official_login {
         write_codex_live_config_atomic(Some(&live_config))
+    } else {
+        write_codex_live_atomic_optional_auth(None, Some(&live_config))
     }
 }
 
@@ -1591,6 +1591,98 @@ pub fn prepare_codex_provider_live_config(
         Some(token) => set_codex_experimental_bearer_token(config_text, &token)?,
         None => config_text.to_string(),
     })
+}
+
+/// Prepare a third-party config for Codex 0.149+, where custom providers no
+/// longer inherit their API key from `auth.json`.
+pub fn prepare_codex_third_party_live_config(
+    auth: &Value,
+    config_text: &str,
+    preserve_official_login: bool,
+) -> Result<String, AppError> {
+    if extract_codex_api_key(Some(auth), Some(config_text)).is_none() {
+        let doc = config_text
+            .parse::<DocumentMut>()
+            .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+        let uses_official_auth_fallback = match active_codex_model_provider_id(&doc).as_deref() {
+            Some(id) if is_custom_codex_model_provider_id(id) => doc
+                .get("model_providers")
+                .and_then(|item| item.as_table_like())
+                .and_then(|providers| providers.get(id))
+                .and_then(|item| item.as_table_like())
+                .is_some_and(|table| {
+                    table
+                        .get("requires_openai_auth")
+                        .and_then(|item| item.as_bool())
+                        .unwrap_or(false)
+                        && table.get("env_key").is_none()
+                        && table.get("auth").is_none()
+                        && table.get("aws").is_none()
+                }),
+            Some(id) if id.eq_ignore_ascii_case("openai") => doc
+                .get("openai_base_url")
+                .and_then(|item| item.as_str())
+                .is_some_and(|url| !url.trim().is_empty()),
+            None => doc
+                .get("openai_base_url")
+                .and_then(|item| item.as_str())
+                .is_some_and(|url| !url.trim().is_empty()),
+            _ => false,
+        };
+        if uses_official_auth_fallback {
+            return Err(AppError::localized(
+                "provider.codex.config.official_auth_fallback",
+                "该 Codex 配置没有 API 密钥，却会回退使用 auth.json 中的登录凭据访问第三方地址",
+                "This Codex config has no API key and would fall back to the auth.json login for a third-party endpoint",
+            ));
+        }
+    }
+
+    let mut live_config = prepare_codex_provider_live_config(auth, config_text)?;
+    if extract_codex_experimental_bearer_token(&live_config).is_none() {
+        return Ok(live_config);
+    }
+    let mut doc = live_config
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let Some(provider_id) = active_codex_model_provider_id(&doc) else {
+        return Err(AppError::localized(
+            "provider.codex.config.no_custom_provider",
+            "Codex 第三方配置必须包含自定义 model_providers 条目以承载 API 密钥",
+            "A Codex third-party config must define a custom model_providers entry to carry the API key",
+        ));
+    };
+    if !is_custom_codex_model_provider_id(&provider_id) {
+        return Err(AppError::localized(
+            "provider.codex.config.no_custom_provider",
+            "Codex 第三方供应商必须使用自定义 model_provider 条目以承载 API 密钥",
+            "A Codex third-party provider must use a custom model_provider entry to carry the API key",
+        ));
+    }
+    let Some(provider_table) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|providers| providers.get_mut(provider_id.as_str()))
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return Err(AppError::localized(
+            "provider.codex.config.no_custom_provider",
+            "Codex 第三方配置缺少活动 model_provider 的配置表，无法承载 API 密钥",
+            "The active Codex model_provider table is missing, so it cannot carry the API key",
+        ));
+    };
+    let has_provider_token = provider_table
+        .get("experimental_bearer_token")
+        .and_then(|item| item.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_provider_token {
+        provider_table.insert(
+            "requires_openai_auth",
+            toml_edit::value(preserve_official_login),
+        );
+    }
+    live_config = doc.to_string();
+    Ok(live_config)
 }
 
 /// During DB backfill, lift a live `experimental_bearer_token` back into

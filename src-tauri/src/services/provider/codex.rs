@@ -604,15 +604,6 @@ impl ProviderService {
             clean_config_text
         };
 
-        // `force_sync` only bypasses the live-sync policy above. Authentication
-        // placement must remain identical to the upstream provider write: an
-        // official snapshot writes auth.json only when it contains login
-        // material, while a third-party provider writes unless preservation is
-        // enabled.
-        let should_write_auth = (is_official
-            && crate::codex_config::codex_auth_has_login_material(auth))
-            || (!is_official && !crate::settings::preserve_codex_official_auth_on_switch());
-
         // A third-party provider must authenticate with its API key, never with a
         // stray ChatGPT OAuth login that leaked into auth.json (e.g. from running
         // `codex login` while it was active). Strip OAuth material for non-official
@@ -629,31 +620,26 @@ impl ProviderService {
             )
         };
 
-        // config.toml is a clean OVERWRITE with the provider's effective config.
-        // When auth.json is preserved (third-party + preserve flag) the API key
-        // is injected into config.toml as an experimental_bearer_token instead.
-        let config_text = if should_write_auth {
-            live_config_text
-        } else {
-            crate::codex_config::prepare_codex_provider_live_config(&write_auth, &live_config_text)?
-        };
-
-        // auth.json follows Preserve/Write/Delete (no merge): a switch always
-        // prefers the incoming provider's auth, but never clobbers a preserved
-        // ChatGPT OAuth cache when auth is preserved. An empty/null incoming auth
-        // removes the stale live auth.json rather than writing an empty file.
-        let auth = if should_write_auth {
-            if write_auth.is_null()
-                || write_auth
-                    .as_object()
-                    .is_some_and(serde_json::Map::is_empty)
-            {
-                PreparedCodexAuthWrite::Delete
+        let preserve_official_login = crate::settings::preserve_codex_official_auth_on_switch();
+        let (config_text, auth) = if is_official {
+            let auth_write = if crate::codex_config::codex_auth_has_login_material(auth) {
+                PreparedCodexAuthWrite::Write(auth.clone())
             } else {
-                PreparedCodexAuthWrite::Write(write_auth)
-            }
+                PreparedCodexAuthWrite::Preserve
+            };
+            (live_config_text, auth_write)
         } else {
-            PreparedCodexAuthWrite::Preserve
+            let config_text = crate::codex_config::prepare_codex_third_party_live_config(
+                &write_auth,
+                &live_config_text,
+                preserve_official_login,
+            )?;
+            let auth_write = if preserve_official_login {
+                PreparedCodexAuthWrite::Preserve
+            } else {
+                PreparedCodexAuthWrite::Delete
+            };
+            (config_text, auth_write)
         };
 
         Ok(PreparedLiveWrite::Codex {

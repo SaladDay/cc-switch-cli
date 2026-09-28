@@ -30,18 +30,17 @@ fn switch_codex_provider_writes_stored_config_directly() {
         let manager = config
             .get_manager_mut(&AppType::Codex)
             .expect("codex manager");
-        manager.providers.insert(
+        let mut official = Provider::with_id(
             "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "OpenAI".to_string(),
-                json!({
-                    "auth": { "OPENAI_API_KEY": "sk-test" },
-                    "config": "model_provider = \"openai\"\nmodel = \"gpt-4o\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = true\n"
-                }),
-                None,
-            ),
+            "OpenAI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model_provider = \"openai\"\nmodel = \"gpt-4o\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = true\n"
+            }),
+            None,
         );
+        official.category = Some("official".to_string());
+        manager.providers.insert("p1".to_string(), official);
     }
 
     let state = state_from_config(config);
@@ -209,7 +208,7 @@ fn switch_codex_overwrites_config_toml_respecting_auth_mode() {
 
 #[test]
 #[serial]
-fn force_sync_codex_third_party_refreshes_auth_when_preserve_is_disabled() {
+fn force_sync_codex_third_party_uses_provider_bearer_when_preserve_is_disabled() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
@@ -227,19 +226,16 @@ fn force_sync_codex_third_party_refreshes_auth_when_preserve_is_disabled() {
     ProviderService::write_codex_live_force(&provider, None, false)
         .expect("force sync should succeed");
 
-    let auth: Value =
-        crate::config::read_json_file(&get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth.get("OPENAI_API_KEY").and_then(Value::as_str),
-        Some("sk-current-provider"),
-        "force sync must replace a stale third-party API key"
+    assert!(
+        !get_codex_auth_path().exists(),
+        "third-party sync must clear auth.json when official login preservation is disabled"
     );
 
     let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert_eq!(
         crate::codex_config::extract_codex_experimental_bearer_token(&config_text),
-        None,
-        "preserve disabled must keep the provider API key in auth.json"
+        Some("sk-current-provider".to_string()),
+        "the provider API key must be written to config.toml for Codex 0.149+"
     );
 }
 
@@ -276,6 +272,10 @@ fn force_sync_codex_third_party_preserves_oauth_when_preserve_is_enabled() {
     );
 
     let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
+    assert!(
+        config_text.contains("requires_openai_auth = true"),
+        "preserved official login should remain available to Codex"
+    );
     assert_eq!(
         crate::codex_config::extract_codex_experimental_bearer_token(&config_text).as_deref(),
         Some("sk-current-provider"),
@@ -371,22 +371,24 @@ fn switch_codex_third_party_discards_stray_chatgpt_oauth_after_login() {
     ProviderService::switch(&state, AppType::Codex, "thirdparty")
         .expect("switch back to thirdparty");
 
-    let auth_final: Value =
-        crate::config::read_json_file(&get_codex_auth_path()).expect("auth.json final");
     let cfg_final = std::fs::read_to_string(get_codex_config_path()).expect("config.toml final");
 
     assert!(
-        auth_final.pointer("/tokens/access_token").is_none(),
-        "live auth.json must not retain ChatGPT OAuth tokens after switching to third-party: {auth_final}"
-    );
-    assert_eq!(
-        auth_final.get("OPENAI_API_KEY").and_then(Value::as_str),
-        Some("sk-thirdparty"),
-        "live auth.json must carry the third-party API key: {auth_final}"
+        !get_codex_auth_path().exists(),
+        "switching to a third-party provider must clear auth.json when preservation is disabled"
     );
     assert!(
         cfg_final.contains("base_url = \"http://localhost:8317/v1\""),
         "config.toml should point at the third-party endpoint: {cfg_final}"
+    );
+    assert_eq!(
+        crate::codex_config::extract_codex_experimental_bearer_token(&cfg_final).as_deref(),
+        Some("sk-thirdparty"),
+        "the active provider table must carry its API key"
+    );
+    assert!(
+        cfg_final.contains("requires_openai_auth = false"),
+        "without preserved official login the custom provider should not require Codex login"
     );
 }
 
