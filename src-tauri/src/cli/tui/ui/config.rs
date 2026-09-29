@@ -3731,7 +3731,8 @@ fn managed_account_key_items(app: &App) -> Vec<(&'static str, &'static str)> {
         .as_ref()
         .is_some_and(|status| !status.accounts.is_empty())
     {
-        items.push(("Space", texts::tui_key_switch()));
+        items.push(("Space", texts::tui_key_set_default()));
+        items.push(("u", crate::t!("Use in Codex", "在 Codex 中使用")));
         items.push(("Enter", texts::tui_key_open()));
     }
 
@@ -3936,6 +3937,25 @@ fn managed_account_detail_lines(app: &App, theme: &super::theme::Theme) -> Vec<L
         ));
         return lines;
     };
+
+    lines.push(managed_account_detail_field(
+        crate::t!("Codex active", "Codex 当前账号"),
+        status
+            .active_codex_account_id
+            .as_ref()
+            .map(|id| {
+                status
+                    .accounts
+                    .iter()
+                    .find(|a| &a.id == id)
+                    .map(|a| a.login.clone())
+                    .unwrap_or_else(|| id.clone())
+            })
+            .unwrap_or_else(|| texts::none().to_string()),
+        Style::default().fg(theme.comment),
+        label_width,
+        theme,
+    ));
 
     let default_account = status
         .default_account_id

@@ -153,6 +153,10 @@ struct CodexAccountData {
     pub email: Option<String>,
     pub refresh_token: String,
     pub authenticated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_auth: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_native_sync: Option<crate::services::codex_account::NativeAuthCopies>,
 }
 
 impl From<&CodexAccountData> for ManagedAuthAccount {
@@ -186,6 +190,8 @@ pub struct CodexOAuthManager {
     refresh_locks: std::sync::Arc<RwLock<HashMap<String, std::sync::Arc<Mutex<()>>>>>,
     pending_device_codes: std::sync::Arc<RwLock<HashMap<String, PendingDeviceCode>>>,
     storage_path: PathBuf,
+    #[cfg(test)]
+    token_endpoint: Option<String>,
 }
 
 impl CodexOAuthManager {
@@ -198,6 +204,8 @@ impl CodexOAuthManager {
             refresh_locks: std::sync::Arc::new(RwLock::new(HashMap::new())),
             pending_device_codes: std::sync::Arc::new(RwLock::new(HashMap::new())),
             storage_path,
+            #[cfg(test)]
+            token_endpoint: None,
         };
 
         if let Err(e) = manager.load_from_disk_sync() {
@@ -205,6 +213,26 @@ impl CodexOAuthManager {
         }
 
         manager
+    }
+
+    pub(crate) async fn lock_store(&self) -> Result<fs::File, CodexOAuthError> {
+        let path = self.storage_path.with_extension("lock");
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)?;
+            file.lock()?;
+            Ok::<_, std::io::Error>(file)
+        })
+        .await
+        .map_err(|_| CodexOAuthError::IoError("Account lock worker failed".into()))?
+        .map_err(Into::into)
     }
 
     pub async fn start_device_flow(
@@ -258,6 +286,15 @@ impl CodexOAuthManager {
     }
 
     pub async fn poll_for_token(
+        &self,
+        device_code: &str,
+    ) -> Result<Option<ManagedAuthAccount>, CodexOAuthError> {
+        let _lock = self.lock_store().await?;
+        self.reload_from_disk().await?;
+        self.poll_for_token_locked(device_code).await
+    }
+
+    pub(crate) async fn poll_for_token_locked(
         &self,
         device_code: &str,
     ) -> Result<Option<ManagedAuthAccount>, CodexOAuthError> {
@@ -339,6 +376,8 @@ impl CodexOAuthManager {
             .add_account_internal(account_id, refresh_token, email)
             .await?;
 
+        self.remember_token_response(&account.id, &tokens, None)
+            .await?;
         Ok(Some(account))
     }
 
@@ -375,12 +414,20 @@ impl CodexOAuthManager {
             .map_err(|e| CodexOAuthError::ParseError(e.to_string()))
     }
 
+    fn refresh_endpoint(&self) -> &str {
+        #[cfg(test)]
+        if let Some(endpoint) = self.token_endpoint.as_deref() {
+            return endpoint;
+        }
+        OAUTH_TOKEN_URL
+    }
+
     async fn refresh_with_token(
         &self,
         refresh_token: &str,
     ) -> Result<OAuthTokenResponse, CodexOAuthError> {
         let response = crate::proxy::http_client::get()
-            .post(OAUTH_TOKEN_URL)
+            .post(self.refresh_endpoint())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .header("User-Agent", CODEX_USER_AGENT)
             .form(&[
@@ -410,10 +457,213 @@ impl CodexOAuthManager {
             .map_err(|e| CodexOAuthError::ParseError(e.to_string()))
     }
 
+    /// Retain the full credential bundle needed by a standalone Codex process.
+    async fn remember_token_response(
+        &self,
+        account_id: &str,
+        tokens: &OAuthTokenResponse,
+        copies: Option<crate::services::codex_account::NativeAuthCopies>,
+    ) -> Result<(), CodexOAuthError> {
+        let mut accounts = self.accounts.write().await;
+        let account = accounts
+            .get_mut(account_id)
+            .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
+        if let Some(refresh) = &tokens.refresh_token {
+            account.refresh_token = refresh.clone();
+        }
+        let id_token = tokens.id_token.clone().or_else(|| {
+            account
+                .codex_auth
+                .as_ref()
+                .and_then(|a| a.pointer("/tokens/id_token"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+        account.pending_native_sync = copies;
+        account.codex_auth = Some(serde_json::json!({
+            "auth_mode": "chatgpt", "OPENAI_API_KEY": null,
+            "tokens": {"account_id": account_id, "access_token": tokens.access_token,
+                "refresh_token": account.refresh_token, "id_token": id_token},
+            "last_refresh": chrono::Utc::now().to_rfc3339(),
+        }));
+        drop(accounts);
+        self.save_to_disk().await
+    }
+
+    /// Import credentials refreshed by Codex without adding unrelated live accounts.
+    pub(crate) async fn capture_codex_auth(
+        &self,
+        auth: &serde_json::Value,
+    ) -> Result<(), CodexOAuthError> {
+        if auth
+            .get("auth_mode")
+            .and_then(|v| v.as_str())
+            .is_some_and(|mode| mode != "chatgpt")
+        {
+            return Ok(());
+        }
+        let Some(id) = auth.pointer("/tokens/account_id").and_then(|v| v.as_str()) else {
+            return Ok(());
+        };
+        let Some(refresh) = auth
+            .pointer("/tokens/refresh_token")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+        else {
+            return Ok(());
+        };
+        self.reconcile_native_copies(id).await?;
+        let mut accounts = self.accounts.write().await;
+        let Some(account) = accounts.get_mut(id) else {
+            return Ok(());
+        };
+        if let Some(saved) = account.codex_auth.as_ref() {
+            if saved == auth {
+                return Ok(());
+            }
+            let timestamp = |v: &serde_json::Value| {
+                v.get("last_refresh")
+                    .and_then(|x| x.as_str())
+                    .and_then(|x| chrono::DateTime::parse_from_rfc3339(x).ok())
+            };
+            if timestamp(saved).is_some() && timestamp(auth) < timestamp(saved) {
+                return Ok(());
+            }
+        }
+        let copies =
+            crate::services::codex_account::NativeAuthCopies::read(id, &account.refresh_token)
+                .map_err(CodexOAuthError::IoError)?;
+        account.pending_native_sync = Some(copies);
+        account.refresh_token = refresh.to_string();
+        account.codex_auth = Some(auth.clone());
+        drop(accounts);
+        self.access_tokens.write().await.remove(id);
+        self.save_to_disk().await?;
+        self.reconcile_native_copies(id).await
+    }
+
+    /// The new token and its pending destinations are committed together. Retrying
+    /// is safe after partial publication: destination hashes protect explicit edits.
+    async fn reconcile_native_copies(&self, account_id: &str) -> Result<(), CodexOAuthError> {
+        let pending = self
+            .accounts
+            .read()
+            .await
+            .get(account_id)
+            .and_then(|account| {
+                account
+                    .pending_native_sync
+                    .clone()
+                    .zip(account.codex_auth.clone())
+            });
+        let Some((copies, auth)) = pending else {
+            return Ok(());
+        };
+        copies.publish(&auth).map_err(CodexOAuthError::IoError)?;
+        if let Some(account) = self.accounts.write().await.get_mut(account_id) {
+            account.pending_native_sync = None;
+        }
+        self.save_to_disk().await
+    }
+
+    pub(crate) async fn contains_account(&self, account_id: &str) -> bool {
+        self.accounts.read().await.contains_key(account_id)
+    }
+
+    pub(crate) async fn export_codex_auth(
+        &self,
+        account_id: &str,
+    ) -> Result<serde_json::Value, CodexOAuthError> {
+        self.reconcile_native_copies(account_id).await?;
+        let saved = self
+            .accounts
+            .read()
+            .await
+            .get(account_id)
+            .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?
+            .codex_auth
+            .clone();
+        let usable = saved
+            .as_ref()
+            .and_then(stored_access_expiration)
+            .is_some_and(|exp| {
+                exp > chrono::Utc::now().timestamp_millis() + TOKEN_REFRESH_BUFFER_MS
+            });
+        if !usable {
+            self.access_tokens.write().await.remove(account_id);
+            self.get_valid_token_for_account_locked(account_id).await?;
+        }
+        let accounts = self.accounts.read().await;
+        let auth = accounts
+            .get(account_id)
+            .and_then(|a| a.codex_auth.clone())
+            .ok_or_else(|| {
+                CodexOAuthError::ParseError("Missing Codex credentials; sign in again.".into())
+            })?;
+        if auth.pointer("/tokens/account_id").and_then(|v| v.as_str()) != Some(account_id) {
+            return Err(CodexOAuthError::ParseError(
+                "Stored Codex account identity mismatch".into(),
+            ));
+        }
+        for key in ["id_token", "access_token", "refresh_token"] {
+            if auth["tokens"][key].as_str().is_none_or(str::is_empty) {
+                return Err(CodexOAuthError::ParseError(
+                    "Incomplete Codex credentials; sign in again.".into(),
+                ));
+            }
+        }
+        Ok(auth)
+    }
+
     pub async fn get_valid_token_for_account(
         &self,
         account_id: &str,
     ) -> Result<String, CodexOAuthError> {
+        let _state_guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .map_err(CodexOAuthError::IoError)?;
+        let _lock = self.lock_store().await?;
+        self.reload_from_disk().await?;
+        self.get_valid_token_for_account_locked(account_id).await
+    }
+
+    pub(crate) async fn get_valid_token_for_account_locked(
+        &self,
+        account_id: &str,
+    ) -> Result<String, CodexOAuthError> {
+        self.reconcile_native_copies(account_id).await?;
+        let live_path = crate::codex_config::get_codex_auth_path();
+        let live_before = fs::read(&live_path).ok();
+        if let Some(live) = live_before
+            .as_ref()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        {
+            if live.pointer("/tokens/account_id").and_then(|v| v.as_str()) == Some(account_id) {
+                self.capture_codex_auth(&live).await?;
+            }
+        }
+        if let Some(auth) = self
+            .accounts
+            .read()
+            .await
+            .get(account_id)
+            .and_then(|a| a.codex_auth.as_ref())
+        {
+            if let Some(expires_at_ms) = stored_access_expiration(auth) {
+                if expires_at_ms > chrono::Utc::now().timestamp_millis() + TOKEN_REFRESH_BUFFER_MS {
+                    self.access_tokens.write().await.insert(
+                        account_id.to_string(),
+                        CachedAccessToken {
+                            token: auth["tokens"]["access_token"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            expires_at_ms,
+                        },
+                    );
+                }
+            }
+        }
         {
             let tokens = self.access_tokens.read().await;
             if let Some(cached) = tokens.get(account_id) {
@@ -443,18 +693,14 @@ impl CodexOAuthManager {
                 .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?
         };
 
+        let copies =
+            crate::services::codex_account::NativeAuthCopies::read(account_id, &refresh_token)
+                .map_err(CodexOAuthError::IoError)?;
         let new_tokens = self.refresh_with_token(&refresh_token).await?;
 
-        if let Some(new_refresh) = new_tokens.refresh_token.clone() {
-            if new_refresh != refresh_token {
-                let mut accounts = self.accounts.write().await;
-                if let Some(account) = accounts.get_mut(account_id) {
-                    account.refresh_token = new_refresh;
-                }
-                drop(accounts);
-                self.save_to_disk().await?;
-            }
-        }
+        self.remember_token_response(account_id, &new_tokens, Some(copies))
+            .await?;
+        self.reconcile_native_copies(account_id).await?;
 
         let access_token = new_tokens.access_token.clone();
         let expires_at_ms = compute_expires_at_ms(new_tokens.expires_in);
@@ -474,8 +720,13 @@ impl CodexOAuthManager {
     }
 
     pub async fn get_valid_token(&self) -> Result<String, CodexOAuthError> {
+        let _state_guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .map_err(CodexOAuthError::IoError)?;
+        let _lock = self.lock_store().await?;
+        self.reload_from_disk().await?;
         match self.resolve_default_account_id().await {
-            Some(id) => self.get_valid_token_for_account(&id).await,
+            Some(id) => self.get_valid_token_for_account_locked(&id).await,
             None => Err(CodexOAuthError::AccountNotFound(
                 "无可用的 ChatGPT 账号".to_string(),
             )),
@@ -483,17 +734,24 @@ impl CodexOAuthManager {
     }
 
     pub async fn default_account_id(&self) -> Option<String> {
-        self.resolve_default_account_id().await
+        self.get_status().await.default_account_id
     }
 
     #[allow(dead_code)]
     pub async fn list_accounts(&self) -> Vec<ManagedAuthAccount> {
-        let accounts = self.accounts.read().await.clone();
-        let default_id = self.resolve_default_account_id().await;
-        Self::sorted_accounts(&accounts, default_id.as_deref())
+        self.get_status().await.accounts
     }
 
     pub async fn remove_account(&self, account_id: &str) -> Result<(), CodexOAuthError> {
+        let _lock = self.lock_store().await?;
+        self.reload_from_disk().await?;
+        self.remove_account_locked(account_id).await
+    }
+
+    pub(crate) async fn remove_account_locked(
+        &self,
+        account_id: &str,
+    ) -> Result<(), CodexOAuthError> {
         {
             let mut accounts = self.accounts.write().await;
             if accounts.remove(account_id).is_none() {
@@ -517,6 +775,15 @@ impl CodexOAuthManager {
     }
 
     pub async fn set_default_account(&self, account_id: &str) -> Result<(), CodexOAuthError> {
+        let _lock = self.lock_store().await?;
+        self.reload_from_disk().await?;
+        self.set_default_account_locked(account_id).await
+    }
+
+    pub(crate) async fn set_default_account_locked(
+        &self,
+        account_id: &str,
+    ) -> Result<(), CodexOAuthError> {
         {
             let accounts = self.accounts.read().await;
             if !accounts.contains_key(account_id) {
@@ -524,12 +791,22 @@ impl CodexOAuthManager {
             }
         }
 
+        let previous = self.default_account_id.read().await.clone();
         *self.default_account_id.write().await = Some(account_id.to_string());
-        self.save_to_disk().await?;
+        if let Err(error) = self.save_to_disk().await {
+            *self.default_account_id.write().await = previous;
+            return Err(error);
+        }
         Ok(())
     }
 
     pub async fn clear_auth(&self) -> Result<(), CodexOAuthError> {
+        let _lock = self.lock_store().await?;
+        self.reload_from_disk().await?;
+        self.clear_auth_locked().await
+    }
+
+    pub(crate) async fn clear_auth_locked(&self) -> Result<(), CodexOAuthError> {
         self.accounts.write().await.clear();
         *self.default_account_id.write().await = None;
         self.access_tokens.write().await.clear();
@@ -549,6 +826,10 @@ impl CodexOAuthManager {
     }
 
     pub async fn get_status(&self) -> CodexOAuthStatus {
+        let _lock = self.lock_store().await.ok();
+        if _lock.is_some() {
+            let _ = self.reload_from_disk().await;
+        }
         let accounts_map = self.accounts.read().await.clone();
         let default_id = self.resolve_default_account_id().await;
         let account_list = Self::sorted_accounts(&accounts_map, default_id.as_deref());
@@ -579,6 +860,8 @@ impl CodexOAuthManager {
             email,
             refresh_token,
             authenticated_at: now,
+            codex_auth: None,
+            pending_native_sync: None,
         };
         let account = ManagedAuthAccount::from(&data);
 
@@ -725,6 +1008,31 @@ impl CodexOAuthManager {
         Ok(())
     }
 
+    pub(crate) async fn reload_from_disk(&self) -> Result<(), CodexOAuthError> {
+        let content = match fs::read_to_string(&self.storage_path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.accounts.write().await.clear();
+                *self.default_account_id.write().await = None;
+                self.access_tokens.write().await.clear();
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let store: CodexOAuthStore = serde_json::from_str(&content)
+            .map_err(|_| CodexOAuthError::ParseError("Invalid managed account store".into()))?;
+        let mut accounts = self.accounts.write().await;
+        self.access_tokens.write().await.retain(|id, _| {
+            accounts
+                .get(id)
+                .zip(store.accounts.get(id))
+                .is_some_and(|(old, new)| old.refresh_token == new.refresh_token)
+        });
+        *accounts = store.accounts;
+        *self.default_account_id.write().await = store.default_account_id;
+        Ok(())
+    }
+
     async fn save_to_disk(&self) -> Result<(), CodexOAuthError> {
         let accounts = self.accounts.read().await.clone();
         let default = self.resolve_default_account_id().await;
@@ -769,6 +1077,14 @@ impl CodexOAuthManager {
 
         Ok(())
     }
+}
+
+fn stored_access_expiration(auth: &serde_json::Value) -> Option<i64> {
+    let token = auth.pointer("/tokens/access_token")?.as_str()?;
+    let part = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(part).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("exp")?.as_i64()?.checked_mul(1000)
 }
 
 fn parse_interval(value: Option<&serde_json::Value>) -> u64 {
@@ -934,5 +1250,165 @@ mod tests {
             status.accounts.first().map(|account| account.id.as_str()),
             Some("acc-456")
         );
+    }
+    #[tokio::test]
+    async fn native_codex_credentials_keep_id_token_across_refresh_and_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .seed_account_for_tests("a", "refresh-a", None, None, None)
+            .await
+            .unwrap();
+        manager
+            .remember_token_response(
+                "a",
+                &OAuthTokenResponse {
+                    access_token: "access-a".into(),
+                    refresh_token: Some("rotated-1".into()),
+                    id_token: Some("id-a".into()),
+                    expires_in: Some(3600),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        manager
+            .remember_token_response(
+                "a",
+                &OAuthTokenResponse {
+                    access_token: "access-b".into(),
+                    refresh_token: Some("rotated-2".into()),
+                    id_token: None,
+                    expires_in: Some(3600),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let reloaded = CodexOAuthManager::new(temp.path().to_path_buf());
+        let accounts = reloaded.accounts.read().await;
+        let account = &accounts["a"];
+        assert_eq!(account.refresh_token, "rotated-2");
+        let auth = account.codex_auth.as_ref().unwrap();
+        assert_eq!(auth["tokens"]["refresh_token"], "rotated-2");
+        assert_eq!(auth["tokens"]["access_token"], "access-b");
+        assert_eq!(auth["tokens"]["id_token"], "id-a");
+    }
+
+    #[tokio::test]
+    async fn native_codex_capture_does_not_restore_an_older_refresh_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .seed_account_for_tests("a", "initial", None, None, None)
+            .await
+            .unwrap();
+        let newer = serde_json::json!({"tokens":{"account_id":"a","refresh_token":"new"},"last_refresh":"2026-02-01T00:00:00Z"});
+        manager.capture_codex_auth(&newer).await.unwrap();
+        let older = serde_json::json!({"tokens":{"account_id":"a","refresh_token":"old"},"last_refresh":"2026-01-01T00:00:00Z"});
+        manager.capture_codex_auth(&older).await.unwrap();
+        assert_eq!(manager.accounts.read().await["a"].refresh_token, "new");
+        assert_eq!(
+            manager.accounts.read().await["a"].codex_auth.as_ref(),
+            Some(&newer)
+        );
+    }
+    async fn exercise_native_refresh(obstruct_live: bool) {
+        use serde_json::json;
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let db = crate::Database::init().unwrap();
+        let jwt = |exp| {
+            format!(
+                "e30.{}.sig",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({"exp":exp})).unwrap())
+            )
+        };
+        let expired = jwt(1);
+        let fresh = jwt(chrono::Utc::now().timestamp() + 3600);
+        let auth = json!({"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{
+            "account_id":"a","access_token":expired,"refresh_token":"old","id_token":"id-a"},"last_refresh":"2026-01-01T00:00:00Z"});
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &auth).unwrap();
+        let mut provider = crate::Provider::with_id(
+            "official".into(),
+            "Official".into(),
+            json!({"auth":auth,"config":""}),
+            None,
+        );
+        provider.category = Some("official".into());
+        db.save_provider("codex", &provider).unwrap();
+        let response = json!({"access_token":fresh,"refresh_token":"rotated","expires_in":3600});
+        let live_path = crate::codex_config::get_codex_auth_path();
+        let obstruction_path = live_path.clone();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || async move {
+                if obstruct_live {
+                    std::fs::rename(&obstruction_path, obstruction_path.with_extension("old"))
+                        .unwrap();
+                    std::fs::create_dir(&obstruction_path).unwrap();
+                }
+                axum::Json(response)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut manager = CodexOAuthManager::new(crate::config::get_app_config_dir());
+        manager.token_endpoint = Some(format!("http://{address}/token"));
+        manager
+            .seed_account_for_tests("a", "old", None, None, None)
+            .await
+            .unwrap();
+        let result = manager.get_valid_token_for_account("a").await;
+        if obstruct_live {
+            assert!(result.is_err());
+            assert!(manager.accounts.read().await["a"]
+                .pending_native_sync
+                .is_some());
+            std::fs::remove_dir(&live_path).unwrap();
+            std::fs::rename(live_path.with_extension("old"), &live_path).unwrap();
+        } else {
+            assert_eq!(result.unwrap(), fresh);
+        }
+        server.abort();
+        // Retry in a different manager after the server is gone. It must finish the
+        // persisted publication, not rotate the token again.
+        let mut recovered = CodexOAuthManager::new(crate::config::get_app_config_dir());
+        recovered.token_endpoint = Some(format!("http://{address}/closed"));
+        assert_eq!(
+            recovered.get_valid_token_for_account("a").await.unwrap(),
+            fresh
+        );
+        assert!(recovered.accounts.read().await["a"]
+            .pending_native_sync
+            .is_none());
+        let live: serde_json::Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path()).unwrap();
+        assert_eq!(live["tokens"]["refresh_token"], "rotated");
+        assert_eq!(live["tokens"]["id_token"], "id-a");
+        assert_eq!(
+            db.get_all_providers("codex").unwrap()["official"].settings_config["auth"],
+            live
+        );
+        // A fresh manager must use persisted access credentials, not refresh again.
+        let mut restarted = CodexOAuthManager::new(crate::config::get_app_config_dir());
+        restarted.token_endpoint = Some(format!("http://{address}/closed"));
+        assert_eq!(
+            restarted.get_valid_token_for_account("a").await.unwrap(),
+            fresh
+        );
+    }
+    #[tokio::test]
+    async fn native_codex_http_refresh_updates_live_and_launch_copy_and_survives_restart() {
+        exercise_native_refresh(false).await;
+    }
+
+    #[tokio::test]
+    async fn native_codex_refresh_recovers_failed_publication_in_a_new_process_manager() {
+        exercise_native_refresh(true).await;
     }
 }

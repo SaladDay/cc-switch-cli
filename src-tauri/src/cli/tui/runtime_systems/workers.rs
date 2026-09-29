@@ -719,6 +719,9 @@ fn managed_auth_worker_loop(rx: mpsc::Receiver<ManagedAuthReq>, tx: mpsc::Sender
                         device_code,
                         result: Err(err.clone()),
                     },
+                    ManagedAuthReq::Use { .. } => ManagedAuthMsg::Used {
+                        result: Err(err.clone()),
+                    },
                     ManagedAuthReq::SetDefault {
                         auth_provider,
                         account_id,
@@ -771,6 +774,16 @@ fn managed_auth_worker_loop(rx: mpsc::Receiver<ManagedAuthReq>, tx: mpsc::Sender
                     device_code,
                     result,
                 });
+            }
+            ManagedAuthReq::Use {
+                auth_provider,
+                account_id,
+            } => {
+                let result = rt.block_on(async {
+                    crate::services::codex_account::use_account(&account_id).await?;
+                    crate::services::AuthService::get_status(&auth_provider).await
+                });
+                let _ = tx.send(ManagedAuthMsg::Used { result });
             }
             ManagedAuthReq::SetDefault {
                 auth_provider,

@@ -38,15 +38,41 @@ pub fn execute(cmd: InternalCommand) -> Result<(), AppError> {
             codex_home,
             auth_only,
         } => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| AppError::Message(e.to_string()))?;
+            // Capture's DB write, accepted-result read and managed import must be
+            // serialized together with activation and managed credential refresh.
+            let _mutation_guard = runtime
+                .block_on(crate::services::state_coordination::acquire_restore_mutation_guard())
+                .map_err(AppError::Message)?;
+            let db = crate::Database::init()?;
             if auth_only {
-                return ProviderService::capture_codex_launch_auth(
-                    &crate::Database::init()?,
+                ProviderService::capture_codex_launch_auth(&db, &provider_id, &codex_home)?;
+            } else {
+                let state = AppState::try_new()?;
+                ProviderService::capture_codex_temp_launch_snapshot(
+                    &state,
                     &provider_id,
                     &codex_home,
-                );
+                )?;
             }
-            let state = AppState::try_new()?;
-            ProviderService::capture_codex_temp_launch_snapshot(&state, &provider_id, &codex_home)
+            // Use the accepted DB snapshot, not a launch file rejected by optimistic concurrency.
+            let providers = db.get_all_providers("codex")?;
+            if let Some(provider) = providers
+                .get(&provider_id)
+                .filter(|p| ProviderService::codex_live_write_category(p) == Some("official"))
+            {
+                if let Some(auth) = provider.settings_config.get("auth") {
+                    runtime
+                        .block_on(crate::services::codex_account::capture_native_auth_locked(
+                            auth,
+                        ))
+                        .map_err(AppError::Message)?;
+                }
+            }
+            Ok(())
         }
     }
 }

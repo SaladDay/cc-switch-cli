@@ -4072,6 +4072,7 @@ fn managed_auth_status() -> crate::services::ManagedAuthStatus {
         authenticated: true,
         default_account_id: Some("acc-default".to_string()),
         migration_error: None,
+        active_codex_account_id: None,
         accounts: vec![
             crate::services::ManagedAuthAccount {
                 id: "acc-default".to_string(),
