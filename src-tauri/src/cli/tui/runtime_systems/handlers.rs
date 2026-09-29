@@ -2494,6 +2494,7 @@ mod tests {
             extra_usage: None,
             error: None,
             queried_at: Some(chrono::Utc::now().timestamp_millis()),
+            reset_credits: None,
         }
     }
 

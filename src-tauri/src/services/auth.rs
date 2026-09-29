@@ -166,6 +166,31 @@ impl AuthService {
         }
     }
 
+    pub async fn get_quota(
+        auth_provider: &str,
+        account_id: Option<&str>,
+    ) -> Result<crate::services::subscription::SubscriptionQuota, String> {
+        let auth_provider = ensure_auth_provider(auth_provider)?;
+        match auth_provider {
+            AUTH_PROVIDER_CODEX_OAUTH => Ok(CodexOAuthService::get_quota(account_id).await),
+            _ => unreachable!(),
+        }
+    }
+
+    pub async fn reset_quota(
+        auth_provider: &str,
+        account_id: Option<&str>,
+        credit_id: Option<&str>,
+    ) -> Result<crate::services::subscription::CodexResetConsumeResult, String> {
+        let auth_provider = ensure_auth_provider(auth_provider)?;
+        match auth_provider {
+            AUTH_PROVIDER_CODEX_OAUTH => {
+                CodexOAuthService::reset_quota(account_id, credit_id).await
+            }
+            _ => unreachable!(),
+        }
+    }
+
     pub async fn logout(auth_provider: &str) -> Result<(), String> {
         let auth_provider = ensure_auth_provider(auth_provider)?;
         match auth_provider {

@@ -177,7 +177,23 @@ pub(crate) async fn query_quota(target: &QuotaTarget) -> Result<ProviderUsageQuo
     }
 }
 
+
+pub(crate) async fn reset_provider_quota(
+    target: &QuotaTarget,
+    credit_id: Option<&str>,
+) -> Result<crate::services::subscription::CodexResetConsumeResult, String> {
+    match &target.kind {
+        QuotaTargetKind::SubscriptionTool { tool } if tool == "codex" => {
+            crate::services::subscription::reset_codex_subscription_quota(credit_id).await
+        }
+        QuotaTargetKind::CodexOAuth { account_id } => {
+            crate::services::CodexOAuthService::reset_quota(account_id.as_deref(), credit_id).await
+        }
+        _ => Err("Rate limit reset credits are only supported for Codex / OpenAI accounts.".to_string()),
+    }
+}
 pub(crate) fn display_usage_plan_name(item: &UsageData) -> Option<&str> {
+
     item.plan_name.as_deref().filter(|value| {
         let trimmed = value.trim();
         !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("default")
