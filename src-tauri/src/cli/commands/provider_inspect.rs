@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::provider_quota::{
-    display_usage_plan_name, provider_display_name, query_quota, quota_target_for_provider,
-    usage_value_summary, ProviderUsageQuota, QuotaTarget,
+    display_usage_plan_name, provider_display_name, query_quota, quota_reset_display,
+    quota_target_for_provider, reset_provider_quota, usage_value_summary, ProviderUsageQuota,
+    QuotaTarget, QuotaTargetKind,
 };
 use crate::cli::ui::{create_table, error, highlight, info, success, to_json, warning};
 use crate::error::AppError;
@@ -513,7 +514,14 @@ fn print_fetched_models(models: &[String]) {
     );
 }
 
-pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
+pub(crate) fn quota_provider(
+    app_type: AppType,
+    id: &str,
+    json: bool,
+    reset: bool,
+    credit_id: Option<String>,
+    confirm: bool,
+) -> Result<(), AppError> {
     let state = get_state()?;
     let providers = ProviderService::list(&state, app_type.clone())?;
     let provider = providers
@@ -526,6 +534,123 @@ pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<
     let output = if let Some(target) = target {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::Message(format!("Failed to create async runtime: {}", e)))?;
+
+        if reset {
+            let is_codex = matches!(&target.kind, QuotaTargetKind::CodexOAuth { .. })
+                || matches!(&target.kind, QuotaTargetKind::SubscriptionTool { tool } if tool == "codex");
+            if !is_codex {
+                return Err(AppError::Message(
+                    "Rate limit reset credits are only supported for Codex / OpenAI accounts.".to_string(),
+                ));
+            }
+
+            let current_quota = match runtime.block_on(query_quota(&target)) {
+                Ok(ProviderUsageQuota::Subscription(q)) => q,
+                Ok(_) => {
+                    return Err(AppError::Message("Unexpected quota response format".to_string()));
+                }
+                Err(e) => {
+                    return Err(AppError::Message(format!("Failed to query current quota: {e}")));
+                }
+            };
+
+            let summary = current_quota.reset_credits.as_ref();
+            let available_count = summary.map(|s| s.available_count).unwrap_or(0);
+            if available_count == 0 {
+                return Err(AppError::Message(
+                    "No rate limit reset credits are available for this account.".to_string(),
+                ));
+            }
+
+            let credits = summary.map(|s| &s.credits[..]).unwrap_or(&[]);
+            let selected_credit = match &credit_id {
+                Some(cid) => credits.iter().find(|c| &c.id == cid).cloned().ok_or_else(|| {
+                    AppError::Message(format!(
+                        "Specified credit ID '{cid}' was not found in available credits."
+                    ))
+                })?,
+                None => credits.first().cloned().ok_or_else(|| {
+                    AppError::Message("No available reset credit to consume.".to_string())
+                })?,
+            };
+
+            if !confirm {
+                if json {
+                    let dry_run = serde_json::json!({
+                        "dryRun": true,
+                        "providerId": id,
+                        "targetCredit": selected_credit,
+                        "availableCount": available_count,
+                        "message": "To redeem this credit and reset rate limits, run again with --confirm.",
+                    });
+                    println!(
+                        "{}",
+                        to_json(&dry_run).map_err(|source| AppError::JsonSerialize { source })?
+                    );
+                    return Ok(());
+                }
+
+                println!("{}", highlight("=== Rate Limit Reset Credit (Dry Run) ==="));
+                println!("Provider:        {} ({})", provider_name, id);
+                println!("Credit ID:       {}", selected_credit.id);
+                if let Some(title) = &selected_credit.title {
+                    println!("Title:           {}", title);
+                }
+                if let Some(expires) = &selected_credit.expires_at {
+                    println!("Expires at:      {}", expires);
+                }
+                println!("Available Cards: {}", available_count);
+                println!();
+                println!(
+                    "{}",
+                    warning("⚠ Consuming a reset credit is permanent and cannot be undone.")
+                );
+                println!(
+                    "{}",
+                    info(&format!(
+                        "To consume this credit, re-run with --confirm:
+  cc-switch provider quota {} --reset --confirm",
+                        id
+                    ))
+                );
+                return Ok(());
+            }
+
+            let result = runtime
+                .block_on(reset_provider_quota(&target, Some(&selected_credit.id)))
+                .map_err(AppError::Message)?;
+
+            if json {
+                println!(
+                    "{}",
+                    to_json(&result).map_err(|source| AppError::JsonSerialize { source })?
+                );
+                return Ok(());
+            }
+
+            println!(
+                "{}",
+                success("✓ Rate limit reset credit successfully redeemed!")
+            );
+            println!("Credit ID:         {}", result.credit_id);
+            println!("Redeem Request ID: {}", result.redeem_request_id);
+            println!("Upstream Code:     {}", result.code);
+            if let Some(win) = result.windows_reset {
+                println!("Windows Reset:     {}", win);
+            }
+            if let Some(new_q) = &result.new_quota {
+                println!();
+                println!("{}", highlight("Updated Quota:"));
+                for tier in &new_q.tiers {
+                    println!("  {}: {:.1}%", tier.name, tier.utilization);
+                }
+                if let Some(rc) = &new_q.reset_credits {
+                    println!("  Remaining Credits: {}", rc.available_count);
+                }
+            }
+            return Ok(());
+        }
+
         match runtime.block_on(query_quota(&target)) {
             Ok(result) => quota_output_from_result(
                 app_type,
@@ -548,6 +673,11 @@ pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<
             },
         }
     } else {
+        if reset {
+            return Err(AppError::Message(
+                "Rate limit reset credits are only supported for Codex / OpenAI accounts.".to_string(),
+            ));
+        }
         ProviderQuotaOutput {
             app: app_type,
             provider_id: id.to_string(),
@@ -768,12 +898,38 @@ fn push_subscription_quota_lines(
             queried_at
         ));
     }
+    let now = chrono::Utc::now();
     for tier in &quota.tiers {
-        lines.push(format!(
+        let mut line = format!(
             "{}: {}",
             quota_tier_label(&tier.name),
             quota_percent_text(tier.utilization)
-        ));
+        );
+        if let Some(reset) = quota_reset_display(tier.resets_at.as_deref(), now) {
+            let local_time = reset
+                .at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M %:z")
+                .to_string();
+            line.push_str(&format!("  {}", texts::tui_quota_resets_at(&local_time)));
+            if let Some(remaining) = reset.remaining {
+                line.push_str(&format!("  {}", texts::tui_quota_resets_in(&remaining)));
+            }
+        }
+        lines.push(line);
+    }
+    if let Some(reset_credits) = &quota.reset_credits {
+        if reset_credits.available_count > 0 {
+            lines.push(format!(
+                "Reset Credits: {} available",
+                reset_credits.available_count
+            ));
+            for credit in &reset_credits.credits {
+                let expires = credit.expires_at.as_deref().unwrap_or("never");
+                let title = credit.title.as_deref().unwrap_or("Rate Limit Reset");
+                lines.push(format!("  - {} (expires: {}) [{}]", title, expires, credit.id));
+            }
+        }
     }
     if let Some(extra) = quota.extra_usage.as_ref().filter(|extra| extra.is_enabled) {
         let mut parts = Vec::new();
@@ -1460,6 +1616,7 @@ mod tests {
             extra_usage: None,
             error: None,
             queried_at: Some(1_700_000_000_000),
+            reset_credits: None,
         }
     }
 
@@ -1604,6 +1761,69 @@ base_url = "https://current.example.com/v1"
         .join("\n");
         assert!(expired.contains(texts::tui_quota_expired()));
         assert!(expired.contains("Error: expired"));
+    }
+
+    #[test]
+    fn provider_quota_text_shows_local_reset_time_without_changing_json() {
+        for language in [
+            crate::cli::i18n::Language::English,
+            crate::cli::i18n::Language::Chinese,
+        ] {
+            let _lang = crate::cli::i18n::use_test_language(language);
+            let resets_at = "2099-06-01T20:43:00+08:00";
+            let output = quota_output(ProviderUsageQuota::Subscription(subscription_quota(
+                CredentialStatus::Valid,
+                true,
+                vec![QuotaTier {
+                    name: "five_hour".to_string(),
+                    utilization: 0.0,
+                    resets_at: Some(resets_at.to_string()),
+                }],
+            )));
+            let local_time = chrono::DateTime::parse_from_rfc3339(resets_at)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M %:z")
+                .to_string();
+            let remaining = quota_reset_display(Some(resets_at), chrono::Utc::now())
+                .unwrap()
+                .remaining
+                .unwrap();
+            let joined = provider_quota_text_lines(&output).join("\n");
+            assert!(joined.contains(&format!(
+                "{}: 0%  {}  {}",
+                texts::tui_quota_tier_five_hour(),
+                texts::tui_quota_resets_at(&local_time),
+                texts::tui_quota_resets_in(&remaining),
+            )));
+            let json = serde_json::to_value(&output).unwrap();
+            assert_eq!(json["result"]["quota"]["tiers"][0]["resetsAt"], resets_at);
+        }
+    }
+
+    #[test]
+    fn provider_quota_text_omits_invalid_resets_and_elapsed_countdowns() {
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        for resets_at in [None, Some("invalid"), Some("2000-01-01T00:00:00Z")] {
+            let output = quota_output(ProviderUsageQuota::Subscription(subscription_quota(
+                CredentialStatus::Valid,
+                true,
+                vec![QuotaTier {
+                    name: "seven_day".to_string(),
+                    utilization: 100.0,
+                    resets_at: resets_at.map(str::to_string),
+                }],
+            )));
+            let lines = provider_quota_text_lines(&output);
+            let tier = lines.iter().find(|line| line.starts_with("7d:")).unwrap();
+            assert!(tier.starts_with("7d: 100%"));
+            assert!(!tier.contains("resets in"));
+            if resets_at == Some("2000-01-01T00:00:00Z") {
+                assert!(tier.contains("reset:"));
+            } else {
+                assert_eq!(tier, "7d: 100%");
+            }
+        }
     }
 
     #[test]

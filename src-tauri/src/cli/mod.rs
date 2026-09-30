@@ -773,6 +773,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_auth_reset_quota_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "auth",
+            "reset-quota",
+            "--confirm",
+            "--credit-id",
+            "RateLimitResetCredit_456",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::ResetQuota {
+                account_id,
+                credit_id,
+                confirm,
+                json,
+            })) => {
+                assert!(confirm);
+                assert!(json);
+                assert_eq!(credit_id.as_deref(), Some("RateLimitResetCredit_456"));
+                assert_eq!(account_id, None);
+            }
+            _ => panic!("expected auth reset-quota command"),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn parses_start_claude_subcommand() {
@@ -1193,6 +1221,7 @@ mod tests {
             Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
                 id,
                 json,
+                ..
             })) => {
                 assert_eq!(id, "demo");
                 assert!(!json);
@@ -1209,11 +1238,43 @@ mod tests {
             Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
                 id,
                 json,
+                ..
             })) => {
                 assert_eq!(id, "demo");
                 assert!(json);
             }
             _ => panic!("expected provider quota json command"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_quota_reset_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "quota",
+            "demo",
+            "--reset",
+            "--confirm",
+            "--credit-id",
+            "RateLimitResetCredit_123",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
+                id,
+                json,
+                reset,
+                credit_id,
+                confirm,
+            })) => {
+                assert_eq!(id, "demo");
+                assert!(!json);
+                assert!(reset);
+                assert!(confirm);
+                assert_eq!(credit_id.as_deref(), Some("RateLimitResetCredit_123"));
+            }
+            _ => panic!("expected provider quota reset command"),
         }
     }
 

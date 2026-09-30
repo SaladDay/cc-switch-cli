@@ -2747,8 +2747,12 @@ fn sync_private_file(path: &Path) -> Result<(), ManifestError> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .map_err(|error| ManifestError::io(path, error))?;
     }
-    File::open(path)
-        .and_then(|file| file.sync_all())
+    // Windows FlushFileBuffers requires a handle with write access.
+    #[cfg(windows)]
+    let file = fs::OpenOptions::new().write(true).open(path);
+    #[cfg(not(windows))]
+    let file = File::open(path);
+    file.and_then(|file| file.sync_all())
         .map_err(|error| ManifestError::io(path, error))
 }
 
@@ -2783,6 +2787,32 @@ fn read_json_limited<T: DeserializeOwned>(path: &Path, max_bytes: u64) -> Result
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn sync_private_file_preserves_contents() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join(COORDINATOR_FILE);
+        let contents = b"{\"buildEpoch\":1}";
+        fs::write(&path, contents).expect("write coordinator");
+
+        sync_private_file(&path).expect("sync existing coordinator");
+
+        assert_eq!(fs::read(&path).expect("read coordinator"), contents);
+    }
+
+    #[test]
+    fn sync_private_file_does_not_create_missing_file() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join(COORDINATOR_FILE);
+
+        let error = sync_private_file(&path).expect_err("missing file must fail");
+
+        assert!(matches!(
+            error,
+            ManifestError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(!path.exists());
+    }
 
     fn meta(provider: &str, id: &str, recency: i64) -> SessionMeta {
         SessionMeta {

@@ -776,6 +776,8 @@ pub(super) fn quota_compact_line(
     }
 
     let mut spans = Vec::new();
+    let mut resets = Vec::new();
+    let now = chrono::Utc::now();
     for (idx, tier) in tiers.iter().enumerate() {
         if idx > 0 {
             spans.push(Span::raw("  "));
@@ -788,6 +790,12 @@ pub(super) fn quota_compact_line(
             quota_percent_text(tier.utilization),
             quota_utilization_style(theme, tier.utilization),
         ));
+        if let Some(remaining) =
+            crate::cli::provider_quota::quota_reset_display(tier.resets_at.as_deref(), now)
+                .and_then(|reset| reset.remaining)
+        {
+            resets.push(format!("{} {remaining}", quota_tier_label(&tier.name)));
+        }
     }
     if let Some(checked) = quota.queried_at.map(quota_relative_time_compact) {
         if !spans.is_empty() {
@@ -802,6 +810,13 @@ pub(super) fn quota_compact_line(
         spans.push(Span::styled(
             texts::tui_quota_loading().to_string(),
             Style::default().fg(theme.surface),
+        ));
+    }
+    // Preserve the full existing quota/status prefix on narrow terminals.
+    if !resets.is_empty() {
+        spans.push(Span::styled(
+            format!(" ({})", resets.join(", ")),
+            Style::default().fg(theme.comment),
         ));
     }
     Some(Line::from(spans))

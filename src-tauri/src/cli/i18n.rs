@@ -1532,6 +1532,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_quota_resets_at(time: &str) -> String {
+        if is_chinese() {
+            format!("重置时间: {time}")
+        } else {
+            format!("reset: {time}")
+        }
+    }
+
     pub fn tui_quota_resets_in(time: &str) -> String {
         if is_chinese() {
             format!("{time} 后重置")

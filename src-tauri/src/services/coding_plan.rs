@@ -90,6 +90,7 @@ fn make_error(msg: String) -> SubscriptionQuota {
         extra_usage: None,
         error: Some(msg),
         queried_at: Some(now_millis()),
+        reset_credits: None,
     }
 }
 
@@ -122,6 +123,7 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
+        reset_credits: None,
         };
     }
 
@@ -188,6 +190,7 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
+        reset_credits: None,
     }
 }
 
@@ -291,6 +294,7 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
+        reset_credits: None,
         };
     }
 
@@ -335,6 +339,7 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
+        reset_credits: None,
     }
 }
 
@@ -374,6 +379,7 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
+        reset_credits: None,
         };
     }
 
@@ -456,6 +462,7 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
+        reset_credits: None,
     }
 }
 
@@ -541,6 +548,7 @@ async fn query_opencode_go(api_key: &str) -> Result<SubscriptionQuota, String> {
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
+        reset_credits: None,
         });
     }
     if !status.is_success() {
@@ -573,6 +581,7 @@ async fn query_opencode_go(api_key: &str) -> Result<SubscriptionQuota, String> {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
+        reset_credits: None,
     })
 }
 
@@ -592,6 +601,7 @@ pub async fn get_coding_plan_quota(
             extra_usage: None,
             error: None,
             queried_at: None,
+        reset_credits: None,
         });
     }
 
@@ -607,6 +617,7 @@ pub async fn get_coding_plan_quota(
                 extra_usage: None,
                 error: None,
                 queried_at: None,
+        reset_credits: None,
             })
         }
     };
