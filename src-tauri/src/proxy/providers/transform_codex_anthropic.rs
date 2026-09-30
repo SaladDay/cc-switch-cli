@@ -250,6 +250,12 @@ pub fn responses_request_to_anthropic(
     }
     if let Some(items) = body.get("input").and_then(Value::as_array) {
         for item in items {
+            // `additional_tools` is a tool carrier (lifted by
+            // `collect_input_declared_tools`), not an instruction item: its
+            // optional `content` must never become system text.
+            if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                continue;
+            }
             if matches!(
                 item.get("role").and_then(Value::as_str),
                 Some("system" | "developer")
@@ -647,6 +653,10 @@ fn convert_input_to_messages(
                     push_assistant_thinking_block(&mut messages, block);
                 }
             }
+            // `additional_tools` declares tools for this request (lifted by the
+            // shared registry); the carrier itself is never a message, whatever
+            // its role or content.
+            Some("additional_tools") => {}
             // message item or an item carrying a role
             _ => {
                 let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
@@ -1637,6 +1647,82 @@ mod tests {
         );
         assert_eq!(result["messages"].as_array().unwrap().len(), 1);
         assert_eq!(result["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn test_request_additional_tools_carrier_is_not_system_or_message() {
+        // #466: an `additional_tools` carrier only declares tools. It carries a
+        // `role` and may carry `content`, but neither may become Anthropic system
+        // or message text — whatever the role. The Chat path already ignores it.
+        let cases = [
+            ("developer", json!("carrier-data")),
+            (
+                "user",
+                json!([{ "type": "input_text", "text": "carrier-array" }]),
+            ),
+            ("system", json!("carrier-system")),
+            ("assistant", json!("carrier-assistant")),
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for (role, content) in cases {
+            let body = json!({
+                "model": "m",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "id": "at_1",
+                        "role": role,
+                        "content": content,
+                        "tools": [{ "type": "function", "name": "f", "parameters": { "type": "object", "properties": {} } }]
+                    },
+                    { "type": "message", "role": "developer", "content": [{ "type": "input_text", "text": "You are Codex." }] },
+                    { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }
+                ]
+            });
+
+            let anthropic = responses_request_to_anthropic(body.clone(), 4096).unwrap();
+            let tools: Vec<&str> = anthropic["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect();
+            if tools != ["f"] {
+                failures.push(format!("anthropic tools for {role}: {tools:?}"));
+            }
+            if anthropic["system"] != "You are Codex." {
+                failures.push(format!(
+                    "anthropic system for {role}: {:?}",
+                    anthropic["system"]
+                ));
+            }
+            let expected_messages =
+                json!([{ "role": "user", "content": [{ "type": "text", "text": "hi" }] }]);
+            if anthropic["messages"] != expected_messages {
+                failures.push(format!(
+                    "anthropic messages for {role}: {}",
+                    anthropic["messages"]
+                ));
+            }
+            if anthropic.to_string().contains("carrier-") {
+                failures.push(format!("carrier text leaked into anthropic for {role}"));
+            }
+
+            // The Chat converter must keep the same contract for the same input.
+            let chat =
+                super::super::transform_codex_chat::responses_to_chat_completions(body).unwrap();
+            let expected_chat = json!([
+                { "role": "system", "content": "You are Codex." },
+                { "role": "user", "content": "hi" }
+            ]);
+            if chat["messages"] != expected_chat {
+                failures.push(format!("chat messages for {role}: {}", chat["messages"]));
+            }
+            if chat.to_string().contains("carrier-") {
+                failures.push(format!("carrier text leaked into chat for {role}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[test]
