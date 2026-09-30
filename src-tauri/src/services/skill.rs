@@ -640,6 +640,7 @@ impl SkillService {
             AppType::OpenCode,
             AppType::Hermes,
             AppType::Pi,
+            AppType::Omp,
         ]
         .into_iter()
     }
@@ -724,6 +725,7 @@ impl SkillService {
             AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
             AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir().join("skills"),
             AppType::Pi => crate::pi_config::get_pi_agent_dir()?.join("skills"),
+            AppType::Omp => crate::omp_config::get_omp_agent_dir()?.join("skills"),
         })
     }
 
@@ -844,6 +846,7 @@ impl SkillService {
         let mut installed = db.get_all_installed_skills()?;
         for skill in installed.values_mut() {
             skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+            skill.apps.omp = Self::skill_exists_in_app(&skill.directory, &AppType::Omp);
         }
         let skills: HashMap<String, InstalledSkill> = installed
             .into_values()
@@ -981,9 +984,11 @@ impl SkillService {
 
         let mut discovered: HashMap<String, SkillApps> = HashMap::new();
 
-        // Pi support did not exist before the SSOT migration. Never claim an
-        // independently installed Pi skill as a legacy CC Switch deployment.
-        for app in Self::supported_skill_apps().filter(|app| !matches!(app, AppType::Pi)) {
+        // Pi/OMP support did not exist before the SSOT migration. Never claim
+        // an independently installed native skill as a legacy CC Switch deployment.
+        for app in
+            Self::supported_skill_apps().filter(|app| !matches!(app, AppType::Pi | AppType::Omp))
+        {
             let app_dir = match Self::get_app_skills_dir(&app) {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -1214,7 +1219,7 @@ impl SkillService {
         directory: &str,
         app: &AppType,
     ) -> Result<(), AppError> {
-        if !matches!(app, AppType::Pi) {
+        if !matches!(app, AppType::Pi | AppType::Omp) {
             return Ok(());
         }
         let ssot_dir = Self::get_ssot_dir()?;
@@ -1277,7 +1282,7 @@ impl SkillService {
         // Pi's native Skills directory may contain user-managed entries. Match
         // upstream by replacing only a destination that still mirrors the
         // CC Switch source; preserve every conflicting entry.
-        if matches!(app, AppType::Pi) && (dest.exists() || Self::is_symlink(&dest)) {
+        if matches!(app, AppType::Pi | AppType::Omp) && (dest.exists() || Self::is_symlink(&dest)) {
             Self::inspect_pi_skill_destination(&source, &dest)?;
         }
 
@@ -1434,7 +1439,7 @@ impl SkillService {
         let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         fs::create_dir_all(&app_dir).map_err(|e| AppError::io(&app_dir, e))?;
         let dest = app_dir.join(&directory);
-        if matches!(app, AppType::Pi)
+        if matches!(app, AppType::Pi | AppType::Omp)
             && (dest.exists() || Self::is_symlink(&dest))
             && !Self::pi_skill_destination_is_managed(&source, &dest)
         {
@@ -1561,7 +1566,7 @@ impl SkillService {
         let app_dir = Self::get_distinct_app_skills_dir(&ssot_dir, app)?;
         let path = app_dir.join(&directory);
         if path.exists() || Self::is_symlink(&path) {
-            if matches!(app, AppType::Pi) {
+            if matches!(app, AppType::Pi | AppType::Omp) {
                 let source = Self::get_ssot_dir()?.join(directory);
                 if !Self::pi_skill_destination_is_managed(&source, &path) {
                     return Err(AppError::InvalidInput(format!(
@@ -2683,6 +2688,7 @@ impl SkillService {
             .ok_or_else(|| AppError::Message(format!("Skill not found: {skill_id}")))?;
         let directory = Self::require_valid_directory(&skill.directory)?;
         skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+        skill.apps.omp = Self::skill_exists_in_app(&skill.directory, &AppType::Omp);
 
         let (owner, name) = match (&skill.repo_owner, &skill.repo_name) {
             (Some(owner), Some(name)) => (owner.clone(), name.clone()),
@@ -2727,6 +2733,7 @@ impl SkillService {
             AppError::Message(format!("Skill was removed during update: {skill_id}"))
         })?;
         current.apps.pi = Self::skill_exists_in_app(&current.directory, &AppType::Pi);
+        current.apps.omp = Self::skill_exists_in_app(&current.directory, &AppType::Omp);
         if current.directory != skill.directory
             || current.repo_owner != skill.repo_owner
             || current.repo_name != skill.repo_name
@@ -2754,6 +2761,12 @@ impl SkillService {
         let pi_deployment = if current.apps.pi {
             let pi_dir = Self::get_distinct_app_skills_dir(&ssot_dir, &AppType::Pi)?;
             Self::inspect_pi_skill_destination(&dest, &pi_dir.join(&directory))?
+        } else {
+            None
+        };
+        let omp_deployment = if current.apps.omp {
+            let omp_dir = Self::get_distinct_app_skills_dir(&ssot_dir, &AppType::Omp)?;
+            Self::inspect_pi_skill_destination(&dest, &omp_dir.join(&directory))?
         } else {
             None
         };
@@ -2826,8 +2839,20 @@ impl SkillService {
                 deployment_failures.push(format!("Pi: {error}"));
             }
         }
+        if let Some(deployment) = omp_deployment.as_ref() {
+            let omp_destination = Self::get_app_skills_dir(&AppType::Omp)?.join(&updated.directory);
+            if let Err(error) =
+                Self::refresh_pi_skill_destination(&dest, &omp_destination, deployment)
+            {
+                log::warn!(
+                    "Updated Skill {} but failed to sync it to OMP: {error}",
+                    updated.id
+                );
+                deployment_failures.push(format!("OMP: {error}"));
+            }
+        }
         for app in Self::supported_skill_apps() {
-            if matches!(app, AppType::Pi) {
+            if matches!(app, AppType::Pi | AppType::Omp) {
                 continue;
             }
             if updated.apps.is_enabled_for(&app) {
@@ -3494,6 +3519,7 @@ impl SkillService {
             let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
             let mut apps = selection.apps;
             apps.pi = Self::skill_exists_in_app(&dir_name, &AppType::Pi);
+            apps.omp = Self::skill_exists_in_app(&dir_name, &AppType::Omp);
             let (id, repo_owner, repo_name, repo_branch, readme_url) =
                 build_repo_info_from_lock(&agents_lock, &dir_name);
 

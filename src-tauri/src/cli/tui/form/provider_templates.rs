@@ -259,7 +259,7 @@ pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [Pr
         AppType::OpenCode => &PROVIDER_TEMPLATE_DEFS_OPENCODE,
         AppType::Hermes => &PROVIDER_TEMPLATE_DEFS_HERMES,
         AppType::OpenClaw => &PROVIDER_TEMPLATE_DEFS_OPENCLAW,
-        AppType::Pi => &PROVIDER_TEMPLATE_DEFS_OPENCLAW,
+        AppType::Pi | AppType::Omp => &PROVIDER_TEMPLATE_DEFS_OPENCLAW,
     }
 }
 
@@ -281,9 +281,12 @@ pub(super) fn provider_after_sponsor_template_defs(
     match app_type {
         AppType::Claude => &PROVIDER_TEMPLATE_DEFS_CLAUDE_AFTER_SPONSORS,
         AppType::Codex => &PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS,
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            &[]
-        }
+        AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Omp => &[],
     }
 }
 
@@ -848,7 +851,7 @@ impl ProviderAddFormState {
                     self.opencode_model_original_id = None;
                 }
             }
-            AppType::Pi => {}
+            AppType::Pi | AppType::Omp => {}
         }
 
         if matches!(self.app_type, AppType::Codex) {

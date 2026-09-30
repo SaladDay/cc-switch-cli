@@ -513,6 +513,7 @@ fn set_visible_apps_list(apps: Vec<AppType>) -> Result<(), AppError> {
         hermes: false,
         openclaw: false,
         pi: false,
+        omp: false,
     };
     for app in apps {
         visible_apps.set_enabled_for(&app, true);
@@ -889,6 +890,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         })
         .expect("save manual visible apps");
 
@@ -913,6 +915,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         })
         .expect_err("empty visible apps should be rejected");
 

@@ -177,6 +177,9 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
         AppType::Pi => Err(AppError::Config(
             "Pi providers use the Pi provider service".to_string(),
         )),
+        AppType::Omp => Err(AppError::Config(
+            "OMP providers use the OMP provider service".to_string(),
+        )),
     }
 }
 

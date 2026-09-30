@@ -52,6 +52,9 @@ enum HelpTarget {
     Sessions,
     PiSystemPrompts,
     PiPromptTemplates,
+    OmpModels,
+    OmpRoles,
+    OmpSystemPrompts,
     FailoverQueue,
     PreferredEditor,
     SkillStorageLocation,
@@ -162,6 +165,9 @@ fn current_help_target(app: &App) -> HelpTarget {
         super::route::Route::Sessions => return HelpTarget::Sessions,
         super::route::Route::PiSystemPrompts => return HelpTarget::PiSystemPrompts,
         super::route::Route::PiPromptTemplates => return HelpTarget::PiPromptTemplates,
+        super::route::Route::OmpModels => return HelpTarget::OmpModels,
+        super::route::Route::OmpRoles => return HelpTarget::OmpRoles,
+        super::route::Route::OmpSystemPrompts => return HelpTarget::OmpSystemPrompts,
         _ => {}
     }
 
@@ -359,6 +365,27 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
             help_lines(
                 "这里管理 Pi agent 目录 prompts/*.md 中的原生斜杠命令模板；文件名就是 /template 名称。a 新建，Enter 查看，e 编辑，r 重命名，d 删除。\n模板名只能使用安全的单个文件名，不能包含路径分隔符或路径穿越。保存和重命名会校验打开时的文件版本；检测到外部修改时会报冲突。",
                 "This page manages Pi's native slash-command templates under prompts/*.md; the filename is the /template name. Press a to create, Enter to view, e to edit, r to rename, and d to delete.\nTemplate names must be safe single filenames without path separators or traversal. Save and rename check the revision captured on open and report a conflict when an external edit is detected.",
+            ),
+        ),
+        HelpTarget::OmpModels => HelpContent::new(
+            texts::menu_omp_models(),
+            help_lines(
+                "这里编辑 OMP 原生 models.yml。OMP 允许多个供应商同时存在，模型由 provider/model 选择器引用；e 打开完整 YAML 编辑器，Enter 查看模型，d 删除模型。保存会校验 YAML 和打开时的文件版本，不会覆盖外部修改。",
+                "This page edits OMP's native models.yml. OMP keeps multiple providers together and resolves models through provider/model selectors. Press e to edit the complete YAML, Enter to view a model, and d to delete one. Saves validate YAML and the revision captured on open, so external edits are never silently overwritten.",
+            ),
+        ),
+        HelpTarget::OmpRoles => HelpContent::new(
+            texts::menu_omp_roles(),
+            help_lines(
+                "这里管理 OMP 生效的 modelRoles。内置角色包括 default、smol、slow、vision、plan、designer、commit、tiny、task、advisor，也可以保留扩展角色。若 modelRoleStorage 为 project，角色会写入当前目录的 .omp/config.yml；角色值可带 :low/:medium/:high/:xhigh/:max 推理级别。按 e 编辑，Enter 查看，d 删除。",
+                "This page manages OMP's effective modelRoles. Built-in roles include default, smol, slow, vision, plan, designer, commit, tiny, task, and advisor; extensions may add more. With modelRoleStorage=project, role writes target the current directory's .omp/config.yml. Values may include :low/:medium/:high/:xhigh/:max thinking levels. Press e to edit, Enter to view, and d to delete.",
+            ),
+        ),
+        HelpTarget::OmpSystemPrompts => HelpContent::new(
+            texts::menu_omp_system_prompts(),
+            help_lines(
+                "这里按 OMP 的实际查找规则管理 SYSTEM.md、APPEND_SYSTEM.md 和 TITLE_SYSTEM.md：SYSTEM.md 使用最近非空祖先 .omp，并可跟随 PI_CODING_AGENT_DIR；APPEND_SYSTEM.md/TITLE_SYSTEM.md 使用当前目录下 .omp/.claude/.codex/.gemini 的通用 project-first 查找。表格会显示实际生效路径；SYSTEM.md 替换默认提示词，APPEND_SYSTEM.md 追加内容，TITLE_SYSTEM.md 定制自动标题。",
+                "This page follows OMP's effective lookup rules for SYSTEM.md, APPEND_SYSTEM.md, and TITLE_SYSTEM.md. SYSTEM.md uses the nearest non-empty ancestor .omp directory and may follow PI_CODING_AGENT_DIR; APPEND_SYSTEM.md and TITLE_SYSTEM.md use the generic cwd-only .omp/.claude/.codex/.gemini project-first lookup. The table shows the active path. SYSTEM.md replaces the default prompt, APPEND_SYSTEM.md appends text, and TITLE_SYSTEM.md customizes automatic titles.",
             ),
         ),
         HelpTarget::FailoverQueue => HelpContent::new(
@@ -893,13 +920,26 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Controls whether requests include the default User-Agent. Some providers use it to identify the client.",
             ),
         ),
-        ProviderAddField::OpenClawModels => HelpContent::new(
-            texts::tui_label_openclaw_models(),
-            help_lines(
-                "编辑 OpenClaw/Pi 模型列表。Pi 表单中可按 f 从原生端点拉取模型。",
-                "Edits OpenClaw/Pi model entries. In a Pi form, press f to fetch from the native endpoint.",
-            ),
-        ),
+        ProviderAddField::OpenClawModels => {
+            let (title, body) = if matches!(app_type, AppType::Omp) {
+                (
+                    texts::tui_label_omp_models(),
+                    help_lines(
+                        "编辑 OMP 原生 models.yml 中该供应商的模型列表。聚焦此行时按 f 获取远程模型，选择后会加入当前表单；按 Enter 可手动编辑模型 JSON。保存供应商后才会写入 models.yml。",
+                        "Edits this provider's OMP model entries. With this row focused, press f to fetch remote models and add a selection; press Enter to edit the model JSON manually. The models.yml file is updated when you save the provider.",
+                    ),
+                )
+            } else {
+                (
+                    texts::tui_label_openclaw_models(),
+                    help_lines(
+                        "编辑 OpenClaw/Pi 模型列表。Pi 表单中可按 f 从原生端点拉取模型。",
+                        "Edits OpenClaw/Pi model entries. In a Pi form, press f to fetch from the native endpoint.",
+                    ),
+                )
+            };
+            HelpContent::new(title, body)
+        }
         ProviderAddField::OpenCodeModelContextLimit => HelpContent::new(
             texts::tui_label_context_limit(),
             help_lines(

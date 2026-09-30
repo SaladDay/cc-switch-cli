@@ -25,8 +25,8 @@ use crate::prompt_files::prompt_file_path;
 use crate::provider::Provider;
 use crate::services::config::BackupInfo;
 use crate::services::pi_prompt_files::{
-    PiPromptFileKind, PiPromptFileService, PiPromptFileSnapshot, PiPromptTemplate,
-    PiPromptTemplateService,
+    OmpPromptFileService, PiPromptFileKind, PiPromptFileService, PiPromptFileSnapshot,
+    PiPromptTemplate, PiPromptTemplateService,
 };
 use crate::services::{ConfigService, McpService, PromptService, ProviderService, SkillService};
 use crate::store::AppState;
@@ -223,8 +223,14 @@ pub struct ProvidersSnapshot {
     pub current_id: String,
     pub rows: Vec<ProviderRow>,
     pub live_ids: HashSet<String>,
-    /// Pi provider membership could not be read from models.json. Mutating
-    /// membership actions must fail closed while this is true.
+    /// OMP providers present in models.yml but suppressed by the effective
+    /// disabledProviders settings layer. Kept separate from `live_ids` so the
+    /// provider actions continue to treat disabled entries as inactive while
+    /// the renderer can show an explicit disabled marker.
+    pub disabled_ids: HashSet<String>,
+    /// Pi/OMP native provider membership could not be read from the live
+    /// registry. Mutating membership actions must fail closed while this is
+    /// true.
     pub pi_membership_unknown: bool,
     /// True only for the transient projection shown while a cold-switched app's
     /// real data is still loading. Lets the renderer show a "loading" state
@@ -266,6 +272,51 @@ pub struct PromptsSnapshot {
 pub struct PiPromptsSnapshot {
     pub system_files: Vec<(PiPromptFileKind, PiPromptFileSnapshot)>,
     pub templates: Vec<PiPromptTemplate>,
+    pub read_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OmpSnapshot {
+    pub providers: IndexMap<String, Value>,
+    pub models: Vec<crate::omp_config::OMPNativeModel>,
+    pub model_roles: IndexMap<String, String>,
+    pub models_path: PathBuf,
+    pub config_path: PathBuf,
+    /// The config file receiving model-role writes. This may be the project
+    /// `.omp/config.yml` when OMP's effective `modelRoleStorage` is `project`.
+    pub roles_path: PathBuf,
+    pub models_revision: String,
+    pub config_revision: String,
+    pub roles_revision: String,
+    pub models_yaml: String,
+    pub config_yaml: String,
+    pub roles_yaml: String,
+    pub models_error: Option<String>,
+    pub config_error: Option<String>,
+    pub read_error: Option<String>,
+}
+
+impl Default for OmpSnapshot {
+    fn default() -> Self {
+        let fallback = PathBuf::from("~/.omp/agent");
+        Self {
+            models: Vec::new(),
+            providers: IndexMap::new(),
+            model_roles: IndexMap::new(),
+            models_path: fallback.join("models.yml"),
+            config_path: fallback.join("config.yml"),
+            roles_path: fallback.join("config.yml"),
+            models_revision: "missing".to_string(),
+            config_revision: "missing".to_string(),
+            roles_revision: "missing".to_string(),
+            models_yaml: "providers: {}\n".to_string(),
+            config_yaml: "{}\n".to_string(),
+            roles_yaml: "{}\n".to_string(),
+            models_error: None,
+            config_error: None,
+            read_error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -409,6 +460,7 @@ impl ProxySnapshot {
             AppType::Hermes => None,
             AppType::OpenClaw => None,
             AppType::Pi => None,
+            AppType::Omp => None,
         }
     }
 
@@ -1187,6 +1239,7 @@ pub struct UiData {
     pub mcp: McpSnapshot,
     pub prompts: PromptsSnapshot,
     pub pi_prompts: PiPromptsSnapshot,
+    pub omp: OmpSnapshot,
     pub config: ConfigSnapshot,
     pub skills: SkillsSnapshot,
     pub proxy: ProxySnapshot,
@@ -1234,6 +1287,10 @@ impl UiData {
         Ok(())
     }
 
+    pub(crate) fn refresh_current_app_omp_data(&mut self) {
+        self.omp = load_omp_snapshot();
+    }
+
     pub fn load(app_type: &AppType) -> Result<Self, AppError> {
         let state = load_state()?;
 
@@ -1277,6 +1334,11 @@ impl UiData {
         let mcp = load_mcp(state)?;
         let prompts = load_prompts(state, app_type)?;
         let pi_prompts = load_pi_prompts(app_type)?;
+        let omp = if matches!(app_type, AppType::Omp) {
+            load_omp_snapshot()
+        } else {
+            OmpSnapshot::default()
+        };
         let config = load_config_snapshot(state, app_type)?;
         let skills = match provider_load_mode {
             ProviderLoadMode::SyncLive => load_skills_snapshot()?,
@@ -1289,6 +1351,7 @@ impl UiData {
             mcp,
             prompts,
             pi_prompts,
+            omp,
             config,
             skills,
             proxy,
@@ -1314,6 +1377,7 @@ impl UiData {
             mcp: self.mcp.clone(),
             prompts: PromptsSnapshot::default(),
             pi_prompts: PiPromptsSnapshot::default(),
+            omp: OmpSnapshot::default(),
             config: self.config.loading_projection(app_type),
             skills: self.skills.clone(),
             proxy,
@@ -1534,6 +1598,12 @@ fn load_providers_with_mode(
     } else {
         (None, false)
     };
+    let (omp_live_ids, omp_disabled_ids, omp_membership_unknown) =
+        if matches!(app_type, AppType::Omp) {
+            read_omp_live_ids()
+        } else {
+            (HashSet::new(), HashSet::new(), false)
+        };
     let pi_live_ids = pi_state
         .as_ref()
         .map(|current| {
@@ -1558,6 +1628,18 @@ fn load_providers_with_mode(
         .as_ref()
         .and_then(|model| openclaw_default_model_ref_parts(&model.primary))
         .map(|(provider_id, _)| provider_id.to_string());
+    let omp_default_provider_id = if matches!(app_type, AppType::Omp) {
+        crate::omp_config::read_omp_model_roles()
+            .ok()
+            .and_then(|roles| {
+                roles.get("default").and_then(|selector| {
+                    crate::omp_config::omp_selector_provider_id(selector, &roles)
+                })
+            })
+            .filter(|provider| omp_live_ids.contains(provider))
+    } else {
+        None
+    };
 
     let mut rows = sorted
         .into_iter()
@@ -1578,12 +1660,14 @@ fn load_providers_with_mode(
                     AppType::Hermes => hermes_live_ids.contains(&id),
                     AppType::OpenClaw => openclaw_live_ids.contains(&id),
                     AppType::Pi => pi_live_ids.contains(&id),
+                    AppType::Omp => omp_live_ids.contains(&id),
                     _ => true,
                 },
                 is_saved: true,
                 is_default_model: match app_type {
                     AppType::Hermes => hermes_current_provider_id.as_deref() == Some(id.as_str()),
                     AppType::Pi => pi_default_provider_id.as_deref() == Some(id.as_str()),
+                    AppType::Omp => omp_default_provider_id.as_deref() == Some(id.as_str()),
                     _ => openclaw_primary_default_provider_id.as_deref() == Some(id.as_str()),
                 },
                 primary_model_id: extract_primary_model_id(
@@ -1648,6 +1732,7 @@ fn load_providers_with_mode(
         AppType::Hermes => hermes_live_ids,
         AppType::OpenClaw => openclaw_live_providers.keys().cloned().collect(),
         AppType::Pi => pi_live_ids,
+        AppType::Omp => omp_live_ids,
         _ => HashSet::new(),
     };
 
@@ -1655,9 +1740,43 @@ fn load_providers_with_mode(
         current_id,
         rows,
         live_ids,
-        pi_membership_unknown,
+        disabled_ids: omp_disabled_ids,
+        // This flag is shared by the Pi and OMP additive native registries;
+        // both must fail closed when their live membership cannot be read.
+        pi_membership_unknown: pi_membership_unknown || omp_membership_unknown,
         loading: false,
     })
+}
+
+/// Read OMP's native provider membership for the TUI. The saved CC Switch
+/// catalog remains useful when the external YAML is malformed or temporarily
+/// unreadable, so membership is reported as unknown instead of aborting the
+/// whole provider-page load.
+fn read_omp_live_ids() -> (HashSet<String>, HashSet<String>, bool) {
+    let providers = match crate::omp_config::read_omp_native_providers() {
+        Ok(providers) => providers,
+        Err(error) => {
+            log::warn!("Failed to read OMP provider membership: {error}");
+            return (HashSet::new(), HashSet::new(), true);
+        }
+    };
+    let disabled = match crate::omp_config::read_omp_disabled_providers() {
+        Ok(disabled) => disabled,
+        Err(error) => {
+            log::warn!("Failed to read OMP disabledProviders: {error}");
+            return (HashSet::new(), HashSet::new(), true);
+        }
+    };
+    let provider_ids = providers.into_keys().collect::<HashSet<_>>();
+    let disabled_ids = disabled
+        .intersection(&provider_ids)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let live_ids = provider_ids
+        .difference(&disabled_ids)
+        .cloned()
+        .collect::<HashSet<_>>();
+    (live_ids, disabled_ids, false)
 }
 
 fn current_provider_for_mode(
@@ -1742,6 +1861,7 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .as_str()
             .map(|s| s.to_string()),
         AppType::Pi => crate::pi_config::provider_base_url(settings_config).ok(),
+        AppType::Omp => crate::omp_config::provider_base_url(settings_config).ok(),
     }
 }
 
@@ -1756,6 +1876,7 @@ fn extract_primary_model_id(
             Some(live_provider) => openclaw_primary_model_id(live_provider),
             None => openclaw_primary_model_id(settings_config),
         },
+        AppType::Omp => omp_primary_model_id(settings_config),
         _ => None,
     }
 }
@@ -1808,6 +1929,29 @@ fn openclaw_primary_model_id(provider_value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Return the first native OMP model for provider-level actions.
+///
+/// OMP stores a provider's catalog under `models`, just like Pi.  The
+/// provider table has one row per provider, so actions such as "set default"
+/// need a deterministic model to pass to the native `modelRoles.default`
+/// writer.  Keep this deliberately conservative: malformed/empty catalogs
+/// remain unset and the UI can explain that a model must be configured first.
+fn omp_primary_model_id(provider_value: &Value) -> Option<String> {
+    provider_value
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models.iter().find_map(|model| {
+                model
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+        })
+}
+
 fn openclaw_default_model_ids_by_provider(
     default_model: Option<&crate::openclaw_config::OpenClawDefaultModel>,
 ) -> HashMap<String, String> {
@@ -1849,6 +1993,12 @@ fn load_mcp(state: &AppState) -> Result<McpSnapshot, AppError> {
 }
 
 fn load_prompts(state: &AppState, app_type: &AppType) -> Result<PromptsSnapshot, AppError> {
+    // OMP has no CC Switch prompt-preset database. Its native system prompt
+    // files are loaded separately by load_pi_prompts and rendered on the
+    // dedicated OMP page.
+    if matches!(app_type, AppType::Omp) {
+        return Ok(PromptsSnapshot::default());
+    }
     let prompts = PromptService::get_prompts(state, app_type.clone())?;
     let mut rows = prompts
         .into_iter()
@@ -1870,21 +2020,125 @@ fn load_prompts(state: &AppState, app_type: &AppType) -> Result<PromptsSnapshot,
 }
 
 fn load_pi_prompts(app_type: &AppType) -> Result<PiPromptsSnapshot, AppError> {
-    if !matches!(app_type, AppType::Pi) {
+    if !matches!(app_type, AppType::Pi | AppType::Omp) {
         return Ok(PiPromptsSnapshot::default());
     }
-    let system_files = [
-        PiPromptFileKind::SystemAppend,
-        PiPromptFileKind::SystemOverride,
-    ]
-    .into_iter()
-    .map(|kind| PiPromptFileService::read(kind).map(|snapshot| (kind, snapshot)))
-    .collect::<Result<Vec<_>, _>>()?;
-    let templates = PiPromptTemplateService::list()?;
+    let kinds = if matches!(app_type, AppType::Omp) {
+        vec![
+            PiPromptFileKind::SystemAppend,
+            PiPromptFileKind::SystemOverride,
+            PiPromptFileKind::TitleSystem,
+        ]
+    } else {
+        vec![
+            PiPromptFileKind::SystemAppend,
+            PiPromptFileKind::SystemOverride,
+        ]
+    };
+    let mut system_files = Vec::new();
+    let mut read_error = None;
+    for kind in kinds {
+        let result = if matches!(app_type, AppType::Omp) {
+            OmpPromptFileService::read(kind)
+        } else {
+            PiPromptFileService::read(kind)
+        };
+        match result {
+            Ok(snapshot) => system_files.push((kind, snapshot)),
+            Err(error) if matches!(app_type, AppType::Omp) => {
+                read_error = Some(error.to_string());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let templates = if matches!(app_type, AppType::Omp) {
+        Vec::new()
+    } else {
+        PiPromptTemplateService::list()?
+    };
     Ok(PiPromptsSnapshot {
         system_files,
         templates,
+        read_error,
     })
+}
+
+fn load_omp_snapshot() -> OmpSnapshot {
+    let mut snapshot = OmpSnapshot::default();
+    let mut errors = Vec::new();
+
+    if let Ok(agent_dir) = crate::omp_config::get_omp_agent_dir() {
+        snapshot.models_path = crate::omp_config::get_omp_models_path()
+            .unwrap_or_else(|_| agent_dir.join("models.yml"));
+        snapshot.config_path = crate::omp_config::get_omp_settings_path()
+            .unwrap_or_else(|_| agent_dir.join("config.yml"));
+    }
+
+    match crate::omp_config::read_omp_native_models() {
+        Ok(models) => snapshot.models = models,
+        Err(error) => {
+            snapshot.models_error = Some(error.to_string());
+            errors.push(format!("models.yml: {error}"));
+        }
+    }
+    match crate::omp_config::read_omp_native_providers() {
+        Ok(providers) => snapshot.providers = providers,
+        Err(error) => errors.push(format!("models.yml providers: {error}")),
+    }
+    match crate::omp_config::read_omp_model_roles_with_metadata() {
+        Ok((roles, path, revision)) => {
+            snapshot.model_roles = roles;
+            snapshot.roles_path = path;
+            snapshot.roles_revision = revision;
+            if let Ok((yaml, revision)) =
+                crate::omp_config::read_omp_config_yaml_at(&snapshot.roles_path)
+            {
+                // If config.yml is still represented by legacy settings.json,
+                // the advanced editor must carry the legacy source revision
+                // so its eventual migration write can detect concurrent edits.
+                snapshot.roles_revision = revision;
+                snapshot.roles_yaml = if yaml.trim().is_empty() {
+                    "{}\n".to_string()
+                } else {
+                    yaml
+                };
+            }
+        }
+        Err(error) => {
+            snapshot.config_error = Some(error.to_string());
+            errors.push(format!("config.yml modelRoles: {error}"));
+        }
+    }
+    match crate::omp_config::read_omp_models_yaml() {
+        Ok((yaml, revision)) => {
+            snapshot.models_yaml = yaml;
+            snapshot.models_revision = revision;
+        }
+        Err(error) => {
+            snapshot
+                .models_error
+                .get_or_insert_with(|| error.to_string());
+            errors.push(format!("models.yml: {error}"));
+        }
+    }
+    match crate::omp_config::read_omp_config_yaml() {
+        Ok((yaml, revision)) => {
+            snapshot.config_yaml = if yaml.trim().is_empty() {
+                "{}\n".to_string()
+            } else {
+                yaml
+            };
+            snapshot.config_revision = revision;
+        }
+        Err(error) => {
+            snapshot
+                .config_error
+                .get_or_insert_with(|| error.to_string());
+            errors.push(format!("config.yml: {error}"));
+        }
+    }
+    snapshot.read_error = (!errors.is_empty()).then(|| errors.join("; "));
+    snapshot
 }
 
 fn sort_prompt_rows(rows: &mut [PromptRow]) {
@@ -3513,6 +3767,8 @@ fn usage_provider_name_sql(log_alias: &str, provider_alias: &str) -> String {
          WHEN '_codex_session' THEN 'Codex (Session)' \
          WHEN '_gemini_session' THEN 'Gemini (Session)' \
          WHEN '_opencode_session' THEN 'OpenCode (Session)' \
+         WHEN '_pi_session' THEN 'Pi (Session)' \
+         WHEN '_omp_session' THEN 'OMP (Session)' \
          ELSE {log_alias}.provider_id END)"
     )
 }
@@ -3725,12 +3981,50 @@ fn skills_snapshot_from_index(index: crate::services::skill::SkillsIndex) -> Ski
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::omp_config::test_support::TestAgentDir;
     use crate::prompt::Prompt;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta, UsageScript};
     use serde_json::json;
     use serial_test::serial;
+    use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+
+    #[test]
+    #[serial]
+    fn omp_live_membership_degrades_when_native_file_is_malformed() {
+        let _agent = TestAgentDir::new();
+        let path = crate::omp_config::get_omp_models_path().expect("OMP models path");
+        fs::create_dir_all(path.parent().expect("OMP models parent")).expect("create parent");
+        fs::write(path, "providers: [not-an-object]\n").expect("write malformed OMP models");
+
+        let (live_ids, disabled_ids, membership_unknown) = read_omp_live_ids();
+        assert!(live_ids.is_empty());
+        assert!(disabled_ids.is_empty());
+        assert!(membership_unknown);
+    }
+
+    #[test]
+    #[serial]
+    fn omp_live_membership_separates_disabled_native_providers() {
+        let _agent = TestAgentDir::new();
+        let models_path = crate::omp_config::get_omp_models_path().expect("OMP models path");
+        fs::create_dir_all(models_path.parent().expect("OMP models parent"))
+            .expect("create OMP directory");
+        fs::write(
+            &models_path,
+            "providers:\n  enabled:\n    baseUrl: https://enabled.example/v1\n    apiKey: key\n    models:\n      - id: model\n  disabled:\n    baseUrl: https://disabled.example/v1\n    apiKey: key\n    models:\n      - id: model\n",
+        )
+        .expect("write OMP models");
+        let settings_path = crate::omp_config::get_omp_settings_path().expect("OMP config path");
+        fs::write(&settings_path, "disabledProviders: [disabled]\n").expect("write OMP config");
+
+        let (live_ids, disabled_ids, membership_unknown) = read_omp_live_ids();
+        assert!(!membership_unknown);
+        assert!(live_ids.contains("enabled"));
+        assert!(!live_ids.contains("disabled"));
+        assert!(disabled_ids.contains("disabled"));
+    }
 
     use crate::settings::{get_settings, update_settings, AppSettings};
     use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
@@ -6267,6 +6561,20 @@ base_url = "https://current.example.com/v1"
                 .map(String::as_str),
             Some("shared-model")
         );
+    }
+
+    #[test]
+    fn omp_primary_model_id_skips_malformed_and_empty_entries() {
+        let value = serde_json::json!({
+            "models": [
+                {"name": "missing id"},
+                {"id": "  "},
+                {"id": "gpt-5.6"}
+            ]
+        });
+
+        assert_eq!(omp_primary_model_id(&value).as_deref(), Some("gpt-5.6"));
+        assert_eq!(omp_primary_model_id(&serde_json::json!({})), None);
     }
 
     #[test]

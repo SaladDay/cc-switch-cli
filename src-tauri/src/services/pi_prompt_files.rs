@@ -84,6 +84,10 @@ impl PiAgentsFileGuard {
 pub enum PiPromptFileKind {
     SystemOverride,
     SystemAppend,
+    /// OMP uses this file for the prompt sent to its automatic title
+    /// generator. Pi does not expose it in its native UI, but sharing the
+    /// enum keeps the compare-and-swap file service identical for both apps.
+    TitleSystem,
 }
 
 impl PiPromptFileKind {
@@ -91,6 +95,7 @@ impl PiPromptFileKind {
         match self {
             Self::SystemOverride => "SYSTEM.md",
             Self::SystemAppend => "APPEND_SYSTEM.md",
+            Self::TitleSystem => "TITLE_SYSTEM.md",
         }
     }
 }
@@ -108,7 +113,7 @@ pub struct PiPromptFileService;
 impl PiPromptFileService {
     pub fn read(kind: PiPromptFileKind) -> Result<PiPromptFileSnapshot, AppError> {
         let _guard = lock_prompt_files()?;
-        read_prompt_file(&get_pi_agent_dir()?, kind)
+        read_prompt_file(&get_pi_agent_dir()?, kind, "Pi prompt file")
     }
 
     pub fn replace(
@@ -123,7 +128,7 @@ impl PiPromptFileService {
         let path = root.join(kind.filename());
         ensure_revision(&path, expected_revision, "Pi prompt file")?;
         atomic_write(&path, content.as_bytes())?;
-        read_prompt_file(&root, kind)
+        read_prompt_file(&root, kind, "Pi prompt file")
     }
 
     pub fn delete(kind: PiPromptFileKind, expected_revision: &str) -> Result<bool, AppError> {
@@ -136,6 +141,151 @@ impl PiPromptFileService {
             Err(error) => Err(AppError::io(&path, error)),
         }
     }
+}
+
+/// OMP uses the same user-level instruction filenames as Pi, but resolves
+/// them from OMP's shared config search roots. Keeping a separate service
+/// prevents an OMP edit from ever writing into `~/.pi` and mirrors OMP's
+/// distinction between shared config lookup and its runtime agent directory.
+pub struct OmpPromptFileService;
+
+impl OmpPromptFileService {
+    pub(crate) fn active_path(kind: PiPromptFileKind) -> Result<PathBuf, AppError> {
+        resolve_omp_prompt_path(kind)
+    }
+
+    pub fn read(kind: PiPromptFileKind) -> Result<PiPromptFileSnapshot, AppError> {
+        let _guard = lock_prompt_files()?;
+        let path = resolve_omp_prompt_path(kind)?;
+        read_prompt_file(
+            path.parent().unwrap_or(Path::new(".")),
+            kind,
+            "OMP prompt file",
+        )
+    }
+
+    pub fn replace(
+        kind: PiPromptFileKind,
+        expected_revision: &str,
+        content: &str,
+    ) -> Result<PiPromptFileSnapshot, AppError> {
+        validate_instruction_content_for_app(content, "OMP instruction")?;
+        let _guard = lock_prompt_files()?;
+        let path = resolve_omp_prompt_path(kind)?;
+        ensure_revision(&path, expected_revision, "OMP prompt file")?;
+        ensure_omp_prompt_parent(&path)?;
+        crate::config::atomic_write(&path, content.as_bytes())?;
+        read_prompt_file(
+            path.parent().unwrap_or(Path::new(".")),
+            kind,
+            "OMP prompt file",
+        )
+    }
+
+    pub fn delete(kind: PiPromptFileKind, expected_revision: &str) -> Result<bool, AppError> {
+        let _guard = lock_prompt_files()?;
+        let path = resolve_omp_prompt_path(kind)?;
+        ensure_revision(&path, expected_revision, "OMP prompt file")?;
+        if path.exists() {
+            ensure_omp_prompt_parent(&path)?;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(AppError::io(&path, error)),
+        }
+    }
+}
+
+/// User-level OMP prompt files live beside `models.yml` and `config.yml`, so
+/// their parent must satisfy the same private-directory policy. Project
+/// prompt files remain ordinary repository files and are intentionally not
+/// chmod'd by CC Switch.
+fn ensure_omp_prompt_parent(path: &Path) -> Result<(), AppError> {
+    let user_root = crate::omp_config::get_omp_shared_config_agent_dir()?;
+    let native_root = crate::omp_config::get_omp_agent_dir()?;
+    if path.starts_with(&user_root) || path.starts_with(&native_root) {
+        crate::omp_config::ensure_private_omp_parent(path)?;
+    }
+    Ok(())
+}
+
+/// Resolve OMP's effective prompt search.
+///
+/// OMP has two subtly different discovery paths here. `SYSTEM.md` is exposed
+/// by the native OMP provider, which selects the nearest non-empty ancestor
+/// `.omp` directory and uses its file (if present); its user-level file follows
+/// `getAgentDir()`, including an explicit `PI_CODING_AGENT_DIR` override.
+/// `APPEND_SYSTEM.md` and `TITLE_SYSTEM.md` use the generic shared-config
+/// helper instead: project lookup is cwd-only and user lookup follows the
+/// configured `.omp`/profile agent directory, then the other agent bases.
+fn resolve_omp_prompt_path(kind: PiPromptFileKind) -> Result<PathBuf, AppError> {
+    let cwd = std::env::current_dir().map_err(|error| {
+        AppError::Config(format!("failed to resolve current directory: {error}"))
+    })?;
+
+    if matches!(kind, PiPromptFileKind::SystemOverride) {
+        // The native provider stops at the first non-empty ancestor `.omp`
+        // directory. A nearer non-empty directory without SYSTEM.md still
+        // shadows a farther project config, so do not continue past it.
+        let mut ancestor = cwd.clone();
+        loop {
+            let project_dir = ancestor.join(".omp");
+            if is_non_empty_directory(&project_dir) {
+                let candidate = project_dir.join(kind.filename());
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+                break;
+            }
+            if !ancestor.pop() {
+                break;
+            }
+        }
+    }
+
+    // The generic shared-config path checks project config bases directly under
+    // cwd. The order is part of OMP's precedence contract: `.omp` wins over
+    // `.claude`, then `.codex`, then `.gemini` when multiple files exist.
+    for base in [".omp", ".claude", ".codex", ".gemini"] {
+        let candidate = cwd.join(base).join(kind.filename());
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    if matches!(kind, PiPromptFileKind::SystemOverride) {
+        // Native OMP discovery uses getAgentDir(), so an explicit
+        // PI_CODING_AGENT_DIR can be the effective SYSTEM.md location. Keep
+        // the generic shared `.omp` path as a fallback for installations that
+        // only have a shared-config file there.
+        let native_candidate = crate::omp_config::get_omp_agent_dir()?.join(kind.filename());
+        if native_candidate.exists() {
+            return Ok(native_candidate);
+        }
+    }
+
+    let home = crate::config::get_home_dir();
+    let user_candidates = [
+        crate::omp_config::get_omp_shared_config_agent_dir()?,
+        crate::config::get_claude_config_dir(),
+        home.join(".codex"),
+        home.join(".gemini"),
+    ];
+    for root in user_candidates {
+        let candidate = root.join(kind.filename());
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Ok(crate::omp_config::get_omp_shared_config_agent_dir()?.join(kind.filename()))
+}
+
+fn is_non_empty_directory(path: &Path) -> bool {
+    let Ok(mut entries) = fs::read_dir(path) else {
+        return false;
+    };
+    entries.next().is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,15 +399,19 @@ fn lock_prompt_files() -> Result<MutexGuard<'static, ()>, AppError> {
         .map_err(|error| AppError::Config(format!("Pi prompt file lock is poisoned: {error}")))
 }
 
-fn read_prompt_file(root: &Path, kind: PiPromptFileKind) -> Result<PiPromptFileSnapshot, AppError> {
+fn read_prompt_file(
+    root: &Path,
+    kind: PiPromptFileKind,
+    label: &str,
+) -> Result<PiPromptFileSnapshot, AppError> {
     let path = root.join(kind.filename());
     let (exists, content, file_revision) = match fs::File::open(&path) {
         Ok(file) => {
-            let bytes = read_open_file_limited(file, &path, "Pi prompt file")?;
+            let bytes = read_open_file_limited(file, &path, label)?;
             let file_revision = revision(&bytes);
             let content = String::from_utf8(bytes).map_err(|error| {
                 AppError::InvalidInput(format!(
-                    "Pi prompt file must be UTF-8 ({}): {error}",
+                    "{label} must be UTF-8 ({}): {error}",
                     path.display()
                 ))
             })?;
@@ -319,12 +473,16 @@ fn read_open_file_limited(file: fs::File, path: &Path, label: &str) -> Result<Ve
 }
 
 fn validate_instruction_content(content: &str) -> Result<(), AppError> {
+    validate_instruction_content_for_app(content, "Pi instruction")
+}
+
+fn validate_instruction_content_for_app(content: &str, label: &str) -> Result<(), AppError> {
     if content.trim().is_empty() {
-        return Err(AppError::InvalidInput(
-            "Pi instruction cannot be blank; remove the file to deactivate it".to_string(),
-        ));
+        return Err(AppError::InvalidInput(format!(
+            "{label} cannot be blank; remove the file to deactivate it"
+        )));
     }
-    validate_content_size(content, "Pi instruction")
+    validate_content_size(content, label)
 }
 
 fn validate_content_size(content: &str, label: &str) -> Result<(), AppError> {
@@ -396,6 +554,7 @@ pub(crate) fn validate_template_slug(slug: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::omp_config::test_support::TestAgentDir as OmpTestAgentDir;
     use crate::pi_config::test_support::TestAgentDir;
     use serial_test::serial;
 
@@ -517,5 +676,147 @@ mod tests {
             .read()
             .expect_err("oversized AGENTS.md must be rejected");
         assert!(error.to_string().contains("1 MiB limit"));
+    }
+
+    #[test]
+    #[serial]
+    fn omp_title_system_prompt_uses_omp_agent_directory() {
+        let _agent = OmpTestAgentDir::new();
+        let missing = OmpPromptFileService::read(PiPromptFileKind::TitleSystem)
+            .expect("read missing OMP title prompt");
+        assert!(!missing.exists);
+        let saved = OmpPromptFileService::replace(
+            PiPromptFileKind::TitleSystem,
+            &missing.revision,
+            "Generate a concise title.",
+        )
+        .expect("save OMP title prompt");
+        assert_eq!(saved.content, "Generate a concise title.");
+        assert!(crate::omp_config::get_omp_agent_dir()
+            .expect("OMP agent directory")
+            .join("TITLE_SYSTEM.md")
+            .exists());
+    }
+
+    #[test]
+    #[serial]
+    fn omp_prompt_files_use_project_first_resolution() {
+        let _agent = OmpTestAgentDir::new();
+        let temp = tempfile::tempdir().expect("create project directory");
+        let _cwd = crate::omp_config::test_support::CurrentDirGuard::change_to(temp.path());
+        let project_path = temp.path().join(".omp/SYSTEM.md");
+        fs::create_dir_all(project_path.parent().expect("project prompt parent"))
+            .expect("create project prompt directory");
+        fs::write(&project_path, "project prompt").expect("write project prompt");
+
+        let snapshot = OmpPromptFileService::read(PiPromptFileKind::SystemOverride)
+            .expect("read project prompt");
+        assert!(snapshot.exists);
+        assert_eq!(snapshot.content, "project prompt");
+        OmpPromptFileService::replace(
+            PiPromptFileKind::SystemOverride,
+            &snapshot.revision,
+            "updated project prompt",
+        )
+        .expect("update project prompt");
+        assert_eq!(
+            fs::read_to_string(&project_path).expect("read updated prompt"),
+            "updated project prompt"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn omp_system_prompt_uses_nearest_non_empty_ancestor_project() {
+        let _agent = OmpTestAgentDir::new();
+        let temp = tempfile::tempdir().expect("create project directory");
+        let project_root = temp.path().join("repo");
+        let nested = project_root.join("packages/app/src");
+        fs::create_dir_all(&nested).expect("create nested project directory");
+        let project_path = project_root.join(".omp/SYSTEM.md");
+        fs::create_dir_all(project_path.parent().expect("project prompt parent"))
+            .expect("create project prompt directory");
+        fs::write(&project_path, "ancestor prompt").expect("write ancestor prompt");
+        let _cwd = crate::omp_config::test_support::CurrentDirGuard::change_to(&nested);
+
+        let active = OmpPromptFileService::active_path(PiPromptFileKind::SystemOverride)
+            .expect("resolve ancestor project prompt");
+        assert_eq!(active, project_path);
+
+        // A nearer non-empty .omp directory shadows farther ancestors even
+        // when it does not contain SYSTEM.md, matching OMP's native provider.
+        let nearer = nested.join(".omp");
+        fs::create_dir_all(&nearer).expect("create nearer OMP directory");
+        fs::write(nearer.join("settings.json"), "{}").expect("make nearer config non-empty");
+        let active = OmpPromptFileService::active_path(PiPromptFileKind::SystemOverride)
+            .expect("resolve shadowed project prompt");
+        assert_eq!(
+            active,
+            crate::omp_config::get_omp_shared_config_agent_dir()
+                .unwrap()
+                .join("SYSTEM.md")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial]
+    fn omp_user_prompt_write_rejects_shared_writable_agent_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _agent = OmpTestAgentDir::new();
+        let agent_dir = crate::omp_config::get_omp_shared_config_agent_dir()
+            .expect("OMP shared agent directory");
+        fs::set_permissions(&agent_dir, fs::Permissions::from_mode(0o775))
+            .expect("make OMP agent directory group writable");
+
+        let missing = OmpPromptFileService::read(PiPromptFileKind::SystemOverride)
+            .expect("read missing prompt");
+        let error = OmpPromptFileService::replace(
+            PiPromptFileKind::SystemOverride,
+            &missing.revision,
+            "must not be written",
+        )
+        .expect_err("shared writable OMP directory must be rejected");
+        assert!(error.to_string().contains("group/other writable"));
+        assert!(!agent_dir.join("SYSTEM.md").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn omp_system_prompt_lookup_uses_runtime_agent_override() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _cwd = crate::omp_config::test_support::CurrentDirGuard::change_to(home.path());
+
+        let default_agent = home.path().join(".omp/agent");
+        let runtime_override = home.path().join("omp-runtime-agent");
+        fs::create_dir_all(&default_agent).expect("create default OMP agent directory");
+        fs::create_dir_all(&runtime_override).expect("create runtime override directory");
+        fs::write(default_agent.join("SYSTEM.md"), "native shared prompt")
+            .expect("write native shared prompt");
+        fs::write(runtime_override.join("SYSTEM.md"), "runtime-only prompt")
+            .expect("write runtime override prompt");
+        let previous_agent_override = std::env::var_os("PI_CODING_AGENT_DIR");
+        std::env::set_var("PI_CODING_AGENT_DIR", &runtime_override);
+
+        let active = OmpPromptFileService::active_path(PiPromptFileKind::SystemOverride)
+            .expect("resolve OMP shared prompt path");
+        assert_eq!(active, runtime_override.join("SYSTEM.md"));
+        let snapshot = OmpPromptFileService::read(PiPromptFileKind::SystemOverride)
+            .expect("read native runtime prompt");
+        assert_eq!(snapshot.content, "runtime-only prompt");
+
+        // Generic APPEND_SYSTEM.md lookup intentionally keeps the shared
+        // config base and does not follow an arbitrary runtime agent override.
+        fs::write(default_agent.join("APPEND_SYSTEM.md"), "shared append")
+            .expect("write shared append prompt");
+        fs::write(runtime_override.join("APPEND_SYSTEM.md"), "runtime append")
+            .expect("write runtime append prompt");
+        let active = OmpPromptFileService::active_path(PiPromptFileKind::SystemAppend)
+            .expect("resolve generic append prompt path");
+        assert_eq!(active, default_agent.join("APPEND_SYSTEM.md"));
+
+        crate::test_support::restore_env("PI_CODING_AGENT_DIR", &previous_agent_override);
     }
 }

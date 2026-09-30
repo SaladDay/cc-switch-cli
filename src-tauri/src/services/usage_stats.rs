@@ -216,6 +216,7 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
          WHEN '_gemini_session' THEN 'Gemini (Session)' \
          WHEN '_opencode_session' THEN 'OpenCode (Session)' \
          WHEN '_pi_session' THEN 'Pi (Session)' \
+         WHEN '_omp_session' THEN 'OMP (Session)' \
          ELSE {log_alias}.provider_id END)"
     )
 }
@@ -236,7 +237,7 @@ pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
     let proxy_data_source = data_source_expr("proxy_dedup");
     format!(
         "NOT (
-            {data_source} IN ('session_log', 'codex_session', 'gemini_session', 'opencode_session')
+            {data_source} IN ('session_log', 'codex_session', 'gemini_session', 'opencode_session', 'omp_session')
             AND EXISTS (
                 SELECT 1
                 FROM proxy_request_logs proxy_dedup
@@ -251,7 +252,7 @@ pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
                       proxy_dedup.cache_creation_tokens = {log_alias}.cache_creation_tokens
                       OR (
                           {log_alias}.cache_creation_tokens = 0
-                          AND {data_source} IN ('codex_session', 'gemini_session', 'opencode_session')
+                          AND {data_source} IN ('codex_session', 'gemini_session', 'opencode_session', 'omp_session')
                       )
                   )
                   AND proxy_dedup.created_at BETWEEN

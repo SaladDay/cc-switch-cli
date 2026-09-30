@@ -498,9 +498,12 @@ fn prompt_and_apply_provider_api_format(
     match app_type {
         AppType::Claude => prompt_and_apply_claude_api_format(app_type, provider),
         AppType::Codex => prompt_and_apply_codex_api_format(app_type, provider),
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            Ok(())
-        }
+        AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Omp => Ok(()),
     }
 }
 
@@ -783,7 +786,7 @@ pub enum ProviderCommand {
     SetDefault {
         /// Provider ID to set as default
         id: String,
-        /// OpenClaw model ID to set as primary; defaults to the first live model
+        /// OpenClaw/OMP model ID to set as primary; defaults to the first live model
         #[arg(long)]
         model: Option<String>,
     },
@@ -948,6 +951,7 @@ pub enum ModelFetchAuthArg {
     Bearer,
     Anthropic,
     GoogleApiKey,
+    AzureApiKey,
 }
 
 impl From<ModelFetchAuthArg> for provider_inspect::ProviderModelFetchStrategy {
@@ -956,6 +960,7 @@ impl From<ModelFetchAuthArg> for provider_inspect::ProviderModelFetchStrategy {
             ModelFetchAuthArg::Bearer => Self::Bearer,
             ModelFetchAuthArg::Anthropic => Self::Anthropic,
             ModelFetchAuthArg::GoogleApiKey => Self::GoogleApiKey,
+            ModelFetchAuthArg::AzureApiKey => Self::AzureApiKey,
         }
     }
 }
@@ -1005,8 +1010,8 @@ fn resolve_provider_for_switch(
 fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
     let app_str = app_type.as_str().to_string();
-    let skip_live_sync =
-        !matches!(app_type, AppType::Pi) && !crate::sync_policy::should_sync_live(&app_type);
+    let skip_live_sync = !matches!(app_type, AppType::Pi | AppType::Omp)
+        && !crate::sync_policy::should_sync_live(&app_type);
 
     // 检查 provider 是否存在（支持按 id 或名称解析）
     let providers = ProviderService::list(&state, app_type.clone())?;
@@ -1024,7 +1029,9 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         );
     }
 
-    if app_type.is_additive_mode() {
+    if matches!(app_type, AppType::Omp) {
+        println!("{}", success(&format!("✓ Enabled OMP provider '{}'", id)));
+    } else if app_type.is_additive_mode() {
         println!(
             "{}",
             success(&texts::provider_added_to_app_config(id, &app_str))
@@ -1454,6 +1461,51 @@ fn build_add_settings_config(
             }
             Ok(settings)
         }
+        AppType::Omp => {
+            let base_url = non_empty(args.base_url.clone());
+            let model = non_empty(args.model.clone());
+            if model.is_some() && base_url.is_none() {
+                return Err(add_missing_field_error("--base-url"));
+            }
+            if let Some(base_url) = base_url.as_deref() {
+                if !crate::omp_config::is_valid_request_url(base_url) {
+                    return Err(AppError::InvalidInput(
+                        "OMP --base-url must be an absolute HTTP(S) URL".to_string(),
+                    ));
+                }
+            }
+            // Custom OMP models require a provider-level API protocol. Keep
+            // the CLI ergonomic by defaulting to OMP's native protocol when
+            // `--api-format` is omitted; override-only entries may omit it.
+            let api = non_empty(args.api_format.clone()).or_else(|| {
+                model
+                    .as_ref()
+                    .map(|_| crate::omp_config::OMP_DEFAULT_API_PROTOCOL.to_string())
+            });
+            if let Some(api) = api.as_deref() {
+                crate::omp_config::validate_api_protocol(api)?;
+            }
+            let api_key = non_empty(args.api_key.clone());
+            let mut settings = serde_json::Map::new();
+            if let Some(base_url) = base_url {
+                settings.insert("baseUrl".to_string(), serde_json::json!(base_url));
+            }
+            if let Some(api) = api {
+                settings.insert("api".to_string(), serde_json::json!(api));
+            }
+            if let Some(model) = model {
+                settings.insert("models".to_string(), serde_json::json!([{ "id": model }]));
+            }
+            if let Some(api_key) = api_key {
+                settings.insert("apiKey".to_string(), serde_json::Value::String(api_key));
+            } else {
+                settings.insert(
+                    "auth".to_string(),
+                    serde_json::Value::String("none".to_string()),
+                );
+            }
+            Ok(serde_json::Value::Object(settings))
+        }
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
             let current = current.ok_or_else(|| add_additive_requires_config_error(app_type))?;
             let api_key = non_empty(args.api_key.clone());
@@ -1543,6 +1595,11 @@ fn apply_add_provider_api_format(
         }
         AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
         }
+        AppType::Omp => {
+            if let Some(raw) = api_format {
+                crate::omp_config::validate_api_protocol(raw)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1580,9 +1637,12 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
     let manager = config
         .get_manager(&app_type)
         .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
-    let existing_ids: Vec<String> = manager.providers.keys().cloned().collect();
+    let mut existing_ids: Vec<String> = manager.providers.keys().cloned().collect();
     let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
+    if matches!(app_type, AppType::Omp) {
+        existing_ids.extend(crate::omp_config::read_omp_native_providers()?.into_keys());
+    }
 
     let template = args.template.unwrap_or(ProviderAddTemplate::Custom);
     validate_provider_add_template(&app_type, template)?;
@@ -1832,22 +1892,6 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
-    let base_id = format!("{}-copy", original_id.trim());
-    if !existing_ids.iter().any(|id| id == &base_id) {
-        return base_id;
-    }
-
-    let mut counter = 2;
-    loop {
-        let candidate = format!("{base_id}-{counter}");
-        if !existing_ids.iter().any(|id| id == &candidate) {
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
 fn existing_provider_ids_for_duplicate(
     app_type: &AppType,
     manager_ids: impl IntoIterator<Item = String>,
@@ -1867,6 +1911,9 @@ fn existing_provider_ids_for_duplicate(
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>(),
+            AppType::Omp => crate::omp_config::read_omp_native_providers()?
+                .into_keys()
+                .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
         ids.extend(live_ids);
@@ -1874,9 +1921,13 @@ fn existing_provider_ids_for_duplicate(
     Ok(ids.into_iter().collect())
 }
 
-fn provider_duplicate_draft(source: &Provider, existing_ids: &[String]) -> Provider {
+fn provider_duplicate_draft(
+    app_type: &AppType,
+    source: &Provider,
+    existing_ids: &[String],
+) -> Provider {
     let mut draft = source.clone();
-    draft.id = provider_copy_id(&source.id, existing_ids);
+    draft.id = ProviderService::generate_provider_copy_id(app_type, &source.id, existing_ids);
     draft.name = format!("{} copy", source.name.trim());
     draft.created_at = None;
     draft.in_failover_queue = false;
@@ -1922,7 +1973,7 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
     let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
 
-    let draft = provider_duplicate_draft(&source, &existing_ids);
+    let draft = provider_duplicate_draft(&app_type, &source, &existing_ids);
 
     println!("\n{}", highlight(texts::current_config_header()));
     display_provider_summary(&draft, &app_type);
@@ -2273,6 +2324,50 @@ mod tests {
             build("https://pi.example/v1", "anthropic-messages").expect("valid Pi transport");
         assert_eq!(settings["api"], "anthropic-messages");
         assert_eq!(settings["models"][0]["id"], "model-a");
+    }
+
+    #[test]
+    fn noninteractive_omp_add_allows_keyless_custom_provider() {
+        let settings = build_add_settings_config(
+            &AppType::Omp,
+            &AddProviderArgs {
+                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                model: Some("local-model".to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+            "Local OMP",
+            &mut None,
+        )
+        .expect("keyless OMP provider should be constructible");
+
+        assert_eq!(settings["auth"], "none");
+        assert_eq!(settings["api"], crate::omp_config::OMP_DEFAULT_API_PROTOCOL);
+        assert!(settings.get("apiKey").is_none());
+    }
+
+    #[test]
+    fn noninteractive_omp_add_allows_modeless_override_provider() {
+        let settings = build_add_settings_config(
+            &AppType::Omp,
+            &AddProviderArgs {
+                api_key: Some("OMP_KEY".to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+            "OMP override",
+            &mut None,
+        )
+        .expect("model-less OMP provider should be constructible");
+
+        crate::omp_config::validate_provider_node("override", &settings)
+            .expect("override-only provider should pass OMP validation");
+        assert_eq!(settings["apiKey"], "OMP_KEY");
+        assert!(settings.get("models").is_none());
     }
 
     #[test]
@@ -2734,6 +2829,7 @@ wire_api = "chat"
         provider.sort_index = Some(7);
 
         let draft = provider_duplicate_draft(
+            &AppType::Claude,
             &provider,
             &["provider-1".to_string(), "provider-1-copy".to_string()],
         );
@@ -2747,5 +2843,18 @@ wire_api = "chat"
             draft.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
             "sk-demo"
         );
+    }
+
+    #[test]
+    fn omp_duplicate_draft_bounds_collision_suffix() {
+        let mut provider = claude_provider(json!({}));
+        provider.id = "a".repeat(123);
+        let occupied = format!("{}-copy", provider.id);
+
+        let draft =
+            provider_duplicate_draft(&AppType::Omp, &provider, &[provider.id.clone(), occupied]);
+
+        assert_eq!(draft.id.len(), 128);
+        assert!(draft.id.ends_with("-copy-2"));
     }
 }

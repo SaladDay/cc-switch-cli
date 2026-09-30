@@ -194,8 +194,13 @@ pub(super) fn render_providers(
             } else {
                 String::new()
             }
-        } else if matches!(app.app_type, AppType::OpenCode | AppType::Pi) {
-            if row.is_in_config {
+        } else if matches!(app.app_type, AppType::OpenCode | AppType::Pi | AppType::Omp) {
+            if matches!(app.app_type, AppType::Omp) && data.providers.disabled_ids.contains(&row.id)
+            {
+                "⊘".to_string()
+            } else if matches!(app.app_type, AppType::Omp) && row.is_default_model {
+                "*".to_string()
+            } else if row.is_in_config {
                 "+".to_string()
             } else {
                 String::new()

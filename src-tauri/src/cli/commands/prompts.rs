@@ -4,7 +4,7 @@ use crate::app_config::AppType;
 use crate::cli::ui::{create_table, highlight, info, success};
 use crate::error::AppError;
 use crate::services::pi_prompt_files::{
-    PiPromptFileKind, PiPromptFileService, PiPromptTemplateService,
+    OmpPromptFileService, PiPromptFileKind, PiPromptFileService, PiPromptTemplateService,
 };
 use crate::services::PromptService;
 use crate::store::AppState;
@@ -71,7 +71,7 @@ pub enum PromptsCommand {
         /// Prompt preset ID
         id: String,
     },
-    /// Manage Pi's native SYSTEM.md or APPEND_SYSTEM.md
+    /// Manage Pi/OMP native system prompt files
     System {
         #[command(subcommand)]
         command: PiSystemPromptCommand,
@@ -89,6 +89,8 @@ pub enum PiSystemPromptKind {
     Append,
     /// SYSTEM.md (replaces Pi's built-in system prompt)
     Override,
+    /// TITLE_SYSTEM.md (OMP only)
+    Title,
 }
 
 impl From<PiSystemPromptKind> for PiPromptFileKind {
@@ -96,17 +98,18 @@ impl From<PiSystemPromptKind> for PiPromptFileKind {
         match value {
             PiSystemPromptKind::Append => Self::SystemAppend,
             PiSystemPromptKind::Override => Self::SystemOverride,
+            PiSystemPromptKind::Title => Self::TitleSystem,
         }
     }
 }
 
 #[derive(Subcommand)]
 pub enum PiSystemPromptCommand {
-    /// Show a native Pi system prompt file
+    /// Show a native Pi/OMP system prompt file
     Show { kind: PiSystemPromptKind },
-    /// Edit a native Pi system prompt file
+    /// Edit a native Pi/OMP system prompt file
     Edit { kind: PiSystemPromptKind },
-    /// Delete a native Pi system prompt file
+    /// Delete a native Pi/OMP system prompt file
     Delete { kind: PiSystemPromptKind },
 }
 
@@ -169,19 +172,38 @@ fn require_pi(app_type: &AppType, resource: &str) -> Result<(), AppError> {
     }
 }
 
+fn require_native_prompt_app(app_type: &AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Pi | AppType::Omp) {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput(
+            "Native system prompts are only available with --app pi or --app omp".to_string(),
+        ))
+    }
+}
+
 fn manage_pi_system_prompt(
     app_type: AppType,
     command: PiSystemPromptCommand,
 ) -> Result<(), AppError> {
-    require_pi(&app_type, "Pi native system prompts")?;
+    if matches!(app_type, AppType::Omp) {
+        return manage_omp_system_prompt(command);
+    }
+    require_native_prompt_app(&app_type)?;
     let (kind, action) = match command {
         PiSystemPromptCommand::Show { kind } => (kind, "show"),
         PiSystemPromptCommand::Edit { kind } => (kind, "edit"),
         PiSystemPromptCommand::Delete { kind } => (kind, "delete"),
     };
+    if matches!(kind, PiSystemPromptKind::Title) {
+        return Err(AppError::InvalidInput(
+            "TITLE_SYSTEM.md is only available with --app omp".to_string(),
+        ));
+    }
     let filename = match kind {
         PiSystemPromptKind::Append => "APPEND_SYSTEM.md",
         PiSystemPromptKind::Override => "SYSTEM.md",
+        PiSystemPromptKind::Title => "TITLE_SYSTEM.md",
     };
     let native_kind = kind.into();
 
@@ -239,6 +261,80 @@ fn manage_pi_system_prompt(
                 return Ok(());
             }
             PiPromptFileService::delete(native_kind, &snapshot.revision)?;
+            println!("{}", success(&format!("✓ Deleted {filename}")));
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn manage_omp_system_prompt(command: PiSystemPromptCommand) -> Result<(), AppError> {
+    let (kind, action) = match command {
+        PiSystemPromptCommand::Show { kind } => (kind, "show"),
+        PiSystemPromptCommand::Edit { kind } => (kind, "edit"),
+        PiSystemPromptCommand::Delete { kind } => (kind, "delete"),
+    };
+    let filename = match kind {
+        PiSystemPromptKind::Append => "APPEND_SYSTEM.md",
+        PiSystemPromptKind::Override => "SYSTEM.md",
+        PiSystemPromptKind::Title => "TITLE_SYSTEM.md",
+    };
+    let native_kind: PiPromptFileKind = kind.into();
+
+    match action {
+        "show" => {
+            let snapshot = OmpPromptFileService::read(native_kind)?;
+            if snapshot.exists {
+                println!("{}", highlight(filename));
+                println!("{}", snapshot.content);
+            } else {
+                println!("{}", info(&format!("{filename} does not exist.")));
+            }
+        }
+        "edit" => {
+            let snapshot = OmpPromptFileService::read(native_kind)?;
+            if matches!(kind, PiSystemPromptKind::Override) && !snapshot.exists {
+                println!(
+                    "{}",
+                    info("SYSTEM.md replaces OMP's built-in system prompt; APPEND_SYSTEM.md is recommended for normal additions.")
+                );
+                let confirmed = inquire::Confirm::new("Create SYSTEM.md?")
+                    .with_default(false)
+                    .prompt()
+                    .map_err(|error| AppError::Message(format!("Prompt failed: {error}")))?;
+                if !confirmed {
+                    println!("{}", info("Cancelled."));
+                    return Ok(());
+                }
+            }
+            let initial = if snapshot.exists {
+                snapshot.content.as_str()
+            } else {
+                "# Write the OMP system prompt here\n"
+            };
+            let edited = crate::cli::editor::open_external_editor(initial)?;
+            if snapshot.exists && edited == snapshot.content {
+                println!("{}", info("No changes detected."));
+                return Ok(());
+            }
+            OmpPromptFileService::replace(native_kind, &snapshot.revision, &edited)?;
+            println!("{}", success(&format!("✓ Saved {filename}")));
+        }
+        "delete" => {
+            let snapshot = OmpPromptFileService::read(native_kind)?;
+            if !snapshot.exists {
+                println!("{}", info(&format!("{filename} does not exist.")));
+                return Ok(());
+            }
+            let confirmed = inquire::Confirm::new(&format!("Delete {filename}?"))
+                .with_default(false)
+                .prompt()
+                .map_err(|error| AppError::Message(format!("Prompt failed: {error}")))?;
+            if !confirmed {
+                println!("{}", info("Cancelled."));
+                return Ok(());
+            }
+            OmpPromptFileService::delete(native_kind, &snapshot.revision)?;
             println!("{}", success(&format!("✓ Deleted {filename}")));
         }
         _ => unreachable!(),
@@ -341,7 +437,78 @@ fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
+fn omp_prompt_kinds() -> [PiPromptFileKind; 3] {
+    [
+        PiPromptFileKind::SystemOverride,
+        PiPromptFileKind::SystemAppend,
+        PiPromptFileKind::TitleSystem,
+    ]
+}
+
+fn omp_prompt_filename(kind: PiPromptFileKind) -> &'static str {
+    match kind {
+        PiPromptFileKind::SystemOverride => "SYSTEM.md",
+        PiPromptFileKind::SystemAppend => "APPEND_SYSTEM.md",
+        PiPromptFileKind::TitleSystem => "TITLE_SYSTEM.md",
+    }
+}
+
+fn list_omp_system_prompt_files() -> Result<(), AppError> {
+    let mut table = create_table();
+    table.set_header(vec!["", "File", "Characters", "Resolved path"]);
+    for kind in omp_prompt_kinds() {
+        let snapshot = OmpPromptFileService::read(kind)?;
+        let path = OmpPromptFileService::active_path(kind)?;
+        table.add_row(vec![
+            if snapshot.exists { "✓" } else { " " }.to_string(),
+            omp_prompt_filename(kind).to_string(),
+            snapshot.content.chars().count().to_string(),
+            path.display().to_string(),
+        ]);
+    }
+    println!("{table}");
+    println!(
+        "{}",
+        info("OMP reads these files with project-first lookup.")
+    );
+    Ok(())
+}
+
+fn show_omp_system_prompt_files() -> Result<(), AppError> {
+    println!("{}", highlight("OMP Native Prompt Files"));
+    println!("{}", "=".repeat(50));
+    for kind in omp_prompt_kinds() {
+        let snapshot = OmpPromptFileService::read(kind)?;
+        let path = OmpPromptFileService::active_path(kind)?;
+        println!(
+            "\n{} ({})",
+            highlight(omp_prompt_filename(kind)),
+            path.display()
+        );
+        if snapshot.exists {
+            println!("{}", snapshot.content);
+        } else {
+            println!("{}", info("Not present."));
+        }
+    }
+    Ok(())
+}
+
+fn reject_omp_prompt_presets(app_type: &AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Omp) {
+        Err(AppError::InvalidInput(
+            "OMP uses native prompt files; use 'cc-switch --app omp prompts system ...' instead of prompt presets."
+                .to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn list_prompts(app_type: AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Omp) {
+        return list_omp_system_prompt_files();
+    }
     let state = get_state()?;
     let prompts = PromptService::get_prompts(&state, app_type.clone())?;
 
@@ -403,6 +570,9 @@ fn list_prompts(app_type: AppType) -> Result<(), AppError> {
 }
 
 fn show_current(app_type: AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Omp) {
+        return show_omp_system_prompt_files();
+    }
     let state = get_state()?;
     let prompts = PromptService::get_prompts(&state, app_type.clone())?;
 
@@ -458,6 +628,9 @@ fn show_current(app_type: AppType) -> Result<(), AppError> {
 }
 
 fn show_live_prompt(app_type: AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Omp) {
+        return show_omp_system_prompt_files();
+    }
     let content = PromptService::get_current_file_content(app_type.clone())?;
 
     match content {
@@ -488,6 +661,12 @@ fn show_live_prompt(app_type: AppType) -> Result<(), AppError> {
 }
 
 fn import_prompt(app_type: AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Omp) {
+        return Err(AppError::InvalidInput(
+            "OMP uses native prompt files; use 'cc-switch --app omp prompts system ...' instead of importing presets."
+                .to_string(),
+        ));
+    }
     let state = get_state()?;
     let id = PromptService::import_from_file(&state, app_type.clone())?;
     let prompts = PromptService::get_prompts(&state, app_type.clone())?;
@@ -514,6 +693,7 @@ fn import_prompt(app_type: AppType) -> Result<(), AppError> {
 }
 
 fn activate_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
+    reject_omp_prompt_presets(&app_type)?;
     let state = get_state()?;
     let app_str = app_type.as_str().to_string();
 
@@ -544,6 +724,7 @@ fn activate_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
 }
 
 fn delete_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
+    reject_omp_prompt_presets(&app_type)?;
     let state = get_state()?;
 
     // 检查 prompt 是否存在
@@ -592,6 +773,7 @@ fn delete_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
 }
 
 fn show_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
+    reject_omp_prompt_presets(&app_type)?;
     let state = get_state()?;
     let prompts = PromptService::get_prompts(&state, app_type)?;
 
@@ -641,6 +823,7 @@ fn create_prompt(
     name: Option<String>,
     description: Option<String>,
 ) -> Result<(), AppError> {
+    reject_omp_prompt_presets(&app_type)?;
     let state = get_state()?;
     let default_name = format!("Prompt {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
     let name = match name {
@@ -686,6 +869,7 @@ fn create_prompt(
 }
 
 fn deactivate_prompt(app_type: AppType) -> Result<(), AppError> {
+    reject_omp_prompt_presets(&app_type)?;
     let state = get_state()?;
     let prompts = PromptService::get_prompts(&state, app_type.clone())?;
 
@@ -721,6 +905,7 @@ fn deactivate_prompt(app_type: AppType) -> Result<(), AppError> {
 }
 
 fn edit_prompt(_app_type: AppType, id: &str) -> Result<(), AppError> {
+    reject_omp_prompt_presets(&_app_type)?;
     let state = get_state()?;
     let prompts = PromptService::get_prompts(&state, _app_type.clone())?;
     let Some(mut prompt) = prompts.get(id).cloned() else {
@@ -759,6 +944,7 @@ fn rename_prompt(
     name: Option<String>,
     description: Option<String>,
 ) -> Result<(), AppError> {
+    reject_omp_prompt_presets(&app_type)?;
     let state = get_state()?;
     let prompts = PromptService::get_prompts(&state, app_type.clone())?;
     let Some(prompt) = prompts.get(id) else {

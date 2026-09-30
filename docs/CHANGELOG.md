@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **OMP / Provider Form**: Match Pi provider identity editing by keeping provider ID separate from the display Name, so OMP's native 128-byte key limit is no longer applied to Name.
+
 ## [5.10.5] - 2026-09-15
 
 ### Added

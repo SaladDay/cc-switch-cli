@@ -236,9 +236,12 @@ fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option
         AppType::Gemini => serde_json::from_str::<Value>(common_snippet)
             .ok()
             .map(|env| json!({ "env": env })),
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            None
-        }
+        AppType::Codex
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Omp => None,
     }
     .filter(Value::is_object)
 }
@@ -467,16 +470,21 @@ pub(crate) fn render_provider_add_form(
     };
     let selected_field_for_keys = fields.get(selected_idx).copied();
 
-    render_key_bar(
-        frame,
-        chunks[0],
-        theme,
-        &add_form_key_items(
+    let key_items = if matches!(provider.app_type, AppType::Pi | AppType::Omp) {
+        add_form_key_items_for_app(
             provider.focus,
             provider.is_editing_main_text(),
             selected_field_for_keys,
-        ),
-    );
+            Some(&provider.app_type),
+        )
+    } else {
+        add_form_key_items(
+            provider.focus,
+            provider.is_editing_main_text(),
+            selected_field_for_keys,
+        )
+    };
+    render_key_bar(frame, chunks[0], theme, &key_items);
 
     let rows_data = fields
         .iter()
@@ -1989,7 +1997,13 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::GeminiModel => texts::model_label().to_string(),
         ProviderAddField::OpenClawApiProtocol => texts::tui_label_openclaw_api().to_string(),
         ProviderAddField::OpenClawUserAgent => texts::tui_label_openclaw_user_agent().to_string(),
-        ProviderAddField::OpenClawModels => texts::tui_label_openclaw_models().to_string(),
+        ProviderAddField::OpenClawModels => {
+            if provider.app_type == AppType::Omp {
+                texts::tui_label_omp_models().to_string()
+            } else {
+                texts::tui_label_openclaw_models().to_string()
+            }
+        }
         ProviderAddField::OpenCodeNpmPackage => {
             if provider.app_type == AppType::OpenClaw {
                 texts::tui_label_openclaw_api().to_string()
@@ -2148,7 +2162,13 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
-        ProviderAddField::OpenClawModels => provider.openclaw_models_summary(),
+        ProviderAddField::OpenClawModels => {
+            if provider.app_type == AppType::Omp {
+                provider.omp_models_summary()
+            } else {
+                provider.openclaw_models_summary()
+            }
+        }
         ProviderAddField::HermesApiMode => {
             texts::tui_hermes_api_mode_value(provider.hermes_api_mode_value()).to_string()
         }

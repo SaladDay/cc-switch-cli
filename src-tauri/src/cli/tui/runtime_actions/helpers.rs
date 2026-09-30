@@ -68,6 +68,7 @@ pub(crate) fn app_display_name(app_type: &AppType) -> &'static str {
         AppType::Hermes => "Hermes",
         AppType::OpenClaw => "OpenClaw",
         AppType::Pi => "Pi",
+        AppType::Omp => "OMP",
     }
 }
 

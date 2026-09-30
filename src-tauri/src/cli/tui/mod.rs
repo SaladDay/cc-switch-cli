@@ -42,12 +42,15 @@ use runtime_skills::{
 };
 pub(crate) use runtime_systems::build_stream_check_result_lines;
 #[cfg(test)]
+pub(crate) use runtime_systems::fetch_provider_models_for_tui;
+#[cfg(test)]
 use runtime_systems::{
-    apply_webdav_jianguoyun_quick_setup, build_model_fetch_candidate_urls, drain_latest_webdav_req,
+    apply_webdav_jianguoyun_quick_setup, build_model_fetch_candidate_urls,
+    build_model_fetch_candidate_urls_with_inject_v1, drain_latest_webdav_req,
     model_fetch_strategy_for_field, parse_model_ids_from_response, update_webdav_last_error_with,
     UpdateMsg, WebDavReqKind,
 };
-pub(crate) use runtime_systems::{fetch_provider_models_for_tui, ModelFetchStrategy};
+pub(crate) use runtime_systems::{fetch_provider_models_for_tui_with_options, ModelFetchStrategy};
 use runtime_systems::{
     handle_codex_history_msg, handle_local_env_msg, handle_managed_auth_msg,
     handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg, handle_session_msg,
@@ -2308,6 +2311,9 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::PromptSave { .. }
         | Action::PromptDelete { .. }
         | Action::PiSystemPromptDelete { .. }
+        | Action::OmpModelDelete { .. }
+        | Action::OmpRoleDelete { .. }
+        | Action::OmpSystemPromptDelete { .. }
         | Action::PiPromptTemplateDelete { .. }
         | Action::PiPromptTemplateRename { .. }
         | Action::ConfigBackup { .. }

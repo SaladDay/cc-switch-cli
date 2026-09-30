@@ -4039,6 +4039,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         providers: ProvidersSnapshot {
             current_id: "p0".to_string(),
             live_ids: Default::default(),
+            disabled_ids: Default::default(),
             rows: vec![ProviderRow {
                 id: "p1".to_string(),
                 provider,
@@ -4056,6 +4057,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         mcp: McpSnapshot::default(),
         prompts: PromptsSnapshot::default(),
         pi_prompts: Default::default(),
+        omp: Default::default(),
         config: ConfigSnapshot::default(),
         skills: SkillsSnapshot::default(),
         proxy: ProxySnapshot::default(),
@@ -4155,6 +4157,7 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             opencode: false,
             hermes: false,
             pi: false,
+            omp: false,
         },
         installed_at: 1,
         content_hash: None,
@@ -4654,6 +4657,7 @@ fn header_only_renders_selected_visible_apps() {
         hermes: false,
         openclaw: true,
         pi: false,
+        omp: false,
     })
     .expect("save visible apps");
 
@@ -4684,6 +4688,7 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
         hermes: false,
         openclaw: true,
         pi: false,
+        omp: false,
     })
     .expect("save visible apps");
 
@@ -4714,6 +4719,7 @@ fn settings_page_shows_visible_apps_row_value() {
         hermes: false,
         openclaw: true,
         pi: false,
+        omp: false,
     })
     .expect("save visible apps");
 
@@ -5388,6 +5394,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         },
     };
     app.push_toast(
@@ -5428,6 +5435,7 @@ fn visible_apps_picker_uses_space_toggle_key() {
             hermes: false,
             openclaw: false,
             pi: false,
+            omp: false,
         },
     };
 
@@ -5460,6 +5468,7 @@ fn visible_apps_picker_auto_mode_does_not_append_auto_suffix_to_apps() {
             hermes: true,
             openclaw: true,
             pi: false,
+            omp: false,
         },
     };
 
@@ -5618,6 +5627,7 @@ fn header_centers_tabs_when_room_allows() {
         hermes: true,
         openclaw: true,
         pi: false,
+        omp: false,
     })
     .expect("save visible apps");
 
@@ -5664,6 +5674,7 @@ fn header_keeps_title_and_right_badges_visible_without_large_gap_in_chinese() {
         hermes: true,
         openclaw: true,
         pi: false,
+        omp: false,
     })
     .expect("save visible apps");
 
@@ -6183,6 +6194,7 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 opencode: false,
                 hermes: false,
                 pi: false,
+                omp: false,
             },
             installed_at: 0,
             content_hash: None,
@@ -7103,7 +7115,7 @@ fn skills_page_renders_sync_method_and_installed_rows() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0, 0, 0)));
+    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0, 0, 0, 0)));
     assert!(!all.contains(texts::tui_header_directory()));
     assert!(all.contains(AppType::Claude.as_str()));
     assert!(all.contains(AppType::Codex.as_str()));
@@ -7111,6 +7123,7 @@ fn skills_page_renders_sync_method_and_installed_rows() {
     assert!(all.contains(AppType::OpenCode.as_str()));
     assert!(all.contains(AppType::Hermes.as_str()));
     assert!(all.contains(AppType::Pi.as_str()));
+    assert!(all.contains(AppType::Omp.as_str()));
     assert!(!all.contains("hello-skill"));
     assert!(all.contains("Hello Skill"));
 }
@@ -7163,7 +7176,7 @@ fn skills_page_empty_state_keeps_summary_and_shows_guidance() {
 
     // The summary bar stays; the blank table body is replaced with the
     // shared empty-state guidance (same style as MCP/Prompts/Providers).
-    assert!(all.contains(&texts::tui_skills_installed_counts(0, 0, 0, 0, 0, 0)));
+    assert!(all.contains(&texts::tui_skills_installed_counts(0, 0, 0, 0, 0, 0, 0)));
     assert!(all.contains(texts::tui_skills_empty_title()));
     assert!(all.contains(texts::tui_skills_empty_subtitle()));
 }
@@ -7224,6 +7237,7 @@ fn skills_page_shows_opencode_summary() {
         opencode: true,
         hermes: false,
         pi: false,
+        omp: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7251,6 +7265,7 @@ fn skills_page_shows_hermes_column_and_summary() {
         opencode: false,
         hermes: true,
         pi: false,
+        omp: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7281,6 +7296,7 @@ fn skill_detail_page_shows_opencode_enabled_state() {
         opencode: true,
         hermes: false,
         pi: false,
+        omp: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7312,6 +7328,7 @@ fn skill_detail_page_shows_hermes_enabled_state() {
         opencode: false,
         hermes: true,
         pi: false,
+        omp: false,
     };
     data.skills.installed = vec![skill];
 
@@ -10801,6 +10818,136 @@ fn workspace_non_openclaw_nav_keeps_generic_labels() {
 }
 
 #[test]
+fn omp_nav_uses_shared_resource_labels() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let app = App::new(Some(AppType::Omp));
+    let all = nav_text(&app, &render(&app, &minimal_data(&app.app_type)));
+    let expected = [
+        NavItem::Main,
+        NavItem::Providers,
+        NavItem::OmpModels,
+        NavItem::OmpRoles,
+        NavItem::OmpSystemPrompts,
+        NavItem::Skills,
+        NavItem::Usage,
+        NavItem::Settings,
+        NavItem::Exit,
+    ]
+    .map(nav_label_text);
+    let positions = expected
+        .iter()
+        .map(|label| all.find(label).expect("OMP nav label should render"))
+        .collect::<Vec<_>>();
+
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{all}");
+    assert!(!all.contains("OMP Models"), "{all}");
+    assert!(!all.contains("OMP Roles"), "{all}");
+    assert!(!all.contains("OMP System Prompts"), "{all}");
+}
+
+#[test]
+fn omp_pages_use_shared_titles_and_action_labels() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    for (route, title, empty_title) in [
+        (
+            Route::OmpModels,
+            texts::menu_omp_models(),
+            texts::tui_omp_models_empty_title(),
+        ),
+        (
+            Route::OmpRoles,
+            texts::menu_omp_roles(),
+            texts::tui_omp_roles_empty_title(),
+        ),
+    ] {
+        let mut app = App::new(Some(AppType::Omp));
+        app.route = route;
+        app.focus = Focus::Content;
+        let content = content_text(&app, &render(&app, &minimal_data(&app.app_type)));
+        assert!(content.contains(&buffer_cell_text(title)), "{content}");
+        assert!(content.contains(empty_title), "{content}");
+        assert!(content.contains(texts::tui_key_edit()), "{content}");
+        assert!(!content.contains("OMP Models"), "{content}");
+        assert!(!content.contains("OMP Roles"), "{content}");
+    }
+}
+
+#[test]
+fn omp_system_prompts_page_uses_shared_copy_and_headers() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Omp));
+    app.route = Route::OmpSystemPrompts;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.pi_prompts.system_files = vec![(
+        crate::services::pi_prompt_files::PiPromptFileKind::SystemOverride,
+        crate::services::pi_prompt_files::PiPromptFileSnapshot {
+            exists: true,
+            revision: "rev".to_string(),
+            content: "Use the configured role.".to_string(),
+        },
+    )];
+
+    let content = content_text(&app, &render(&app, &data));
+    assert!(content.contains(&buffer_cell_text(texts::menu_omp_system_prompts())));
+    assert!(content.contains("1 native prompt file"), "{content}");
+    assert!(content.contains("File"), "{content}");
+    assert!(content.contains("Mode"), "{content}");
+    assert!(content.contains("Characters"), "{content}");
+    assert!(
+        content.contains(texts::tui_omp_prompt_active_path_header()),
+        "{content}"
+    );
+    assert!(content.contains(texts::tui_key_view()), "{content}");
+    assert!(content.contains(texts::tui_key_edit()), "{content}");
+    assert!(content.contains(texts::tui_key_delete()), "{content}");
+    assert!(!content.contains("OMP System Prompts"), "{content}");
+}
+
+#[test]
+fn omp_models_table_adapts_to_narrow_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Omp));
+    app.route = Route::OmpModels;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.omp.models = vec![crate::omp_config::OMPNativeModel {
+        provider_id: "company".to_string(),
+        model_id: "gpt-5.6".to_string(),
+        config: json!({
+            "name": "GPT 5.6",
+            "api": "openai-completions",
+            "reasoning": true,
+            "contextWindow": 400000,
+            "maxTokens": 128000,
+        }),
+    }];
+
+    assert_eq!(super::omp_model_column_count(64), 3);
+    assert_eq!(super::omp_model_column_count(90), 5);
+    let narrow = content_text(&app, &render_with_size(&app, &data, 64, 24));
+    assert!(narrow.contains("company"), "{narrow}");
+    assert!(narrow.contains("gpt-5.6"), "{narrow}");
+
+    let wide = content_text(&app, &render_with_size(&app, &data, 300, 24));
+    assert_eq!(super::omp_model_column_count(300), 7);
+    assert!(wide.contains("Reasoning"), "{wide}");
+    assert!(wide.contains("Max Tokens"), "{wide}");
+}
+
+#[test]
 fn workspace_route_render_shows_workspace_files_and_daily_memory_entry() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
@@ -12760,6 +12907,23 @@ fn provider_form_model_field_hints_enter_edit_and_f_fetch() {
         .find(|(key, _label)| *key == "Enter")
         .map(|(_key, label)| *label);
     assert_eq!(enter_label, Some(texts::tui_key_edit_mode()));
+    assert_eq!(
+        keys.iter()
+            .find(|(key, _label)| *key == "f")
+            .map(|(_key, label)| *label),
+        Some(texts::tui_key_fetch_model())
+    );
+}
+
+#[test]
+fn omp_provider_model_field_key_bar_advertises_fetch() {
+    let _lang = use_test_language(Language::English);
+    let keys = super::add_form_key_items_for_app(
+        FormFocus::Fields,
+        false,
+        Some(ProviderAddField::OpenClawModels),
+        Some(&AppType::Omp),
+    );
     assert_eq!(
         keys.iter()
             .find(|(key, _label)| *key == "f")

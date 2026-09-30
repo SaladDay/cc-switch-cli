@@ -21,9 +21,13 @@ const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderModelFetchStrategy {
+    Anonymous,
+    Ollama,
+    LlamaCpp,
     Bearer,
     Anthropic,
     GoogleApiKey,
+    AzureApiKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +43,12 @@ struct ModelFetchTarget {
     auth_value: Option<String>,
     custom_user_agent: Option<String>,
     request_headers: Option<BTreeMap<String, String>>,
+    /// OMP `discovery.injectV1` override for openai-models-list discovery.
+    discovery_inject_v1: Option<bool>,
+    /// OMP `discovery.timeoutMs` (with OMP's ten-second default) for model
+    /// discovery requests. `None` keeps the legacy five-second timeout used by
+    /// other applications and one-off fetches.
+    discovery_timeout_ms: Option<u64>,
     strategy: ProviderModelFetchStrategy,
 }
 
@@ -92,6 +102,39 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     } else {
         None
     };
+    let omp_state = if matches!(app_type, AppType::Omp) {
+        match (
+            crate::omp_config::read_omp_native_providers(),
+            crate::omp_config::read_omp_disabled_providers(),
+        ) {
+            (Ok(providers), Ok(disabled)) => Some((
+                providers
+                    .into_keys()
+                    .collect::<std::collections::HashSet<_>>(),
+                disabled,
+            )),
+            (Err(error), _) => {
+                println!(
+                    "{}",
+                    warning(&format!(
+                        "OMP models.yml could not be read; enabled state is unavailable: {error}"
+                    ))
+                );
+                None
+            }
+            (_, Err(error)) => {
+                println!(
+                    "{}",
+                    warning(&format!(
+                        "OMP disabledProviders could not be read; enabled state is unavailable: {error}"
+                    ))
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     if providers.is_empty() {
         println!("{}", info("No providers found."));
@@ -111,12 +154,18 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     });
 
     for (id, provider) in provider_list {
-        let current_marker = if pi_state.as_ref().is_some_and(|state| {
+        let current_marker = if omp_state
+            .as_ref()
+            .is_some_and(|(_, disabled)| disabled.contains(&id))
+        {
+            "⊘"
+        } else if pi_state.as_ref().is_some_and(|state| {
             state
                 .enabled_provider_ids
                 .iter()
                 .any(|enabled| enabled == &id)
-        }) || (!matches!(app_type, AppType::Pi) && id == current_id)
+        }) || omp_state.as_ref().is_some_and(|(ids, _)| ids.contains(&id))
+            || (!matches!(app_type, AppType::Pi | AppType::Omp) && id == current_id)
         {
             "✓"
         } else {
@@ -131,6 +180,11 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     println!("\n{} Application: {}", info("ℹ"), app_str);
     if matches!(app_type, AppType::Pi) {
         println!("{} ✓ = present in Pi models.json", info("→"));
+    } else if matches!(app_type, AppType::Omp) {
+        println!(
+            "{} ✓ = enabled in OMP models.yml; ⊘ = disabled by effective disabledProviders",
+            info("→")
+        );
     } else {
         println!("{} Current: {}", info("→"), highlight(&current_id));
     }
@@ -141,9 +195,28 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
 pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
     if matches!(app_type, AppType::Pi) {
         return Err(AppError::InvalidInput(
-            "Pi owns the current/default provider; CC Switch only manages explicit models.json entries"
+                "Pi owns the current/default provider; CC Switch only manages explicit native provider entries"
                 .to_string(),
         ));
+    }
+    if matches!(app_type, AppType::Omp) {
+        let (roles, role_path, _) = crate::omp_config::read_omp_model_roles_with_metadata()?;
+        let models_path = crate::omp_config::get_omp_models_path()?;
+        println!("{}", highlight("Current OMP Model"));
+        println!("{}", "═".repeat(60));
+        println!("\n{}", highlight("Default Role"));
+        println!(
+            "  modelRoles.default: {}",
+            roles
+                .get("default")
+                .map(String::as_str)
+                .unwrap_or("(not configured)")
+        );
+        println!("\n{}", highlight("Native Configuration"));
+        println!("  Roles/config: {}", role_path.display());
+        println!("  Models:       {}", models_path.display());
+        println!("\n{}", "─".repeat(60));
+        return Ok(());
     }
     let state = get_state()?;
     let current_id = ProviderService::current(&state, app_type.clone())?;
@@ -214,12 +287,26 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
         println!("\n{}", highlight("API 配置 / API Configuration"));
         let api_url = extract_api_url(provider, &app_type).unwrap_or_else(|| "N/A".to_string());
         println!("  API URL:  {}", api_url);
-        println!(
-            "  API Key:  {}",
+        let api_key = if matches!(app_type, AppType::Omp) {
+            provider
+                .settings_config
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .map(|value| {
+                    if value.trim().is_empty() {
+                        "N/A"
+                    } else {
+                        "***"
+                    }
+                })
+                .unwrap_or("N/A")
+                .to_string()
+        } else {
             provider
                 .configured_api_key(&app_type)
                 .unwrap_or_else(|| "N/A".to_string())
-        );
+        };
+        println!("  API Key:  {}", api_key);
     }
 
     println!("\n{}", "─".repeat(60));
@@ -385,13 +472,15 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
 
     match &source {
         ModelFetchSource::Http(target) => runtime.block_on(async {
-            crate::cli::tui::fetch_provider_models_for_tui(
+            crate::cli::tui::fetch_provider_models_for_tui_with_options(
                 &target.base_url,
                 target.is_full_url,
                 target.auth_value.as_deref(),
                 target.custom_user_agent.as_deref(),
                 to_tui_strategy(target.strategy),
                 target.request_headers.as_ref(),
+                target.discovery_inject_v1,
+                target.discovery_timeout_ms,
             )
             .await
             .map_err(AppError::Message)
@@ -451,17 +540,22 @@ pub(crate) fn quota_provider(
                 || matches!(&target.kind, QuotaTargetKind::SubscriptionTool { tool } if tool == "codex");
             if !is_codex {
                 return Err(AppError::Message(
-                    "Rate limit reset credits are only supported for Codex / OpenAI accounts.".to_string(),
+                    "Rate limit reset credits are only supported for Codex / OpenAI accounts."
+                        .to_string(),
                 ));
             }
 
             let current_quota = match runtime.block_on(query_quota(&target)) {
                 Ok(ProviderUsageQuota::Subscription(q)) => q,
                 Ok(_) => {
-                    return Err(AppError::Message("Unexpected quota response format".to_string()));
+                    return Err(AppError::Message(
+                        "Unexpected quota response format".to_string(),
+                    ));
                 }
                 Err(e) => {
-                    return Err(AppError::Message(format!("Failed to query current quota: {e}")));
+                    return Err(AppError::Message(format!(
+                        "Failed to query current quota: {e}"
+                    )));
                 }
             };
 
@@ -475,11 +569,15 @@ pub(crate) fn quota_provider(
 
             let credits = summary.map(|s| &s.credits[..]).unwrap_or(&[]);
             let selected_credit = match &credit_id {
-                Some(cid) => credits.iter().find(|c| &c.id == cid).cloned().ok_or_else(|| {
-                    AppError::Message(format!(
-                        "Specified credit ID '{cid}' was not found in available credits."
-                    ))
-                })?,
+                Some(cid) => credits
+                    .iter()
+                    .find(|c| &c.id == cid)
+                    .cloned()
+                    .ok_or_else(|| {
+                        AppError::Message(format!(
+                            "Specified credit ID '{cid}' was not found in available credits."
+                        ))
+                    })?,
                 None => credits.first().cloned().ok_or_else(|| {
                     AppError::Message("No available reset credit to consume.".to_string())
                 })?,
@@ -586,7 +684,8 @@ pub(crate) fn quota_provider(
     } else {
         if reset {
             return Err(AppError::Message(
-                "Rate limit reset credits are only supported for Codex / OpenAI accounts.".to_string(),
+                "Rate limit reset credits are only supported for Codex / OpenAI accounts."
+                    .to_string(),
             ));
         }
         ProviderQuotaOutput {
@@ -838,7 +937,10 @@ fn push_subscription_quota_lines(
             for credit in &reset_credits.credits {
                 let expires = credit.expires_at.as_deref().unwrap_or("never");
                 let title = credit.title.as_deref().unwrap_or("Rate Limit Reset");
-                lines.push(format!("  - {} (expires: {}) [{}]", title, expires, credit.id));
+                lines.push(format!(
+                    "  - {} (expires: {}) [{}]",
+                    title, expires, credit.id
+                ));
             }
         }
     }
@@ -1002,6 +1104,8 @@ fn model_fetch_target(
                 auth_value: Some(auth_value),
                 custom_user_agent,
                 request_headers: None,
+                discovery_inject_v1: None,
+                discovery_timeout_ms: None,
                 strategy,
             })
         }
@@ -1014,6 +1118,8 @@ fn model_fetch_target(
                 )?),
                 custom_user_agent,
                 request_headers: None,
+                discovery_inject_v1: None,
+                discovery_timeout_ms: None,
                 strategy: ProviderModelFetchStrategy::Bearer,
             })
         }
@@ -1025,6 +1131,8 @@ fn model_fetch_target(
                 auth_value: Some(auth_value),
                 custom_user_agent,
                 request_headers: None,
+                discovery_inject_v1: None,
+                discovery_timeout_ms: None,
                 strategy,
             })
         }
@@ -1046,6 +1154,8 @@ fn model_fetch_target(
             ),
             custom_user_agent,
             request_headers: None,
+            discovery_inject_v1: None,
+            discovery_timeout_ms: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::Hermes => Ok(ModelFetchTarget {
@@ -1066,6 +1176,8 @@ fn model_fetch_target(
             ),
             custom_user_agent,
             request_headers: None,
+            discovery_inject_v1: None,
+            discovery_timeout_ms: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::OpenClaw => Ok(ModelFetchTarget {
@@ -1085,15 +1197,69 @@ fn model_fetch_target(
             ),
             custom_user_agent,
             request_headers: None,
+            discovery_inject_v1: None,
+            discovery_timeout_ms: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
-        AppType::Pi => {
-            let api = provider.settings_config.get("api").and_then(Value::as_str);
-            let strategy = match api {
-                Some("anthropic-messages") => ProviderModelFetchStrategy::Anthropic,
-                Some("google-generative-ai") => ProviderModelFetchStrategy::GoogleApiKey,
-                _ => ProviderModelFetchStrategy::Bearer,
-            };
+        AppType::Pi | AppType::Omp => {
+            let api = provider
+                .settings_config
+                .get("api")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    provider
+                        .settings_config
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .and_then(|models| {
+                            models
+                                .iter()
+                                .find_map(|model| model.get("api").and_then(Value::as_str))
+                        })
+                });
+            let discovery_type = provider
+                .settings_config
+                .get("discovery")
+                .and_then(Value::as_object)
+                .and_then(|discovery| discovery.get("type"))
+                .and_then(Value::as_str);
+            let omp_auth_none = matches!(
+                provider.settings_config.get("auth").and_then(Value::as_str),
+                Some("none")
+            );
+            let mut strategy =
+                if matches!(app_type, AppType::Omp) && discovery_type == Some("ollama") {
+                    ProviderModelFetchStrategy::Ollama
+                } else if matches!(app_type, AppType::Omp) && discovery_type == Some("llama.cpp") {
+                    ProviderModelFetchStrategy::LlamaCpp
+                } else if matches!(app_type, AppType::Omp) && discovery_type.is_some() {
+                    // OMP's native discovery clients always obtain the
+                    // provider credential through the bearer resolver. This
+                    // is independent of the model wire protocol (`api`), so a
+                    // Google/Vertex/Azure/Anthropic provider still probes its
+                    // model registry with Authorization: Bearer.
+                    if omp_auth_none {
+                        ProviderModelFetchStrategy::Anonymous
+                    } else {
+                        ProviderModelFetchStrategy::Bearer
+                    }
+                } else {
+                    match api {
+                        _ if matches!(
+                            provider.settings_config.get("auth").and_then(Value::as_str),
+                            Some("none")
+                        ) =>
+                        {
+                            ProviderModelFetchStrategy::Anonymous
+                        }
+                        Some("anthropic-messages") => ProviderModelFetchStrategy::Anthropic,
+                        Some("google-generative-ai" | "google-vertex") => {
+                            ProviderModelFetchStrategy::GoogleApiKey
+                        }
+                        Some("azure-openai-responses") => ProviderModelFetchStrategy::AzureApiKey,
+                        _ => ProviderModelFetchStrategy::Bearer,
+                    }
+                };
             let mut request_headers = provider
                 .settings_config
                 .get("headers")
@@ -1102,28 +1268,79 @@ fn model_fetch_target(
                     headers
                         .iter()
                         .filter_map(|(name, value)| {
-                            value
-                                .as_str()
-                                .map(|value| (name.clone(), value.to_string()))
+                            value.as_str().and_then(|value| {
+                                let resolved = if matches!(app_type, AppType::Omp) {
+                                    crate::omp_config::resolve_header_value(value)
+                                } else {
+                                    Some(value.to_string())
+                                }?;
+                                Some((name.clone(), resolved))
+                            })
                         })
                         .collect::<BTreeMap<_, _>>()
                 })
                 .filter(|headers| !headers.is_empty());
-            let api_key = provider
-                .settings_config
-                .get("apiKey")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
+            let api_key = if matches!(app_type, AppType::Omp) {
+                crate::omp_config::resolve_api_key(provider.settings_config.get("apiKey"))
+            } else {
+                provider
+                    .settings_config
+                    .get("apiKey")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            };
+            // OMP's built-in discovery providers support anonymous registries
+            // (notably local llama.cpp/LM Studio and public model lists). Do
+            // not make a missing optional apiKey block those probes.
+            if matches!(app_type, AppType::Omp)
+                && discovery_type.is_some()
+                && api_key.is_none()
+                && !matches!(
+                    strategy,
+                    ProviderModelFetchStrategy::Ollama | ProviderModelFetchStrategy::LlamaCpp
+                )
+            {
+                strategy = ProviderModelFetchStrategy::Anonymous;
+            }
+            let has_omp_oauth_descriptor =
+                provider.settings_config.get("oauth").is_some_and(|value| {
+                    value.as_str().is_some_and(|value| !value.trim().is_empty())
+                        || value.is_object()
+                });
+            if matches!(app_type, AppType::Omp)
+                && (matches!(
+                    provider.settings_config.get("auth").and_then(Value::as_str),
+                    Some("oauth")
+                ) || has_omp_oauth_descriptor)
+                && api_key.is_none()
+            {
+                return Err(AppError::Message(format!(
+                    "OMP provider '{}' uses native OAuth; CC Switch cannot fetch its model list without an apiKey or exported OAuth token",
+                    provider.id
+                )));
+            }
             let auth_value = if matches!(api, Some("anthropic-messages")) {
-                if let Some(api_key) = api_key.as_ref() {
-                    request_headers
-                        .get_or_insert_with(BTreeMap::new)
-                        .entry("x-api-key".to_string())
-                        .or_insert_with(|| api_key.clone());
+                if matches!(app_type, AppType::Omp) && discovery_type.is_some() {
+                    // Discovery authentication is bearer-based in OMP; do not
+                    // synthesize Anthropic's x-api-key header from the model
+                    // protocol here.
+                    api_key
+                } else {
+                    if let Some(api_key) = api_key.as_ref() {
+                        request_headers
+                            .get_or_insert_with(BTreeMap::new)
+                            .entry("x-api-key".to_string())
+                            .or_insert_with(|| api_key.clone());
+                    }
+                    None
                 }
-                None
+            } else if matches!(api, Some("google-gemini-cli")) {
+                api_key
+                    .as_deref()
+                    .and_then(parse_access_token_blob)
+                    .or(api_key)
             } else {
                 api_key
             };
@@ -1133,6 +1350,31 @@ fn model_fetch_target(
                 auth_value,
                 custom_user_agent,
                 request_headers,
+                discovery_inject_v1: if matches!(app_type, AppType::Omp)
+                    && matches!(
+                        provider
+                            .settings_config
+                            .get("discovery")
+                            .and_then(Value::as_object)
+                            .and_then(|discovery| discovery.get("type"))
+                            .and_then(Value::as_str),
+                        Some("openai-models-list" | "lm-studio" | "litellm")
+                    ) {
+                    provider
+                        .settings_config
+                        .get("discovery")
+                        .and_then(Value::as_object)
+                        .and_then(|discovery| discovery.get("injectV1"))
+                        .and_then(Value::as_bool)
+                        .or(Some(true))
+                } else {
+                    None
+                },
+                discovery_timeout_ms: if matches!(app_type, AppType::Omp) {
+                    crate::omp_config::omp_discovery_timeout_ms(&provider.settings_config)
+                } else {
+                    None
+                },
                 strategy,
             })
         }
@@ -1163,6 +1405,8 @@ fn one_off_model_fetch_target(
         auth_value,
         custom_user_agent: None,
         request_headers: None,
+        discovery_inject_v1: None,
+        discovery_timeout_ms: None,
         strategy,
     })
 }
@@ -1171,9 +1415,12 @@ fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetc
     match app_type {
         AppType::Claude => ProviderModelFetchStrategy::Anthropic,
         AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            ProviderModelFetchStrategy::Bearer
-        }
+        AppType::Codex
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Omp => ProviderModelFetchStrategy::Bearer,
     }
 }
 
@@ -1265,11 +1512,15 @@ fn parse_access_token_blob(raw: &str) -> Option<String> {
 
 fn to_tui_strategy(strategy: ProviderModelFetchStrategy) -> crate::cli::tui::ModelFetchStrategy {
     match strategy {
+        ProviderModelFetchStrategy::Anonymous => crate::cli::tui::ModelFetchStrategy::Anonymous,
+        ProviderModelFetchStrategy::Ollama => crate::cli::tui::ModelFetchStrategy::Ollama,
+        ProviderModelFetchStrategy::LlamaCpp => crate::cli::tui::ModelFetchStrategy::LlamaCpp,
         ProviderModelFetchStrategy::Bearer => crate::cli::tui::ModelFetchStrategy::Bearer,
         ProviderModelFetchStrategy::Anthropic => crate::cli::tui::ModelFetchStrategy::Anthropic,
         ProviderModelFetchStrategy::GoogleApiKey => {
             crate::cli::tui::ModelFetchStrategy::GoogleApiKey
         }
+        ProviderModelFetchStrategy::AzureApiKey => crate::cli::tui::ModelFetchStrategy::AzureApiKey,
     }
 }
 
@@ -1700,6 +1951,185 @@ base_url = "https://current.example.com/v1"
                 ("x-client".to_string(), "cc-switch".to_string()),
             ]))
         );
+    }
+
+    #[test]
+    fn omp_model_fetch_maps_native_protocol_auth_headers() {
+        let cases = [
+            ("openai-completions", ProviderModelFetchStrategy::Bearer),
+            ("openai-responses", ProviderModelFetchStrategy::Bearer),
+            ("openai-codex-responses", ProviderModelFetchStrategy::Bearer),
+            (
+                "azure-openai-responses",
+                ProviderModelFetchStrategy::AzureApiKey,
+            ),
+            ("anthropic-messages", ProviderModelFetchStrategy::Anthropic),
+            (
+                "bedrock-converse-stream",
+                ProviderModelFetchStrategy::Bearer,
+            ),
+            (
+                "google-generative-ai",
+                ProviderModelFetchStrategy::GoogleApiKey,
+            ),
+            ("google-gemini-cli", ProviderModelFetchStrategy::Bearer),
+            ("google-vertex", ProviderModelFetchStrategy::GoogleApiKey),
+        ];
+
+        for (api, expected_strategy) in cases {
+            let provider = Provider::with_id(
+                format!("omp-{api}"),
+                "OMP provider".to_string(),
+                json!({
+                    "baseUrl": "https://omp.example.com/v1",
+                    "api": api,
+                    "apiKey": "omp-secret",
+                    "models": [{ "id": "model-a" }]
+                }),
+                None,
+            );
+            let target = model_fetch_target(&provider, &AppType::Omp)
+                .expect("OMP protocol should resolve a model-fetch target");
+            assert_eq!(target.strategy, expected_strategy, "protocol {api}");
+        }
+    }
+
+    #[test]
+    fn omp_ollama_discovery_uses_native_model_fetch_strategy() {
+        let provider = Provider::with_id(
+            "omp-ollama".to_string(),
+            "OMP Ollama".to_string(),
+            json!({
+                "discovery": {"type": "ollama"},
+                "api": "openai-completions"
+            }),
+            None,
+        );
+        let target = model_fetch_target(&provider, &AppType::Omp)
+            .expect("OMP Ollama provider should resolve");
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::Ollama);
+        assert_eq!(target.auth_value, None);
+    }
+
+    #[test]
+    fn omp_keyless_llama_cpp_discovery_uses_native_model_fetch_strategy() {
+        let provider = Provider::with_id(
+            "omp-local".to_string(),
+            "OMP local".to_string(),
+            json!({
+                "baseUrl": "http://127.0.0.1:8080",
+                "discovery": {"type": "llama.cpp"},
+                "api": "openai-completions"
+            }),
+            None,
+        );
+        let target = model_fetch_target(&provider, &AppType::Omp)
+            .expect("keyless OMP discovery should resolve");
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::LlamaCpp);
+        assert_eq!(target.auth_value, None);
+    }
+
+    #[test]
+    fn omp_discovery_uses_bearer_auth_independent_of_wire_protocol() {
+        for (discovery_type, expected_strategy) in [
+            ("openai-models-list", ProviderModelFetchStrategy::Bearer),
+            ("proxy", ProviderModelFetchStrategy::Bearer),
+            ("litellm", ProviderModelFetchStrategy::Bearer),
+            ("llama.cpp", ProviderModelFetchStrategy::LlamaCpp),
+        ] {
+            let provider = Provider::with_id(
+                format!("omp-discovery-{discovery_type}"),
+                "OMP discovery".to_string(),
+                json!({
+                    "baseUrl": "https://omp.example.com/v1",
+                    "api": "google-vertex",
+                    "apiKey": "omp-bearer-secret",
+                    "discovery": {"type": discovery_type}
+                }),
+                None,
+            );
+            let target = model_fetch_target(&provider, &AppType::Omp)
+                .expect("OMP discovery should resolve a model-fetch target");
+            assert_eq!(
+                target.strategy, expected_strategy,
+                "discovery {discovery_type}"
+            );
+            assert_eq!(target.auth_value.as_deref(), Some("omp-bearer-secret"));
+        }
+    }
+
+    #[test]
+    fn omp_litellm_and_lm_studio_discovery_force_v1_model_endpoint() {
+        for discovery_type in ["litellm", "lm-studio"] {
+            let provider = Provider::with_id(
+                format!("omp-v1-{discovery_type}"),
+                "OMP discovery".to_string(),
+                json!({
+                    "baseUrl": "https://omp.example.com",
+                    "api": "openai-completions",
+                    "apiKey": "omp-secret",
+                    "discovery": {"type": discovery_type}
+                }),
+                None,
+            );
+            let target = model_fetch_target(&provider, &AppType::Omp)
+                .expect("OMP discovery should resolve a model-fetch target");
+            assert_eq!(target.discovery_inject_v1, Some(true));
+        }
+    }
+
+    #[test]
+    fn omp_discovery_timeout_uses_native_value_and_safe_default() {
+        let provider = Provider::with_id(
+            "omp-timeout".to_string(),
+            "OMP timeout".to_string(),
+            json!({
+                "baseUrl": "https://omp.example.com/v1",
+                "api": "openai-completions",
+                "apiKey": "omp-secret",
+                "discovery": {"type": "openai-models-list", "timeoutMs": 25_000}
+            }),
+            None,
+        );
+        let target = model_fetch_target(&provider, &AppType::Omp).expect("target should resolve");
+        assert_eq!(target.discovery_timeout_ms, Some(25_000));
+
+        let default_provider = Provider::with_id(
+            "omp-timeout-default".to_string(),
+            "OMP timeout default".to_string(),
+            json!({
+                "baseUrl": "https://omp.example.com/v1",
+                "api": "openai-completions",
+                "apiKey": "omp-secret",
+                "discovery": {"type": "proxy"}
+            }),
+            None,
+        );
+        let default_target =
+            model_fetch_target(&default_provider, &AppType::Omp).expect("target should resolve");
+        assert_eq!(
+            default_target.discovery_timeout_ms,
+            Some(crate::omp_config::OMP_DEFAULT_DISCOVERY_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn omp_gemini_cli_model_fetch_extracts_access_token_blob() {
+        let provider = Provider::with_id(
+            "omp-gemini-cli".to_string(),
+            "OMP Gemini CLI".to_string(),
+            json!({
+                "baseUrl": "https://omp.example.com/v1",
+                "api": "google-gemini-cli",
+                "apiKey": "{\"access_token\":\"ya29.omp-token\"}",
+                "models": [{ "id": "model-a" }]
+            }),
+            None,
+        );
+        let target = model_fetch_target(&provider, &AppType::Omp)
+            .expect("OMP Gemini CLI provider should resolve");
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::Bearer);
+        assert_eq!(target.auth_value.as_deref(), Some("ya29.omp-token"));
     }
 
     #[test]

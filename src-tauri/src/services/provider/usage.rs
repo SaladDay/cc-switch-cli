@@ -482,6 +482,12 @@ impl ProviderService {
                 .and_then(Value::as_str)
                 .ok_or_else(|| AppError::InvalidInput("Pi provider API key is missing".to_string()))
                 .map(str::to_string),
+            AppType::Omp => {
+                crate::omp_config::resolve_api_key(provider.settings_config.get("apiKey"))
+                    .ok_or_else(|| {
+                        AppError::InvalidInput("OMP provider API key is missing".to_string())
+                    })
+            }
         }
     }
 
@@ -563,6 +569,7 @@ impl ProviderService {
                 .unwrap_or_default()
                 .to_string()),
             AppType::Pi => crate::pi_config::provider_base_url(&provider.settings_config),
+            AppType::Omp => crate::omp_config::provider_base_url(&provider.settings_config),
         }
     }
 

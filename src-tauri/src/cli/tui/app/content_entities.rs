@@ -192,7 +192,10 @@ impl App {
     }
 
     fn provider_set_default_action(&mut self, row: &super::data::ProviderRow) -> Action {
-        if !matches!(self.app_type, AppType::OpenClaw | AppType::Hermes) {
+        if !matches!(
+            self.app_type,
+            AppType::OpenClaw | AppType::Hermes | AppType::Omp
+        ) {
             return Action::None;
         }
         if !row.is_in_config {
@@ -203,7 +206,7 @@ impl App {
             return Action::None;
         }
         let model_id = row.primary_model_id.clone().unwrap_or_default();
-        if matches!(self.app_type, AppType::OpenClaw) && model_id.is_empty() {
+        if matches!(self.app_type, AppType::OpenClaw | AppType::Omp) && model_id.is_empty() {
             self.push_toast(
                 texts::tui_toast_provider_default_model_missing(),
                 ToastKind::Warning,
@@ -238,20 +241,25 @@ impl App {
             return Action::None;
         };
 
-        if matches!(self.app_type, AppType::Pi)
+        if matches!(self.app_type, AppType::Pi | AppType::Omp)
             && data.providers.pi_membership_unknown
             && matches!(
                 intent,
                 Intent::Primary | Intent::Add | Intent::Edit | Intent::Switch | Intent::Delete
             )
         {
-            self.push_toast(
+            let message = if matches!(self.app_type, AppType::Omp) {
+                crate::t!(
+                    "OMP models.yml could not be read. Fix or reload it before changing providers.",
+                    "无法读取 OMP models.yml；请修复或重新加载后再修改供应商。"
+                )
+            } else {
                 crate::t!(
                     "Pi models.json could not be read. Fix or reload it before changing providers.",
                     "无法读取 Pi models.json；请修复或重新加载后再修改供应商。"
-                ),
-                ToastKind::Warning,
-            );
+                )
+            };
+            self.push_toast(message, ToastKind::Warning);
             return Action::None;
         }
 
@@ -683,6 +691,186 @@ impl App {
             }
             _ => Action::None,
         }
+    }
+
+    pub(crate) fn on_omp_models_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        use crate::cli::tui::keymap::omp_models::{self, Intent};
+
+        let models = &data.omp.models;
+        match key.code {
+            KeyCode::Up => {
+                self.omp_model_idx = self.omp_model_idx.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if !models.is_empty() {
+                    self.omp_model_idx = (self.omp_model_idx + 1).min(models.len() - 1);
+                }
+            }
+            _ if matches!(omp_models::intent_for(key.code), Some(Intent::View)) => {
+                let Some(model) = models.get(self.omp_model_idx) else {
+                    return Action::None;
+                };
+                let content = serde_yaml::to_string(&model.config)
+                    .unwrap_or_else(|_| "<invalid model configuration>".to_string());
+                self.overlay = Overlay::TextView(TextViewState {
+                    title: format!("{}/{}", model.provider_id, model.model_id),
+                    lines: content.lines().map(str::to_string).collect(),
+                    scroll: 0,
+                    action: None,
+                });
+            }
+            _ if matches!(omp_models::intent_for(key.code), Some(Intent::Edit)) => {
+                self.open_editor(
+                    data.omp.models_path.display().to_string(),
+                    EditorKind::Plain,
+                    data.omp.models_yaml.clone(),
+                    EditorSubmit::OmpModels {
+                        expected_revision: data.omp.models_revision.clone(),
+                    },
+                );
+            }
+            _ if matches!(omp_models::intent_for(key.code), Some(Intent::Delete)) => {
+                let Some(model) = models.get(self.omp_model_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: crate::t!("Delete model", "删除模型").to_string(),
+                    message: crate::t!(
+                        format!("Delete {}/{}?", model.provider_id, model.model_id),
+                        format!("删除 {}/{}？", model.provider_id, model.model_id)
+                    ),
+                    action: ConfirmAction::OmpModelDelete {
+                        provider_id: model.provider_id.clone(),
+                        model_id: model.model_id.clone(),
+                        expected_revision: data.omp.models_revision.clone(),
+                    },
+                });
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    pub(crate) fn on_omp_roles_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        use crate::cli::tui::keymap::omp_roles::{self, Intent};
+
+        let roles = &data.omp.model_roles;
+        let entries = roles.iter().collect::<Vec<_>>();
+        match key.code {
+            KeyCode::Up => self.omp_role_idx = self.omp_role_idx.saturating_sub(1),
+            KeyCode::Down => {
+                if !entries.is_empty() {
+                    self.omp_role_idx = (self.omp_role_idx + 1).min(entries.len() - 1);
+                }
+            }
+            _ if matches!(omp_roles::intent_for(key.code), Some(Intent::View)) => {
+                let Some((role, selector)) = entries.get(self.omp_role_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::TextView(TextViewState {
+                    title: (*role).clone(),
+                    lines: vec![(*selector).clone()],
+                    scroll: 0,
+                    action: None,
+                });
+            }
+            _ if matches!(omp_roles::intent_for(key.code), Some(Intent::Edit)) => {
+                self.open_editor(
+                    data.omp.roles_path.display().to_string(),
+                    EditorKind::Plain,
+                    data.omp.roles_yaml.clone(),
+                    EditorSubmit::OmpConfig {
+                        path: data.omp.roles_path.clone(),
+                        expected_revision: data.omp.roles_revision.clone(),
+                    },
+                );
+            }
+            _ if matches!(omp_roles::intent_for(key.code), Some(Intent::Delete)) => {
+                let Some((role, _)) = entries.get(self.omp_role_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: crate::t!("Delete role", "删除角色").to_string(),
+                    message: crate::t!(
+                        format!("Delete role '{role}'?"),
+                        format!("删除角色“{role}”？")
+                    ),
+                    action: ConfirmAction::OmpRoleDelete {
+                        role: (*role).clone(),
+                        expected_revision: data.omp.roles_revision.clone(),
+                    },
+                });
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    pub(crate) fn on_omp_system_prompts_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        use crate::cli::tui::keymap::omp_system_prompts::{self, Intent};
+
+        let rows = &data.pi_prompts.system_files;
+        match key.code {
+            KeyCode::Up => {
+                self.omp_system_prompt_idx = self.omp_system_prompt_idx.saturating_sub(1)
+            }
+            KeyCode::Down => {
+                if !rows.is_empty() {
+                    self.omp_system_prompt_idx =
+                        (self.omp_system_prompt_idx + 1).min(rows.len() - 1);
+                }
+            }
+            _ if matches!(omp_system_prompts::intent_for(key.code), Some(Intent::View)) => {
+                let Some((kind, snapshot)) = rows.get(self.omp_system_prompt_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::TextView(TextViewState {
+                    title: pi_system_prompt_filename(*kind).to_string(),
+                    lines: snapshot.content.lines().map(str::to_string).collect(),
+                    scroll: 0,
+                    action: None,
+                });
+            }
+            _ if matches!(omp_system_prompts::intent_for(key.code), Some(Intent::Edit)) => {
+                let Some((kind, snapshot)) = rows.get(self.omp_system_prompt_idx) else {
+                    return Action::None;
+                };
+                self.open_editor(
+                    pi_system_prompt_filename(*kind),
+                    EditorKind::Plain,
+                    snapshot.content.clone(),
+                    EditorSubmit::OmpSystemPrompt {
+                        kind: *kind,
+                        expected_revision: snapshot.revision.clone(),
+                    },
+                );
+            }
+            _ if matches!(
+                omp_system_prompts::intent_for(key.code),
+                Some(Intent::Delete)
+            ) =>
+            {
+                let Some((kind, snapshot)) = rows.get(self.omp_system_prompt_idx) else {
+                    return Action::None;
+                };
+                if !snapshot.exists {
+                    return Action::None;
+                }
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: crate::t!("Delete system prompt", "删除系统提示词").to_string(),
+                    message: crate::t!(
+                        format!("Delete {}?", pi_system_prompt_filename(*kind)),
+                        format!("删除 {}？", pi_system_prompt_filename(*kind))
+                    ),
+                    action: ConfirmAction::OmpSystemPromptDelete {
+                        kind: *kind,
+                        expected_revision: snapshot.revision.clone(),
+                    },
+                });
+            }
+            _ => {}
+        }
+        Action::None
     }
 
     pub(crate) fn on_sessions_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
@@ -1303,6 +1491,7 @@ fn pi_system_prompt_filename(
     match kind {
         crate::services::pi_prompt_files::PiPromptFileKind::SystemAppend => "APPEND_SYSTEM.md",
         crate::services::pi_prompt_files::PiPromptFileKind::SystemOverride => "SYSTEM.md",
+        crate::services::pi_prompt_files::PiPromptFileKind::TitleSystem => "TITLE_SYSTEM.md",
     }
 }
 

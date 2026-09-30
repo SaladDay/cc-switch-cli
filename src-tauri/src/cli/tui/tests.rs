@@ -5355,6 +5355,83 @@ fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
 }
 
 #[test]
+fn model_fetch_candidate_urls_honor_omp_inject_v1_and_ignore_query() {
+    assert_eq!(
+        build_model_fetch_candidate_urls_with_inject_v1(
+            "https://relay.example/v3/compat?api-version=1",
+            ModelFetchStrategy::Bearer,
+            false,
+            Some(true),
+        ),
+        vec!["https://relay.example/v3/compat/v1/models".to_string()]
+    );
+    assert_eq!(
+        build_model_fetch_candidate_urls_with_inject_v1(
+            "https://relay.example/v3/compat?api-version=1",
+            ModelFetchStrategy::Bearer,
+            false,
+            Some(false),
+        ),
+        vec!["https://relay.example/v3/compat/models".to_string()]
+    );
+}
+
+#[test]
+fn model_fetch_candidate_urls_prefer_v1_for_omp_local_openai_discovery() {
+    assert_eq!(
+        build_model_fetch_candidate_urls_with_inject_v1(
+            "https://relay.example",
+            ModelFetchStrategy::Bearer,
+            false,
+            Some(true),
+        ),
+        vec!["https://relay.example/v1/models".to_string()]
+    );
+}
+
+#[test]
+fn model_fetch_candidate_urls_strip_v1_for_omp_llama_cpp() {
+    assert_eq!(
+        build_model_fetch_candidate_urls(
+            "http://127.0.0.1:8080/v1",
+            ModelFetchStrategy::LlamaCpp,
+            false,
+        ),
+        vec!["http://127.0.0.1:8080/models".to_string()]
+    );
+}
+
+#[test]
+fn model_fetch_candidate_urls_use_ollama_native_tags_endpoint() {
+    assert_eq!(
+        build_model_fetch_candidate_urls(
+            "http://ollama.example:11434/v1",
+            ModelFetchStrategy::Ollama,
+            false,
+        ),
+        vec!["http://ollama.example:11434/api/tags".to_string()]
+    );
+}
+
+#[test]
+fn model_fetch_candidate_urls_use_llama_cpp_native_root() {
+    // The OMP handler strips a configured `/v1` suffix before dispatching the
+    // generic worker; the first candidate must therefore be the native root
+    // endpoint rather than `/v1/models`.
+    assert_eq!(
+        build_model_fetch_candidate_urls(
+            "http://127.0.0.1:8080",
+            ModelFetchStrategy::Bearer,
+            false,
+        ),
+        vec![
+            "http://127.0.0.1:8080/models".to_string(),
+            "http://127.0.0.1:8080/v1/models".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn model_fetch_candidate_urls_derive_models_endpoint_from_full_url() {
     assert_eq!(
         build_model_fetch_candidate_urls(
@@ -5388,6 +5465,79 @@ async fn model_fetch_full_url_reports_when_models_endpoint_cannot_be_derived() {
     .expect_err("origin-only full URL should not invent a models endpoint");
 
     assert_eq!(error, "Cannot derive models endpoint from full URL");
+}
+
+#[tokio::test]
+async fn model_fetch_anonymous_allows_keyless_omp_provider() {
+    use axum::{http::HeaderMap, routing::get, Router};
+
+    let app = Router::new().route(
+        "/v1/models",
+        get(|headers: HeaderMap| async move {
+            assert!(headers.get("authorization").is_none());
+            axum::Json(json!({ "data": [{ "id": "local-model" }] }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind anonymous model fetch test server");
+    let address = listener
+        .local_addr()
+        .expect("anonymous model fetch listener address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("anonymous model fetch test server should run");
+    });
+
+    let models = fetch_provider_models_for_tui(
+        &format!("http://{address}"),
+        false,
+        None,
+        None,
+        ModelFetchStrategy::Anonymous,
+        None,
+    )
+    .await
+    .expect("keyless model fetch should succeed");
+    server.abort();
+
+    assert_eq!(models, vec!["local-model"]);
+}
+
+#[tokio::test]
+async fn model_fetch_ollama_uses_native_tags_endpoint() {
+    use axum::{routing::get, Router};
+
+    let app = Router::new().route(
+        "/api/tags",
+        get(|| async { axum::Json(json!({ "models": [{ "name": "llama3" }] })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind Ollama model fetch test server");
+    let address = listener
+        .local_addr()
+        .expect("Ollama model fetch listener address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("Ollama model fetch test server should run");
+    });
+
+    let models = fetch_provider_models_for_tui(
+        &format!("http://{address}/v1"),
+        false,
+        None,
+        None,
+        ModelFetchStrategy::Ollama,
+        None,
+    )
+    .await
+    .expect("Ollama model fetch should use /api/tags");
+    server.abort();
+
+    assert_eq!(models, vec!["llama3"]);
 }
 
 #[tokio::test]
@@ -5446,6 +5596,116 @@ async fn model_fetch_sends_trimmed_custom_user_agent() {
     );
 }
 
+#[tokio::test]
+async fn model_fetch_uses_azure_api_key_header() {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{http::HeaderMap, routing::get, Router};
+
+    let observed = Arc::new(Mutex::new(None::<String>));
+    let handler_observed = Arc::clone(&observed);
+    let app = Router::new().route(
+        "/v1/models",
+        get(move |headers: HeaderMap| {
+            let observed = Arc::clone(&handler_observed);
+            async move {
+                *observed.lock().expect("capture Azure model-fetch header") = headers
+                    .get("api-key")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                axum::Json(json!({ "data": [{ "id": "model-a" }] }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind model fetch test server");
+    let address = listener.local_addr().expect("model fetch listener address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("model fetch test server should run");
+    });
+
+    let models = fetch_provider_models_for_tui(
+        &format!("http://{address}"),
+        false,
+        Some("azure-secret"),
+        None,
+        ModelFetchStrategy::AzureApiKey,
+        None,
+    )
+    .await
+    .expect("Azure model fetch should succeed");
+    server.abort();
+
+    assert_eq!(models, vec!["model-a"]);
+    assert_eq!(
+        observed
+            .lock()
+            .expect("read Azure model-fetch header")
+            .as_deref(),
+        Some("azure-secret")
+    );
+}
+
+#[tokio::test]
+async fn model_fetch_omp_discovery_uses_bearer_header_for_google_wire_api() {
+    use axum::{http::HeaderMap, routing::get, Router};
+
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(None::<HeaderMap>));
+    let handler_observed = std::sync::Arc::clone(&observed);
+    let app = Router::new().route(
+        "/v1/models",
+        get(move |headers: HeaderMap| {
+            let observed = std::sync::Arc::clone(&handler_observed);
+            async move {
+                *observed.lock().expect("capture OMP discovery headers") = Some(headers);
+                axum::Json(json!({ "data": [{ "id": "model-a" }] }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind OMP discovery model fetch test server");
+    let address = listener
+        .local_addr()
+        .expect("OMP discovery model fetch listener address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("OMP discovery model fetch test server should run");
+    });
+
+    let models = fetch_provider_models_for_tui_with_options(
+        &format!("http://{address}"),
+        false,
+        Some("omp-bearer-secret"),
+        None,
+        ModelFetchStrategy::Bearer,
+        None,
+        Some(true),
+        Some(1_000),
+    )
+    .await
+    .expect("OMP discovery model fetch should succeed");
+    server.abort();
+
+    assert_eq!(models, vec!["model-a"]);
+    let headers = observed
+        .lock()
+        .expect("read OMP discovery headers")
+        .clone()
+        .expect("server should capture request headers");
+    assert_eq!(
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer omp-bearer-secret")
+    );
+    assert!(headers.get("x-goog-api-key").is_none());
+}
+
 #[test]
 #[serial(home_settings)]
 fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_loading_data() {
@@ -5459,6 +5719,7 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
         hermes: false,
         openclaw: true,
         pi: false,
+        omp: false,
     })
     .expect("save visible apps");
 
@@ -5511,6 +5772,31 @@ fn parse_model_ids_supports_multiple_shapes_and_dedups_stably() {
     assert_eq!(
         parse_model_ids_from_response(&gemini_payload),
         vec!["gemini-2.0-pro", "gemini-2.0-flash"]
+    );
+
+    let ollama_payload = json!({
+        "models": [
+            {"model": "llama3.2:latest"},
+            {"name": "qwen3:latest"}
+        ]
+    });
+    assert_eq!(
+        parse_model_ids_from_response(&ollama_payload),
+        vec!["llama3.2:latest", "qwen3:latest"]
+    );
+
+    let nested_payload = json!({
+        "result": {
+            "items": [
+                {"id": "nested-a"},
+                {"name": "models/nested-b"},
+                {"id": "nested-a"}
+            ]
+        }
+    });
+    assert_eq!(
+        parse_model_ids_from_response(&nested_payload),
+        vec!["nested-a", "nested-b"]
     );
 }
 

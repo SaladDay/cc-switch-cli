@@ -81,10 +81,10 @@ fn parse_provider_deeplink(
     // Validate app type
     if !matches!(
         app.as_str(),
-        "claude" | "codex" | "gemini" | "opencode" | "openclaw" | "hermes"
+        "claude" | "codex" | "gemini" | "opencode" | "openclaw" | "hermes" | "omp" | "oh-my-pi"
     ) {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'codex', 'gemini', 'opencode', 'openclaw', or 'hermes', got '{app}'"
+            "Invalid app type: must be 'claude', 'codex', 'gemini', 'opencode', 'openclaw', 'hermes', or 'omp', got '{app}'"
         )));
     }
 
@@ -174,6 +174,7 @@ fn parse_provider_deeplink(
         usage_user_id,
         usage_auto_interval,
         openclaw_config: None,
+        omp_config: None,
     })
 }
 
@@ -191,10 +192,18 @@ fn parse_prompt_deeplink(
     // Validate app type
     if !matches!(
         app.as_str(),
-        "claude" | "codex" | "gemini" | "opencode" | "openclaw" | "hermes" | "pi"
+        "claude"
+            | "codex"
+            | "gemini"
+            | "opencode"
+            | "openclaw"
+            | "hermes"
+            | "pi"
+            | "omp"
+            | "oh-my-pi"
     ) {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'codex', 'gemini', 'opencode', 'openclaw', 'hermes', or 'pi', got '{app}'"
+            "Invalid app type: must be 'claude', 'codex', 'gemini', 'opencode', 'openclaw', 'hermes', 'pi', or 'omp', got '{app}'"
         )));
     }
 
@@ -245,6 +254,7 @@ fn parse_prompt_deeplink(
         usage_user_id: None,
         usage_auto_interval: None,
         openclaw_config: None,
+        omp_config: None,
     })
 }
 
@@ -311,6 +321,7 @@ fn parse_mcp_deeplink(
         usage_user_id: None,
         usage_auto_interval: None,
         openclaw_config: None,
+        omp_config: None,
     })
 }
 
@@ -334,6 +345,28 @@ fn parse_skill_deeplink(
 
     let directory = params.get("directory").cloned();
     let branch = params.get("branch").cloned();
+    let apps = params.get("apps").cloned();
+    if let Some(raw_apps) = apps.as_deref() {
+        for app in raw_apps.split(',') {
+            let trimmed = app.trim();
+            if !matches!(
+                trimmed,
+                "claude"
+                    | "codex"
+                    | "gemini"
+                    | "opencode"
+                    | "openclaw"
+                    | "hermes"
+                    | "pi"
+                    | "omp"
+                    | "oh-my-pi"
+            ) {
+                return Err(AppError::InvalidInput(format!(
+                    "Invalid app in 'apps': unsupported app '{trimmed}'"
+                )));
+            }
+        }
+    }
 
     Ok(DeepLinkImportRequest {
         version,
@@ -355,7 +388,7 @@ fn parse_skill_deeplink(
         opus_model: None,
         content: None,
         description: None,
-        apps: None,
+        apps,
         config: None,
         config_format: None,
         config_url: None,
@@ -367,5 +400,6 @@ fn parse_skill_deeplink(
         usage_user_id: None,
         usage_auto_interval: None,
         openclaw_config: None,
+        omp_config: None,
     })
 }

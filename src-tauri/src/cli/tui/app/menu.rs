@@ -102,6 +102,9 @@ impl App {
             prompt_idx: 0,
             pi_system_prompt_idx: 0,
             pi_prompt_template_idx: 0,
+            omp_model_idx: 0,
+            omp_role_idx: 0,
+            omp_system_prompt_idx: 0,
             skills_idx: 0,
             skills_discover_idx: 0,
             skills_repo_idx: 0,
@@ -190,6 +193,9 @@ impl App {
             Route::Prompts => NavItem::Prompts,
             Route::PiSystemPrompts => NavItem::PiSystemPrompts,
             Route::PiPromptTemplates => NavItem::PiPromptTemplates,
+            Route::OmpModels => NavItem::OmpModels,
+            Route::OmpRoles => NavItem::OmpRoles,
+            Route::OmpSystemPrompts => NavItem::OmpSystemPrompts,
             Route::HermesMemory => NavItem::HermesMemory,
             Route::Config => NavItem::Config,
             Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
@@ -1114,6 +1120,9 @@ impl App {
             Route::Prompts => self.on_prompts_key(key, data),
             Route::PiSystemPrompts => self.on_pi_system_prompts_key(key, data),
             Route::PiPromptTemplates => self.on_pi_prompt_templates_key(key, data),
+            Route::OmpModels => self.on_omp_models_key(key, data),
+            Route::OmpRoles => self.on_omp_roles_key(key, data),
+            Route::OmpSystemPrompts => self.on_omp_system_prompts_key(key, data),
             Route::HermesMemory => self.on_hermes_memory_key(key, data),
             Route::Config => self.on_config_key(key, data),
             Route::ConfigOpenClawWorkspace => self.on_config_openclaw_workspace_key(key, data),
@@ -1192,6 +1201,16 @@ impl App {
         } else {
             self.prompt_idx = self.prompt_idx.min(prompt_len - 1);
         }
+
+        self.omp_model_idx = self
+            .omp_model_idx
+            .min(data.omp.models.len().saturating_sub(1));
+        self.omp_role_idx = self
+            .omp_role_idx
+            .min(data.omp.model_roles.len().saturating_sub(1));
+        self.omp_system_prompt_idx = self
+            .omp_system_prompt_idx
+            .min(data.pi_prompts.system_files.len().saturating_sub(1));
 
         let visible_session_rows = visible_sessions_for_state(
             &self.filter,

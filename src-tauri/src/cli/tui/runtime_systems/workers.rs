@@ -18,16 +18,16 @@ use super::super::data::{
     UsageRangePreset,
 };
 use super::types::{
-    fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
-    AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem,
-    LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
-    ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchStrategy,
-    ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem,
-    RefreshedMessagePages, SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg,
-    SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg,
-    SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq,
-    UpdateSystem, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq,
-    UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg, AppDataReq, AppDataSystem,
+    CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem, LoadedMessagePage, LocalEnvMsg,
+    LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq, ManagedAuthSystem,
+    ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchStrategy, ModelFetchSystem,
+    ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages,
+    SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
+    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
+    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
+    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
+    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -634,6 +634,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             custom_user_agent,
             api_protocol,
             request_headers,
+            discovery_timeout_ms,
             codex_oauth,
             codex_oauth_account_id,
             field,
@@ -647,18 +648,28 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             })
         } else {
             let strategy = match api_protocol.as_deref() {
+                // OMP uses the synthetic `none` protocol marker for
+                // keyless providers. The actual wire protocol is irrelevant
+                // to the unauthenticated models discovery request.
+                Some("none") => ModelFetchStrategy::Anonymous,
+                Some("ollama") => ModelFetchStrategy::Ollama,
+                Some("omp-discovery") => ModelFetchStrategy::Bearer,
+                Some("llama.cpp") => ModelFetchStrategy::LlamaCpp,
                 Some("anthropic-messages") => ModelFetchStrategy::Anthropic,
-                Some("google-generative-ai") => ModelFetchStrategy::GoogleApiKey,
+                Some("google-generative-ai" | "google-vertex") => ModelFetchStrategy::GoogleApiKey,
+                Some("azure-openai-responses") => ModelFetchStrategy::AzureApiKey,
                 _ => model_fetch_strategy_for_field(field),
             };
             rt.block_on(async {
-                fetch_provider_models_for_tui(
+                crate::cli::tui::fetch_provider_models_for_tui_with_options(
                     &base_url,
                     is_full_url,
                     api_key.as_deref(),
                     custom_user_agent.as_deref(),
                     strategy,
                     request_headers.as_ref(),
+                    None,
+                    discovery_timeout_ms,
                 )
                 .await
             })

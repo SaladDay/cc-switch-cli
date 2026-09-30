@@ -82,6 +82,26 @@ impl ConfigDirEnvGuard {
             std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
             std::env::set_var("XDG_STATE_HOME", runtime.path());
         }
+        // `tempfile::TempDir` normally uses 0700, but the test runner may
+        // apply a permissive umask to directories created by callers.  The
+        // production config guard intentionally rejects group/other-writable
+        // managed roots, so normalize an existing test root here.  Tests that
+        // exercise rejection of insecure permissions set their explicit mode
+        // after this helper returns; system paths such as /tmp are excluded.
+        #[cfg(unix)]
+        if path != Path::new("/tmp")
+            && !path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::symlink_metadata(path) {
+                if meta.is_dir() {
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                        .expect("restrict isolated config dir");
+                }
+            }
+        }
         Self {
             original,
             original_xdg_runtime_dir,
@@ -420,6 +440,12 @@ fn daemon_owned_pidfile_can_initialize_and_run_v16_migration_without_self_deadlo
     let _env = crate::test_support::TestEnvGuard::isolated(home.path());
     let config_dir = home.path().join(".cc-switch");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict config dir");
+    }
     let db_path = config_dir.join("cc-switch.db");
     let conn = Connection::open(&db_path).expect("seed database");
     Database::create_tables_on_conn(&conn).expect("create current tables");

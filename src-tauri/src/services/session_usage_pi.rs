@@ -8,7 +8,8 @@ use crate::error::AppError;
 use crate::proxy::usage::calculator::CostCalculator;
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
-    metadata_modified_nanos, update_sync_state_conn, SessionSyncResult,
+    metadata_modified_nanos, open_session_file_no_follow, update_line_sync_state_conn,
+    SessionSyncResult,
 };
 use crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH;
 use crate::services::usage_stats::find_model_pricing;
@@ -16,7 +17,7 @@ use rusqlite::OptionalExtension;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -109,11 +110,8 @@ struct PiFileRevision {
 }
 
 impl PiFileRevision {
-    fn encoded(self) -> i64 {
-        ((REVISION_MARKER << REVISION_MARKER_SHIFT)
-            | (u64::from(self.complete) << REVISION_COMPLETE_SHIFT)
-            | (self.file_size << REVISION_SIZE_SHIFT)
-            | u64::from(self.tail_fingerprint)) as i64
+    fn encoded_tail(self) -> i64 {
+        (u64::from(self.tail_fingerprint) | (u64::from(self.complete) << 32)) as i64
     }
 }
 
@@ -121,6 +119,7 @@ impl PiFileRevision {
 struct PiSyncState {
     revision: PiFileRevision,
     last_line_offset: i64,
+    legacy_revision: bool,
 }
 
 #[derive(Debug)]
@@ -187,8 +186,19 @@ fn sync_single_pi_file(db: &Database, file_path: &Path) -> Result<SessionSyncRes
     let modified = metadata_modified_nanos(&metadata);
     let revision = pi_file_revision(file_path, &metadata, modified)?;
     let previous = get_pi_sync_state(db, &file_path_string)?;
-    if previous.is_some_and(|state| state.revision == revision) {
-        return Ok(SessionSyncResult::default());
+    if let Some(state) = previous {
+        if state.revision == revision {
+            if state.legacy_revision {
+                let conn = lock_conn!(db.conn);
+                update_pi_sync_state_on_conn(
+                    &conn,
+                    &file_path_string,
+                    revision,
+                    state.last_line_offset,
+                )?;
+            }
+            return Ok(SessionSyncResult::default());
+        }
     }
 
     // A matching tail at the old EOF identifies Pi's normal append path, so
@@ -238,7 +248,8 @@ fn get_pi_sync_state(db: &Database, file_path: &str) -> Result<Option<PiSyncStat
     let conn = lock_conn!(db.conn);
     let row = conn
         .query_row(
-            "SELECT last_modified, last_line_offset, last_synced_at
+            "SELECT last_modified, last_line_offset, last_synced_at,
+                    last_byte_offset, last_tail_fingerprint
              FROM session_log_sync WHERE file_path = ?1",
             rusqlite::params![file_path],
             |row| {
@@ -246,19 +257,54 @@ fn get_pi_sync_state(db: &Database, file_path: &str) -> Result<Option<PiSyncStat
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| AppError::Database(format!("读取 Pi 会话同步状态失败: {error}")))?;
-    let Some((modified_nanos, last_line_offset, encoded_revision)) = row else {
+    let Some((
+        modified_nanos,
+        last_line_offset,
+        legacy_encoded_revision,
+        stored_file_size,
+        stored_tail_fingerprint,
+    )) = row
+    else {
         return Ok(None);
     };
-    let encoded_revision = encoded_revision as u64;
-    if encoded_revision >> REVISION_MARKER_SHIFT != REVISION_MARKER {
-        return Ok(None);
-    }
-    let file_size = (encoded_revision >> REVISION_SIZE_SHIFT) & REVISION_SIZE_MASK;
+    let (file_size, tail_fingerprint, complete, legacy_revision) = if let (
+        Some(file_size),
+        Some(encoded_tail),
+    ) =
+        (stored_file_size, stored_tail_fingerprint)
+    {
+        if file_size < 0 || encoded_tail < 0 {
+            return Ok(None);
+        }
+        let encoded_tail = encoded_tail as u64;
+        (
+            file_size as u64,
+            encoded_tail as u32,
+            ((encoded_tail >> 32) & 1) == 1,
+            false,
+        )
+    } else {
+        // Databases written by the first Pi importer stored the append-proof
+        // revision in last_synced_at. Accept those rows once and migrate them
+        // to the dedicated cursor columns on the next successful sync.
+        let encoded_revision = legacy_encoded_revision as u64;
+        if encoded_revision >> REVISION_MARKER_SHIFT != REVISION_MARKER {
+            return Ok(None);
+        }
+        (
+            (encoded_revision >> REVISION_SIZE_SHIFT) & REVISION_SIZE_MASK,
+            encoded_revision as u32,
+            ((encoded_revision >> REVISION_COMPLETE_SHIFT) & 1) == 1,
+            true,
+        )
+    };
     if file_size > crate::session_manager::providers::pi::MAX_SESSION_BYTES
         || last_line_offset < 0
         || last_line_offset > crate::session_manager::providers::pi::MAX_TREE_ENTRIES as i64 + 1
@@ -269,10 +315,11 @@ fn get_pi_sync_state(db: &Database, file_path: &str) -> Result<Option<PiSyncStat
         revision: PiFileRevision {
             modified_nanos,
             file_size,
-            tail_fingerprint: encoded_revision as u32,
-            complete: ((encoded_revision >> REVISION_COMPLETE_SHIFT) & 1) == 1,
+            tail_fingerprint,
+            complete,
         },
         last_line_offset,
+        legacy_revision,
     }))
 }
 
@@ -282,15 +329,17 @@ fn update_pi_sync_state_on_conn(
     revision: PiFileRevision,
     last_line_offset: i64,
 ) -> Result<(), AppError> {
-    update_sync_state_conn(conn, file_path, revision.modified_nanos, last_line_offset)?;
-    // Match upstream: Pi privately tags this field with the append-proof
-    // revision; no production consumer interprets it as a wall-clock value.
-    conn.execute(
-        "UPDATE session_log_sync SET last_synced_at = ?2 WHERE file_path = ?1",
-        rusqlite::params![file_path, revision.encoded()],
+    update_line_sync_state_conn(
+        conn,
+        file_path,
+        revision.modified_nanos,
+        last_line_offset,
+        Some(
+            i64::try_from(revision.file_size)
+                .map_err(|_| AppError::Config("Pi 会话文件大小超出同步游标范围".to_string()))?,
+        ),
+        Some(revision.encoded_tail()),
     )
-    .map_err(|error| AppError::Database(format!("更新 Pi 会话同步状态失败: {error}")))?;
-    Ok(())
 }
 
 fn pi_file_revision(
@@ -301,7 +350,7 @@ fn pi_file_revision(
     let tail_len = metadata.len().min(REVISION_TAIL_BYTES);
     let mut tail = vec![0; tail_len as usize];
     if tail_len > 0 {
-        let mut file = File::open(file_path)
+        let mut file = open_session_file_no_follow(file_path)
             .map_err(|error| AppError::Config(format!("无法打开 Pi 会话文件: {error}")))?;
         file.seek(SeekFrom::Start(metadata.len() - tail_len))
             .and_then(|_| file.read_exact(&mut tail))
@@ -322,7 +371,7 @@ fn pi_prefix_tail_matches(file_path: &Path, previous: PiFileRevision) -> Result<
     let tail_len = previous.file_size.min(REVISION_TAIL_BYTES);
     let mut tail = vec![0; tail_len as usize];
     if tail_len > 0 {
-        let mut file = File::open(file_path)
+        let mut file = open_session_file_no_follow(file_path)
             .map_err(|error| AppError::Config(format!("无法打开 Pi 会话文件: {error}")))?;
         file.seek(SeekFrom::Start(previous.file_size - tail_len))
             .and_then(|_| file.read_exact(&mut tail))
@@ -346,7 +395,7 @@ fn parse_pi_file(
     snapshot_size: u64,
     file_modified_nanos: i64,
 ) -> Result<ParsedPiFile, AppError> {
-    let file = File::open(file_path)
+    let file = open_session_file_no_follow(file_path)
         .map_err(|error| AppError::Config(format!("无法打开 Pi 会话文件: {error}")))?;
     let mut reader = BufReader::new(file);
     let mut buffer = String::new();
@@ -356,6 +405,57 @@ fn parse_pi_file(
     let mut session_timestamp = None;
     let mut records = Vec::new();
     let mut incomplete_tail = false;
+
+    // An append cursor points at the old complete EOF, while the session
+    // header lives near the beginning of the file. Establish the session
+    // identity once, then seek directly to that cursor so active sessions are
+    // not reparsed from byte zero on every sync cycle.
+    if let Some(byte_offset) =
+        start_at_byte.filter(|offset| *offset > 0 && *offset <= snapshot_size)
+    {
+        while session_id.is_none() && bytes_read < byte_offset {
+            buffer.clear();
+            let remaining = byte_offset.saturating_sub(bytes_read);
+            let read = Read::by_ref(&mut reader)
+                .take(remaining)
+                .read_line(&mut buffer)
+                .map_err(|error| AppError::Config(format!("无法读取 Pi 会话 header: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            bytes_read = bytes_read.saturating_add(read as u64);
+            line_number = line_number.saturating_add(1);
+            let line = buffer.trim();
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                if !buffer.ends_with('\n') {
+                    return Err(AppError::Config("Pi 会话 header 不完整".to_string()));
+                }
+                continue;
+            };
+            if value.get("type").and_then(Value::as_str) == Some("session") {
+                session_id = value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| crate::session_manager::providers::pi::is_valid_tree_id(id))
+                    .map(str::to_string);
+                if session_id.is_none() {
+                    return Err(AppError::Config("Pi 会话 header 缺少 id".to_string()));
+                }
+                session_timestamp = value
+                    .get("timestamp")
+                    .and_then(parse_timestamp_millis)
+                    .map(|timestamp| timestamp / 1000);
+            }
+        }
+        if session_id.is_none() {
+            return Err(AppError::Config("Pi 会话没有有效 header".to_string()));
+        }
+        reader
+            .seek(SeekFrom::Start(byte_offset))
+            .map_err(|error| AppError::Config(format!("无法定位 Pi 会话增量边界: {error}")))?;
+        bytes_read = byte_offset;
+        line_number = start_after_line;
+    }
 
     loop {
         buffer.clear();
@@ -424,13 +524,6 @@ fn parse_pi_file(
             }
             let header_timestamp_millis = value.get("timestamp").and_then(parse_timestamp_millis);
             session_timestamp = header_timestamp_millis.map(|timestamp| timestamp / 1000);
-            if let Some(byte_offset) = start_at_byte.filter(|offset| *offset >= bytes_read) {
-                reader.seek(SeekFrom::Start(byte_offset)).map_err(|error| {
-                    AppError::Config(format!("无法定位 Pi 会话增量边界: {error}"))
-                })?;
-                bytes_read = byte_offset;
-                line_number = start_after_line;
-            }
             continue;
         }
         if let Some(record) = parse_usage_record(
@@ -875,7 +968,7 @@ fn insert_pi_record(conn: &rusqlite::Connection, record: &PiUsageRecord) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::FileTimes;
+    use std::fs::{File, FileTimes};
     use std::io::Write;
 
     fn session_path(root: &Path, name: &str) -> PathBuf {
