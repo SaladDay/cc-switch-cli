@@ -306,6 +306,9 @@ enum PreparedLiveWrite {
     OpenClaw {
         models: Value,
     },
+    Kimi {
+        config: String,
+    },
 }
 
 #[derive(Clone)]
@@ -317,7 +320,7 @@ enum PreparedCodexAuthWrite {
 
 impl ProviderService {
     pub fn is_provider_key_app(app_type: &AppType) -> bool {
-        matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi)
+        matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi | AppType::Kimi)
     }
 
     pub fn is_valid_provider_key(value: &str) -> bool {
@@ -429,6 +432,10 @@ impl ProviderService {
                 .map(|(id, _)| id)
                 .collect(),
             AppType::Pi => crate::pi_config::read_pi_native_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+            AppType::Kimi => crate::kimi_config::get_providers()?
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect(),
@@ -753,6 +760,8 @@ impl ProviderService {
                 .map(|providers| providers.contains_key(provider_id)),
             AppType::OpenClaw => Self::valid_openclaw_live_provider_ids()
                 .map(|ids| ids.is_some_and(|ids| ids.contains(provider_id))),
+            AppType::Kimi => crate::kimi_config::get_providers()
+                .map(|providers| providers.contains_key(provider_id)),
             _ => Ok(false),
         };
 
@@ -1002,6 +1011,13 @@ impl ProviderService {
                     && matches!(prepared.action.app_type, AppType::Hermes)
                 {
                     crate::hermes_config::set_current_provider(
+                        &prepared.action.provider.id,
+                        &prepared.action.provider.settings_config,
+                    )?;
+                } else if prepared.action.activate_provider
+                    && matches!(prepared.action.app_type, AppType::Kimi)
+                {
+                    crate::kimi_config::set_current_provider(
                         &prepared.action.provider.id,
                         &prepared.action.provider.settings_config,
                     )?;
@@ -1426,6 +1442,26 @@ impl ProviderService {
                 }
                 state.save()?;
             }
+            AppType::Kimi => {
+                let providers = crate::kimi_config::get_providers()?;
+                let live_after = providers.get(provider_id).cloned().ok_or_else(|| {
+                    AppError::localized(
+                        "kimi.live.missing_provider",
+                        format!("Kimi live 配置中缺少供应商: {provider_id}"),
+                        format!("Kimi live config missing provider: {provider_id}"),
+                    )
+                })?;
+
+                {
+                    let mut guard = state.config.write().map_err(AppError::from)?;
+                    if let Some(manager) = guard.get_manager_mut(app_type) {
+                        if let Some(target) = manager.providers.get_mut(provider_id) {
+                            target.settings_config = live_after;
+                        }
+                    }
+                }
+                state.save()?;
+            }
             AppType::Pi => {}
         }
         Ok(())
@@ -1482,7 +1518,7 @@ impl ProviderService {
                 strict_current_provider_id,
                 old_snippet,
             ),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => Ok(()),
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => Ok(()),
         };
 
         match result {
@@ -1612,7 +1648,7 @@ impl ProviderService {
             }
             AppType::Gemini => live_settings.get("env") != provider_settings.get("env"),
             AppType::Claude => live_settings != provider_settings,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => false,
         }
     }
 
@@ -1770,7 +1806,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
             AppType::Hermes => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
-            AppType::Pi => Ok(String::new()),
+            AppType::Pi | AppType::Kimi => Ok(String::new()),
         }
     }
 
@@ -2134,6 +2170,10 @@ impl ProviderService {
             return crate::hermes_config::get_current_provider_id()
                 .map(|opt| opt.unwrap_or_default());
         }
+        if matches!(app_type, AppType::Kimi) {
+            return crate::kimi_config::get_current_provider_id()
+                .map(|opt| opt.unwrap_or_default());
+        }
         if app_type.is_additive_mode() {
             return Ok(String::new());
         }
@@ -2478,6 +2518,7 @@ impl ProviderService {
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
             AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
             AppType::Pi => unreachable!("Pi uses native provider import"),
+            AppType::Kimi => unreachable!("additive mode apps are handled earlier"),
         };
 
         let mut provider = Provider::with_id(
@@ -2617,6 +2658,17 @@ impl ProviderService {
                 }
                 crate::openclaw_config::read_openclaw_config()
             }
+            AppType::Kimi => {
+                let config_path = crate::kimi_config::get_kimi_config_path();
+                if !config_path.exists() {
+                    return Err(AppError::localized(
+                        "kimi.config.missing",
+                        "Kimi 配置文件不存在",
+                        "Kimi configuration file not found",
+                    ));
+                }
+                crate::kimi_config::read_kimi_config_json()
+            }
             AppType::Pi => Err(AppError::InvalidInput(
                 "Pi providers are read from models.json".to_string(),
             )),
@@ -2696,6 +2748,11 @@ impl ProviderService {
                     crate::openclaw_config::remove_provider(provider_id)?;
                 }
             }
+            AppType::Kimi => {
+                if crate::kimi_config::get_kimi_config_dir().exists() {
+                    crate::kimi_config::remove_provider(provider_id)?;
+                }
+            }
             _ => unreachable!("non-additive apps should not enter remove-from-live branch"),
         }
 
@@ -2744,6 +2801,7 @@ impl ProviderService {
             AppType::OpenCode => Self::import_opencode_providers_from_live(state),
             AppType::OpenClaw => Self::import_openclaw_providers_from_live(state),
             AppType::Hermes => Self::import_hermes_providers_from_live(state),
+            AppType::Kimi => live::import_kimi_providers_from_live(state),
             AppType::Pi => Self::import_pi_providers_from_live(state),
             _ => Self::import_default_config(state, app_type).map(usize::from),
         }
@@ -2760,11 +2818,15 @@ impl ProviderService {
                 Self::switch(state, AppType::Hermes, provider_id)?;
                 Ok(provider_id.to_string())
             }
+            AppType::Kimi => {
+                Self::switch(state, AppType::Kimi, provider_id)?;
+                Ok(provider_id.to_string())
+            }
             AppType::OpenClaw => Self::set_openclaw_default_model(provider_id, model_id),
             _ => Err(AppError::localized(
                 "provider.set_default_model.unsupported",
-                "只有 Hermes 和 OpenClaw 支持设置默认供应商/模型",
-                "Only Hermes and OpenClaw support setting a default provider/model",
+                "只有 Hermes, OpenClaw 和 Kimi 支持设置默认供应商/模型",
+                "Only Hermes, OpenClaw, and Kimi support setting a default provider/model",
             )),
         }
     }
@@ -2847,6 +2909,16 @@ impl ProviderService {
                     "provider.remove_from_config.hermes_current",
                     "不能从配置中移除 Hermes 当前默认供应商",
                     "Cannot remove the current default Hermes provider from config",
+                ))
+            }
+            AppType::Kimi
+                if crate::kimi_config::get_current_provider_id()?.as_deref()
+                    == Some(provider_id) =>
+            {
+                Err(AppError::localized(
+                    "provider.remove_from_config.kimi_current",
+                    "不能从配置中移除 Kimi 当前默认供应商",
+                    "Cannot remove the current default Kimi provider from config",
                 ))
             }
             AppType::OpenClaw if Self::openclaw_default_model_references_provider(provider_id)? => {
@@ -3009,7 +3081,7 @@ impl ProviderService {
                 takeover_active: false,
                 refresh_stale_backup: false,
                 sync_proxy_live: false,
-                activate_provider: matches!(app_type, AppType::Hermes),
+                activate_provider: matches!(app_type, AppType::Hermes | AppType::Kimi),
             });
         }
 
@@ -3035,6 +3107,7 @@ impl ProviderService {
             AppType::OpenCode => unreachable!("additive mode handled above"),
             AppType::Hermes => unreachable!("additive mode handled above"),
             AppType::OpenClaw => unreachable!("additive mode handled above"),
+            AppType::Kimi => unreachable!("additive mode handled above"),
             AppType::Pi => unreachable!("Pi switch is handled by the native provider service"),
         };
 
@@ -3239,6 +3312,20 @@ impl ProviderService {
                 )?;
                 Ok(PreparedLiveWrite::Hermes { providers })
             }
+            AppType::Kimi => {
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.kimi.settings.not_object",
+                        "Kimi 配置必须是 JSON 对象",
+                        "Kimi configuration must be a JSON object",
+                    ));
+                }
+                let config = crate::kimi_config::prepare_provider(
+                    &provider.id,
+                    provider.settings_config.clone(),
+                )?;
+                Ok(PreparedLiveWrite::Kimi { config })
+            }
             AppType::OpenClaw => {
                 let settings_config = provider.settings_config.clone();
                 let looks_like_provider = settings_config.get("baseUrl").is_some()
@@ -3271,6 +3358,9 @@ impl ProviderService {
             }
             PreparedLiveWrite::Hermes { providers } => {
                 crate::hermes_config::write_prepared_providers(providers).map(|_| ())
+            }
+            PreparedLiveWrite::Kimi { config } => {
+                crate::kimi_config::write_prepared_config(&config).map(|_| ())
             }
             PreparedLiveWrite::OpenClaw { models } => {
                 crate::openclaw_config::write_prepared_models(models)
@@ -3496,6 +3586,9 @@ impl ProviderService {
             AppType::Pi => Err(AppError::Config(
                 "Pi does not support proxy takeover backups".into(),
             )),
+            AppType::Kimi => Err(AppError::Config(
+                "Kimi does not support proxy takeover backups".into(),
+            )),
         }
     }
 
@@ -3583,6 +3676,15 @@ impl ProviderService {
                         "provider.hermes.settings.not_object",
                         "Hermes 配置必须是 JSON 对象",
                         "Hermes configuration must be a JSON object",
+                    ));
+                }
+            }
+            AppType::Kimi => {
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.kimi.settings.not_object",
+                        "Kimi 配置必须是 JSON 对象",
+                        "Kimi configuration must be a JSON object",
                     ));
                 }
             }
@@ -3752,6 +3854,11 @@ impl ProviderService {
                         crate::openclaw_config::remove_provider(provider_id)?;
                     }
                 }
+                AppType::Kimi => {
+                    if crate::kimi_config::get_kimi_config_dir().exists() {
+                        crate::kimi_config::remove_provider(provider_id)?;
+                    }
+                }
                 _ => unreachable!("non-additive apps should not enter additive delete branch"),
             }
 
@@ -3791,6 +3898,9 @@ impl ProviderService {
                 let _ = provider_snapshot;
             }
             AppType::OpenClaw => {
+                let _ = provider_snapshot;
+            }
+            AppType::Kimi => {
                 let _ = provider_snapshot;
             }
             AppType::Pi => unreachable!("Pi deletion is handled by the native provider service"),

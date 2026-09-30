@@ -5459,6 +5459,7 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
         hermes: false,
         openclaw: true,
         pi: false,
+        kimi: false,
     })
     .expect("save visible apps");
 

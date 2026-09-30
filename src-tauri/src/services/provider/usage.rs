@@ -482,6 +482,19 @@ impl ProviderService {
                 .and_then(Value::as_str)
                 .ok_or_else(|| AppError::InvalidInput("Pi provider API key is missing".to_string()))
                 .map(str::to_string),
+            AppType::Kimi => provider
+                .settings_config
+                .get("apiKey")
+                .or_else(|| provider.settings_config.get("api_key"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.kimi.api_key.missing",
+                        "缺少 API Key",
+                        "API key is missing",
+                    )
+                })
+                .map(|s| s.to_string()),
         }
     }
 
@@ -559,6 +572,15 @@ impl ProviderService {
             AppType::OpenClaw => Ok(provider
                 .settings_config
                 .get("baseUrl")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()),
+            AppType::Kimi => Ok(provider
+                .settings_config
+                .get("baseUrl")
+                .or_else(|| provider.settings_config.get("baseURL"))
+                .or_else(|| provider.settings_config.get("base_url"))
+                .or_else(|| provider.settings_config.get("endpoint"))
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string()),

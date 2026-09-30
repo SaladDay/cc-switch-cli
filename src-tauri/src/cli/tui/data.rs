@@ -409,6 +409,7 @@ impl ProxySnapshot {
             AppType::Hermes => None,
             AppType::OpenClaw => None,
             AppType::Pi => None,
+            AppType::Kimi => None,
         }
     }
 
@@ -1742,6 +1743,13 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .as_str()
             .map(|s| s.to_string()),
         AppType::Pi => crate::pi_config::provider_base_url(settings_config).ok(),
+        AppType::Kimi => settings_config
+            .get("base_url")
+            .or_else(|| settings_config.get("baseUrl"))
+            .or_else(|| settings_config.get("baseURL"))
+            .or_else(|| settings_config.get("endpoint"))?
+            .as_str()
+            .map(|s| s.to_string()),
     }
 }
 
@@ -1752,6 +1760,11 @@ fn extract_primary_model_id(
 ) -> Option<String> {
     match app_type {
         AppType::Hermes => hermes_primary_model_id(settings_config),
+        AppType::Kimi => settings_config
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+            .map(ToOwned::to_owned),
         AppType::OpenClaw => match openclaw_live_provider {
             Some(live_provider) => openclaw_primary_model_id(live_provider),
             None => openclaw_primary_model_id(settings_config),

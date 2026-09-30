@@ -533,6 +533,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
         AppType::Hermes,
         AppType::OpenClaw,
         AppType::Pi,
+        AppType::Kimi,
     ] {
         let app_key = app.as_str();
         let providers = db.get_all_providers(app_key)?;
@@ -550,6 +551,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
             AppType::Hermes => config.prompts.hermes.prompts = prompts.into_iter().collect(),
             AppType::OpenClaw => config.prompts.openclaw.prompts = prompts.into_iter().collect(),
             AppType::Pi => config.prompts.pi.prompts = prompts.into_iter().collect(),
+            AppType::Kimi => config.prompts.kimi.prompts = prompts.into_iter().collect(),
         }
 
         // common snippet
@@ -558,7 +560,17 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
     }
 
     // mcp servers (unified)
-    let servers = db.get_all_mcp_servers()?;
+    let mut servers = db.get_all_mcp_servers()?;
+    // Kimi enablement is native-local state, not an extension to the shared DB schema.
+    match crate::kimi_config::read_kimi_mcp_servers_map() {
+        Ok(kimi_servers) => {
+            for (id, server) in &mut servers {
+                server.apps.kimi = kimi_servers.contains_key(id);
+            }
+        }
+        // A malformed unrelated app must not prevent CC-Switch startup. MCP writes still fail closed.
+        Err(error) => log::warn!("Could not read Kimi MCP enablement: {error}"),
+    }
     config.mcp.servers = Some(servers.into_iter().collect());
 
     Ok(config)
@@ -587,6 +599,7 @@ fn persist_multi_app_config_to_db_preserving_current_providers(
         AppType::OpenCode,
         AppType::Hermes,
         AppType::OpenClaw,
+        AppType::Kimi,
     ] {
         let app_key = app.as_str();
         let manager = config.get_manager(&app);
@@ -761,6 +774,7 @@ fn migrate_legacy_codex_configs(db: &Database, config: &mut MultiAppConfig) {
 #[cfg(test)]
 mod tests {
     use super::AppState;
+    use crate::app_config::AppType;
     use crate::database::Database;
     use crate::provider::Provider;
     use crate::services::skill::{SkillService, SkillStore};
@@ -786,6 +800,79 @@ mod tests {
             serde_json::to_string_pretty(&value).expect("serialize json"),
         )
         .expect("write json file");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn kimi_provider_survives_database_sync_and_fresh_live_restore() {
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::isolated(home.path());
+        let _kimi = crate::kimi_config::test_support::TestKimiDir::new();
+        let original = r#"default_model = "fast"
+[providers.native]
+type = "kimi"
+base_url = "https://example.invalid/v1"
+[models.fast]
+provider = "native"
+model = "kimi-k2.5"
+max_context_size = 262144
+"#;
+        crate::kimi_config::write_kimi_config_source(original).unwrap();
+        let expected = crate::kimi_config::read_kimi_config_json().unwrap();
+        let config = crate::kimi_config::get_provider("native").unwrap().unwrap();
+        let db = Database::memory().unwrap();
+        db.save_provider(
+            "kimi",
+            &Provider::with_id("native".into(), "native".into(), config, None),
+        )
+        .unwrap();
+        let sql = db.export_sql_string_for_sync().unwrap();
+        let restored = Database::memory().unwrap();
+        restored.import_sql_string_for_sync(&sql).unwrap();
+        let provider = restored
+            .get_provider_by_id("native", "kimi")
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(crate::kimi_config::get_kimi_config_path()).unwrap();
+        crate::kimi_config::write_prepared_config(
+            &crate::kimi_config::prepare_provider("native", provider.settings_config).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::kimi_config::read_kimi_config_json().unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn kimi_mcp_enablement_survives_restart_without_schema_changes() {
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::isolated(home.path());
+        let _kimi = crate::kimi_config::test_support::TestKimiDir::new();
+        let state = AppState::try_new().unwrap();
+        let server: crate::app_config::McpServer = serde_json::from_value(json!({
+            "id":"native-test", "name":"native-test", "server":{"command":"echo"}, "apps":{"kimi":true}
+        })).unwrap();
+        crate::kimi_config::write_kimi_config_source("").unwrap();
+        crate::services::McpService::upsert_server(&state, server).unwrap();
+        drop(state);
+        let state = AppState::try_new().unwrap();
+        assert!(
+            crate::services::McpService::get_all_servers(&state).unwrap()["native-test"]
+                .apps
+                .kimi
+        );
+        crate::services::McpService::toggle_app(&state, "native-test", AppType::Kimi, false)
+            .unwrap();
+        drop(state);
+        let state = AppState::try_new().unwrap();
+        assert!(
+            !crate::services::McpService::get_all_servers(&state).unwrap()["native-test"]
+                .apps
+                .kimi
+        );
+        assert_eq!(crate::database::SCHEMA_VERSION, 18);
     }
 
     #[test]

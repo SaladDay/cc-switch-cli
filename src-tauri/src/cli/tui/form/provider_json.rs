@@ -865,6 +865,20 @@ impl ProviderAddFormState {
                     }
                 }
             }
+            AppType::Kimi => {
+                let base_url = self
+                    .hermes_base_url
+                    .value
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string();
+                crate::kimi_config::set_editor_fields(
+                    settings_obj,
+                    &base_url,
+                    &self.hermes_api_key.value,
+                    &self.claude_model.value,
+                );
+            }
         }
 
         Value::Object(provider_obj)
@@ -1503,7 +1517,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {}
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,
@@ -1642,5 +1656,70 @@ fn set_or_remove_f64(obj: &mut serde_json::Map<String, Value>, key: &str, raw: &
         }
     } else {
         obj.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod kimi_roundtrip_tests {
+    use super::*;
+    #[test]
+    fn kimi_native_only_noop_edit_keeps_connection_and_clear_is_explicit() {
+        let provider = crate::provider::Provider::with_id(
+            "native".into(),
+            "native".into(),
+            json!({
+                "providerConfig":{"type":"kimi","base_url":"https://example.invalid/v1","api_key":"native-secret"},
+                "model":" fast ", "models":[{"id":" fast ","config":{"model":"kimi-k2.5"}}]
+            }),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Kimi, &provider);
+        let value = form.to_provider_json_value();
+        assert_eq!(
+            value["settingsConfig"]["base_url"],
+            "https://example.invalid/v1"
+        );
+        assert_eq!(value["settingsConfig"]["api_key"], "native-secret");
+        assert_eq!(value["settingsConfig"]["model"], " fast ");
+        form.hermes_api_key.set("");
+        let cleared = form.to_provider_json_value();
+        assert!(!cleared["settingsConfig"]
+            .to_string()
+            .contains("native-secret"));
+    }
+
+    #[test]
+    fn kimi_form_keeps_native_metadata_and_replaces_imported_alias_fields() {
+        let provider = crate::provider::Provider::with_id(
+            "native".into(),
+            "native".into(),
+            json!({
+                "type":"kimi", "baseUrl":"https://old.invalid", "base_url":"https://old.invalid",
+                "apiKey":"old", "api_key":"old", "model":" fast ",
+                "providerConfig":{"type":"kimi","custom":"preserve","api_key":"superseded-secret","base_url":"https://old.invalid"},
+                "models":[{"id":" fast ","config":{"model":"kimi-k2.5","max_context_size":262144}}]
+            }),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Kimi, &provider);
+        form.hermes_base_url.set("https://new.invalid");
+        form.hermes_api_key.set("");
+        let value = form.to_provider_json_value();
+        let settings = &value["settingsConfig"];
+        assert_eq!(settings["base_url"], "https://new.invalid");
+        assert_eq!(settings["api_key"], "");
+        assert_eq!(settings["model"], " fast ");
+        assert!(settings.get("apiKey").is_none());
+        assert!(settings.get("baseUrl").is_none());
+        assert_eq!(settings["models"], provider.settings_config["models"]);
+        assert_eq!(
+            settings["providerConfig"],
+            json!({"type":"kimi","custom":"preserve"})
+        );
+        assert!(!settings.to_string().contains("superseded-secret"));
+        form.hermes_api_key.set("replacement-secret");
+        let replaced = form.to_provider_json_value();
+        assert_eq!(replaced["settingsConfig"]["api_key"], "replacement-secret");
+        assert!(!replaced.to_string().contains("superseded-secret"));
     }
 }
