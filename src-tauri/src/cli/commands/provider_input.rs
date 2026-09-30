@@ -144,7 +144,9 @@ pub fn common_snippet_has_effective_config(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|obj| !obj.is_empty()),
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => false,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => {
+            false
+        }
     }
 }
 
@@ -3896,12 +3898,10 @@ fn prompt_kimi_config(current: Option<&Value>) -> Result<Value, AppError> {
     println!("\n{}", "Kimi Code".bright_cyan().bold());
 
     let default_api_key = current
-        .and_then(|v| v.get("api_key").or_else(|| v.get("apiKey")))
-        .and_then(Value::as_str)
+        .and_then(crate::kimi_config::provider_api_key)
         .unwrap_or_default();
     let default_base_url = current
-        .and_then(|v| v.get("base_url").or_else(|| v.get("baseUrl")))
-        .and_then(Value::as_str)
+        .and_then(crate::kimi_config::provider_base_url)
         .unwrap_or("https://api.moonshot.cn/v1");
     let default_model = current
         .and_then(|v| v.get("model"))
@@ -3923,18 +3923,11 @@ fn prompt_kimi_config(current: Option<&Value>) -> Result<Value, AppError> {
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
 
-    let mut map = serde_json::Map::new();
-    map.insert(
-        "api_key".to_string(),
-        Value::String(api_key.trim().to_string()),
-    );
-    map.insert(
-        "base_url".to_string(),
-        Value::String(base_url.trim().to_string()),
-    );
-    if !model.trim().is_empty() {
-        map.insert("model".to_string(), Value::String(model.trim().to_string()));
-    }
+    let mut map = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    crate::kimi_config::set_editor_fields(&mut map, &base_url, &api_key, &model);
     Ok(Value::Object(map))
 }
 

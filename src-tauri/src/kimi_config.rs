@@ -14,6 +14,54 @@ pub const DEFAULT_KIMI_CONFIG_DIR: &str = ".kimi-code";
 pub const KIMI_HOME_ENV: &str = "KIMI_CODE_HOME";
 pub const KIMI_CONFIG_FILE: &str = "config.toml";
 
+const BASE_URL_FIELDS: &[&str] = &["base_url", "baseUrl", "baseURL", "endpoint"];
+const API_KEY_FIELDS: &[&str] = &["api_key", "apiKey", "auth_token"];
+
+fn connection_field<'a>(settings: &'a Value, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| settings.get(*name))
+        .or_else(|| {
+            settings
+                .get("providerConfig")
+                .and_then(|native| names.iter().find_map(|name| native.get(*name)))
+        })
+        .and_then(Value::as_str)
+}
+
+pub(crate) fn provider_base_url(settings: &Value) -> Option<&str> {
+    connection_field(settings, BASE_URL_FIELDS)
+}
+
+pub(crate) fn provider_api_key(settings: &Value) -> Option<&str> {
+    connection_field(settings, API_KEY_FIELDS)
+}
+
+/// Canonicalize edited connection fields without retaining superseded aliases or secrets.
+pub(crate) fn set_editor_fields(
+    settings: &mut serde_json::Map<String, Value>,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) {
+    for name in BASE_URL_FIELDS.iter().chain(API_KEY_FIELDS) {
+        settings.remove(*name);
+    }
+    if let Some(native) = settings
+        .get_mut("providerConfig")
+        .and_then(Value::as_object_mut)
+    {
+        for name in BASE_URL_FIELDS.iter().chain(API_KEY_FIELDS) {
+            native.remove(*name);
+        }
+    }
+    settings.insert("base_url".into(), json!(base_url.trim()));
+    settings.insert("api_key".into(), json!(api_key.trim()));
+    if !model.is_empty() {
+        settings.insert("model".into(), json!(model));
+    }
+}
+
 /// 解析 Kimi Code 根目录路径（遵循 KIMI_CODE_HOME 环境变量，默认 ~/.kimi-code）
 pub fn get_kimi_config_dir() -> PathBuf {
     if let Some(override_dir) = crate::settings::get_kimi_override_dir() {
@@ -25,16 +73,12 @@ pub fn get_kimi_config_dir() -> PathBuf {
         }
     }
     #[cfg(test)]
+    if crate::test_support::test_home_override().is_none()
+        && std::env::var_os("CC_SWITCH_TEST_HOME").is_none()
     {
-        // 单元测试未显式设置 KIMI_CODE_HOME 时，绝不能回退到宿主真实目录，防止测试副作用篡改真实凭据
-        std::env::temp_dir().join("cc-switch-kimi-test-isolated")
+        return std::env::temp_dir().join("cc-switch-kimi-test-isolated");
     }
-    #[cfg(not(test))]
-    {
-        dirs::home_dir()
-            .map(|p| p.join(DEFAULT_KIMI_CONFIG_DIR))
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_KIMI_CONFIG_DIR))
-    }
+    crate::config::get_home_dir().join(DEFAULT_KIMI_CONFIG_DIR)
 }
 
 /// 获取 Kimi Code 的主配置文件路径 (~/.kimi-code/config.toml)
@@ -73,7 +117,7 @@ pub fn read_kimi_config_source() -> Result<Option<String>, AppError> {
 
 pub fn write_kimi_config_source(source: &str) -> Result<(), AppError> {
     let path = get_kimi_config_path();
-    write_file_atomic(&path, source, 0o644).map_err(|e| AppError::Message(e.to_string()))
+    write_file_atomic(&path, source, 0o600).map_err(|e| AppError::Message(e.to_string()))
 }
 
 pub fn read_kimi_config_json() -> Result<Value, AppError> {
@@ -105,6 +149,11 @@ pub fn get_providers() -> Result<IndexMap<String, Value>, AppError> {
     let Some(providers_tbl) = doc.get("providers").and_then(|v| v.as_table_like()) else {
         return Ok(IndexMap::new());
     };
+
+    let native: toml::Value = toml::from_str(&content)
+        .map_err(|e| AppError::Config(format!("Failed to parse Kimi config.toml: {e}")))?;
+    let native = serde_json::to_value(native)
+        .map_err(|e| AppError::Config(format!("Failed to convert Kimi config: {e}")))?;
 
     let default_model_opt = doc.get("default_model").and_then(|v| v.as_str());
 
@@ -143,6 +192,8 @@ pub fn get_providers() -> Result<IndexMap<String, Value>, AppError> {
                         models.push(json!({
                             "id": m_name,
                             "name": display_name,
+                            // The table key is a local alias, not the upstream model ID.
+                            "config": native["models"][m_name].clone(),
                         }));
                     }
                 }
@@ -151,7 +202,10 @@ pub fn get_providers() -> Result<IndexMap<String, Value>, AppError> {
 
         // Determine primary model
         let primary_model = if let Some(def_m) = default_model_opt {
-            if models.iter().any(|m| m.get("id").and_then(Value::as_str) == Some(def_m)) {
+            if models
+                .iter()
+                .any(|m| m.get("id").and_then(Value::as_str) == Some(def_m))
+            {
                 Some(def_m.to_string())
             } else {
                 models
@@ -169,6 +223,10 @@ pub fn get_providers() -> Result<IndexMap<String, Value>, AppError> {
         };
 
         let mut obj = serde_json::Map::new();
+        obj.insert(
+            "providerConfig".to_string(),
+            native["providers"][p_id].clone(),
+        );
         obj.insert("name".to_string(), json!(p_id));
         obj.insert("type".to_string(), json!(p_type));
         if !base_url.is_empty() {
@@ -196,6 +254,63 @@ pub fn get_provider(id: &str) -> Result<Option<Value>, AppError> {
     Ok(get_providers()?.get(id).cloned())
 }
 
+fn validate_native_fields(config: &Value, model: bool) -> Result<(), AppError> {
+    let invalid = || {
+        AppError::localized(
+            "kimi.native.invalid_fields",
+            "Kimi 原生配置字段类型无效",
+            "Invalid field types in Kimi native configuration",
+        )
+    };
+    let fields = config.as_object().ok_or_else(invalid)?;
+    let string_fields: &[&str] = if model {
+        &["model", "provider", "display_name"]
+    } else {
+        &[
+            "type",
+            "base_url",
+            "baseUrl",
+            "baseURL",
+            "endpoint",
+            "api_key",
+            "apiKey",
+            "auth_token",
+        ]
+    };
+    for key in string_fields {
+        if let Some(value) = fields.get(*key) {
+            if !value.is_string() || (*key == "model" && value.as_str().unwrap().trim().is_empty())
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    if model {
+        if let Some(size) = fields.get("max_context_size") {
+            if size.as_u64().is_none_or(|size| size == 0) {
+                return Err(invalid());
+            }
+        }
+        if let Some(capabilities) = fields.get("capabilities") {
+            if capabilities
+                .as_array()
+                .is_none_or(|values| values.iter().any(|v| !v.is_string()))
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn native_document(config: &Value) -> Result<DocumentMut, AppError> {
+    let source = toml::to_string(config)
+        .map_err(|e| AppError::Config(format!("Invalid Kimi native config: {e}")))?;
+    source
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Config(format!("Invalid Kimi native config: {e}")))
+}
+
 /// 准备将 provider 变更写入 Kimi 的 config.toml，返回更新后的 TOML 文本
 pub fn prepare_provider(id: &str, provider_config: Value) -> Result<String, AppError> {
     let path = get_kimi_config_path();
@@ -215,9 +330,9 @@ pub fn prepare_provider(id: &str, provider_config: Value) -> Result<String, AppE
     if doc.get("providers").is_none() {
         doc["providers"] = toml_edit::Item::Table(Table::new());
     }
-    let providers = doc["providers"].as_table_like_mut().ok_or_else(|| {
-        AppError::Config("Kimi config.toml [providers] is not a table".into())
-    })?;
+    let providers = doc["providers"]
+        .as_table_like_mut()
+        .ok_or_else(|| AppError::Config("Kimi config.toml [providers] is not a table".into()))?;
 
     if providers.get(id).is_none() {
         providers.insert(id, toml_edit::Item::Table(Table::new()));
@@ -227,41 +342,51 @@ pub fn prepare_provider(id: &str, provider_config: Value) -> Result<String, AppE
         .and_then(|v| v.as_table_like_mut())
         .ok_or_else(|| AppError::Config(format!("Kimi provider table '{id}' is invalid")))?;
 
+    if let Some(native) = provider_config.get("providerConfig") {
+        validate_native_fields(native, false)?;
+        let native_doc = native_document(native)?;
+        for (key, value) in native_doc.iter() {
+            provider_tbl.insert(key, value.clone());
+        }
+    }
+
     let p_type = provider_config
         .get("type")
+        .or_else(|| {
+            provider_config
+                .get("providerConfig")
+                .and_then(|native| native.get("type"))
+        })
         .and_then(|v| v.as_str())
         .unwrap_or("openai");
     provider_tbl.insert("type", toml_edit::value(p_type));
 
-    let base_url = provider_config
-        .get("baseUrl")
-        .or_else(|| provider_config.get("base_url"))
-        .or_else(|| provider_config.get("endpoint"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    if let Some(url) = base_url {
-        provider_tbl.insert("base_url", toml_edit::value(url));
-    }
-
-    let api_key = provider_config
-        .get("apiKey")
-        .or_else(|| provider_config.get("api_key"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    if let Some(key) = api_key {
-        provider_tbl.insert("api_key", toml_edit::value(key));
-    } else if provider_config.get("api_key").is_some() || provider_config.get("apiKey").is_some() {
-        provider_tbl.remove("api_key");
+    for (field, names, value) in [
+        (
+            "base_url",
+            BASE_URL_FIELDS,
+            provider_base_url(&provider_config),
+        ),
+        (
+            "api_key",
+            API_KEY_FIELDS,
+            provider_api_key(&provider_config),
+        ),
+    ] {
+        if let Some(value) = value {
+            for name in names {
+                provider_tbl.remove(name);
+            }
+            if !value.trim().is_empty() {
+                provider_tbl.insert(field, toml_edit::value(value.trim()));
+            }
+        }
     }
 
     // Handle models
     let mut configured_models = Vec::new();
     if let Some(model_str) = provider_config.get("model").and_then(|v| v.as_str()) {
-        let m = model_str.trim();
+        let m = model_str;
         if !m.is_empty() {
             configured_models.push(m.to_string());
         }
@@ -274,7 +399,7 @@ pub fn prepare_provider(id: &str, provider_config: Value) -> Result<String, AppE
                 .and_then(|v| v.as_str())
                 .or_else(|| item.as_str())
             {
-                let m = m_id.trim();
+                let m = m_id;
                 if !m.is_empty() && !configured_models.contains(&m.to_string()) {
                     configured_models.push(m.to_string());
                 }
@@ -286,16 +411,59 @@ pub fn prepare_provider(id: &str, provider_config: Value) -> Result<String, AppE
         if doc.get("models").is_none() {
             doc["models"] = toml_edit::Item::Table(Table::new());
         }
-        if let Some(models) = doc["models"].as_table_like_mut() {
+        let models = doc["models"]
+            .as_table_like_mut()
+            .ok_or_else(|| AppError::Config("Kimi models must be a table".into()))?;
+        {
             for m in &configured_models {
+                if let Some(existing) = models.get(m) {
+                    let owner = existing
+                        .as_table_like()
+                        .and_then(|tbl| tbl.get("provider"))
+                        .and_then(|v| v.as_str());
+                    if owner != Some(id) {
+                        return Err(AppError::localized(
+                            "kimi.model.conflict",
+                            format!("模型别名 '{m}' 已被其他供应商占用，请使用不同的别名"),
+                            format!("Model alias '{m}' belongs to another provider; choose a different alias"),
+                        ));
+                    }
+                }
                 if models.get(m).is_none() {
-                    let mut tbl = Table::new();
-                    tbl.insert("provider", toml_edit::value(id));
+                    models.insert(m, toml_edit::Item::Table(Table::new()));
+                }
+                let tbl = models
+                    .get_mut(m)
+                    .and_then(|v| v.as_table_like_mut())
+                    .ok_or_else(|| AppError::Config(format!("Invalid Kimi model table '{m}'")))?;
+                let model_entry = provider_config
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .and_then(|entries| {
+                        entries
+                            .iter()
+                            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(m))
+                    });
+                if let Some(native) = model_entry.and_then(|entry| entry.get("config")) {
+                    validate_native_fields(native, true)?;
+                    let native_doc = native_document(native)?;
+                    for (key, value) in native_doc.iter() {
+                        tbl.insert(key, value.clone());
+                    }
+                }
+                tbl.insert("provider", toml_edit::value(id));
+                // Preserve a native model ID when rewriting an existing alias.
+                if tbl.get("model").is_none() {
                     tbl.insert("model", toml_edit::value(m.as_str()));
-                    models.insert(m, toml_edit::Item::Table(tbl));
-                } else if let Some(tbl) = models.get_mut(m).and_then(|v| v.as_table_like_mut()) {
-                    tbl.insert("provider", toml_edit::value(id));
-                    tbl.insert("model", toml_edit::value(m.as_str()));
+                }
+                if let Some(name) = model_entry
+                    .and_then(|entry| entry.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    // A missing display_name is distinct from a synthetic alias label.
+                    if model_entry.and_then(|entry| entry.get("config")).is_none() {
+                        tbl.insert("display_name", toml_edit::value(name));
+                    }
                 }
             }
         }
@@ -314,7 +482,7 @@ pub fn write_prepared_config(content: &str) -> Result<(), AppError> {
         .lock()
         .map_err(|_| AppError::Message("Kimi write lock poisoned".into()))?;
     let path = get_kimi_config_path();
-    write_file_atomic(&path, content, 0o644).map_err(|e| AppError::Message(e.to_string()))
+    write_file_atomic(&path, content, 0o600).map_err(|e| AppError::Message(e.to_string()))
 }
 
 /// 从 config.toml 中移除指定 provider 及其关联的 models
@@ -368,7 +536,7 @@ pub fn remove_provider(id: &str) -> Result<(), AppError> {
         }
     }
 
-    write_file_atomic(&path, &doc.to_string(), 0o644).map_err(|e| AppError::Message(e.to_string()))
+    write_file_atomic(&path, &doc.to_string(), 0o600).map_err(|e| AppError::Message(e.to_string()))
 }
 
 /// 获取当前激活的 provider ID（根据 default_model 追溯）
@@ -436,17 +604,26 @@ pub fn set_current_provider(id: &str, provider_config: &Value) -> Result<(), App
     if doc.get("models").is_none() {
         doc["models"] = toml_edit::Item::Table(Table::new());
     }
-    if let Some(models) = doc["models"].as_table_like_mut() {
-        if models.get(&target_model).is_none() {
-            let mut tbl = Table::new();
-            tbl.insert("provider", toml_edit::value(id));
-            tbl.insert("model", toml_edit::value(&target_model));
-            models.insert(&target_model, toml_edit::Item::Table(tbl));
+    let models = doc["models"]
+        .as_table_like_mut()
+        .ok_or_else(|| AppError::Config("Kimi models must be a table".into()))?;
+    {
+        let owner = models
+            .get(&target_model)
+            .and_then(|v| v.as_table_like())
+            .and_then(|tbl| tbl.get("provider"))
+            .and_then(|v| v.as_str());
+        if owner != Some(id) {
+            return Err(AppError::localized(
+                "kimi.model.invalid_selection",
+                "所选模型不存在或不属于此供应商",
+                "Selected model is missing or belongs to another provider",
+            ));
         }
     }
 
     doc["default_model"] = toml_edit::value(&target_model);
-    write_file_atomic(&path, &doc.to_string(), 0o644).map_err(|e| AppError::Message(e.to_string()))
+    write_file_atomic(&path, &doc.to_string(), 0o600).map_err(|e| AppError::Message(e.to_string()))
 }
 
 /// 设置默认模型
@@ -467,8 +644,21 @@ pub fn set_default_model(model_name: &str) -> Result<String, AppError> {
             .parse::<DocumentMut>()
             .map_err(|e| AppError::Config(format!("Failed to parse Kimi config.toml: {e}")))?
     };
+    if doc
+        .get("models")
+        .and_then(|m| m.as_table_like())
+        .and_then(|m| m.get(model_name))
+        .is_none()
+    {
+        return Err(AppError::localized(
+            "kimi.model.missing",
+            "所选模型不存在",
+            "Selected model does not exist",
+        ));
+    }
     doc["default_model"] = toml_edit::value(model_name);
-    write_file_atomic(&path, &doc.to_string(), 0o644).map_err(|e| AppError::Message(e.to_string()))?;
+    write_file_atomic(&path, &doc.to_string(), 0o600)
+        .map_err(|e| AppError::Message(e.to_string()))?;
     Ok(model_name.to_string())
 }
 
@@ -480,15 +670,28 @@ pub fn read_kimi_mcp_servers_map() -> Result<HashMap<String, Value>, AppError> {
     }
     let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
     let val: Value = serde_json::from_str(&content).map_err(|e| AppError::json(&path, e))?;
-    let servers = val
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let root = val.as_object().ok_or_else(|| {
+        AppError::localized(
+            "kimi.mcp.invalid_root",
+            "Kimi MCP 配置必须是对象",
+            "Kimi MCP config must be an object",
+        )
+    })?;
+    let servers = match root.get("mcpServers") {
+        None => HashMap::new(),
+        Some(value) => value
+            .as_object()
+            .ok_or_else(|| {
+                AppError::localized(
+                    "kimi.mcp.invalid_servers",
+                    "Kimi mcpServers 必须是对象",
+                    "Kimi mcpServers must be an object",
+                )
+            })?
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    };
     Ok(servers)
 }
 
@@ -501,11 +704,12 @@ pub fn set_kimi_mcp_servers_map(servers: &HashMap<String, Value>) -> Result<(), 
     fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
 
     let mut root_obj = if path.exists() {
-        fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default()
+        let source = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
+        serde_json::from_str::<Value>(&source)
+            .map_err(|e| AppError::json(&path, e))?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| AppError::Config("Kimi MCP config must be an object".into()))?
     } else {
         serde_json::Map::new()
     };
@@ -516,7 +720,7 @@ pub fn set_kimi_mcp_servers_map(servers: &HashMap<String, Value>) -> Result<(), 
 
     let formatted = serde_json::to_string_pretty(&Value::Object(root_obj))
         .map_err(|e| AppError::Message(format!("Failed to format MCP JSON: {e}")))?;
-    write_file_atomic(&path, &formatted, 0o644).map_err(|e| AppError::Message(e.to_string()))
+    write_file_atomic(&path, &formatted, 0o600).map_err(|e| AppError::Message(e.to_string()))
 }
 
 /// 同步单个 MCP 服务器到 Kimi live 配置
@@ -543,13 +747,16 @@ pub fn remove_server_from_kimi(id: &str) -> Result<(), AppError> {
     set_kimi_mcp_servers_map(&servers)
 }
 
-fn write_file_atomic(path: &Path, content: &str, #[allow(unused_variables)] mode: u32) -> Result<()> {
+fn write_file_atomic(
+    path: &Path,
+    content: &str,
+    #[allow(unused_variables)] mode: u32,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("无效的路径: {}", path.display()))?;
 
-    fs::create_dir_all(parent)
-        .with_context(|| format!("创建目录失败: {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("创建目录失败: {}", parent.display()))?;
 
     let filename = path
         .file_name()
@@ -590,8 +797,215 @@ fn write_file_atomic(path: &Path, content: &str, #[allow(unused_variables)] mode
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) struct TestKimiDir {
+        _dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+    impl TestKimiDir {
+        // Caller holds the shared test home/settings lock.
+        pub(crate) fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os(super::KIMI_HOME_ENV);
+            std::env::set_var(super::KIMI_HOME_ENV, dir.path());
+            Self {
+                _dir: dir,
+                previous,
+            }
+        }
+    }
+    impl Drop for TestKimiDir {
+        fn drop(&mut self) {
+            crate::test_support::restore_env(super::KIMI_HOME_ENV, &self.previous);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kimi_roundtrip_preserves_native_model_and_provider_attributes() {
+        let _lock = crate::test_support::lock_test_home_and_settings();
+        let _dir = test_support::TestKimiDir::new();
+        let original = r#"default_model = "fast"
+[providers.native]
+type = "kimi"
+base_url = "https://example.invalid/v1"
+api_key = "fixture-only"
+custom = "preserved"
+[providers.native.oauth]
+storage = "native-only"
+[models.fast]
+provider = "native"
+model = "kimi-k2.5"
+max_context_size = 262144
+capabilities = ["thinking", "image_in"]
+"#;
+        write_kimi_config_source(original).unwrap();
+        let imported = get_provider("native").unwrap().unwrap();
+        // Database serialization followed by same-machine edit and fresh-machine restore.
+        let imported: Value =
+            serde_json::from_str(&serde_json::to_string(&imported).unwrap()).unwrap();
+        let expected = read_kimi_config_json().unwrap();
+        write_prepared_config(&prepare_provider("native", imported.clone()).unwrap()).unwrap();
+        assert_eq!(read_kimi_config_json().unwrap(), expected);
+        fs::remove_file(get_kimi_config_path()).unwrap();
+        write_prepared_config(&prepare_provider("native", imported).unwrap()).unwrap();
+        assert_eq!(read_kimi_config_json().unwrap(), expected);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(get_kimi_config_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_quoted_alias_restores_verbatim_without_colliding_with_trimmed_alias() {
+        let _lock = crate::test_support::lock_test_home_and_settings();
+        let _dir = test_support::TestKimiDir::new();
+        let original = r#"default_model = " fast "
+[providers.native]
+type = "kimi"
+[models." fast "]
+provider = "native"
+model = "kimi-k2.5"
+max_context_size = 262144
+capabilities = ["thinking"]
+"#;
+        write_kimi_config_source(original).unwrap();
+        let mut imported = get_provider("native").unwrap().unwrap();
+        set_editor_fields(imported.as_object_mut().unwrap(), "", "", " fast ");
+        let expected = read_kimi_config_json().unwrap();
+        fs::remove_file(get_kimi_config_path()).unwrap();
+        write_prepared_config(&prepare_provider("native", imported.clone()).unwrap()).unwrap();
+        assert_eq!(read_kimi_config_json().unwrap(), expected);
+        write_prepared_config(&prepare_provider("other", json!({"model":"fast"})).unwrap())
+            .unwrap();
+        set_current_provider("native", &imported).unwrap();
+        let current = read_kimi_config_json().unwrap();
+        assert_eq!(current["default_model"], " fast ");
+        assert_eq!(current["models"][" fast "]["model"], "kimi-k2.5");
+        assert_eq!(current["models"]["fast"]["provider"], "other");
+    }
+
+    #[test]
+    fn kimi_native_provider_type_survives_without_flat_duplicate() {
+        let _lock = crate::test_support::lock_test_home_and_settings();
+        let _dir = test_support::TestKimiDir::new();
+        let native = json!({"providerConfig":{"type":"kimi"},"model":"fast","models":[{"id":"fast","config":{"model":"kimi-k2.5"}}]});
+        write_prepared_config(&prepare_provider("native", native.clone()).unwrap()).unwrap();
+        assert_eq!(
+            read_kimi_config_json().unwrap()["providers"]["native"]["type"],
+            "kimi"
+        );
+        let mut overridden = native;
+        overridden["type"] = json!("openai");
+        write_prepared_config(&prepare_provider("native", overridden).unwrap()).unwrap();
+        assert_eq!(
+            read_kimi_config_json().unwrap()["providers"]["native"]["type"],
+            "openai"
+        );
+    }
+
+    #[test]
+    fn kimi_native_connection_fields_survive_noop_edit_and_explicit_clear() {
+        for api_name in API_KEY_FIELDS {
+            let mut native = json!({"providerConfig":{"type":"kimi","base_url":"https://example.invalid/v1"},"model":"fast"});
+            native["providerConfig"][*api_name] = json!("native-secret");
+            let base = provider_base_url(&native).unwrap().to_string();
+            let key = provider_api_key(&native).unwrap().to_string();
+            assert_eq!(key, "native-secret");
+            set_editor_fields(native.as_object_mut().unwrap(), &base, &key, "fast");
+            assert_eq!(provider_api_key(&native), Some("native-secret"));
+            assert_eq!(
+                provider_base_url(&native),
+                Some("https://example.invalid/v1")
+            );
+            set_editor_fields(native.as_object_mut().unwrap(), "", "", "fast");
+            assert_eq!(provider_api_key(&native), Some(""));
+            assert!(!native.to_string().contains("native-secret"));
+        }
+    }
+
+    #[test]
+    fn kimi_model_conflict_and_invalid_selection_do_not_change_live_config() {
+        let _lock = crate::test_support::lock_test_home_and_settings();
+        let _dir = test_support::TestKimiDir::new();
+        let config = json!({"type":"openai", "model":"shared"});
+        write_prepared_config(&prepare_provider("a", config.clone()).unwrap()).unwrap();
+        let before = read_kimi_config_source().unwrap();
+        assert!(prepare_provider("b", config.clone()).is_err());
+        assert!(set_current_provider("b", &config).is_err());
+        assert!(set_default_model("missing").is_err());
+        assert_eq!(read_kimi_config_source().unwrap(), before);
+        assert_eq!(get_current_provider_id().unwrap().as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn kimi_native_credential_aliases_are_removed_after_import_and_edit() {
+        let _lock = crate::test_support::lock_test_home_and_settings();
+        let _dir = test_support::TestKimiDir::new();
+        let original = "[providers.native]\ntype = 'openai'\napiKey = 'superseded-native-secret'\nbaseUrl = 'https://old.invalid'\n";
+        for replacement in ["replacement-secret", ""] {
+            write_kimi_config_source(original).unwrap();
+            let mut imported = get_provider("native").unwrap().unwrap();
+            set_editor_fields(
+                imported.as_object_mut().unwrap(),
+                "https://new.invalid",
+                replacement,
+                "",
+            );
+            assert!(!imported.to_string().contains("superseded-native-secret"));
+            assert!(!imported.to_string().contains("https://old.invalid"));
+            write_prepared_config(&prepare_provider("native", imported).unwrap()).unwrap();
+            let live = read_kimi_config_source().unwrap().unwrap();
+            assert!(!live.contains("superseded-native-secret"));
+            assert!(!live.contains("https://old.invalid"));
+            let current = get_provider("native").unwrap().unwrap();
+            assert_eq!(
+                current.get("api_key").and_then(Value::as_str).unwrap_or(""),
+                replacement
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_invalid_native_fields_preserve_existing_live_bytes() {
+        let _lock = crate::test_support::lock_test_home_and_settings();
+        let _dir = test_support::TestKimiDir::new();
+        write_prepared_config(&prepare_provider("a", json!({"model":"fast"})).unwrap()).unwrap();
+        let before = read_kimi_config_source().unwrap();
+        for config in [
+            json!({"model":123}),
+            json!({"model":""}),
+            json!({"max_context_size":"bad"}),
+            json!({"capabilities":[123]}),
+        ] {
+            let invalid = json!({"model":"fast", "models":[{"id":"fast","config":config}]});
+            assert!(prepare_provider("a", invalid).is_err());
+            assert_eq!(read_kimi_config_source().unwrap(), before);
+        }
+        assert!(prepare_provider("a", json!({"providerConfig":{"api_key":123}})).is_err());
+        assert_eq!(read_kimi_config_source().unwrap(), before);
+    }
+
+    #[test]
+    fn kimi_mcp_write_preserves_malformed_input() {
+        let _lock = crate::test_support::lock_test_home_and_settings();
+        let _dir = test_support::TestKimiDir::new();
+        fs::write(get_kimi_mcp_path(), "{broken").unwrap();
+        assert!(set_kimi_mcp_servers_map(&HashMap::new()).is_err());
+        assert_eq!(fs::read_to_string(get_kimi_mcp_path()).unwrap(), "{broken");
+    }
 
     #[test]
     fn test_kimi_provider_crud_and_mcp() {
@@ -647,7 +1061,10 @@ mod tests {
 
         // Switch to openrouter
         set_current_provider("openrouter", &or_config).unwrap();
-        assert_eq!(get_current_provider_id().unwrap(), Some("openrouter".to_string()));
+        assert_eq!(
+            get_current_provider_id().unwrap(),
+            Some("openrouter".to_string())
+        );
 
         // 4. Remove cortex
         remove_provider("cortex").unwrap();
@@ -655,7 +1072,10 @@ mod tests {
         assert_eq!(providers.len(), 1);
         assert!(!providers.contains_key("cortex"));
         assert!(providers.contains_key("openrouter"));
-        assert_eq!(get_current_provider_id().unwrap(), Some("openrouter".to_string()));
+        assert_eq!(
+            get_current_provider_id().unwrap(),
+            Some("openrouter".to_string())
+        );
 
         // 5. MCP sync
         let dummy_cfg = MultiAppConfig::default();
@@ -699,10 +1119,16 @@ mod tests {
         let prepared = prepare_provider("moonshot", provider_config).unwrap();
         write_prepared_config(&prepared).unwrap();
 
-        assert_eq!(get_current_provider_id().unwrap(), Some("moonshot".to_string()));
+        assert_eq!(
+            get_current_provider_id().unwrap(),
+            Some("moonshot".to_string())
+        );
 
         set_default_model("moonshot-v1-32k").unwrap();
-        assert_eq!(get_current_provider_id().unwrap(), Some("moonshot".to_string()));
+        assert_eq!(
+            get_current_provider_id().unwrap(),
+            Some("moonshot".to_string())
+        );
 
         let json = read_kimi_config_json().unwrap();
         assert_eq!(json["default_model"], "moonshot-v1-32k");

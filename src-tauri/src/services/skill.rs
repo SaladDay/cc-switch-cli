@@ -846,6 +846,7 @@ impl SkillService {
         let mut installed = db.get_all_installed_skills()?;
         for skill in installed.values_mut() {
             skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+            skill.apps.kimi = Self::skill_exists_in_app(&skill.directory, &AppType::Kimi);
         }
         let skills: HashMap<String, InstalledSkill> = installed
             .into_values()
@@ -2685,6 +2686,7 @@ impl SkillService {
             .ok_or_else(|| AppError::Message(format!("Skill not found: {skill_id}")))?;
         let directory = Self::require_valid_directory(&skill.directory)?;
         skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+        skill.apps.kimi = Self::skill_exists_in_app(&skill.directory, &AppType::Kimi);
 
         let (owner, name) = match (&skill.repo_owner, &skill.repo_name) {
             (Some(owner), Some(name)) => (owner.clone(), name.clone()),
@@ -2729,6 +2731,7 @@ impl SkillService {
             AppError::Message(format!("Skill was removed during update: {skill_id}"))
         })?;
         current.apps.pi = Self::skill_exists_in_app(&current.directory, &AppType::Pi);
+        current.apps.kimi = Self::skill_exists_in_app(&current.directory, &AppType::Kimi);
         if current.directory != skill.directory
             || current.repo_owner != skill.repo_owner
             || current.repo_name != skill.repo_name
@@ -3496,6 +3499,7 @@ impl SkillService {
             let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
             let mut apps = selection.apps;
             apps.pi = Self::skill_exists_in_app(&dir_name, &AppType::Pi);
+            apps.kimi = Self::skill_exists_in_app(&dir_name, &AppType::Kimi);
             let (id, repo_owner, repo_name, repo_branch, readme_url) =
                 build_repo_info_from_lock(&agents_lock, &dir_name);
 
@@ -3758,6 +3762,29 @@ impl SkillService {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn kimi_skill_enablement_survives_reload_and_disable() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _kimi = crate::kimi_config::test_support::TestKimiDir::new();
+        let destination = SkillService::get_app_skills_dir(&AppType::Kimi)
+            .unwrap()
+            .join("demo");
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join("SKILL.md"), "fixture").unwrap();
+        SkillService::import_from_apps(vec![ImportSkillSelection {
+            directory: "demo".into(),
+            apps: SkillApps::only(&AppType::Kimi),
+        }])
+        .unwrap();
+        assert!(SkillService::load_index().unwrap().skills["demo"].apps.kimi);
+        SkillService::toggle_app("demo", &AppType::Kimi, false).unwrap();
+        assert!(!SkillService::load_index().unwrap().skills["demo"].apps.kimi);
+        SkillService::toggle_app("demo", &AppType::Kimi, true).unwrap();
+        assert!(SkillService::load_index().unwrap().skills["demo"].apps.kimi);
+    }
 
     #[test]
     fn skill_state_lock_allows_snapshots_but_excludes_writers() {

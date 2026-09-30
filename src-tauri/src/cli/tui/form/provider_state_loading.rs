@@ -441,21 +441,10 @@ fn populate_hermes_form(form: &mut ProviderAddFormState, provider: &Provider) {
 
 fn populate_kimi_form(form: &mut ProviderAddFormState, provider: &Provider) {
     let settings = &provider.settings_config;
-    if let Some(base_url) = settings
-        .get("base_url")
-        .or_else(|| settings.get("baseUrl"))
-        .or_else(|| settings.get("baseURL"))
-        .or_else(|| settings.get("endpoint"))
-        .and_then(|value| value.as_str())
-    {
+    if let Some(base_url) = crate::kimi_config::provider_base_url(settings) {
         form.hermes_base_url.set(base_url);
     }
-    if let Some(api_key) = settings
-        .get("api_key")
-        .or_else(|| settings.get("apiKey"))
-        .or_else(|| settings.get("auth_token"))
-        .and_then(|value| value.as_str())
-    {
+    if let Some(api_key) = crate::kimi_config::provider_api_key(settings) {
         form.hermes_api_key.set(api_key);
     }
     if let Some(model) = settings.get("model").and_then(|value| value.as_str()) {
