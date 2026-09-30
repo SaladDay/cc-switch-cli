@@ -3123,6 +3123,17 @@ impl ProviderService {
             Ok(((), Some(action)))
         })?;
 
+        // Capture the newly-activated provider's snapshot back to the database
+        // so the TUI displays current state, not stale data from before activation.
+        if app_type == AppType::Codex {
+            let mut guard = state.config.write().map_err(AppError::from)?;
+            if let Err(err) = Self::capture_codex_active_snapshot(&mut guard, provider_id) {
+                log::warn!("Failed to capture active Codex provider snapshot: {err}");
+            }
+            drop(guard);
+            let _ = state.save();
+        }
+
         if !app_type.is_additive_mode() {
             crate::settings::set_current_provider(&app_type, Some(provider_id))?;
         }

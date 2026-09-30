@@ -4183,6 +4183,127 @@ fn provider_service_switch_codex_preserves_missing_wire_api_for_openai_official(
 }
 
 #[test]
+#[test]
+#[serial]
+fn switch_codex_updates_both_active_and_inactive_snapshots() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+
+        manager.providers.insert(
+            "provider-a".to_string(),
+            codex_provider(
+                "provider-a",
+                "Provider A",
+                "sk-key-a",
+                "vendor_a",
+                "https://a.example/v1",
+            ),
+        );
+        manager.providers.insert(
+            "provider-b".to_string(),
+            codex_provider(
+                "provider-b",
+                "Provider B",
+                "sk-key-b",
+                "vendor_b",
+                "https://b.example/v1",
+            ),
+        );
+        manager.current = "provider-a".to_string();
+    }
+
+    let state = state_from_config(config);
+
+    // Switch A → B
+    ProviderService::switch(&state, AppType::Codex, "provider-b").expect("switch to provider-b");
+
+    {
+        let guard = state.config.read().expect("read config");
+        let manager = guard.get_manager(&AppType::Codex).expect("codex manager");
+
+        let provider_a = manager
+            .providers
+            .get("provider-a")
+            .expect("provider-a exists");
+        let provider_b = manager
+            .providers
+            .get("provider-b")
+            .expect("provider-b exists");
+
+        // Provider A (now inactive) should have experimental_bearer_token from backfill
+        let a_config = provider_a
+            .settings_config
+            .get("config")
+            .and_then(|v| v.as_str())
+            .expect("provider-a has config");
+        assert!(
+            a_config.contains("experimental_bearer_token"),
+            "Inactive provider A should have experimental_bearer_token in snapshot after backfill"
+        );
+
+        // Provider B (now active) should also have experimental_bearer_token from capture
+        let b_config = provider_b
+            .settings_config
+            .get("config")
+            .and_then(|v| v.as_str())
+            .expect("provider-b has config");
+        assert!(
+            b_config.contains("experimental_bearer_token"),
+            "Active provider B should have experimental_bearer_token in snapshot after capture"
+        );
+    }
+
+    // Switch B → A
+    ProviderService::switch(&state, AppType::Codex, "provider-a")
+        .expect("switch back to provider-a");
+
+    {
+        let guard = state.config.read().expect("read config");
+        let manager = guard.get_manager(&AppType::Codex).expect("codex manager");
+
+        let provider_a = manager
+            .providers
+            .get("provider-a")
+            .expect("provider-a exists");
+        let provider_b = manager
+            .providers
+            .get("provider-b")
+            .expect("provider-b exists");
+
+        // Both should still have experimental_bearer_token
+        let a_config = provider_a
+            .settings_config
+            .get("config")
+            .and_then(|v| v.as_str())
+            .expect("provider-a has config");
+        assert!(
+            a_config.contains("experimental_bearer_token"),
+            "Provider A should have experimental_bearer_token after second switch"
+        );
+
+        let b_config = provider_b
+            .settings_config
+            .get("config")
+            .and_then(|v| v.as_str())
+            .expect("provider-b has config");
+        assert!(
+            b_config.contains("experimental_bearer_token"),
+            "Provider B should have experimental_bearer_token after being backfilled again"
+        );
+    }
+}
+
+#[test]
+#[serial]
 fn provider_service_switch_codex_preserves_missing_requires_openai_auth_for_openai_official() {
     let _guard = lock_test_mutex();
     reset_test_fs();
