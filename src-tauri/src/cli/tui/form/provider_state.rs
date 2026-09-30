@@ -26,22 +26,6 @@ use super::{
     OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
-fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
-    let base_id = format!("{}-copy", original_id.trim());
-    if !existing_ids.iter().any(|id| id == &base_id) {
-        return base_id;
-    }
-
-    let mut counter = 2;
-    loop {
-        let candidate = format!("{base_id}-{counter}");
-        if !existing_ids.iter().any(|id| id == &candidate) {
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
 impl ProviderAddFormState {
     pub const USAGE_QUERY_GENERAL_PRESET: &'static str = r#"({
   request: {
@@ -345,7 +329,11 @@ impl ProviderAddFormState {
                 extra.remove(key);
             }
         }
-        form.id.set(provider_copy_id(&provider.id, existing_ids));
+        form.id.set(ProviderService::generate_provider_copy_id(
+            &form.app_type,
+            &provider.id,
+            existing_ids,
+        ));
         // A copy arrives pre-filled, so opening on the template row would both
         // mislabel it as "Custom" and put a values-wiping Enter one keypress
         // away. Start on the first real field, as this form always used to.
@@ -475,9 +463,7 @@ impl ProviderAddFormState {
     }
 
     pub fn is_id_editable(&self) -> bool {
-        !matches!(self.app_type, AppType::Omp)
-            && !self.mode.is_edit()
-            && self.copy_source_id.is_none()
+        !self.mode.is_edit() && self.copy_source_id.is_none()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
@@ -506,7 +492,7 @@ impl ProviderAddFormState {
 
         if matches!(
             self.app_type,
-            AppType::Hermes | AppType::OpenClaw | AppType::Pi
+            AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Omp
         ) && self.copy_source_id.is_none()
         {
             fields.insert(0, ProviderAddField::Id);
@@ -2705,9 +2691,6 @@ impl ProviderAddFormState {
 
         next.mode = previous_mode.clone();
         next.copy_source_id = previous_copy_source_id;
-        if matches!(next.app_type, AppType::Omp) && !next.mode.is_edit() {
-            next.id_is_manual = false;
-        }
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
@@ -2817,9 +2800,6 @@ impl ProviderAddFormState {
 
         next.mode = previous_mode.clone();
         next.copy_source_id = previous_copy_source_id;
-        if matches!(next.app_type, AppType::Omp) && !next.mode.is_edit() {
-            next.id_is_manual = false;
-        }
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;

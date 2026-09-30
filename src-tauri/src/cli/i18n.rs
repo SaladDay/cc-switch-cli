@@ -2796,17 +2796,9 @@ pub mod texts {
 
     pub fn tui_omp_provider_key_invalid() -> &'static str {
         if is_chinese() {
-            "根据名称生成的供应商标识不能超过 128 字节"
+            "供应商 ID 必须为 1–128 字节，且不能包含空白、控制字符或 /"
         } else {
-            "Provider ID derived from Name cannot exceed 128 bytes"
-        }
-    }
-
-    pub fn tui_omp_provider_name_required() -> &'static str {
-        if is_chinese() {
-            "请填写 name；现有 id 保持不变。"
-        } else {
-            "Please fill in Name; the existing ID remains unchanged."
+            "Provider ID must be 1–128 bytes and cannot contain whitespace, control characters, or /"
         }
     }
 

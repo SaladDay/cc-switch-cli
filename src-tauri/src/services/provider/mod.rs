@@ -393,12 +393,16 @@ impl ProviderService {
     }
 
     pub fn generate_omp_provider_key(name: &str, existing_ids: &[String]) -> String {
-        let base_id = Self::generate_provider_key(name, &[]);
+        const KEY_LIMIT: usize = 128;
+        let generated_id = Self::generate_provider_key(name, &[]);
+        // `generate_provider_key` produces ASCII, so this byte slice is also a
+        // valid UTF-8 boundary. OMP limits the native map key, not the display
+        // name used to derive it.
+        let base_id = generated_id[..generated_id.len().min(KEY_LIMIT)].to_string();
         if !existing_ids.iter().any(|existing| existing == &base_id) {
             return base_id;
         }
 
-        const KEY_LIMIT: usize = 128;
         let mut counter = 1;
         loop {
             let suffix = format!("-{counter}");
@@ -431,16 +435,43 @@ impl ProviderService {
         Ok(())
     }
 
-    fn provider_copy_id(original_id: &str, existing_ids: &HashSet<String>) -> String {
-        let base_id = format!("{}-copy", original_id.trim());
+    pub(crate) fn generate_provider_copy_id<I, S>(
+        app_type: &AppType,
+        original_id: &str,
+        existing_ids: I,
+    ) -> String
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let existing_ids = existing_ids
+            .into_iter()
+            .map(|id| id.as_ref().to_string())
+            .collect::<HashSet<_>>();
+        let original_id = original_id.trim();
 
+        let candidate_for_suffix = |suffix: &str| {
+            if !matches!(app_type, AppType::Omp) {
+                return format!("{original_id}{suffix}");
+            }
+
+            const OMP_KEY_LIMIT: usize = 128;
+            let prefix_budget = OMP_KEY_LIMIT.saturating_sub(suffix.len());
+            let mut prefix_end = original_id.len().min(prefix_budget);
+            while !original_id.is_char_boundary(prefix_end) {
+                prefix_end -= 1;
+            }
+            format!("{}{suffix}", &original_id[..prefix_end])
+        };
+
+        let base_id = candidate_for_suffix("-copy");
         if !existing_ids.contains(&base_id) {
             return base_id;
         }
 
         let mut counter = 2;
         loop {
-            let candidate = format!("{base_id}-{counter}");
+            let candidate = candidate_for_suffix(&format!("-copy-{counter}"));
             if !existing_ids.contains(&candidate) {
                 return candidate;
             }
@@ -476,6 +507,7 @@ impl ProviderService {
     }
 
     fn duplicate_provider_with_overrides(
+        app_type: &AppType,
         source: &Provider,
         provider: Option<Provider>,
         existing_ids: &HashSet<String>,
@@ -485,7 +517,7 @@ impl ProviderService {
             duplicate.name = format!("{} copy", source.name.trim());
             duplicate
         });
-        duplicate.id = Self::provider_copy_id(&source.id, existing_ids);
+        duplicate.id = Self::generate_provider_copy_id(app_type, &source.id, existing_ids.iter());
         duplicate.name = if duplicate.name.trim().is_empty() {
             format!("{} copy", source.name.trim())
         } else {
@@ -541,8 +573,12 @@ impl ProviderService {
             })?;
             let mut existing_ids = providers.keys().cloned().collect::<HashSet<_>>();
             existing_ids.extend(Self::live_provider_ids(&app_type)?);
-            let duplicate =
-                Self::duplicate_provider_with_overrides(source, provider_override, &existing_ids);
+            let duplicate = Self::duplicate_provider_with_overrides(
+                &app_type,
+                source,
+                provider_override,
+                &existing_ids,
+            );
             pi::add(state, duplicate.clone(), false)?;
             return Ok(duplicate);
         }
@@ -553,10 +589,12 @@ impl ProviderService {
             })?;
             let mut existing_ids = providers.keys().cloned().collect::<HashSet<_>>();
             existing_ids.extend(Self::live_provider_ids(&app_type)?);
-            let mut duplicate =
-                Self::duplicate_provider_with_overrides(source, provider_override, &existing_ids);
-            let existing_ids = existing_ids.into_iter().collect::<Vec<_>>();
-            duplicate.id = Self::generate_omp_provider_key(&duplicate.name, &existing_ids);
+            let duplicate = Self::duplicate_provider_with_overrides(
+                &app_type,
+                source,
+                provider_override,
+                &existing_ids,
+            );
             omp::add(state, duplicate.clone(), false)?;
             return Ok(duplicate);
         }
@@ -588,8 +626,12 @@ impl ProviderService {
 
             let mut existing_ids = manager.providers.keys().cloned().collect::<HashSet<_>>();
             existing_ids.extend(live_ids);
-            let mut duplicate =
-                Self::duplicate_provider_with_overrides(&source, provider_override, &existing_ids);
+            let mut duplicate = Self::duplicate_provider_with_overrides(
+                &app_type_clone,
+                &source,
+                provider_override,
+                &existing_ids,
+            );
             Self::normalize_duplicate_provider_snapshot(&app_type_clone, &mut duplicate);
 
             Self::normalize_provider_if_claude(&app_type_clone, &mut duplicate);

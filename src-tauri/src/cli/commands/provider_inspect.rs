@@ -540,17 +540,22 @@ pub(crate) fn quota_provider(
                 || matches!(&target.kind, QuotaTargetKind::SubscriptionTool { tool } if tool == "codex");
             if !is_codex {
                 return Err(AppError::Message(
-                    "Rate limit reset credits are only supported for Codex / OpenAI accounts.".to_string(),
+                    "Rate limit reset credits are only supported for Codex / OpenAI accounts."
+                        .to_string(),
                 ));
             }
 
             let current_quota = match runtime.block_on(query_quota(&target)) {
                 Ok(ProviderUsageQuota::Subscription(q)) => q,
                 Ok(_) => {
-                    return Err(AppError::Message("Unexpected quota response format".to_string()));
+                    return Err(AppError::Message(
+                        "Unexpected quota response format".to_string(),
+                    ));
                 }
                 Err(e) => {
-                    return Err(AppError::Message(format!("Failed to query current quota: {e}")));
+                    return Err(AppError::Message(format!(
+                        "Failed to query current quota: {e}"
+                    )));
                 }
             };
 
@@ -564,11 +569,15 @@ pub(crate) fn quota_provider(
 
             let credits = summary.map(|s| &s.credits[..]).unwrap_or(&[]);
             let selected_credit = match &credit_id {
-                Some(cid) => credits.iter().find(|c| &c.id == cid).cloned().ok_or_else(|| {
-                    AppError::Message(format!(
-                        "Specified credit ID '{cid}' was not found in available credits."
-                    ))
-                })?,
+                Some(cid) => credits
+                    .iter()
+                    .find(|c| &c.id == cid)
+                    .cloned()
+                    .ok_or_else(|| {
+                        AppError::Message(format!(
+                            "Specified credit ID '{cid}' was not found in available credits."
+                        ))
+                    })?,
                 None => credits.first().cloned().ok_or_else(|| {
                     AppError::Message("No available reset credit to consume.".to_string())
                 })?,
@@ -675,7 +684,8 @@ pub(crate) fn quota_provider(
     } else {
         if reset {
             return Err(AppError::Message(
-                "Rate limit reset credits are only supported for Codex / OpenAI accounts.".to_string(),
+                "Rate limit reset credits are only supported for Codex / OpenAI accounts."
+                    .to_string(),
             ));
         }
         ProviderQuotaOutput {
@@ -927,7 +937,10 @@ fn push_subscription_quota_lines(
             for credit in &reset_credits.credits {
                 let expires = credit.expires_at.as_deref().unwrap_or("never");
                 let title = credit.title.as_deref().unwrap_or("Rate Limit Reset");
-                lines.push(format!("  - {} (expires: {}) [{}]", title, expires, credit.id));
+                lines.push(format!(
+                    "  - {} (expires: {}) [{}]",
+                    title, expires, credit.id
+                ));
             }
         }
     }

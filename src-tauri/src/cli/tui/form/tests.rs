@@ -7991,16 +7991,20 @@ fn provider_add_form_pi_uses_native_api_default() {
 }
 
 #[test]
-fn provider_form_omp_derives_hidden_id_from_name() {
-    let mut form = ProviderAddFormState::new(AppType::Omp);
+fn provider_form_omp_exposes_identity_fields_like_pi() {
+    let pi_form = ProviderAddFormState::new(AppType::Pi);
+    let mut omp_form = ProviderAddFormState::new(AppType::Omp);
 
-    assert!(form.fields().contains(&ProviderAddField::Name));
-    assert!(!form.fields().contains(&ProviderAddField::Id));
-    assert!(!form.is_id_editable());
+    assert_eq!(omp_form.fields(), pi_form.fields());
+    assert!(omp_form.fields().contains(&ProviderAddField::Id));
+    assert!(omp_form.fields().contains(&ProviderAddField::Name));
+    assert!(omp_form.is_id_editable());
 
-    form.name.set("Custom OMP");
-    assert!(form.ensure_generated_id(&[]));
-    assert_eq!(form.id.value, "custom-omp");
+    let long_name = "a".repeat(129);
+    omp_form.name.set(&long_name);
+    assert!(omp_form.ensure_generated_id(&[]));
+    assert_eq!(omp_form.name.value, long_name);
+    assert_eq!(omp_form.id.value.len(), 128);
 
     let provider = Provider::with_id(
         "native-key".to_string(),
@@ -8009,8 +8013,29 @@ fn provider_form_omp_derives_hidden_id_from_name() {
         None,
     );
     let edit_form = ProviderAddFormState::from_provider(AppType::Omp, &provider);
-    assert!(!edit_form.fields().contains(&ProviderAddField::Id));
+    assert!(edit_form.fields().contains(&ProviderAddField::Id));
     assert!(!edit_form.is_id_editable());
+}
+
+#[test]
+fn provider_copy_form_omp_bounds_hidden_copy_id() {
+    let provider = Provider::with_id(
+        "a".repeat(128),
+        "Long native key".to_string(),
+        json!({"extension": "native"}),
+        None,
+    );
+
+    let form = ProviderAddFormState::copy_from_provider_with_common_snippet(
+        AppType::Omp,
+        &provider,
+        "",
+        std::slice::from_ref(&provider.id),
+    );
+
+    assert!(!form.fields().contains(&ProviderAddField::Id));
+    assert_eq!(form.id.value.len(), 128);
+    assert!(form.id.value.ends_with("-copy"));
 }
 
 #[test]

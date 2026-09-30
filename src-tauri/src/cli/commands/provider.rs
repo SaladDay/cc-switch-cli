@@ -1892,22 +1892,6 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
-    let base_id = format!("{}-copy", original_id.trim());
-    if !existing_ids.iter().any(|id| id == &base_id) {
-        return base_id;
-    }
-
-    let mut counter = 2;
-    loop {
-        let candidate = format!("{base_id}-{counter}");
-        if !existing_ids.iter().any(|id| id == &candidate) {
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
 fn existing_provider_ids_for_duplicate(
     app_type: &AppType,
     manager_ids: impl IntoIterator<Item = String>,
@@ -1937,9 +1921,13 @@ fn existing_provider_ids_for_duplicate(
     Ok(ids.into_iter().collect())
 }
 
-fn provider_duplicate_draft(source: &Provider, existing_ids: &[String]) -> Provider {
+fn provider_duplicate_draft(
+    app_type: &AppType,
+    source: &Provider,
+    existing_ids: &[String],
+) -> Provider {
     let mut draft = source.clone();
-    draft.id = provider_copy_id(&source.id, existing_ids);
+    draft.id = ProviderService::generate_provider_copy_id(app_type, &source.id, existing_ids);
     draft.name = format!("{} copy", source.name.trim());
     draft.created_at = None;
     draft.in_failover_queue = false;
@@ -1985,7 +1973,7 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
     let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
 
-    let draft = provider_duplicate_draft(&source, &existing_ids);
+    let draft = provider_duplicate_draft(&app_type, &source, &existing_ids);
 
     println!("\n{}", highlight(texts::current_config_header()));
     display_provider_summary(&draft, &app_type);
@@ -2841,6 +2829,7 @@ wire_api = "chat"
         provider.sort_index = Some(7);
 
         let draft = provider_duplicate_draft(
+            &AppType::Claude,
             &provider,
             &["provider-1".to_string(), "provider-1-copy".to_string()],
         );
@@ -2854,5 +2843,18 @@ wire_api = "chat"
             draft.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
             "sk-demo"
         );
+    }
+
+    #[test]
+    fn omp_duplicate_draft_bounds_collision_suffix() {
+        let mut provider = claude_provider(json!({}));
+        provider.id = "a".repeat(123);
+        let occupied = format!("{}-copy", provider.id);
+
+        let draft =
+            provider_duplicate_draft(&AppType::Omp, &provider, &[provider.id.clone(), occupied]);
+
+        assert_eq!(draft.id.len(), 128);
+        assert!(draft.id.ends_with("-copy-2"));
     }
 }

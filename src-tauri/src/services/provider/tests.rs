@@ -7747,6 +7747,13 @@ fn delete_rejects_last_failover_queue_provider_while_active() {
 #[test]
 fn omp_provider_key_collision_suffix_stays_within_native_limit() {
     let base = "a".repeat(128);
+    let overlong = format!("{base}tail");
+    assert_eq!(
+        ProviderService::generate_omp_provider_key(&overlong, &[]),
+        base,
+        "an OMP ID derived from a long display name must cap the native key, not reject the name"
+    );
+
     let first = ProviderService::generate_omp_provider_key(&base, std::slice::from_ref(&base));
 
     assert_eq!(first.len(), 128);

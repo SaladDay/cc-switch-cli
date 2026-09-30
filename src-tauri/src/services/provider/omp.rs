@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn duplicate_derives_omp_key_from_visible_copy_name() {
+    fn duplicate_preserves_explicit_copy_id_like_pi() {
         let _agent = TestAgentDir::new();
         let state = state();
         let mut source = input("model-a");
@@ -872,17 +872,48 @@ mod tests {
 
         let mut edited_copy = source;
         edited_copy.id = "cc-switch-test-copy".to_string();
-        edited_copy.name = "Friendly Name copy".to_string();
+        edited_copy.name = "A completely different display name".to_string();
         let duplicate =
             ProviderService::duplicate(&state, AppType::Omp, "cc-switch-test", Some(edited_copy))
                 .expect("duplicate OMP provider");
 
-        assert_eq!(duplicate.id, "friendly-name-copy");
+        assert_eq!(duplicate.id, "cc-switch-test-copy");
+        assert_eq!(duplicate.name, "A completely different display name");
         assert!(state
             .db
-            .get_provider_by_id("friendly-name-copy", OMP_APP)
+            .get_provider_by_id("cc-switch-test-copy", OMP_APP)
             .expect("query duplicate")
             .is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn duplicate_bounds_copy_ids_at_native_limit_and_after_collision() {
+        let _agent = TestAgentDir::new();
+        let state = state();
+
+        let mut max_length_source = input("model-a");
+        max_length_source.id = format!("{}ab", "界".repeat(42));
+        assert_eq!(max_length_source.id.len(), 128);
+        add(&state, max_length_source.clone(), false).expect("save max-length source");
+
+        let first = ProviderService::duplicate(&state, AppType::Omp, &max_length_source.id, None)
+            .expect("duplicate max-length OMP ID");
+        assert_eq!(first.id.len(), 128);
+        assert!(first.id.ends_with("-copy"));
+
+        let mut collision_source = input("model-b");
+        collision_source.id = "b".repeat(123);
+        add(&state, collision_source.clone(), false).expect("save collision source");
+
+        let mut occupied_copy = input("model-c");
+        occupied_copy.id = format!("{}-copy", collision_source.id);
+        add(&state, occupied_copy, false).expect("occupy first copy ID");
+
+        let collided = ProviderService::duplicate(&state, AppType::Omp, &collision_source.id, None)
+            .expect("duplicate OMP ID after copy collision");
+        assert_eq!(collided.id.len(), 128);
+        assert!(collided.id.ends_with("-copy-2"));
     }
 
     #[test]
