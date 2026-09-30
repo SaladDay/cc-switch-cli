@@ -529,6 +529,109 @@ impl ProviderService {
         Ok(())
     }
 
+    /// Capture the active Codex provider's live config back to the database snapshot.
+    ///
+    /// This ensures the TUI displays current state for the active provider, not stale
+    /// data from before activation. Called after successfully writing live config.
+    pub(super) fn capture_codex_active_snapshot(
+        config: &mut MultiAppConfig,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let provider = config
+            .get_manager(&AppType::Codex)
+            .and_then(|manager| manager.providers.get(provider_id))
+            .cloned();
+        let Some(provider) = provider else {
+            log::debug!("Skip capture for nonexistent provider '{provider_id}'");
+            return Ok(());
+        };
+
+        let auth_path = get_codex_auth_path();
+        let config_path = get_codex_config_path();
+
+        // Read live auth; if absent, keep the existing snapshot auth
+        let auth = if auth_path.exists() {
+            match read_json_file::<Value>(&auth_path) {
+                Ok(auth) => Some(auth),
+                Err(err) => {
+                    log::warn!("Failed to read live auth.json for active snapshot: {err}");
+                    provider.settings_config.get("auth").cloned()
+                }
+            }
+        } else {
+            provider.settings_config.get("auth").cloned()
+        };
+
+        // Read live config.toml; if absent or fails, keep existing snapshot
+        let config_text = if config_path.exists() {
+            match std::fs::read_to_string(&config_path) {
+                Ok(text) => Some(text),
+                Err(err) => {
+                    log::warn!("Failed to read live config.toml for active snapshot: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let Some(text) = config_text else {
+            return Ok(());
+        };
+
+        let is_official = Self::codex_live_write_category(&provider) == Some("official");
+        let stored_auth = provider.settings_config.get("auth");
+        let stored_config = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str);
+
+        let capture_auth = if is_official {
+            auth.clone()
+        } else {
+            Some(crate::codex_config::sanitize_codex_third_party_auth(
+                auth.as_ref(),
+                Some(text.as_str()),
+                stored_auth,
+                stored_config,
+            ))
+        };
+
+        let mut raw_settings = serde_json::Map::new();
+        if let Some(auth) = capture_auth {
+            raw_settings.insert("auth".to_string(), auth);
+        }
+        raw_settings.insert("config".to_string(), Value::String(text));
+        let mut settings_for_storage = Value::Object(raw_settings);
+        crate::codex_config::strip_codex_mcp_servers_from_settings(&mut settings_for_storage)?;
+        if is_official {
+            crate::codex_config::strip_codex_unified_session_bucket_from_settings(
+                &mut settings_for_storage,
+            )?;
+        }
+
+        let mut snapshot_provider = provider.clone();
+        snapshot_provider.settings_config = settings_for_storage;
+        snapshot_provider = Self::migrate_provider_snapshot_for_storage(
+            &AppType::Codex,
+            &snapshot_provider,
+            config.common_config_snippets.codex.as_deref(),
+        )?;
+
+        Self::preserve_codex_model_catalog_for_backfill(
+            &provider,
+            &mut snapshot_provider.settings_config,
+        );
+
+        if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
+            if let Some(target) = manager.providers.get_mut(provider_id) {
+                *target = snapshot_provider;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Write Codex live configuration.
     ///
     /// Aligned with upstream: the stored `settings_config.config` is the full config.toml text.
