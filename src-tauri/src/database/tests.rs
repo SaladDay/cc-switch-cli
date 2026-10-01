@@ -2093,6 +2093,260 @@ fn schema_migration_v17_adds_claude_byte_cursor_columns() {
     assert_eq!(cursors, (None, None));
 }
 
+fn seed_v18_mcode_fixture(conn: &Connection) {
+    Database::create_tables_on_conn(conn).expect("create fixture tables");
+    conn.execute_batch(
+        "ALTER TABLE mcp_servers DROP COLUMN enabled_mcode;
+         ALTER TABLE skills DROP COLUMN enabled_mcode;
+         INSERT INTO mcp_servers
+            (id, name, server_config, tags, enabled_claude, enabled_codex,
+             enabled_gemini, enabled_grokbuild, enabled_opencode, enabled_hermes)
+         VALUES ('mcp-v19', 'Original MCP', '{\"command\":\"example\"}', '[\"test\"]', 1, 0, 1, 1, 0, 1);
+         INSERT INTO skills
+            (id, name, directory, enabled_claude, enabled_codex, enabled_gemini,
+             enabled_grokbuild, enabled_opencode, enabled_hermes, installed_at,
+             content_hash, updated_at)
+         VALUES ('skill-v19', 'Original Skill', 'example', 0, 1, 0, 1, 1, 0, 123, 'hash', 456);",
+    )
+    .expect("seed v18 rows without MiniMax Code columns");
+    Database::set_user_version(conn, 18).expect("set v18 version");
+}
+
+fn assert_mcode_flags(conn: &Connection, expected: bool) {
+    for table in ["mcp_servers", "skills"] {
+        let flags: Vec<bool> = conn
+            .prepare(&format!("SELECT enabled_mcode FROM {table}"))
+            .expect("prepare flag query")
+            .query_map([], |row| row.get(0))
+            .expect("query flags")
+            .collect::<Result<_, _>>()
+            .expect("read flags");
+        assert_eq!(flags, vec![expected], "{table} must preserve its flag");
+    }
+}
+
+fn v18_fixture_rows(conn: &Connection) -> (String, String) {
+    let mcp = conn
+        .query_row(
+            "SELECT json_array(id, name, server_config, description, homepage, docs, tags,
+            enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild,
+            enabled_opencode, enabled_hermes) FROM mcp_servers",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let skill = conn
+        .query_row(
+            "SELECT json_array(id, name, description, directory, repo_owner, repo_name,
+            repo_branch, readme_url, enabled_claude, enabled_codex, enabled_gemini,
+            enabled_grokbuild, enabled_opencode, enabled_hermes, installed_at,
+            content_hash, updated_at) FROM skills",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (mcp, skill)
+}
+
+#[test]
+fn fresh_v19_tables_default_mcode_flags_to_false() {
+    let conn = Connection::open_in_memory().unwrap();
+    Database::create_tables_on_conn(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO mcp_servers (id, name, server_config) VALUES ('new', 'New MCP', '{}');
+         INSERT INTO skills (id, name, directory) VALUES ('new', 'New Skill', 'new');",
+    )
+    .unwrap();
+    assert_mcode_flags(&conn, false);
+}
+
+#[test]
+fn schema_migration_v18_adds_mcode_flags_without_losing_data() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    seed_v18_mcode_fixture(&conn);
+    let before = v18_fixture_rows(&conn);
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v18");
+    assert_eq!(Database::get_user_version(&conn).unwrap(), 19);
+    assert_mcode_flags(&conn, false);
+    assert_eq!(before, v18_fixture_rows(&conn));
+
+    for table in ["mcp_servers", "skills"] {
+        let definition: (String, bool, String) = conn
+            .query_row(
+                &format!("SELECT type, [notnull], dflt_value FROM pragma_table_info('{table}') WHERE name = 'enabled_mcode'"),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read column definition");
+        assert_eq!(definition, ("BOOLEAN".into(), true, "0".into()));
+    }
+}
+
+#[test]
+fn schema_migration_v18_preserves_existing_mcode_column() {
+    for existing_table in ["mcp_servers", "skills"] {
+        let conn = Connection::open_in_memory().expect("open memory db");
+        seed_v18_mcode_fixture(&conn);
+        conn.execute_batch(&format!(
+            "ALTER TABLE {existing_table} ADD COLUMN enabled_mcode BOOLEAN NOT NULL DEFAULT 0;
+             UPDATE {existing_table} SET enabled_mcode = 1;"
+        ))
+        .expect("seed partially migrated flag");
+        Database::apply_schema_migrations_on_conn(&conn).expect("migrate partial v18");
+        Database::apply_schema_migrations_on_conn(&conn).expect("repeat v19 migration");
+        let flag: bool = conn
+            .query_row(
+                &format!("SELECT enabled_mcode FROM {existing_table}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(flag);
+        assert_eq!(Database::get_user_version(&conn).unwrap(), 19);
+    }
+}
+
+#[test]
+fn schema_migration_v18_rolls_back_both_columns_on_failure() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let conn = Connection::open_in_memory().expect("open memory db");
+    seed_v18_mcode_fixture(&conn);
+    conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::AlterTable {
+            table_name: "skills",
+            ..
+        } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }));
+    Database::apply_schema_migrations_on_conn(&conn).expect_err("fail second column addition");
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    assert_eq!(Database::get_user_version(&conn).unwrap(), 18);
+    for table in ["mcp_servers", "skills"] {
+        assert!(!Database::has_column(&conn, table, "enabled_mcode").unwrap());
+    }
+    Database::apply_schema_migrations_on_conn(&conn).expect("retry after rollback");
+    assert_mcode_flags(&conn, false);
+}
+
+#[test]
+fn v19_mcp_and_skill_updates_preserve_mcode_flags() {
+    let db = Database::memory().expect("memory database");
+    {
+        let conn = db.conn.lock().unwrap();
+        seed_v18_mcode_fixture(&conn);
+        Database::apply_schema_migrations_on_conn(&conn).unwrap();
+        conn.execute_batch(
+            "UPDATE mcp_servers SET enabled_mcode = 1; UPDATE skills SET enabled_mcode = 1;",
+        )
+        .unwrap();
+    }
+    let mut server = db
+        .get_all_mcp_servers()
+        .unwrap()
+        .shift_remove("mcp-v19")
+        .unwrap();
+    server.name = "Updated MCP".into();
+    server.apps.codex = true;
+    db.save_mcp_server(&server).unwrap();
+    let mut skill = db.get_installed_skill("skill-v19").unwrap().unwrap();
+    skill.name = "Updated Skill".into();
+    skill.apps.claude = true;
+    db.save_skill(&skill).unwrap();
+    skill.apps.codex = false;
+    assert!(db.update_skill_apps(&skill.id, &skill.apps).unwrap());
+    assert_eq!(
+        db.get_all_mcp_servers().unwrap()["mcp-v19"].name,
+        "Updated MCP"
+    );
+    assert_eq!(
+        db.get_installed_skill("skill-v19").unwrap().unwrap().name,
+        "Updated Skill"
+    );
+    assert_mcode_flags(&db.conn.lock().unwrap(), true);
+}
+
+#[test]
+#[serial_test::serial]
+fn v19_local_init_keeps_v18_safety_backup_and_reopens_v19() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+    let config_dir = home.path().join(".cc-switch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let conn = Connection::open(config_dir.join("cc-switch.db")).unwrap();
+    seed_v18_mcode_fixture(&conn);
+    let original_rows = v18_fixture_rows(&conn);
+    drop(conn);
+    let db = Database::init().expect("open and migrate v18");
+    assert_mcode_flags(&db.conn.lock().unwrap(), false);
+    let backup_conn = std::fs::read_dir(config_dir.join("backups"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+        .map(|path| Connection::open(path).unwrap())
+        .find(|conn| Database::get_user_version(conn).unwrap() == 18)
+        .expect("pre-migration backup");
+    assert_eq!(Database::get_user_version(&backup_conn).unwrap(), 18);
+    assert!(!Database::has_column(&backup_conn, "skills", "enabled_mcode").unwrap());
+    assert_eq!(v18_fixture_rows(&backup_conn), original_rows);
+    drop(db);
+    let reopened = Database::init().expect("open existing v19 locally");
+    assert_eq!(
+        Database::get_user_version(&reopened.conn.lock().unwrap()).unwrap(),
+        19
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn v19_sql_restore_and_sync_preserve_mcode_and_reject_future_schema() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+    let source = Database::memory().unwrap();
+    seed_v18_mcode_fixture(&source.conn.lock().unwrap());
+    let target = Database::init().unwrap();
+    let v18_sql = source.export_sql_string().unwrap();
+    target
+        .import_sql_string(&v18_sql)
+        .expect("restore and migrate v18 SQL");
+    assert_mcode_flags(&target.conn.lock().unwrap(), false);
+    target
+        .import_sql_string_for_sync(&v18_sql)
+        .expect("sync and migrate v18 SQL");
+    assert_mcode_flags(&target.conn.lock().unwrap(), false);
+    {
+        let conn = source.conn.lock().unwrap();
+        Database::apply_schema_migrations_on_conn(&conn).unwrap();
+        conn.execute_batch(
+            "UPDATE mcp_servers SET enabled_mcode = 1; UPDATE skills SET enabled_mcode = 1;",
+        )
+        .unwrap();
+    }
+    target
+        .import_sql_string(&source.export_sql_string().unwrap())
+        .expect("restore v19 SQL");
+    assert_mcode_flags(&target.conn.lock().unwrap(), true);
+    target
+        .import_sql_string_for_sync(&source.export_sql_string_for_sync().unwrap())
+        .expect("import v19 through WebDAV sync path");
+    assert_mcode_flags(&target.conn.lock().unwrap(), true);
+    Database::set_user_version(&source.conn.lock().unwrap(), 20).unwrap();
+    let future_sql = source.export_sql_string().unwrap();
+    for result in [
+        target.import_sql_string(&future_sql),
+        target.import_sql_string_for_sync(&future_sql),
+    ] {
+        assert!(result
+            .expect_err("reject v20 SQL")
+            .to_string()
+            .contains("由较新版本的 CC Switch 创建"));
+        assert_eq!(
+            Database::get_user_version(&target.conn.lock().unwrap()).unwrap(),
+            19
+        );
+        assert_mcode_flags(&target.conn.lock().unwrap(), true);
+    }
+}
+
 #[test]
 fn create_tables_migrates_legacy_global_profile_marker_once() {
     let conn = Connection::open_in_memory().expect("open memory db");
