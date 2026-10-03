@@ -16,6 +16,12 @@ use crate::session_manager::{self, SessionMessage, SessionMessageBatch, SessionM
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionsCommand {
+    /// Repair legacy Codex session names (dry-run unless --apply is passed)
+    RepairCodexNames {
+        /// Apply the reported repairs to the Codex state database
+        #[arg(long)]
+        apply: bool,
+    },
     /// List saved assistant sessions
     List {
         /// Scan a specific provider instead of --app
@@ -126,6 +132,7 @@ struct SessionMessagesOutput<'a> {
 
 pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppError> {
     match cmd {
+        SessionsCommand::RepairCodexNames { apply } => repair_codex_names(apply),
         SessionsCommand::List {
             provider,
             all,
@@ -162,6 +169,24 @@ pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppErro
             json,
         } => sync_usage(app, provider, all, json),
     }
+}
+
+fn repair_codex_names(apply: bool) -> Result<(), AppError> {
+    let changed = crate::codex_history_migration::repair_codex_legacy_thread_names(apply)?;
+    if apply {
+        println!(
+            "{}",
+            success(&format!("Repaired {changed} Codex session name(s)."))
+        );
+    } else {
+        println!(
+            "{}",
+            info(&format!(
+                "Dry run: {changed} Codex session name(s) can be repaired. Re-run with --apply to write changes."
+            ))
+        );
+    }
+    Ok(())
 }
 
 fn list_sessions(
