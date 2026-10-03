@@ -806,7 +806,7 @@ async fn codex_oauth_prepare_request_ignores_stale_full_url_and_injects_bound_ac
         Some("acc-bound")
     );
     assert_eq!(header_value(&request, "originator"), Some("codex_cli_rs"));
-    assert_eq!(header_value(&request, "version"), Some("0.144.1"));
+    assert_eq!(header_value(&request, "version"), Some("0.153.4"));
     assert_eq!(header_value(&request, "anthropic-beta"), None);
     assert_eq!(header_value(&request, "anthropic-version"), None);
 }
