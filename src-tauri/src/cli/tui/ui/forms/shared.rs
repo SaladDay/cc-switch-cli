@@ -65,7 +65,9 @@ pub(crate) fn add_form_key_items(
                         ProviderAddField::GeminiAuthType
                         | ProviderAddField::CodexPromptCacheRouting
                         | ProviderAddField::OpenClawApiProtocol
-                        | ProviderAddField::HermesApiMode,
+                        | ProviderAddField::HermesApiMode
+                        | ProviderAddField::ClaudeAnthropicApiKeyField
+                        | ProviderAddField::CodexAnthropicApiKeyField,
                     ) => texts::tui_key_select(),
                     _ => texts::tui_key_edit_mode(),
                 };
@@ -314,22 +316,68 @@ pub(crate) fn render_form_template_chips(
     frame.render_widget(template_block.clone(), area);
     let template_inner = template_block.inner(area);
 
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (idx, label) in labels.iter().enumerate() {
+    if template_inner.width == 0 || labels.is_empty() {
+        return;
+    }
+
+    let selected_idx = selected_idx.min(labels.len().saturating_sub(1));
+    let viewport = template_inner.width as usize;
+
+    // Build chip metadata: each chip renders as " {label} " followed by a
+    // trailing space, so its total advance is label width + 3.
+    let chip_widths: Vec<usize> = labels
+        .iter()
+        .map(|label| UnicodeWidthStr::width(*label).saturating_add(3))
+        .collect();
+    let total_width = chip_widths
+        .iter()
+        .fold(0usize, |acc, width| acc.saturating_add(*width));
+
+    // Decide the horizontal window so that the selected chip is always fully
+    // visible. When space permits, also show preceding and following chips.
+    let (first_visible, last_visible) = if total_width <= viewport {
+        (0, labels.len().saturating_sub(1))
+    } else {
+        let mut first = selected_idx;
+        let mut last = selected_idx;
+        let mut used = chip_widths[selected_idx];
+        while first > 0 {
+            let prev_width = chip_widths[first.saturating_sub(1)];
+            if used.saturating_add(prev_width) > viewport {
+                break;
+            }
+            used = used.saturating_add(prev_width);
+            first = first.saturating_sub(1);
+        }
+        while last.saturating_add(1) < labels.len() {
+            let next_width = chip_widths[last.saturating_add(1)];
+            if used.saturating_add(next_width) > viewport {
+                break;
+            }
+            used = used.saturating_add(next_width);
+            last = last.saturating_add(1);
+        }
+        (first, last)
+    };
+
+    let mut visible_spans: Vec<Span<'static>> = Vec::new();
+    for (idx, label) in labels
+        .iter()
+        .enumerate()
+        .skip(first_visible)
+        .take(last_visible.saturating_sub(first_visible).saturating_add(1))
+    {
         let selected = idx == selected_idx;
         let style = if selected {
             active_chip_style(theme)
         } else {
             inactive_chip_style(theme)
         };
-        spans.push(Span::styled(format!(" {label} "), style));
-        spans.push(Span::raw(" "));
+        visible_spans.push(Span::styled(format!(" {label} "), style));
+        visible_spans.push(Span::raw(" "));
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
-        template_inner,
-    );
+    frame.render_widget(Paragraph::new(Line::from(visible_spans)), template_inner);
 }
 
 pub(crate) fn visible_text_window(text: &str, cursor: usize, width: usize) -> (String, u16) {

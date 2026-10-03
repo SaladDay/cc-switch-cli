@@ -29,11 +29,12 @@ pub(super) fn launch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
 fn prepare_claude_launch(id: &str, temp_dir: &Path) -> Result<PreparedClaudeLaunch, AppError> {
     let state = load_state()?;
     let provider = ProviderService::get_provider(&state, AppType::Claude, id)?;
-    let settings = ProviderService::build_effective_live_snapshot_from_state(
+    let mut settings = ProviderService::build_effective_live_snapshot_from_state(
         &state,
         AppType::Claude,
         &provider,
     )?;
+    crate::cli::claude_temp_launch::clear_alternate_claude_auth_field(&mut settings);
     prepare_launch_from_settings(&provider.id, &settings, temp_dir)
 }
 
