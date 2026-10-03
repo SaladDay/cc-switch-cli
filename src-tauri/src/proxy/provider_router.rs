@@ -16,6 +16,40 @@ pub struct ProviderRouter {
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
 }
 
+pub(super) struct ProviderRequestPermit {
+    pub(super) allowed: bool,
+    half_open_permit: Option<(Arc<CircuitBreaker>, u64)>,
+}
+
+impl ProviderRequestPermit {
+    /// 创建绕过熔断器时使用的许可，不持有半开探测名额。
+    pub(super) fn bypassed() -> Self {
+        Self {
+            allowed: true,
+            half_open_permit: None,
+        }
+    }
+
+    /// 将熔断器许可包装为可在任务取消时自动释放的守卫。
+    fn guarded(breaker: Arc<CircuitBreaker>, result: AllowResult) -> Self {
+        Self {
+            allowed: result.allowed,
+            half_open_permit: result
+                .half_open_generation
+                .map(|generation| (breaker, generation)),
+        }
+    }
+}
+
+impl Drop for ProviderRequestPermit {
+    /// 在请求完成、取消或 panic 展开时归还半开探测名额。
+    fn drop(&mut self) {
+        if let Some((breaker, generation)) = self.half_open_permit.take() {
+            breaker.release_half_open_permit_for_generation(generation);
+        }
+    }
+}
+
 impl ProviderRouter {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
@@ -89,6 +123,19 @@ impl ProviderRouter {
         breaker.allow_request().await
     }
 
+    /// 获取由生命周期守卫管理的请求许可，避免任务取消后泄漏半开名额。
+    pub(super) async fn acquire_provider_request(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+    ) -> ProviderRequestPermit {
+        let breaker = self
+            .get_or_create_circuit_breaker(&format!("{app_type}:{provider_id}"))
+            .await;
+        let result = breaker.allow_request().await;
+        ProviderRequestPermit::guarded(breaker, result)
+    }
+
     pub async fn record_result(
         &self,
         provider_id: &str,
@@ -124,6 +171,20 @@ impl ProviderRouter {
             )
             .await
             .map_err(|error| ProxyError::DatabaseError(error.to_string()))
+    }
+
+    /// 记录由守卫持有的请求结果，permit 统一在守卫销毁时释放。
+    pub(super) async fn record_guarded_result(
+        &self,
+        permit: &ProviderRequestPermit,
+        provider_id: &str,
+        app_type: &str,
+        success: bool,
+        error_msg: Option<String>,
+    ) -> Result<(), ProxyError> {
+        debug_assert!(permit.allowed);
+        self.record_result(provider_id, app_type, false, success, error_msg)
+            .await
     }
 
     pub async fn reset_circuit_breaker(&self, circuit_key: &str) {

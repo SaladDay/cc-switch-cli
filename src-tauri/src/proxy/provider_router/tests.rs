@@ -4,6 +4,7 @@ use serde_json::json;
 use serial_test::serial;
 use std::{env, sync::Arc};
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
 struct TempHome {
     #[allow(dead_code)]
@@ -335,6 +336,106 @@ async fn test_release_permit_neutral_frees_half_open_slot() {
     let third = router.allow_provider_request("a", "claude").await;
     assert!(third.allowed);
     assert!(third.used_half_open_permit);
+}
+
+/// 验证请求任务被取消并丢弃许可守卫后，半开探测名额会自动归还。
+#[tokio::test]
+#[serial(home_settings)]
+async fn test_cancelled_guarded_probe_frees_half_open_slot() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    db.update_circuit_breaker_config(&CircuitBreakerConfig {
+        failure_threshold: 1,
+        timeout_seconds: 0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let provider_a = Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+    db.save_provider("claude", &provider_a).unwrap();
+    db.add_to_failover_queue("claude", "a").unwrap();
+
+    let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
+    config.auto_failover_enabled = true;
+    db.update_proxy_config_for_app(config).await.unwrap();
+
+    let router = Arc::new(ProviderRouter::new(db.clone()));
+
+    router
+        .record_result("a", "claude", false, false, Some("fail".to_string()))
+        .await
+        .unwrap();
+
+    let task_router = Arc::clone(&router);
+    let (acquired_tx, acquired_rx) = oneshot::channel();
+    let probe_task = tokio::spawn(async move {
+        let permit = task_router.acquire_provider_request("a", "claude").await;
+        assert!(permit.allowed);
+        acquired_tx.send(()).unwrap();
+        std::future::pending::<()>().await;
+        drop(permit);
+    });
+
+    acquired_rx.await.unwrap();
+    assert!(!router.allow_provider_request("a", "claude").await.allowed);
+
+    probe_task.abort();
+    assert!(probe_task.await.unwrap_err().is_cancelled());
+
+    let next = router.acquire_provider_request("a", "claude").await;
+    assert!(next.allowed);
+}
+
+/// 验证旧代际守卫不会释放新一轮半开探测正在使用的名额。
+#[tokio::test]
+#[serial(home_settings)]
+async fn test_stale_guard_does_not_release_new_half_open_generation() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    db.update_circuit_breaker_config(&CircuitBreakerConfig {
+        failure_threshold: 1,
+        timeout_seconds: 0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let provider_a = Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+    db.save_provider("claude", &provider_a).unwrap();
+    db.add_to_failover_queue("claude", "a").unwrap();
+
+    let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
+    config.auto_failover_enabled = true;
+    db.update_proxy_config_for_app(config).await.unwrap();
+
+    let router = ProviderRouter::new(db.clone());
+
+    router
+        .record_result("a", "claude", false, false, Some("fail".to_string()))
+        .await
+        .unwrap();
+
+    let stale = router.acquire_provider_request("a", "claude").await;
+    assert!(stale.allowed);
+    router
+        .record_guarded_result(&stale, "a", "claude", false, Some("probe failed".to_string()))
+        .await
+        .unwrap();
+
+    let current = router.acquire_provider_request("a", "claude").await;
+    assert!(current.allowed);
+
+    drop(stale);
+    assert!(!router.allow_provider_request("a", "claude").await.allowed);
+
+    drop(current);
+    let next = router.acquire_provider_request("a", "claude").await;
+    assert!(next.allowed);
 }
 
 #[tokio::test]
