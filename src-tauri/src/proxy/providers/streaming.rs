@@ -37,8 +37,6 @@ struct Delta {
     reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<DeltaToolCall>>,
-    #[serde(default)]
-    function_call: Option<DeltaFunction>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -113,8 +111,6 @@ pub fn create_anthropic_sse_stream(
         let mut current_non_tool_block_index: Option<u32> = None;
         let mut tool_blocks_by_index: HashMap<usize, ToolBlockState> = HashMap::new();
         let mut open_tool_block_indices: HashSet<u32> = HashSet::new();
-        let mut legacy_function_name: Option<String> = None;
-        let mut legacy_function_block_index: Option<u32> = None;
 
         tokio::pin!(stream);
 
@@ -476,75 +472,6 @@ pub fn create_anthropic_sse_stream(
                                 }
                             }
 
-                            if let Some(function_call) = &choice.delta.function_call {
-                                if let Some(name) = &function_call.name {
-                                    legacy_function_name = Some(name.clone());
-                                }
-
-                                let has_legacy_function_payload = function_call
-                                    .name
-                                    .as_deref()
-                                    .is_some_and(|name| !name.is_empty())
-                                    || function_call
-                                        .arguments
-                                        .as_deref()
-                                        .is_some_and(|arguments| !arguments.is_empty());
-
-                                if has_legacy_function_payload {
-                                    if let Some(index) = current_non_tool_block_index.take() {
-                                        let event = json!({
-                                            "type": "content_block_stop",
-                                            "index": index
-                                        });
-                                        let sse_data = format!(
-                                            "event: content_block_stop\ndata: {}\n\n",
-                                            serde_json::to_string(&event).unwrap_or_default()
-                                        );
-                                        yield Ok(Bytes::from(sse_data));
-                                    }
-                                    current_non_tool_block_type = None;
-
-                                    if legacy_function_block_index.is_none() {
-                                        let index = next_content_index;
-                                        next_content_index += 1;
-                                        legacy_function_block_index = Some(index);
-                                        let event = json!({
-                                            "type": "content_block_start",
-                                            "index": index,
-                                            "content_block": {
-                                                "type": "tool_use",
-                                                "id": "",
-                                                "name": legacy_function_name.clone().unwrap_or_default(),
-                                                "input": {}
-                                            }
-                                        });
-                                        let sse_data = format!(
-                                            "event: content_block_start\ndata: {}\n\n",
-                                            serde_json::to_string(&event).unwrap_or_default()
-                                        );
-                                        yield Ok(Bytes::from(sse_data));
-                                    }
-
-                                    if let Some(arguments) = &function_call.arguments {
-                                        if let Some(index) = legacy_function_block_index {
-                                            let event = json!({
-                                                "type": "content_block_delta",
-                                                "index": index,
-                                                "delta": {
-                                                    "type": "input_json_delta",
-                                                    "partial_json": arguments
-                                                }
-                                            });
-                                            let sse_data = format!(
-                                                "event: content_block_delta\ndata: {}\n\n",
-                                                serde_json::to_string(&event).unwrap_or_default()
-                                            );
-                                            yield Ok(Bytes::from(sse_data));
-                                        }
-                                    }
-                                }
-                            }
-
                             if let Some(finish_reason) = &choice.finish_reason {
                                 if let Some(index) = current_non_tool_block_index.take() {
                                     let event = json!({
@@ -623,18 +550,6 @@ pub fn create_anthropic_sse_stream(
                                         );
                                         yield Ok(Bytes::from(delta_sse));
                                     }
-                                }
-
-                                if let Some(index) = legacy_function_block_index.take() {
-                                    let event = json!({
-                                        "type": "content_block_stop",
-                                        "index": index
-                                    });
-                                    let sse_data = format!(
-                                        "event: content_block_stop\ndata: {}\n\n",
-                                        serde_json::to_string(&event).unwrap_or_default()
-                                    );
-                                    yield Ok(Bytes::from(sse_data));
                                 }
 
                                 if !open_tool_block_indices.is_empty() {
@@ -1211,19 +1126,20 @@ mod tests {
         );
 
         let events = collect_events(input).await;
+        assert!(events.iter().any(|event| {
+            event["type"] == "content_block_delta" && event["delta"]["text"] == "ok"
+        }));
         assert!(!events.iter().any(|event| {
-            event["type"] == "content_block_start"
-                && event["content_block"]["type"] == "tool_use"
+            event["type"] == "content_block_start" && event["content_block"]["type"] == "tool_use"
         }));
         assert!(events.iter().any(|event| {
-            event["type"] == "message_delta"
-                && event["delta"]["stop_reason"] == "end_turn"
+            event["type"] == "message_delta" && event["delta"]["stop_reason"] == "end_turn"
         }));
         assert!(events.iter().any(|event| event["type"] == "message_stop"));
     }
 
     #[tokio::test]
-    async fn legacy_function_call_stream_emits_tool_use_block_and_argument_delta() {
+    async fn legacy_function_call_payload_is_ignored_like_upstream() {
         let input = concat!(
             "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"get_weather\"}}}]}\n\n",
             "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"function_call\":{\"arguments\":\"{\\\"location\\\":\\\"Tokyo\\\"}\"}}}]}\n\n",
@@ -1232,32 +1148,15 @@ mod tests {
         );
 
         let events = collect_events(input).await;
-        let tool_start = events
-            .iter()
-            .find(|event| {
-                event["type"] == "content_block_start"
-                    && event["content_block"]["type"] == "tool_use"
-            })
-            .expect("tool_use block start");
-        let tool_delta = events
-            .iter()
-            .find(|event| {
-                event["type"] == "content_block_delta"
-                    && event["delta"]["type"] == "input_json_delta"
-            })
-            .expect("tool_use argument delta");
-        let message_delta = events
-            .iter()
-            .find(|event| event["type"] == "message_delta")
-            .expect("message_delta event");
-
-        assert_eq!(tool_start["content_block"]["name"], "get_weather");
-        assert_eq!(tool_start["content_block"]["input"], json!({}));
-        assert_eq!(
-            tool_delta["delta"]["partial_json"],
-            "{\"location\":\"Tokyo\"}"
-        );
-        assert_eq!(message_delta["delta"]["stop_reason"], "tool_use");
+        assert!(!events.iter().any(|event| {
+            event["content_block"]["type"] == "tool_use"
+                || event["delta"]["type"] == "input_json_delta"
+        }));
+        // Preserve the upstream finish-reason mapping for ignored legacy payloads.
+        assert!(events.iter().any(|event| {
+            event["type"] == "message_delta" && event["delta"]["stop_reason"] == "tool_use"
+        }));
+        assert!(events.iter().any(|event| event["type"] == "message_stop"));
     }
 
     #[tokio::test]
