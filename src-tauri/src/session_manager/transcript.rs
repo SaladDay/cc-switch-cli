@@ -21,8 +21,7 @@ use sha2::{Digest, Sha256};
 use super::providers::{claude, codex, gemini, hermes, openclaw, opencode};
 use super::{truncate_string_utf8, SessionMessage};
 use crate::config::{
-    create_managed_config_dir_all, get_app_config_dir,
-    resolve_config_dir_without_following_user_symlinks, write_json_file,
+    create_managed_config_dir_all, get_app_config_dir, resolve_config_dir, write_json_file,
 };
 
 pub(crate) const TRANSCRIPT_PAGE_SIZE: usize = 100;
@@ -437,8 +436,8 @@ struct ScopeCacheEntry {
 
 impl TranscriptIndexStore {
     fn open() -> Result<Self, String> {
-        let config_dir = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())
-            .map_err(|error| error.to_string())?;
+        let config_dir =
+            resolve_config_dir(&get_app_config_dir()).map_err(|error| error.to_string())?;
         Self::open_at(&config_dir)
     }
 

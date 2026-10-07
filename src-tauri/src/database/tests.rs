@@ -3975,3 +3975,51 @@ fn bulk_import_guard_restores_prior_synchronous() {
     // Drop 后恢复到进入前的原值 OFF(0)，而非硬编码 FULL(2)。
     assert_eq!(read_sync(&db), 0, "Drop 后应恢复原值 OFF(0)");
 }
+
+#[test]
+#[cfg(unix)]
+fn init_and_backup_work_under_symlinked_home_parent() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let temp = tempfile::tempdir().unwrap();
+    let homes = temp.path().join("volume/homes");
+    let home = homes.join("user");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let alias = temp.path().join("homes");
+    symlink(&homes, &alias).unwrap();
+    let config = alias.join("user/.cc-switch");
+    let _env = crate::test_support::TestEnvGuard::isolated(&alias.join("user"));
+    std::env::remove_var("CC_SWITCH_CONFIG_DIR");
+    assert_eq!(crate::config::get_app_config_dir(), config);
+
+    let db = Database::init().expect("initialize through a NAS home alias");
+    db.set_setting("symlink_home_test", "preserved").unwrap();
+    crate::config::write_json_file(&config.join("settings.json"), &json!({"test": true})).unwrap();
+    let backup = db.backup_database_file().unwrap().expect("backup file");
+    assert!(backup.is_file());
+    assert!(home.join(".cc-switch/cc-switch.db").is_file());
+    assert_eq!(
+        crate::config::read_json_file::<serde_json::Value>(&config.join("settings.json")).unwrap(),
+        json!({"test": true})
+    );
+    drop(db);
+    let _config_override = ConfigDirEnvGuard::set(&config);
+    let reopened = Database::init().expect("reopen existing database through alias");
+    assert_eq!(
+        reopened
+            .get_setting("symlink_home_test")
+            .unwrap()
+            .as_deref(),
+        Some("preserved")
+    );
+    assert_eq!(
+        std::fs::metadata(&homes).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        std::fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+}

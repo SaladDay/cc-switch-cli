@@ -113,10 +113,10 @@ pub fn get_app_config_dir() -> PathBuf {
 /// 校验 CC_SWITCH_CONFIG_DIR 是否为安全的应用专属目录
 ///
 /// 拒绝系统关键目录（如 `/`、`/etc`、`/usr` 等），防止下游权限操作破坏系统。
-/// 未设置环境变量时默认路径 `~/.cc-switch` 始终安全，直接放行。
+/// 父目录可包含符号链接；配置目录本身及其内部仍受独立的写入保护。
 pub fn validate_config_dir() -> Result<(), AppError> {
     let path = get_app_config_dir();
-    let resolved = resolve_config_dir_without_following_user_symlinks(&path)?;
+    let resolved = resolve_config_dir(&path)?;
 
     if is_system_dir(&path) || is_system_dir(&resolved) {
         return Err(AppError::InvalidInput(texts::config_dir_is_system_dir(
@@ -452,7 +452,7 @@ pub(crate) fn resolve_managed_storage_path(path: &Path) -> Result<Option<PathBuf
         return Ok(None);
     }
 
-    let resolved_root = resolve_config_dir_without_following_user_symlinks(&raw_root)?;
+    let resolved_root = resolve_config_dir(&raw_root)?;
     let suffix = path
         .strip_prefix(&raw_root)
         .unwrap_or_else(|_| Path::new(""));
@@ -474,9 +474,9 @@ fn validate_managed_storage_suffix(suffix: &Path, original_path: &Path) -> Resul
     Ok(())
 }
 
-pub(crate) fn resolve_config_dir_without_following_user_symlinks(
-    path: &Path,
-) -> Result<PathBuf, AppError> {
+/// Resolve parent directory aliases (including NAS home mounts), while rejecting
+/// a symlink at the managed configuration root itself. Never change ancestor permissions.
+pub(crate) fn resolve_config_dir(path: &Path) -> Result<PathBuf, AppError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -502,7 +502,10 @@ pub(crate) fn resolve_config_dir_without_following_user_symlinks(
                 current.push(part);
                 match fs::symlink_metadata(&current) {
                     Ok(meta) if meta.file_type().is_symlink() => {
-                        if is_allowed_platform_config_symlink(&current) {
+                        if idx + 1 < components.len() {
+                            current = current
+                                .canonicalize()
+                                .map_err(|e| AppError::io(&current, e))?;
                             continue;
                         }
                         return Err(AppError::InvalidInput(format!(
@@ -536,8 +539,7 @@ pub(crate) fn create_managed_config_parent_dirs(path: &Path) -> Result<(), AppEr
         if let Some(parent) = resolved.parent() {
             #[cfg(unix)]
             {
-                let config_root =
-                    resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?;
+                let config_root = resolve_config_dir(&get_app_config_dir())?;
                 create_secure_config_dir_all_no_symlink(&config_root, parent)?;
             }
 
@@ -559,8 +561,7 @@ pub(crate) fn create_managed_config_dir_all(path: &Path) -> Result<(), AppError>
     if let Some(resolved) = resolve_managed_storage_path(path)? {
         #[cfg(unix)]
         {
-            let config_root =
-                resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?;
+            let config_root = resolve_config_dir(&get_app_config_dir())?;
             create_secure_config_dir_all_no_symlink(&config_root, &resolved)?;
         }
 
@@ -1003,7 +1004,7 @@ mod tests {
             "config dir should reject parent components instead of normalizing to the parent"
         );
         assert!(
-            resolve_config_dir_without_following_user_symlinks(&config_dir).is_err(),
+            resolve_config_dir(&config_dir).is_err(),
             "managed config root resolution must reject parent components"
         );
     }
@@ -1030,7 +1031,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn validate_config_dir_rejects_symlink_parent_without_touching_target() {
+    fn validate_config_dir_accepts_symlink_parent_without_touching_target() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let _guard = lock_test_home_and_settings();
@@ -1049,8 +1050,8 @@ mod tests {
             ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(raw_config.to_str().unwrap()));
 
         assert!(
-            validate_config_dir().is_err(),
-            "validation should reject the symlink parent component"
+            validate_config_dir().is_ok(),
+            "validation should accept a symlinked home parent"
         );
         let mode = std::fs::metadata(&external_config)
             .expect("metadata external config")
@@ -1277,10 +1278,10 @@ mod tests {
             &get_app_config_dir().join("settings.json"),
             &serde_json::json!({ "token": "secret" }),
         )
-        .expect_err("symlink component should be rejected before lexical dotdot collapse");
+        .expect_err("parent traversal should be rejected before lexical dotdot collapse");
 
         assert!(
-            err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+            err.to_string().contains("父目录组件"),
             "unexpected error: {err}"
         );
         assert!(
