@@ -766,3 +766,36 @@ fn token_rotation_rejects_switch_before_route_or_stash_publication() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+#[serial]
+fn malformed_or_unreadable_auth_does_not_block_upstream_route_switching() {
+    for unreadable in [false, true] {
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::isolated(home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+        crate::settings::set_preserve_codex_official_auth_on_switch(false).unwrap();
+        let auth_path = get_codex_auth_path();
+        if unreadable {
+            std::fs::create_dir(&auth_path).unwrap();
+        } else {
+            std::fs::write(&auth_path, "{").unwrap();
+        }
+        let state = auth_switch_state();
+        for id in ["thirdparty", "official"] {
+            ProviderService::switch(&state, AppType::Codex, id).unwrap();
+            assert_eq!(
+                ProviderService::current(&state, AppType::Codex).unwrap(),
+                id
+            );
+            if unreadable {
+                assert!(auth_path.is_dir());
+            } else {
+                assert!(
+                    !auth_path.exists(),
+                    "upstream clears malformed auth when preservation is off"
+                );
+            }
+        }
+    }
+}

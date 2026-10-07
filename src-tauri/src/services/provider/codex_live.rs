@@ -78,18 +78,22 @@ pub(crate) fn prepare(
         ),
     };
     let path = get_codex_auth_path();
-    let auth_bytes = crate::live::engine::read_current(&path)?;
+    let (auth_bytes, auth_readable) = match crate::live::engine::read_current(&path) {
+        Ok(bytes) => (bytes, true),
+        Err(err) => {
+            log::warn!("Cannot read Codex auth.json; leaving it unchanged: {err}");
+            (None, false)
+        }
+    };
     let auth_pre = crate::live::engine::digest(auth_bytes.as_deref());
     let live = auth_bytes
         .as_deref()
-        .map(serde_json::from_slice::<Value>)
-        .transpose()
-        .map_err(|source| crate::error::AppError::JsonSerialize { source })?;
+        .map(|bytes| serde_json::from_slice::<Value>(bytes).unwrap_or(Value::Null));
     let preserve = crate::settings::preserve_codex_official_auth_on_switch();
     let proxy = !official
         && extract_codex_auth_api_key(row_auth).as_deref()
             == Some(crate::live::project::codex::PROXY_TOKEN_PLACEHOLDER);
-    let plan = plan(AuthInput {
+    let mut plan = plan(AuthInput {
         live: live.as_ref(),
         live_is_managed: false,
         third_party_keys: &keys,
@@ -110,6 +114,10 @@ pub(crate) fn prepare(
             "Cannot update unreadable Codex login stash {}; repair or move it before switching",
             stash_path().display()
         )));
+    }
+    // Upstream continues routing when auth.json cannot be read, but never writes it.
+    if !auth_readable {
+        plan.auth = None;
     }
     use crate::live::project::codex::{
         requires_openai_auth, CodexConfigPatch, CodexProjection, Route, RouteWrite, RowInput,
