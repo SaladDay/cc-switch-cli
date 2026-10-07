@@ -310,6 +310,136 @@ fn schema_migration_sets_user_version_when_missing() {
     );
 }
 
+// Use upstream DDL independently of the CLI's fresh-table definitions.
+fn seed_upstream_mcp_skills(conn: &Connection, version: i32) {
+    conn.execute_batch("DROP TABLE IF EXISTS mcp_servers; DROP TABLE IF EXISTS skills;")
+        .expect("remove CLI tables");
+    conn.execute_batch(include_str!("fixtures/upstream_v20_mcp_skills.sql"))
+        .expect("create upstream tables");
+    if version < 20 {
+        conn.execute_batch("ALTER TABLE mcp_servers DROP COLUMN enabled_pi;")
+            .expect("restore v19 MCP schema");
+    }
+    if version < 19 {
+        conn.execute_batch(
+            "ALTER TABLE mcp_servers DROP COLUMN enabled_mcode;
+             ALTER TABLE skills DROP COLUMN enabled_mcode;",
+        )
+        .expect("restore v18 schema");
+    }
+    conn.execute_batch(
+        "INSERT INTO mcp_servers (id, name, server_config, enabled_codex)
+         VALUES ('upstream-mcp', 'Upstream MCP', '{}', 1);
+         INSERT INTO skills (id, name, directory, enabled_codex)
+         VALUES ('upstream-skill', 'Upstream Skill', 'upstream-skill', 1);",
+    )
+    .expect("seed upstream records");
+    if version >= 19 {
+        conn.execute_batch(
+            "UPDATE mcp_servers SET enabled_mcode = 1;
+             UPDATE skills SET enabled_mcode = 1;",
+        )
+        .expect("enable MCode");
+    }
+    if version >= 20 {
+        conn.execute_batch("UPDATE mcp_servers SET enabled_pi = 1;")
+            .expect("enable Pi");
+    }
+    Database::set_user_version(conn, version).expect("set upstream version");
+}
+
+fn assert_upstream_mcp_skills(conn: &Connection, original_version: i32) {
+    assert_eq!(Database::get_user_version(conn).unwrap(), SCHEMA_VERSION);
+    for (table, column) in [
+        ("mcp_servers", "enabled_mcode"),
+        ("skills", "enabled_mcode"),
+        ("mcp_servers", "enabled_pi"),
+    ] {
+        let info = get_column_info(conn, table, column);
+        assert_eq!(info.r#type, "BOOLEAN");
+        assert_eq!(info.notnull, 1);
+        assert_eq!(normalize_default(&info.default).as_deref(), Some("0"));
+        let flags: (i64, i64) = conn
+            .query_row(
+                &format!("SELECT enabled_codex, {column} FROM {table}"),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read upstream flags");
+        let introduced = if column == "enabled_pi" { 20 } else { 19 };
+        assert_eq!(flags, (1, i64::from(original_version >= introduced)));
+    }
+}
+
+#[test]
+fn schema_migration_upstream_v18_v19_v20_preserves_data_and_is_idempotent() {
+    for version in [18, 19, 20] {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_upstream_mcp_skills(&conn, version);
+        Database::apply_schema_migrations_on_conn(&conn).expect("migrate upstream schema");
+        assert_upstream_mcp_skills(&conn, version);
+        Database::apply_schema_migrations_on_conn(&conn).expect("repeat migration");
+        assert_upstream_mcp_skills(&conn, version);
+    }
+    // Upstream tolerates absent tables and already-present columns.
+    let conn = Connection::open_in_memory().unwrap();
+    Database::set_user_version(&conn, 18).unwrap();
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate absent tables");
+    seed_upstream_mcp_skills(&conn, 20);
+    Database::set_user_version(&conn, 18).unwrap();
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate existing columns");
+    assert_upstream_mcp_skills(&conn, 20);
+}
+
+#[test]
+fn schema_create_tables_matches_upstream_v20_flags() {
+    let conn = Connection::open_in_memory().unwrap();
+    Database::create_tables_on_conn(&conn).unwrap();
+    for (table, column) in [
+        ("mcp_servers", "enabled_mcode"),
+        ("skills", "enabled_mcode"),
+        ("mcp_servers", "enabled_pi"),
+    ] {
+        let info = get_column_info(&conn, table, column);
+        assert_eq!(info.r#type, "BOOLEAN");
+        assert_eq!(info.notnull, 1);
+        assert_eq!(normalize_default(&info.default).as_deref(), Some("0"));
+    }
+    assert!(!Database::has_column(&conn, "skills", "enabled_pi").unwrap());
+}
+
+#[test]
+fn init_and_sync_import_accept_upstream_v18_v19_v20() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+    let config_dir = home.path().join(".cc-switch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    for version in [18, 19, 20] {
+        let conn = Connection::open(config_dir.join("cc-switch.db")).unwrap();
+        Database::create_tables_on_conn(&conn).unwrap();
+        seed_upstream_mcp_skills(&conn, version);
+        drop(conn);
+        let db = Database::init().expect("open upstream database");
+        assert_upstream_mcp_skills(&db.conn.lock().unwrap(), version);
+        drop(db);
+
+        let remote = Database::memory().unwrap();
+        seed_upstream_mcp_skills(&remote.conn.lock().unwrap(), version);
+        let sql = remote.export_sql_string_for_sync().unwrap();
+        let local = Database::memory().unwrap();
+        local
+            .import_sql_string_for_sync(&sql)
+            .expect("import upstream sync snapshot");
+        assert_upstream_mcp_skills(&local.conn.lock().unwrap(), version);
+        let exported = local.export_sql_string_for_sync().unwrap();
+        let restored = Database::memory().unwrap();
+        restored
+            .import_sql_string_for_sync(&exported)
+            .expect("roundtrip sync snapshot");
+        assert_upstream_mcp_skills(&restored.conn.lock().unwrap(), version);
+    }
+}
+
 #[test]
 fn schema_migration_rejects_future_version() {
     let conn = Connection::open_in_memory().expect("open memory db");
@@ -323,6 +453,7 @@ fn schema_migration_rejects_future_version() {
     assert!(message.contains(&format!("数据库版本: {}", SCHEMA_VERSION + 1)));
     assert!(message.contains(&format!("最高支持数据库版本: {SCHEMA_VERSION}")));
     assert!(message.contains("cc-switch update"));
+    assert!(message.contains("brew upgrade cc-switch-cli"));
 }
 
 #[test]
@@ -2178,7 +2309,7 @@ fn schema_migration_v9_adds_hermes_columns() {
 }
 
 #[test]
-fn mcp_dao_roundtrip_preserves_unknown_grokbuild_enablement() {
+fn mcp_dao_roundtrip_preserves_upstream_enablement() {
     let db = Database::memory().expect("create memory db");
 
     {
@@ -2187,8 +2318,8 @@ fn mcp_dao_roundtrip_preserves_unknown_grokbuild_enablement() {
             "INSERT INTO mcp_servers (
                 id, name, server_config, tags,
                 enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild,
-                enabled_opencode, enabled_hermes
-            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 1, 0, 1)",
+                enabled_opencode, enabled_hermes, enabled_mcode, enabled_pi
+            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 1, 0, 1, 1, 1)",
             params![
                 "remote-hermes",
                 "Remote Hermes",
@@ -2215,31 +2346,31 @@ fn mcp_dao_roundtrip_preserves_unknown_grokbuild_enablement() {
     server.description = Some("updated".to_string());
     db.save_mcp_server(&server).expect("save mcp server");
 
-    let hidden_enablement: (i64, i64) = {
+    let hidden_enablement: (i64, i64, i64, i64) = {
         let conn = db.conn.lock().expect("lock conn");
         conn.query_row(
-            "SELECT enabled_grokbuild, enabled_hermes FROM mcp_servers WHERE id = 'remote-hermes'",
+            "SELECT enabled_grokbuild, enabled_hermes, enabled_mcode, enabled_pi FROM mcp_servers WHERE id = 'remote-hermes'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("read hidden enablement after save")
     };
     assert_eq!(
         hidden_enablement,
-        (1, 1),
+        (1, 1, 1, 1),
         "save should preserve hidden flags"
     );
 }
 
 #[test]
-fn skill_dao_save_preserves_unknown_grokbuild_enablement() {
+fn skill_dao_save_preserves_upstream_enablement() {
     let db = Database::memory().expect("create memory db");
     {
         let conn = db.conn.lock().expect("lock conn");
         conn.execute(
             "INSERT INTO skills (
-                id, name, directory, enabled_grokbuild, enabled_hermes, installed_at
-             ) VALUES ('remote-skill', 'Remote Skill', 'remote-skill', 1, 1, 42)",
+                id, name, directory, enabled_grokbuild, enabled_hermes, enabled_mcode, installed_at
+             ) VALUES ('remote-skill', 'Remote Skill', 'remote-skill', 1, 1, 1, 42)",
             [],
         )
         .expect("seed grokbuild-enabled Skill");
@@ -2252,18 +2383,18 @@ fn skill_dao_save_preserves_unknown_grokbuild_enablement() {
     skill.description = Some("updated".to_string());
     db.save_skill(&skill).expect("save Skill");
 
-    let hidden_enablement: (i64, i64) = {
+    let hidden_enablement: (i64, i64, i64) = {
         let conn = db.conn.lock().expect("lock conn");
         conn.query_row(
-            "SELECT enabled_grokbuild, enabled_hermes FROM skills WHERE id = 'remote-skill'",
+            "SELECT enabled_grokbuild, enabled_hermes, enabled_mcode FROM skills WHERE id = 'remote-skill'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("read hidden enablement after save")
     };
     assert_eq!(
         hidden_enablement,
-        (1, 1),
+        (1, 1, 1),
         "save should preserve hidden flags"
     );
 }
