@@ -378,14 +378,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          body: |
-            Use the assets below for platform packages, checksums, and update metadata.
-
-            Install on macOS/Linux:
-
-            ```bash
-            curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
-            ```
+          body_path: docs/releases/${{ github.ref_name }}.md
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

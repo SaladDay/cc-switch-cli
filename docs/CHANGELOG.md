@@ -9,6 +9,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.11.0] - 2026-10-07
+
+### Added
+
+- **Codex / Reset Credits**: Inspect and redeem rate-limit reset credits from auth and provider quota commands. Confirmation commands pin the selected managed account and credit; inspection failures are distinguished from empty results, and a failed refresh after redemption does not invite a second redemption. Includes [#475](https://github.com/SaladDay/cc-switch-cli/pull/475) and [#477](https://github.com/SaladDay/cc-switch-cli/pull/477).
+
+### Changed
+
+- **Database / Compatibility**: Align schema and migrations with CC-Switch schema v20, including shared MCP/Skills fields. Databases at v18 and v19 migrate forward; v20 databases work with local startup and SQL/WebDAV import. Includes [#484](https://github.com/SaladDay/cc-switch-cli/pull/484), addressing [#472](https://github.com/SaladDay/cc-switch-cli/issues/472).
+- **Codex / Configuration and Authentication**: Align provider switching, native-login preservation, configuration projection, and interrupted-write recovery with the shared implementation. Third-party keys are written to the provider's TOML bearer token, and switching back to OpenAI Official restores the native login without retaining the third-party key. Includes [#486](https://github.com/SaladDay/cc-switch-cli/pull/486), addressing [#480](https://github.com/SaladDay/cc-switch-cli/issues/480) and [#473](https://github.com/SaladDay/cc-switch-cli/issues/473).
+- **OpenCode / V2 Storage**: Support OpenCode 2.x session and message tables for session browsing, transcripts, deletion, and usage collection, while retaining V1 support and handling mixed databases. Includes [#485](https://github.com/SaladDay/cc-switch-cli/pull/485), fixing [#483](https://github.com/SaladDay/cc-switch-cli/issues/483).
+
+### Fixed
+
+- **Codex / Compressed Requests**: Decode compressed Codex requests before proxy processing. Includes [#487](https://github.com/SaladDay/cc-switch-cli/pull/487), fixing [#469](https://github.com/SaladDay/cc-switch-cli/issues/469).
+- **Codex / Tool Declarations**: Collect supported `additional_tools` declarations from input carriers for Chat Completions conversion. Includes [#488](https://github.com/SaladDay/cc-switch-cli/pull/488), fixing [#466](https://github.com/SaladDay/cc-switch-cli/issues/466).
+- **Codex / Reasoning and Tools**: Preserve reasoning across mixed tool-call turns and combine commentary with tool output where required by the conversion path. Includes [#491](https://github.com/SaladDay/cc-switch-cli/pull/491), fixing [#458](https://github.com/SaladDay/cc-switch-cli/issues/458).
+- **Codex / OAuth Identity**: Use consistent Codex client identity headers for OAuth requests and model discovery, matching client version 0.159.0. Includes [#465](https://github.com/SaladDay/cc-switch-cli/pull/465).
+- **Proxy / Empty Legacy Tool Calls**: Ignore legacy `function_call` payloads in Chat-to-Anthropic streaming, preventing empty placeholders from creating invalid tool blocks. Includes [#438](https://github.com/SaladDay/cc-switch-cli/pull/438), addressing [#437](https://github.com/SaladDay/cc-switch-cli/issues/437). See the compatibility note below.
+- **Hermes / Custom Home**: Honor custom Hermes home directories. Includes [#489](https://github.com/SaladDay/cc-switch-cli/pull/489), fixing [#464](https://github.com/SaladDay/cc-switch-cli/issues/464).
+- **Configuration / Symlinked Home**: Support symlinked home-directory ancestors, including Synology layouts, while retaining protections for managed paths. Includes [#490](https://github.com/SaladDay/cc-switch-cli/pull/490), fixing [#457](https://github.com/SaladDay/cc-switch-cli/issues/457).
+- **TUI / Build Reliability**: Prevent visibility sentinel functions from being folded together. Includes [#462](https://github.com/SaladDay/cc-switch-cli/pull/462).
+- **Tests / Portability**: Handle the single-parser-worker completion-order case and skip the non-UTF8 filename case on macOS. Includes [#470](https://github.com/SaladDay/cc-switch-cli/pull/470) and [#463](https://github.com/SaladDay/cc-switch-cli/pull/463).
+
+### Upgrade notes
+
+- Database schema advances from v18 to v20. Back up your configuration before upgrading; older clients that only support v18 cannot open a migrated database. Schema versions newer than v20 remain rejected.
+- Normal Codex provider switching preserves live settings and MCP configuration rather than replaying saved common snippets or resynchronizing MCP. Explicit common-config editing remains available.
+- Streamed tool invocations must use modern `tool_calls`. Legacy-only `function_call` payloads are now ignored, including nonempty payloads; the existing finish-reason mapping is retained. See the [compatibility details](https://github.com/SaladDay/cc-switch-cli/blob/v5.11.0/docs/maintenance/legacy-function-call-streaming.md).
+- For Homebrew installations, use `brew upgrade cc-switch-cli`.
+
+### Thanks
+
+Thank you to everyone who reported problems, proposed changes, shared diagnostics, reviewed code, or joined the discussions. The list below covers issues and pull requests active since v5.10.5 and their linked discussions, including earlier participants and contributions that have not been merged. Being listed here does not mean a proposed feature is included in this release.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@1753135250](https://github.com/1753135250) | [#252](https://github.com/SaladDay/cc-switch-cli/issues/252) |
+| [@525300887039](https://github.com/525300887039) | [#476](https://github.com/SaladDay/cc-switch-cli/pull/476) |
+| [@alario-tang](https://github.com/alario-tang) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@bryango](https://github.com/bryango) | [#462](https://github.com/SaladDay/cc-switch-cli/pull/462), [#463](https://github.com/SaladDay/cc-switch-cli/pull/463), [#470](https://github.com/SaladDay/cc-switch-cli/pull/470) |
+| [@bytemain](https://github.com/bytemain) | [#467](https://github.com/SaladDay/cc-switch-cli/pull/467), [#475](https://github.com/SaladDay/cc-switch-cli/pull/475), [#477](https://github.com/SaladDay/cc-switch-cli/pull/477) |
+| [@CCE-Li](https://github.com/CCE-Li) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+| [@CodeCatMeow](https://github.com/CodeCatMeow) | [#403](https://github.com/SaladDay/cc-switch-cli/issues/403) |
+| [@cyberElar](https://github.com/cyberElar) | [#468](https://github.com/SaladDay/cc-switch-cli/issues/468), [#469](https://github.com/SaladDay/cc-switch-cli/issues/469) |
+| [@Devin-Pi](https://github.com/Devin-Pi) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358), [#446](https://github.com/SaladDay/cc-switch-cli/pull/446) |
+| [@dividduang](https://github.com/dividduang) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@GOTOgxy](https://github.com/GOTOgxy) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@haai-team](https://github.com/haai-team) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+| [@HappyLiang12](https://github.com/HappyLiang12) | [#466](https://github.com/SaladDay/cc-switch-cli/issues/466) |
+| [@JM-FRANK](https://github.com/JM-FRANK) | [#478](https://github.com/SaladDay/cc-switch-cli/pull/478) |
+| [@Josh00-Lu](https://github.com/Josh00-Lu) | [#473](https://github.com/SaladDay/cc-switch-cli/issues/473) |
+| [@JounQin](https://github.com/JounQin) | [#457](https://github.com/SaladDay/cc-switch-cli/issues/457) |
+| [@kelvkhiu](https://github.com/kelvkhiu) | [#403](https://github.com/SaladDay/cc-switch-cli/issues/403), [#444](https://github.com/SaladDay/cc-switch-cli/issues/444), [#474](https://github.com/SaladDay/cc-switch-cli/pull/474), [#479](https://github.com/SaladDay/cc-switch-cli/issues/479) |
+| [@kiwiflydream](https://github.com/kiwiflydream) | [#334](https://github.com/SaladDay/cc-switch-cli/issues/334) |
+| [@l2yyd5](https://github.com/l2yyd5) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@LJY-emperor](https://github.com/LJY-emperor) | [#480](https://github.com/SaladDay/cc-switch-cli/issues/480) |
+| [@MainRedstoner](https://github.com/MainRedstoner) | [#482](https://github.com/SaladDay/cc-switch-cli/issues/482) |
+| [@MALossov](https://github.com/MALossov) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@moonjoke001](https://github.com/moonjoke001) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@msuadOf](https://github.com/msuadOf) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+| [@neverdie0710](https://github.com/neverdie0710) | [#451](https://github.com/SaladDay/cc-switch-cli/pull/451) |
+| [@qiufuyu123](https://github.com/qiufuyu123) | [#465](https://github.com/SaladDay/cc-switch-cli/pull/465) |
+| [@RainyPixel](https://github.com/RainyPixel) | [#449](https://github.com/SaladDay/cc-switch-cli/pull/449) |
+| [@RuoChen5251](https://github.com/RuoChen5251) | [#471](https://github.com/SaladDay/cc-switch-cli/issues/471) |
+| [@ruolin1314](https://github.com/ruolin1314) | [#483](https://github.com/SaladDay/cc-switch-cli/issues/483) |
+| [@Sakulakime](https://github.com/Sakulakime) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@SaladDay](https://github.com/SaladDay) | [#334](https://github.com/SaladDay/cc-switch-cli/issues/334), [#358](https://github.com/SaladDay/cc-switch-cli/issues/358), [#434](https://github.com/SaladDay/cc-switch-cli/pull/434), [#438](https://github.com/SaladDay/cc-switch-cli/pull/438), [#444](https://github.com/SaladDay/cc-switch-cli/issues/444), [#446](https://github.com/SaladDay/cc-switch-cli/pull/446), [#449](https://github.com/SaladDay/cc-switch-cli/pull/449), [#451](https://github.com/SaladDay/cc-switch-cli/pull/451), [#457](https://github.com/SaladDay/cc-switch-cli/issues/457), [#458](https://github.com/SaladDay/cc-switch-cli/issues/458), [#461](https://github.com/SaladDay/cc-switch-cli/issues/461), [#462](https://github.com/SaladDay/cc-switch-cli/pull/462), [#463](https://github.com/SaladDay/cc-switch-cli/pull/463), [#464](https://github.com/SaladDay/cc-switch-cli/issues/464), [#465](https://github.com/SaladDay/cc-switch-cli/pull/465), [#466](https://github.com/SaladDay/cc-switch-cli/issues/466), [#467](https://github.com/SaladDay/cc-switch-cli/pull/467), [#468](https://github.com/SaladDay/cc-switch-cli/issues/468), [#469](https://github.com/SaladDay/cc-switch-cli/issues/469), [#470](https://github.com/SaladDay/cc-switch-cli/pull/470), [#471](https://github.com/SaladDay/cc-switch-cli/issues/471), [#472](https://github.com/SaladDay/cc-switch-cli/issues/472), [#473](https://github.com/SaladDay/cc-switch-cli/issues/473), [#475](https://github.com/SaladDay/cc-switch-cli/pull/475), [#476](https://github.com/SaladDay/cc-switch-cli/pull/476), [#477](https://github.com/SaladDay/cc-switch-cli/pull/477), [#478](https://github.com/SaladDay/cc-switch-cli/pull/478), [#479](https://github.com/SaladDay/cc-switch-cli/issues/479), [#480](https://github.com/SaladDay/cc-switch-cli/issues/480), [#484](https://github.com/SaladDay/cc-switch-cli/pull/484), [#485](https://github.com/SaladDay/cc-switch-cli/pull/485), [#486](https://github.com/SaladDay/cc-switch-cli/pull/486), [#487](https://github.com/SaladDay/cc-switch-cli/pull/487), [#488](https://github.com/SaladDay/cc-switch-cli/pull/488), [#489](https://github.com/SaladDay/cc-switch-cli/pull/489), [#490](https://github.com/SaladDay/cc-switch-cli/pull/490), [#491](https://github.com/SaladDay/cc-switch-cli/pull/491) |
+| [@SoFarSoGoodya](https://github.com/SoFarSoGoodya) | [#334](https://github.com/SaladDay/cc-switch-cli/issues/334) |
+| [@suntory1](https://github.com/suntory1) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@SyaJask](https://github.com/SyaJask) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@tangjunyi1](https://github.com/tangjunyi1) | [#458](https://github.com/SaladDay/cc-switch-cli/issues/458) |
+| [@tianzhuwei](https://github.com/tianzhuwei) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@tony](https://github.com/tony) | [#434](https://github.com/SaladDay/cc-switch-cli/pull/434) |
+| [@Tonystarkw12](https://github.com/Tonystarkw12) | [#434](https://github.com/SaladDay/cc-switch-cli/pull/434) |
+| [@u1544096979](https://github.com/u1544096979) | [#437](https://github.com/SaladDay/cc-switch-cli/issues/437), [#438](https://github.com/SaladDay/cc-switch-cli/pull/438) |
+| [@unive3sal](https://github.com/unive3sal) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+| [@wangsiqidahaoren](https://github.com/wangsiqidahaoren) | [#461](https://github.com/SaladDay/cc-switch-cli/issues/461) |
+| [@ybin2024](https://github.com/ybin2024) | [#464](https://github.com/SaladDay/cc-switch-cli/issues/464) |
+| [@zhiquanchi](https://github.com/zhiquanchi) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+
+Thanks also to the CC-Switch maintainers and contributors whose shared implementations underpin the compatibility fixes in this release.
+
 ## [5.10.5] - 2026-09-15
 
 ### Added
