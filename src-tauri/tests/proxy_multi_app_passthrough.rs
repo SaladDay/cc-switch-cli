@@ -1,3 +1,6 @@
+#[path = "support.rs"]
+mod support;
+
 use std::sync::Arc;
 
 use axum::{
@@ -902,6 +905,9 @@ async fn proxy_gemini_query_streaming_uses_stream_timeouts() {
 #[tokio::test]
 #[serial]
 async fn proxy_codex_decodes_zstd_before_json_on_all_routes() {
+    let _guard = support::lock_test_mutex();
+    support::reset_test_fs();
+    let _home = support::ensure_test_home();
     let upstream_state = UpstreamState::default();
     let upstream_router = Router::new()
         .route("/v1/responses", post(handle_responses))
