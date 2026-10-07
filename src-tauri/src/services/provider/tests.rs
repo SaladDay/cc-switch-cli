@@ -1175,13 +1175,11 @@ trust_level = "trusted"
     );
 
     ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
-    // Switching back to p1 reapplies its common-config opt-in (set during the
-    // backfill that auto-extracted the runtime projects), so the project trust
-    // returns to the live config via the common snippet.
+    // Upstream leaves runtime project trust in live config across both switches.
     let p1_live = std::fs::read_to_string(get_codex_config_path()).expect("read p1 live config");
     assert!(
         p1_live.contains("[projects.\"/tmp/codex-project-a\"]"),
-        "runtime project trust should survive switching away and back via the common snippet"
+        "runtime project trust should survive switching away and back"
     );
 }
 
@@ -1262,8 +1260,8 @@ fn codex_switch_backfill_migrates_existing_common_meta_for_current_provider() {
     ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
     let live_config = std::fs::read_to_string(get_codex_config_path()).expect("read live config");
     assert!(
-        live_config.contains("disable_response_storage = true"),
-        "strict runtime opt-in should reapply the common snippet after switching back"
+        !live_config.contains("disable_response_storage = true"),
+        "ordinary switches must project the stored provider fields without merging common snippets"
     );
 }
 
@@ -5382,7 +5380,7 @@ fn clearing_claude_common_snippet_tolerates_invalid_stored_snippet() {
 
 #[test]
 #[serial]
-fn common_config_snippet_is_merged_into_codex_config_on_write() {
+fn ordinary_codex_write_does_not_merge_saved_common_config() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
@@ -5408,8 +5406,8 @@ fn common_config_snippet_is_merged_into_codex_config_on_write() {
 
     let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
-        live_text.contains("disable_response_storage = true"),
-        "common snippet should be merged into config.toml"
+        !live_text.contains("disable_response_storage = true"),
+        "ordinary provider writes must not replay saved common snippets"
     );
 }
 

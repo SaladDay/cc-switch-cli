@@ -463,9 +463,9 @@ impl ProviderService {
 
     pub(super) fn prepare_codex_live_write(
         provider: &Provider,
-        common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
-        apply_common_config: bool,
+        _common_config_snippet: Option<&str>,
+        _previous_common_config_snippet: Option<&str>,
+        _apply_common_config: bool,
         force_sync: bool,
         rows: &[Provider],
         previous: Option<&Provider>,
@@ -474,13 +474,8 @@ impl ProviderService {
             return Ok(PreparedLiveWrite::Noop);
         }
 
-        let effective = Self::build_effective_live_snapshot(
-            &AppType::Codex,
-            provider,
-            common_config_snippet,
-            apply_common_config,
-        )?;
-        let settings = effective
+        let settings = provider
+            .settings_config
             .as_object()
             .ok_or_else(|| AppError::Config("Codex 配置必须是 JSON 对象".into()))?;
 
@@ -520,10 +515,6 @@ impl ProviderService {
 
         let mut plan = codex_live::prepare(is_official, auth, &live_config_text, rows, previous)?;
         plan.config.catalog = prepared_config.model_catalog.is_some();
-        plan.common = codex_live::common_patch(
-            common_config_snippet.filter(|_| apply_common_config),
-            previous_common_config_snippet,
-        )?;
         Ok(PreparedLiveWrite::Codex {
             plan,
             config: prepared_config,

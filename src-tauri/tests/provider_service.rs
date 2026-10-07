@@ -109,7 +109,7 @@ fn insert_codex_managed_mcp(config: &mut MultiAppConfig) {
 }
 
 #[test]
-fn reapply_codex_official_live_resyncs_mcp_servers() {
+fn reapply_codex_official_live_preserves_existing_mcp_servers() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -119,7 +119,11 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         "OPENAI_API_KEY": null,
         "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
     });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
+    write_codex_live_atomic(
+        &live_auth,
+        Some("[mcp_servers.echo-server]\ncommand = \"user-command\"\n"),
+    )
+    .expect("seed official live auth");
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -153,7 +157,7 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         .expect("read config.toml after switch");
     assert!(
         live.contains("mcp_servers.echo-server"),
-        "switch should sync enabled MCP servers into live"
+        "switch should preserve existing MCP servers in live"
     );
 
     let reapplied =
@@ -167,7 +171,7 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         .expect("read config.toml after reapply");
     assert!(
         live.contains("mcp_servers.echo-server"),
-        "reapply must re-project enabled MCP servers after the full live rewrite, got: {live}"
+        "reapply must preserve existing MCP servers, got: {live}"
     );
 }
 
@@ -182,7 +186,11 @@ fn codex_unified_session_bucket_stays_live_only_across_provider_switches() {
         "OPENAI_API_KEY": null,
         "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
     });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
+    write_codex_live_atomic(
+        &live_auth,
+        Some("[mcp_servers.echo-server]\ncommand = \"user-command\"\n"),
+    )
+    .expect("seed official live auth");
 
     let mut settings = AppSettings::load();
     settings.unify_codex_session_history = true;
@@ -337,8 +345,8 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
+        config_text.contains("mcp_servers.legacy"),
+        "switch must preserve live MCP servers instead of resyncing stored definitions"
     );
     let parsed_config: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
     assert_eq!(
@@ -825,8 +833,8 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("disable_response_storage = true"),
-        "common snippet should still be present after update"
+        !config_text.contains("disable_response_storage = true"),
+        "provider-owned fields follow the row without replaying saved common snippets"
     );
     assert!(
         config_text.contains("[mcp_servers.echo-server]"),

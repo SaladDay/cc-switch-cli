@@ -1457,8 +1457,8 @@ command = "echo"
 
     let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
+        config_text.contains("mcp_servers.legacy"),
+        "switch must preserve live MCP servers instead of resyncing stored definitions"
     );
     let parsed_config: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
     assert_eq!(

@@ -614,14 +614,14 @@ fn unpublished_conflict_keeps_external_token_rotation_and_config_edit() {
         &json!({"tokens":{"access_token":"old"}}),
     )
     .unwrap();
-    crate::mode::operation::failpoint::on_before_publish(Some(Box::new(|index, path| {
+    crate::mode::operation::failpoint::on_before_publish(Some(Box::new(|index, _path| {
         if index == 0 {
             std::fs::write(
                 get_codex_auth_path(),
                 br#"{"tokens":{"access_token":"rotated"}}"#,
             )
             .unwrap();
-            std::fs::write(path, b"user_edit = [").unwrap();
+            std::fs::write(get_codex_config_path(), b"user_edit = [").unwrap();
         }
     })));
     let result = ProviderService::switch(&state, AppType::Codex, "thirdparty");
@@ -688,4 +688,81 @@ fn codex_switch_with_group_writable_umask_creates_compatible_managed_directory()
             & 0o777,
         0o600
     );
+}
+
+#[test]
+#[serial]
+fn ordinary_switch_preserves_live_edits_after_common_snippet_was_saved() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let state = auth_switch_state();
+    {
+        let mut config = state.config.write().unwrap();
+        config.common_config_snippets.codex = Some("approval_policy = \"on-request\"".into());
+        for provider in config
+            .get_manager_mut(&AppType::Codex)
+            .unwrap()
+            .providers
+            .values_mut()
+        {
+            provider
+                .meta
+                .get_or_insert_with(Default::default)
+                .apply_common_config = Some(true);
+        }
+    }
+    state.save().unwrap();
+    crate::config::write_text_file(&get_codex_config_path(), "approval_policy = \"never\"\n")
+        .unwrap();
+    for id in ["thirdparty", "official"] {
+        ProviderService::switch(&state, AppType::Codex, id).unwrap();
+        let live = std::fs::read_to_string(get_codex_config_path()).unwrap();
+        assert!(live.contains("approval_policy = \"never\""), "{live}");
+    }
+}
+
+#[test]
+#[serial]
+fn token_rotation_rejects_switch_before_route_or_stash_publication() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    crate::settings::set_preserve_codex_official_auth_on_switch(false).unwrap();
+    let state = auth_switch_state();
+    let config = "model = \"gpt-5.2\"\napproval_policy = \"never\"\n";
+    crate::config::write_text_file(&get_codex_config_path(), config).unwrap();
+    write_json_file(
+        &get_codex_auth_path(),
+        &json!({"tokens":{"access_token":"old"}}),
+    )
+    .unwrap();
+    crate::mode::operation::failpoint::on_before_publish(Some(Box::new(|index, _| {
+        if index == 0 {
+            std::fs::write(
+                get_codex_auth_path(),
+                br#"{"tokens":{"access_token":"rotated"}}"#,
+            )
+            .unwrap();
+        }
+    })));
+    let result = ProviderService::switch(&state, AppType::Codex, "thirdparty");
+    crate::mode::operation::failpoint::on_before_publish(None);
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read_to_string(get_codex_config_path()).unwrap(),
+        config
+    );
+    assert_eq!(
+        read_json_file::<Value>(&get_codex_auth_path()).unwrap()["tokens"]["access_token"],
+        "rotated"
+    );
+    assert!(!super::codex_live::stash_path().exists());
+    assert_eq!(
+        ProviderService::current(&state, AppType::Codex).unwrap(),
+        "official"
+    );
+    assert!(crate::mode::operation::settle(&state.db, "codex")
+        .unwrap()
+        .is_none());
 }

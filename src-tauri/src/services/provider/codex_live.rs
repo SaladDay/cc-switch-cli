@@ -237,16 +237,17 @@ pub(crate) fn apply(
         .map(WholeFile::Write);
     let config_steps =
         crate::live::patch::toml::TomlSteps(vec![&prepared.common, &prepared.config]);
-    let mut changes = vec![operation::FileChange {
-        file: LiveFile::private(crate::codex_config::get_codex_config_path()),
-        patch: &config_steps,
-    }];
+    let mut changes = Vec::new();
     if let Some(patch) = &auth {
         changes.push(operation::FileChange {
             file: LiveFile::private(crate::codex_config::get_codex_auth_path()),
             patch,
         });
     }
+    changes.push(operation::FileChange {
+        file: LiveFile::private(crate::codex_config::get_codex_config_path()),
+        patch: &config_steps,
+    });
     if let Some(patch) = &catalog {
         changes.push(operation::FileChange {
             file: LiveFile::shared(crate::codex_config::get_codex_model_catalog_path()),

@@ -21,9 +21,9 @@ retains their upstream cases and tests.
 
 CLI integration details:
 
-- Provider rows and common snippets still use the CLI's existing SQLite/state APIs. Explicit common-snippet edits are expressed through upstream `TomlPatch`, then the upstream Codex projection applies the provider fields.
-- Direct switches defer the current-provider pointer until the durable file operation commits. Interrupted operations recover using the upstream pending journal; the older CLI file rollback is bypassed for Codex, including unpublished conflicts, so external token rotations and config edits survive.
-- MCP synchronization remains CLI housekeeping after the durable commit. Codex switching no longer refreshes provider snapshots from live files. Errors are logged and must not roll back the committed switch.
+- Provider rows and common snippets still use the CLI's existing SQLite/state APIs. Only explicit common-snippet edits are expressed through upstream `TomlPatch`; ordinary switches project the provider template without replaying stored common snippets.
+- Direct switches defer the current-provider pointer until the durable file operation commits. Guarded authentication is published before route changes, matching upstream. Interrupted operations recover using the upstream pending journal; the older CLI file rollback is bypassed for Codex, including unpublished conflicts, so external token rotations and config edits survive.
+- Like upstream, direct Codex switching does not resynchronize MCP servers or refresh provider snapshots from live files. Explicit MCP management remains available through its own commands.
 - Switching keeps stored provider templates instead of backfilling live routes or credentials. Config restore also keeps an official provider’s stored auth template. The CLI's separate temporary-home launch/capture feature is unchanged.
 - Login stash, pending state and first-write backups live in the device's `~/.cc-switch`, independently of `CC_SWITCH_CONFIG_DIR`, matching upstream. Login-containing files are private and are not added to WebDAV state.
 

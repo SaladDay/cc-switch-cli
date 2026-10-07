@@ -154,6 +154,7 @@ struct PostCommitAction {
     previous_provider: Option<Provider>,
     backup: LiveSnapshot,
     sync_mcp: bool,
+    edit_common_config: bool,
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
     previous_common_config_snippet: Option<String>,
@@ -1038,9 +1039,18 @@ impl ProviderService {
                 .as_ref()
                 .and_then(|meta| meta.apply_common_config)
                 .unwrap_or(false);
+            let mut provider = action.provider.clone();
+            if action.edit_common_config && matches!(action.app_type, AppType::Codex) {
+                provider.settings_config = Self::build_effective_live_snapshot(
+                    &AppType::Codex,
+                    &provider,
+                    action.common_config_snippet.as_deref(),
+                    apply_common_config,
+                )?;
+            }
             PreparedPostCommitEffect::Live(Self::prepare_live_snapshot(
                 &action.app_type,
-                &action.provider,
+                &provider,
                 action.previous_provider.as_ref(),
                 action.common_config_snippet.as_deref(),
                 action.previous_common_config_snippet.as_deref(),
@@ -1063,9 +1073,27 @@ impl ProviderService {
             PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
         ) {
             action.refresh_snapshot = false;
+            action.sync_mcp = false;
         }
         let mut effect = effect;
         if let PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { plan, .. }) = &mut effect {
+            if action.edit_common_config {
+                let apply = Self::resolve_live_apply_common_config(
+                    &AppType::Codex,
+                    &action.provider,
+                    action.common_config_snippet.as_deref(),
+                    action
+                        .provider
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.apply_common_config)
+                        .unwrap_or(false),
+                );
+                plan.common = codex_live::common_patch(
+                    action.common_config_snippet.as_deref().filter(|_| apply),
+                    action.previous_common_config_snippet.as_deref(),
+                )?;
+            }
             if let crate::live::project::codex::RouteWrite::Official { dormant_base_url } =
                 &mut plan.config.route
             {
@@ -1636,7 +1664,7 @@ impl ProviderService {
             return Ok(None);
         };
 
-        Self::build_post_commit_action_for_current_provider(
+        let mut action = Self::build_post_commit_action_for_current_provider(
             config,
             app_type,
             current_provider_id,
@@ -1644,7 +1672,11 @@ impl ProviderService {
             live_taken_over,
             refresh_stale_backup,
             previous_common_config_snippet,
-        )
+        )?;
+        if let Some(action) = &mut action {
+            action.edit_common_config = true;
+        }
+        Ok(action)
     }
 
     fn build_post_commit_action_for_current_provider(
@@ -1669,6 +1701,7 @@ impl ProviderService {
             previous_provider: Some(provider.clone()),
             provider,
             backup: Self::capture_live_snapshot(app_type)?,
+            edit_common_config: false,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -2331,8 +2364,7 @@ impl ProviderService {
                     provider: provider_to_store.clone(),
                     previous_provider: None,
                     backup,
-                    // Codex current-provider saves rewrite live config from the stored snapshot,
-                    // so managed MCP must be synced back after the write.
+                    edit_common_config: false,
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
                     refresh_snapshot: false,
                     common_config_snippet,
@@ -2506,8 +2538,7 @@ impl ProviderService {
                     provider: merged,
                     previous_provider,
                     backup,
-                    // Codex current-provider saves rewrite live config from the stored snapshot,
-                    // so managed MCP must be synced back after the write.
+                    edit_common_config: false,
                     sync_mcp: matches!(&app_type_clone, AppType::Codex)
                         && !ownership.takeover_active,
                     refresh_snapshot: false,
@@ -3116,6 +3147,7 @@ impl ProviderService {
                 provider,
                 previous_provider: None,
                 backup: Self::capture_live_snapshot(app_type)?,
+                edit_common_config: false,
                 sync_mcp: matches!(app_type, AppType::OpenCode),
                 refresh_snapshot: false,
                 common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -3157,6 +3189,7 @@ impl ProviderService {
             provider,
             previous_provider,
             backup,
+            edit_common_config: false,
             sync_mcp: true,
             refresh_snapshot: true,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
