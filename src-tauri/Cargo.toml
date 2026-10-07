@@ -105,6 +105,7 @@ minisign-verify = { version = "0.2.4", optional = true }
 semver = { version = "1.0", optional = true }
 flate2 = "1.0"
 brotli = "7"
+zstd = "0.13"
 tar = { version = "0.4", optional = true }
 rquickjs = { version = "0.8", features = ["array-buffer", "classes"] }
 zip = "2.2"
