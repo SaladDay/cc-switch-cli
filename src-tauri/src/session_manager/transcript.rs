@@ -1725,13 +1725,14 @@ fn index_opencode_sqlite(
     )
     .map_err(|error| format!("Failed to open OpenCode database: {error}"))?;
     super::providers::utils::with_sqlite_cancellation(&conn, is_cancelled, || {
+        let sql = if opencode::sqlite_session_uses_v2(&conn, &session_id) {
+            "SELECT rowid FROM session_message WHERE session_id = ?1
+             AND type IN ('user', 'assistant', 'system') ORDER BY seq ASC, rowid ASC"
+        } else {
+            "SELECT rowid FROM message WHERE session_id = ?1 ORDER BY time_created ASC, id ASC"
+        };
         let mut stmt = conn
-            .prepare(
-                "SELECT rowid
-                 FROM message
-                 WHERE session_id = ?1
-                 ORDER BY time_created ASC, id ASC",
-            )
+            .prepare(sql)
             .map_err(|error| format!("Failed to prepare OpenCode transcript index: {error}"))?;
         let rows = stmt
             .query_map([session_id], |row| row.get::<_, i64>(0))
@@ -3878,6 +3879,31 @@ mod tests {
         assert_eq!(last.messages.len(), 5);
         assert_eq!(last.messages[0].content, "opencode-200");
         assert_eq!(last.messages[4].content, "opencode-204");
+    }
+
+    #[test]
+    fn opencode_v2_transcript_pages_follow_seq() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("opencode.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE session_v2 (id TEXT PRIMARY KEY);
+             INSERT INTO session_v2 VALUES ('ses_v2');
+             CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT);
+             INSERT INTO session_message VALUES
+             ('a','ses_v2','assistant',2,5000,'{"content":[{"type":"text","text":"answer needle"}]}'),
+             ('u','ses_v2','user',1,1000,'{"text":"question"}'),
+             ('c','ses_v2','compaction',3,6000,'{"status":"completed"}');"#
+        ).unwrap();
+        drop(conn);
+        let source = format!("sqlite:{}:ses_v2", db_path.display());
+        let store = TranscriptIndexStore::open_at(&temp.path().join("config")).unwrap();
+        let reader = store.open_or_build("opencode", &source, &|| false).unwrap();
+        assert_eq!(reader.total_rows(), 2);
+        let page = reader.load_page(0, &|| false).unwrap();
+        assert_eq!(page.messages[0].content, "question");
+        assert_eq!(page.messages[1].content, "answer needle");
+        assert!(reader.load_page(0, &|| true).is_err());
     }
 
     #[test]
