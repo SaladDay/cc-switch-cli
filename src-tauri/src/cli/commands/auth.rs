@@ -371,11 +371,15 @@ fn reset_quota(
 
     let credits = summary.map(|s| &s.credits[..]).unwrap_or(&[]);
     let selected_credit = match &credit_id {
-        Some(cid) => credits.iter().find(|c| &c.id == cid).cloned().ok_or_else(|| {
-            AppError::Message(format!(
-                "Specified credit ID '{cid}' was not found in available credits."
-            ))
-        })?,
+        Some(cid) => credits
+            .iter()
+            .find(|c| &c.id == cid)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::Message(format!(
+                    "Specified credit ID '{cid}' was not found in available credits."
+                ))
+            })?,
         None => credits.first().cloned().ok_or_else(|| {
             AppError::Message("No available reset credit to consume.".to_string())
         })?,

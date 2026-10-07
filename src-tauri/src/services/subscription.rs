@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use uuid::Uuid;
 use crate::config;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -663,7 +663,9 @@ pub(crate) async fn fetch_codex_reset_credits(
         .await
         .map_err(|e| format!("Failed to parse reset credits response: {e}"))?;
 
-    Ok(filter_and_sort_codex_reset_credits(raw.credits.unwrap_or_default()))
+    Ok(filter_and_sort_codex_reset_credits(
+        raw.credits.unwrap_or_default(),
+    ))
 }
 
 fn now_millis() -> i64 {
@@ -809,7 +811,6 @@ pub(crate) async fn query_codex_quota(
     }
 }
 
-
 pub async fn consume_codex_reset_credit(
     access_token: &str,
     account_id: Option<&str>,
@@ -867,12 +868,16 @@ pub async fn consume_codex_reset_credit(
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(format!("Authentication failed (HTTP {status}). Please re-login."));
+        return Err(format!(
+            "Authentication failed (HTTP {status}). Please re-login."
+        ));
     }
 
     if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("OpenAI rejected reset credit consumption (HTTP 422): {body}"));
+        return Err(format!(
+            "OpenAI rejected reset credit consumption (HTTP 422): {body}"
+        ));
     }
 
     let body_text = response.text().await.unwrap_or_default();
@@ -1804,7 +1809,8 @@ mod tests {
             }
         });
 
-        let resp: CodexUsageResponse = serde_json::from_value(json).expect("deserialize CodexUsageResponse");
+        let resp: CodexUsageResponse =
+            serde_json::from_value(json).expect("deserialize CodexUsageResponse");
         let credits = resp.rate_limit_reset_credits.expect("credits present");
         assert_eq!(credits.available_count, Some(3));
         assert_eq!(credits.applicable_available_count, Some(3));
