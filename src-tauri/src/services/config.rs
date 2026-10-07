@@ -278,6 +278,7 @@ impl ConfigService {
         Self::sync_current_provider_for_app(config, &AppType::OpenCode)?;
         Self::sync_current_provider_for_app(config, &AppType::Hermes)?;
         Self::sync_current_provider_for_app(config, &AppType::OpenClaw)?;
+        Self::sync_current_provider_for_app(config, &AppType::Kimi)?;
         Ok(())
     }
 
@@ -316,6 +317,7 @@ impl ConfigService {
             AppType::Hermes => {}
             AppType::OpenClaw => {}
             AppType::Pi => {}
+            AppType::Kimi => {}
         }
 
         Ok(())

@@ -142,6 +142,7 @@ fn build_provider_from_request(
         AppType::OpenCode => build_opencode_settings(request),
         AppType::Hermes => build_hermes_settings(request),
         AppType::OpenClaw => build_openclaw_settings(request),
+        AppType::Kimi => build_kimi_settings(request),
         AppType::Pi => {
             return Err(AppError::InvalidInput(
                 "Pi providers must be added from the Pi provider page".to_string(),
@@ -376,6 +377,31 @@ fn build_hermes_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
     }
     if let Some(api_key) = &request.api_key {
         settings.insert("apiKey".to_string(), json!(api_key));
+    }
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.insert("model".to_string(), json!(model));
+    }
+
+    Value::Object(settings)
+}
+
+fn build_kimi_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    let endpoint = get_primary_endpoint(request);
+    let mut settings = serde_json::Map::new();
+    settings.insert(
+        "name".to_string(),
+        json!(request.name.clone().unwrap_or_else(|| "custom".to_string())),
+    );
+
+    if !endpoint.is_empty() {
+        settings.insert("base_url".to_string(), json!(endpoint));
+    }
+    if let Some(api_key) = &request.api_key {
+        settings.insert("api_key".to_string(), json!(api_key));
     }
     if let Some(model) = request
         .model

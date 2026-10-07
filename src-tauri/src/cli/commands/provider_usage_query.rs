@@ -735,6 +735,20 @@ fn provider_comment_credentials<'a>(
                 .or_else(|| settings.get("auth_token"))
                 .and_then(|value| value.as_str()),
         ),
+        AppType::Kimi => (
+            settings
+                .get("base_url")
+                .or_else(|| settings.get("baseUrl"))
+                .or_else(|| settings.get("baseURL"))
+                .or_else(|| settings.get("endpoint"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            settings
+                .get("api_key")
+                .or_else(|| settings.get("apiKey"))
+                .or_else(|| settings.get("auth_token"))
+                .and_then(|value| value.as_str()),
+        ),
         AppType::OpenClaw => (
             settings
                 .get("baseUrl")

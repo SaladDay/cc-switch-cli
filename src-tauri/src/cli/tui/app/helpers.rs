@@ -1761,6 +1761,7 @@ pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
         AppType::Hermes => 4,
         AppType::OpenClaw => 5,
         AppType::Pi => 6,
+        AppType::Kimi => 7,
     }
 }
 

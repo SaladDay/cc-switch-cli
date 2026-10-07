@@ -17,6 +17,8 @@ pub struct McpApps {
     pub opencode: bool,
     #[serde(default)]
     pub hermes: bool,
+    #[serde(default)]
+    pub kimi: bool,
 }
 
 impl McpApps {
@@ -30,6 +32,7 @@ impl McpApps {
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false,
             AppType::Pi => false,
+            AppType::Kimi => self.kimi,
         }
     }
 
@@ -43,6 +46,7 @@ impl McpApps {
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {}
             AppType::Pi => {}
+            AppType::Kimi => self.kimi = enabled,
         }
     }
 
@@ -64,12 +68,15 @@ impl McpApps {
         if self.hermes {
             apps.push(AppType::Hermes);
         }
+        if self.kimi {
+            apps.push(AppType::Kimi);
+        }
         apps
     }
 
     /// 检查是否所有应用都未启用
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
+        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes && !self.kimi
     }
 }
 
@@ -88,6 +95,8 @@ pub struct SkillApps {
     pub hermes: bool,
     #[serde(default)]
     pub pi: bool,
+    #[serde(default)]
+    pub kimi: bool,
 }
 
 impl SkillApps {
@@ -100,6 +109,7 @@ impl SkillApps {
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false,
             AppType::Pi => self.pi,
+            AppType::Kimi => self.kimi,
         }
     }
 
@@ -112,11 +122,12 @@ impl SkillApps {
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {}
             AppType::Pi => self.pi = enabled,
+            AppType::Kimi => self.kimi = enabled,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes && !self.pi
+        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes && !self.pi && !self.kimi
     }
 
     pub fn only(app: &AppType) -> Self {
@@ -142,6 +153,7 @@ impl SkillApps {
         self.opencode |= other.opencode;
         self.hermes |= other.hermes;
         self.pi |= other.pi;
+        self.kimi |= other.kimi;
     }
 }
 
@@ -252,6 +264,8 @@ pub struct McpRoot {
     pub hermes: McpConfig,
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub openclaw: McpConfig,
+    #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
+    pub kimi: McpConfig,
     #[serde(skip)]
     pub pi: McpConfig,
 }
@@ -268,6 +282,7 @@ impl Default for McpRoot {
             opencode: McpConfig::default(),
             hermes: McpConfig::default(),
             openclaw: McpConfig::default(),
+            kimi: McpConfig::default(),
             pi: McpConfig::default(),
         }
     }
@@ -297,6 +312,8 @@ pub struct PromptRoot {
     pub openclaw: PromptConfig,
     #[serde(default)]
     pub pi: PromptConfig,
+    #[serde(default)]
+    pub kimi: PromptConfig,
 }
 
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
@@ -315,6 +332,7 @@ pub enum AppType {
     Hermes,
     OpenClaw,
     Pi,
+    Kimi,
 }
 
 impl AppType {
@@ -327,13 +345,14 @@ impl AppType {
             AppType::Hermes => "hermes",
             AppType::OpenClaw => "openclaw",
             AppType::Pi => "pi",
+            AppType::Kimi => "kimi",
         }
     }
 
     pub fn is_additive_mode(&self) -> bool {
         matches!(
             self,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi
         )
     }
 
@@ -350,6 +369,7 @@ impl AppType {
             AppType::Hermes,
             AppType::OpenClaw,
             AppType::Pi,
+            AppType::Kimi,
         ]
         .into_iter()
     }
@@ -374,13 +394,14 @@ impl FromStr for AppType {
             "hermes" => Ok(AppType::Hermes),
             "openclaw" => Ok(AppType::OpenClaw),
             "pi" => Ok(AppType::Pi),
+            "kimi" => Ok(AppType::Kimi),
             other => Err(AppError::localized(
                 "unsupported_app",
                 format!(
-                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw, pi。"
+                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw, pi, kimi。"
                 ),
                 format!(
-                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw, pi."
+                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw, pi, kimi."
                 ),
             )),
         }
@@ -407,6 +428,9 @@ pub struct CommonConfigSnippets {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kimi: Option<String>,
 }
 
 impl CommonConfigSnippets {
@@ -420,6 +444,7 @@ impl CommonConfigSnippets {
             AppType::Hermes => self.hermes.as_ref(),
             AppType::OpenClaw => self.openclaw.as_ref(),
             AppType::Pi => None,
+            AppType::Kimi => self.kimi.as_ref(),
         }
     }
 
@@ -433,6 +458,7 @@ impl CommonConfigSnippets {
             AppType::Hermes => self.hermes = snippet,
             AppType::OpenClaw => self.openclaw = snippet,
             AppType::Pi => {}
+            AppType::Kimi => self.kimi = snippet,
         }
     }
 }
@@ -476,6 +502,7 @@ impl Default for MultiAppConfig {
         apps.insert("hermes".to_string(), ProviderManager::default());
         apps.insert("openclaw".to_string(), ProviderManager::default());
         apps.insert("pi".to_string(), ProviderManager::default());
+        apps.insert("kimi".to_string(), ProviderManager::default());
 
         Self {
             version: 2,
@@ -590,6 +617,13 @@ impl MultiAppConfig {
             updated = true;
         }
 
+        if !config.apps.contains_key("kimi") {
+            config
+                .apps
+                .insert("kimi".to_string(), ProviderManager::default());
+            updated = true;
+        }
+
         // 执行 MCP 迁移（v3.6.x → v3.7.0）
         let migrated = config.migrate_mcp_to_unified()?;
         if migrated {
@@ -657,6 +691,7 @@ impl MultiAppConfig {
             AppType::Hermes => &self.mcp.hermes,
             AppType::OpenClaw => &self.mcp.openclaw,
             AppType::Pi => &self.mcp.pi,
+            AppType::Kimi => &self.mcp.kimi,
         }
     }
 
@@ -670,6 +705,7 @@ impl MultiAppConfig {
             AppType::Hermes => &mut self.mcp.hermes,
             AppType::OpenClaw => &mut self.mcp.openclaw,
             AppType::Pi => &mut self.mcp.pi,
+            AppType::Kimi => &mut self.mcp.kimi,
         }
     }
 
@@ -699,6 +735,7 @@ impl MultiAppConfig {
             AppType::Gemini,
             AppType::OpenCode,
             AppType::Hermes,
+            AppType::Kimi,
         ] {
             let old_servers = match app {
                 AppType::Claude => &self.mcp.claude.servers,
@@ -706,6 +743,7 @@ impl MultiAppConfig {
                 AppType::Gemini => &self.mcp.gemini.servers,
                 AppType::OpenCode => &self.mcp.opencode.servers,
                 AppType::Hermes => &self.mcp.hermes.servers,
+                AppType::Kimi => &self.mcp.kimi.servers,
                 AppType::OpenClaw => continue,
                 AppType::Pi => continue,
             };
@@ -812,6 +850,7 @@ impl MultiAppConfig {
         self.mcp.gemini = McpConfig::default();
         self.mcp.opencode = McpConfig::default();
         self.mcp.hermes = McpConfig::default();
+        self.mcp.kimi = McpConfig::default();
 
         Ok(true)
     }
