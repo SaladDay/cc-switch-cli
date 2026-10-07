@@ -21,7 +21,7 @@ const CODEX_USER_AGENT: &str = "cc-switch-codex-oauth";
 // client identity. gpt-6-astra requires >= 0.153.0 in the rust-v0.153.4 catalog.
 // Bump together when a new model raises its minimal_client_version.
 pub(crate) const CODEX_OAUTH_ORIGINATOR: &str = "codex_cli_rs";
-pub(crate) const CODEX_OAUTH_CLIENT_VERSION: &str = "0.153.4";
+pub(crate) const CODEX_OAUTH_CLIENT_VERSION: &str = "0.159.0";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodexOAuthError {
