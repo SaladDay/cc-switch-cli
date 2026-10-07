@@ -1450,6 +1450,10 @@ custom_providers: []\n";
                 "custom_providers:\n  - name: custom-relay\n    base_url: https://example.test/v1\n    api_key: test-key\n    model: test-model\n").unwrap();
             std::env::set_var("HERMES_HOME", &custom);
             assert_eq!(get_hermes_config_path(), custom.join("config.yaml"));
+            assert_eq!(
+                crate::prompt_files::prompt_file_path(&crate::AppType::Hermes).unwrap(),
+                custom.join("AGENTS.md")
+            );
             let providers = get_providers().unwrap();
             assert_eq!(
                 providers["custom-relay"]["base_url"],
