@@ -570,6 +570,14 @@ mod tests {
     }
 
     #[test]
+    fn upstream_v19_and_v20_database_schemas_are_accepted() {
+        for version in [19, 20] {
+            let sql = format!("PRAGMA user_version={version};\n");
+            assert!(validate_sql_user_version_for_import(&sql).is_ok());
+        }
+    }
+
+    #[test]
     fn custom_endpoint_behavior_remains_a_transport_concern() {
         assert_eq!(PROTOCOL_FORMAT, "cc-switch-webdav-sync");
         assert_eq!(PROTOCOL_VERSION, 2);

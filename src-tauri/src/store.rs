@@ -33,6 +33,7 @@ impl AppState {
             let db = Arc::new(Database::init()?);
             // Initialize default repos once per database.
             let _ = db.init_default_skill_repos();
+            crate::mode::operation::recover_on_startup(&db);
             let mut config = export_db_to_multi_app_config(&db)?;
             migrate_legacy_codex_configs(&db, &mut config);
             crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(

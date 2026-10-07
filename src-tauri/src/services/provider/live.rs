@@ -16,8 +16,10 @@ pub(super) enum LiveSnapshot {
         settings: Option<Value>,
     },
     Codex {
-        auth: Option<Value>,
+        auth: Option<Vec<u8>>,
+        auth_readable: bool,
         config: Option<String>,
+        stash: Option<Vec<u8>>,
     },
     Gemini {
         env: Option<HashMap<String, String>>,
@@ -45,13 +47,21 @@ impl LiveSnapshot {
                     delete_file(&path)?;
                 }
             }
-            LiveSnapshot::Codex { auth, config } => {
+            LiveSnapshot::Codex {
+                auth,
+                auth_readable,
+                config,
+                stash,
+            } => {
+                super::codex_live::restore_stash(stash.as_deref())?;
                 let auth_path = get_codex_auth_path();
                 let config_path = get_codex_config_path();
-                if let Some(value) = auth {
-                    write_json_file(&auth_path, value)?;
-                } else if auth_path.exists() {
-                    delete_file(&auth_path)?;
+                if *auth_readable {
+                    if let Some(bytes) = auth {
+                        crate::config::atomic_write_private(&auth_path, bytes)?;
+                    } else if auth_path.exists() {
+                        delete_file(&auth_path)?;
+                    }
                 }
 
                 if let Some(text) = config {
@@ -126,17 +136,22 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
         AppType::Codex => {
             let auth_path = get_codex_auth_path();
             let config_path = get_codex_config_path();
-            let auth = if auth_path.exists() {
-                Some(read_json_file(&auth_path)?)
-            } else {
-                None
+            // Snapshot raw bytes: malformed JSON must not block upstream routing.
+            let (auth, auth_readable) = match crate::live::engine::read_current(&auth_path) {
+                Ok(bytes) => (bytes, true),
+                Err(_) => (None, false),
             };
             let config = if config_path.exists() {
                 Some(crate::codex_config::read_and_validate_codex_config_text()?)
             } else {
                 None
             };
-            Ok(LiveSnapshot::Codex { auth, config })
+            Ok(LiveSnapshot::Codex {
+                auth,
+                auth_readable,
+                config,
+                stash: super::codex_live::read_stash_bytes()?,
+            })
         }
         AppType::Gemini => {
             use crate::gemini_config::{

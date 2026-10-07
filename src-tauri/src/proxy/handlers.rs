@@ -1,3 +1,6 @@
+use super::content_encoding::{
+    decompress_body, get_content_encoding, is_supported_content_encoding,
+};
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode, Uri},
@@ -78,12 +81,59 @@ pub async fn handle_messages(
     handle_claude_request(state, headers, body).await
 }
 
+fn decode_codex_request_body(
+    headers: &mut axum::http::HeaderMap,
+    body_bytes: Bytes,
+) -> Result<Bytes, ProxyError> {
+    let Some(encoding) = get_content_encoding(headers) else {
+        return Ok(body_bytes);
+    };
+
+    if !is_supported_content_encoding(&encoding) {
+        return Err(ProxyError::InvalidRequest(format!(
+            "Unsupported request content-encoding: {encoding}"
+        )));
+    }
+
+    log::debug!("[Codex] 解压请求体: content-encoding={encoding}");
+    let decompressed = match decompress_body(&encoding, &body_bytes) {
+        Ok(Some(decompressed)) => decompressed,
+        // is_supported_content_encoding 已确保编码受支持，正常不会返回 None；
+        // 防御性兜底：宁可报错，也不能把压缩字节当 JSON 透传下去。
+        Ok(None) => {
+            return Err(ProxyError::InvalidRequest(format!(
+                "Unsupported request content-encoding: {encoding}"
+            )));
+        }
+        Err(e) => {
+            log::warn!("[Codex] 请求体解压失败 ({encoding}): {e}");
+            return Err(ProxyError::InvalidRequest(format!(
+                "Failed to decompress request body ({encoding}): {e}"
+            )));
+        }
+    };
+
+    headers.remove(axum::http::header::CONTENT_ENCODING);
+    headers.remove(axum::http::header::CONTENT_LENGTH);
+    headers.remove(axum::http::header::TRANSFER_ENCODING);
+
+    Ok(Bytes::from(decompressed))
+}
+
 pub async fn handle_chat_completions(
     State(state): State<ProxyServerState>,
     uri: Uri,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
+    mut headers: HeaderMap,
+    body_bytes: Bytes,
 ) -> Response {
+    let body_bytes = match decode_codex_request_body(&mut headers, body_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
+    };
+    let body = match Json::<Value>::from_bytes(&body_bytes) {
+        Ok(Json(body)) => body,
+        Err(err) => return err.into_response(),
+    };
     handle_passthrough_request(
         state,
         headers,
@@ -97,9 +147,17 @@ pub async fn handle_chat_completions(
 pub async fn handle_responses(
     State(state): State<ProxyServerState>,
     uri: Uri,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
+    mut headers: HeaderMap,
+    body_bytes: Bytes,
 ) -> Response {
+    let body_bytes = match decode_codex_request_body(&mut headers, body_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
+    };
+    let body = match Json::<Value>::from_bytes(&body_bytes) {
+        Ok(Json(body)) => body,
+        Err(err) => return err.into_response(),
+    };
     handle_passthrough_request(
         state,
         headers,
@@ -113,9 +171,17 @@ pub async fn handle_responses(
 pub async fn handle_responses_compact(
     State(state): State<ProxyServerState>,
     uri: Uri,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
+    mut headers: HeaderMap,
+    body_bytes: Bytes,
 ) -> Response {
+    let body_bytes = match decode_codex_request_body(&mut headers, body_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
+    };
+    let body = match Json::<Value>::from_bytes(&body_bytes) {
+        Ok(Json(body)) => body,
+        Err(err) => return err.into_response(),
+    };
     handle_passthrough_request(
         state,
         headers,
@@ -1252,6 +1318,26 @@ fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<D
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compressed_codex_body_removes_stale_entity_headers() {
+        let payload = br#"{"model":"test"}"#;
+        let compressed = zstd::stream::encode_all(&payload[..], 0).unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("content-encoding", "zstd".parse().unwrap());
+        headers.insert(
+            "content-length",
+            compressed.len().to_string().parse().unwrap(),
+        );
+        headers.insert("transfer-encoding", "chunked".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+        let decoded = super::decode_codex_request_body(&mut headers, compressed.into()).unwrap();
+        assert_eq!(decoded.as_ref(), payload);
+        for name in ["content-encoding", "content-length", "transfer-encoding"] {
+            assert!(!headers.contains_key(name));
+        }
+        assert_eq!(headers["content-type"], "application/json");
+    }
+
     use super::{
         build_buffered_claude_transform_response, endpoint_with_query, handle_responses,
         handle_responses_compact, responses_sse_to_response_value,
@@ -1473,10 +1559,13 @@ mod tests {
                 State(state),
                 Uri::from_static("/v1/responses"),
                 HeaderMap::new(),
-                Json(json!({
-                    "model": "gpt-5.4",
-                    "input": "hello"
-                })),
+                bytes::Bytes::from(
+                    json!({
+                        "model": "gpt-5.4",
+                        "input": "hello"
+                    })
+                    .to_string(),
+                ),
             ),
         )
         .await
@@ -1540,11 +1629,14 @@ mod tests {
             State(state),
             Uri::from_static("/v1/responses"),
             HeaderMap::new(),
-            Json(json!({
-                "model": "gpt-5.4",
-                "tools": [{"type": "tool_search"}],
-                "input": "Find Gmail tools"
-            })),
+            bytes::Bytes::from(
+                json!({
+                    "model": "gpt-5.4",
+                    "tools": [{"type": "tool_search"}],
+                    "input": "Find Gmail tools"
+                })
+                .to_string(),
+            ),
         )
         .await;
 
@@ -1589,10 +1681,13 @@ mod tests {
             State(state),
             Uri::from_static("/v1/responses?beta=true"),
             HeaderMap::new(),
-            Json(json!({
-                "model": "gpt-5.4",
-                "input": "hello"
-            })),
+            bytes::Bytes::from(
+                json!({
+                    "model": "gpt-5.4",
+                    "input": "hello"
+                })
+                .to_string(),
+            ),
         )
         .await;
 
@@ -1641,11 +1736,14 @@ mod tests {
             State(state),
             Uri::from_static("/v1/responses/compact?beta=true"),
             HeaderMap::new(),
-            Json(json!({
-                "model": "gpt-5.4",
-                "input": "hello",
-                "stream": true
-            })),
+            bytes::Bytes::from(
+                json!({
+                    "model": "gpt-5.4",
+                    "input": "hello",
+                    "stream": true
+                })
+                .to_string(),
+            ),
         )
         .await;
 
