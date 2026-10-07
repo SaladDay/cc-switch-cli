@@ -30,10 +30,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{SessionMeta, CACHED_PROVIDERS};
-use crate::config::{
-    atomic_write, get_app_config_dir, resolve_config_dir_without_following_user_symlinks,
-    write_json_file,
-};
+use crate::config::{atomic_write, get_app_config_dir, resolve_config_dir, write_json_file};
 
 /// Rows presented on one logical Sessions page.
 pub(crate) const PAGE_SIZE: usize = 100;
@@ -407,7 +404,7 @@ pub(crate) struct PagedManifestStore {
 
 impl PagedManifestStore {
     pub(crate) fn open() -> Result<Self, ManifestError> {
-        let config_dir = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())
+        let config_dir = resolve_config_dir(&get_app_config_dir())
             .map_err(|error| ManifestError::Corrupt(error.to_string()))?;
         Self::open_at(&config_dir)
     }
@@ -1266,7 +1263,7 @@ pub(crate) struct CliManifestStore {
 
 impl CliManifestStore {
     pub(crate) fn open() -> Result<Self, ManifestError> {
-        let config_dir = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())
+        let config_dir = resolve_config_dir(&get_app_config_dir())
             .map_err(|error| ManifestError::Corrupt(error.to_string()))?;
         Self::open_at(&config_dir)
     }
@@ -1344,7 +1341,7 @@ pub(crate) struct QueryManifestStore {
 
 impl QueryManifestStore {
     pub(crate) fn open(namespace: &QueryManifestNamespace) -> Result<Self, ManifestError> {
-        let config_dir = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())
+        let config_dir = resolve_config_dir(&get_app_config_dir())
             .map_err(|error| ManifestError::Corrupt(error.to_string()))?;
         Self::open_at(&config_dir, namespace)
     }
