@@ -60,7 +60,9 @@ impl Database {
             enabled_claude BOOLEAN NOT NULL DEFAULT 0, enabled_codex BOOLEAN NOT NULL DEFAULT 0,
             enabled_gemini BOOLEAN NOT NULL DEFAULT 0, enabled_grokbuild BOOLEAN NOT NULL DEFAULT 0,
             enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
-            enabled_hermes BOOLEAN NOT NULL DEFAULT 0
+            enabled_mcode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
+            enabled_pi BOOLEAN NOT NULL DEFAULT 0
         )",
             [],
         )
@@ -89,6 +91,7 @@ impl Database {
             enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
             enabled_grokbuild BOOLEAN NOT NULL DEFAULT 0,
             enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_mcode BOOLEAN NOT NULL DEFAULT 0,
             enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
             installed_at INTEGER NOT NULL DEFAULT 0,
             content_hash TEXT,
@@ -529,6 +532,31 @@ impl Database {
                         log::info!("迁移数据库从 v17 到 v18（会话日志字节游标列）");
                         Self::migrate_v17_to_v18(conn)?;
                         Self::set_user_version(conn, 18)?;
+                    }
+                    18 => {
+                        for table in ["mcp_servers", "skills"] {
+                            if Self::table_exists(conn, table)? {
+                                Self::add_column_if_missing(
+                                    conn,
+                                    table,
+                                    "enabled_mcode",
+                                    "BOOLEAN NOT NULL DEFAULT 0",
+                                )?;
+                            }
+                        }
+                        Self::set_user_version(conn, 19)?;
+                    }
+                    19 => {
+                        log::info!("迁移数据库从 v19 到 v20（MCP 添加 Pi 支持）");
+                        if Self::table_exists(conn, "mcp_servers")? {
+                            Self::add_column_if_missing(
+                                conn,
+                                "mcp_servers",
+                                "enabled_pi",
+                                "BOOLEAN NOT NULL DEFAULT 0",
+                            )?;
+                        }
+                        Self::set_user_version(conn, 20)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1822,6 +1850,9 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
+            // GPT-6 Astra 标准价（USD / 1M tokens），与上游一致；不含长上下文和服务档位倍率。
+            // https://developers.openai.com/api/docs/models/gpt-6-astra
+            ("gpt-6-astra", "GPT-6 Astra", "10", "50", "1", "12.5"),
             // GPT-5.6 系列（Sol / Terra / Luna，2026-06 发布）
             // 5.6 家族起 cache write 收 1.25× 输入价（此前 GPT 模型写缓存免费，勿回填旧系列）
             ("gpt-5.6-sol", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
@@ -3172,7 +3203,8 @@ impl Database {
             "当前数据库由较新版本的 CC Switch 创建，旧版本无法打开。\n\
              数据库版本: {version}\n\
              当前应用: v{}，最高支持数据库版本: {SCHEMA_VERSION}\n\
-             请运行 `cc-switch update` 升级到最新版；如果仍然失败，请从 GitHub Releases 安装最新版本。",
+             Homebrew 安装请运行 `brew upgrade cc-switch-cli`；其他安装方式请运行 `cc-switch update`。\n\
+             如果仍然失败，请检查 GitHub Releases 是否已有支持该数据库版本的新版本。",
             env!("CARGO_PKG_VERSION")
         ))
     }

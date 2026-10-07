@@ -1596,6 +1596,9 @@ impl ProviderAddFormState {
             CodexModelCatalogField::Model => row.model.clone(),
             CodexModelCatalogField::DisplayName => row.display_name.clone(),
             CodexModelCatalogField::ContextWindow => row.context_window.clone(),
+            // These fields use pickers instead of text input.
+            CodexModelCatalogField::ReasoningLevels
+            | CodexModelCatalogField::DefaultReasoningLevel => String::new(),
         }
     }
 
@@ -1669,6 +1672,11 @@ impl ProviderAddFormState {
         value: &str,
     ) -> bool {
         match (row, field) {
+            (
+                _,
+                CodexModelCatalogField::ReasoningLevels
+                | CodexModelCatalogField::DefaultReasoningLevel,
+            ) => false,
             (None, CodexModelCatalogField::Model) => self.upsert_codex_model_catalog_model(value),
             (None, _) => false,
             (Some(index), CodexModelCatalogField::Model) => {

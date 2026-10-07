@@ -974,7 +974,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn apply_snapshot_rejects_symlink_parent_config_dir_before_restoring_skills() {
+    fn apply_snapshot_rejects_parent_traversal_after_symlink_before_restoring_skills() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().expect("create temp dir");
@@ -1013,10 +1013,10 @@ mod tests {
             b"-- CC Switch SQLite export\nPRAGMA user_version=0;\n",
             &skills_zip,
         )
-        .expect_err("symlink parent config dir should fail before restoring skills");
+        .expect_err("parent traversal should fail before restoring skills");
 
         assert!(
-            err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+            err.to_string().contains("父目录组件"),
             "unexpected error: {err}"
         );
         assert!(

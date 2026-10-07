@@ -391,23 +391,41 @@ pub enum CodexModelCatalogField {
     Model,
     DisplayName,
     ContextWindow,
+    ReasoningLevels,
+    DefaultReasoningLevel,
 }
 
 impl CodexModelCatalogField {
-    pub const ALL: [Self; 3] = [Self::Model, Self::DisplayName, Self::ContextWindow];
+    pub const ALL: [Self; 5] = [
+        Self::Model,
+        Self::DisplayName,
+        Self::ContextWindow,
+        Self::ReasoningLevels,
+        Self::DefaultReasoningLevel,
+    ];
 
     pub fn index(self) -> usize {
         match self {
             Self::Model => 0,
             Self::DisplayName => 1,
             Self::ContextWindow => 2,
+            Self::ReasoningLevels => 3,
+            Self::DefaultReasoningLevel => 4,
         }
     }
 
     pub fn from_index(index: usize) -> Self {
-        Self::ALL.get(index).copied().unwrap_or(Self::ContextWindow)
+        Self::ALL
+            .get(index)
+            .copied()
+            .unwrap_or(Self::DefaultReasoningLevel)
     }
 }
+
+// Keep the picker order aligned with upstream CodexFormFields.tsx.
+pub const CODEX_REASONING_LEVELS: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexModelCatalogRow {

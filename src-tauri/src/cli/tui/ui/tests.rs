@@ -2828,6 +2828,79 @@ fn provider_passive_fields_bound_million_byte_classifiers_and_validation() {
 }
 
 #[test]
+fn codex_model_catalog_reasoning_fields_and_pickers_render_in_both_languages() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    for language in [Language::English, Language::Chinese] {
+        let _lang = use_test_language(language);
+        for inline in [false, true] {
+            let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
+            form.codex_local_routing_enabled = true;
+            form.upsert_codex_model_catalog_model("test-model");
+            form.codex_model_catalog[0].reasoning_levels = vec!["none".into(), "high".into()];
+            form.codex_model_catalog[0].default_reasoning_level = "high".into();
+            if inline {
+                form.open_codex_local_routing_page();
+            } else {
+                form.open_codex_model_catalog_page();
+            }
+            let mut app = App::new(Some(AppType::Codex));
+            app.route = Route::Providers;
+            app.focus = Focus::Content;
+            app.form = Some(FormState::ProviderAdd(form));
+            let data = minimal_data(&AppType::Codex);
+            for width in [80, 120] {
+                let all = all_text(&render_with_size(&app, &data, width, 30));
+                for label in [
+                    texts::tui_codex_reasoning_levels_header(),
+                    texts::tui_codex_default_reasoning_header(),
+                    "high",
+                ] {
+                    assert!(
+                        all.replace(' ', "").contains(&label.replace(' ', "")),
+                        "missing {label} at {width}: {all}"
+                    );
+                }
+            }
+            app.overlay = Overlay::CodexReasoningLevelsPicker {
+                row: 0,
+                selected: 4,
+                checked: [true, false, false, false, true, false, false, false],
+            };
+            let all = all_text(&render_with_size(&app, &data, 80, 30));
+            for label in [
+                texts::tui_codex_reasoning_levels(),
+                "Space",
+                "none",
+                "minimal",
+                "ultra",
+            ] {
+                assert!(
+                    all.replace(' ', "").contains(&label.replace(' ', "")),
+                    "missing {label}: {all}"
+                );
+            }
+            app.overlay = Overlay::CodexDefaultReasoningPicker {
+                row: 0,
+                selected: 2,
+                options: vec![String::new(), "none".into(), "high".into()],
+            };
+            let all = all_text(&render_with_size(&app, &data, 80, 30));
+            for label in [
+                texts::tui_codex_default_reasoning_level(),
+                texts::tui_codex_reasoning_auto(),
+                "high",
+            ] {
+                assert!(
+                    all.replace(' ', "").contains(&label.replace(' ', "")),
+                    "missing {label}: {all}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn codex_model_catalog_renders_only_the_selected_large_collection_window() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);

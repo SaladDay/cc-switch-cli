@@ -617,6 +617,50 @@ fn add_openmodel_template_is_scriptable_for_every_app() {
 
 #[test]
 #[serial]
+fn add_patewayai_template_uses_upstream_claude_and_codex_settings() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    for (app_type, name) in [
+        (AppType::Claude, "PatewayAI Claude"),
+        (AppType::Codex, "PatewayAI Codex"),
+    ] {
+        run_add(
+            Some(name),
+            app_type,
+            AddOpts {
+                template: Some(ProviderAddTemplate::Patewayai),
+                api_key: Some("pateway-test".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("PatewayAI preset should accept non-interactive API-key input");
+    }
+
+    let claude = saved_provider(AppType::Claude, "patewayai-claude");
+    assert_eq!(env_str(&claude, "ANTHROPIC_API_KEY"), Some("pateway-test"));
+    assert_eq!(env_str(&claude, "ANTHROPIC_AUTH_TOKEN"), None);
+    assert_eq!(
+        env_str(&claude, "ANTHROPIC_BASE_URL"),
+        Some("https://api.pateway.ai")
+    );
+
+    let codex = saved_provider(AppType::Codex, "patewayai-codex");
+    assert_eq!(
+        codex.settings_config["auth"]["OPENAI_API_KEY"],
+        "pateway-test"
+    );
+    let config = codex.settings_config["config"]
+        .as_str()
+        .expect("PatewayAI Codex config should be TOML");
+    assert!(config.contains("model = \"gpt-5.6-sol\""));
+    assert!(config.contains("base_url = \"https://api.pateway.ai/v1\""));
+    assert!(config.contains("name = \"patewayai\""));
+    assert!(config.contains("wire_api = \"responses\""));
+}
+
+#[test]
+#[serial]
 fn add_claude_role_flags_reject_non_claude_apps() {
     let _guard = lock_test_mutex();
     prepare_empty_state();

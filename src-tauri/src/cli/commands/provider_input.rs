@@ -37,6 +37,7 @@ pub enum ProviderAddTemplate {
     Packycode,
     Runapi,
     Aicodemirror,
+    Patewayai,
     Cubence,
     Openmodel,
     Dds,
@@ -57,6 +58,7 @@ impl ProviderAddTemplate {
             Self::Packycode => "packycode",
             Self::Runapi => "runapi",
             Self::Aicodemirror => "aicodemirror",
+            Self::Patewayai => "patewayai",
             Self::Cubence => "cubence",
             Self::Openmodel => "openmodel",
             Self::Dds => "dds",
@@ -77,6 +79,7 @@ impl ProviderAddTemplate {
                 | Self::Packycode
                 | Self::Runapi
                 | Self::Aicodemirror
+                | Self::Patewayai
                 | Self::Cubence
                 | Self::Openmodel
                 | Self::Dds
@@ -238,6 +241,7 @@ fn sponsor_template_from_id(id: &str) -> ProviderAddTemplate {
         "packycode" => ProviderAddTemplate::Packycode,
         "runapi" => ProviderAddTemplate::Runapi,
         "aicodemirror" => ProviderAddTemplate::Aicodemirror,
+        "patewayai" => ProviderAddTemplate::Patewayai,
         "cubence" => ProviderAddTemplate::Cubence,
         "openmodel" => ProviderAddTemplate::Openmodel,
         "dds" => ProviderAddTemplate::Dds,
@@ -345,6 +349,7 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
@@ -367,6 +372,7 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
@@ -391,6 +397,7 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Dds => None,
     }
@@ -428,6 +435,7 @@ fn template_default_meta(
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
@@ -438,6 +446,11 @@ fn template_default_meta(
                 partner_promotion_key: Some(preset.partner_promotion_key.to_string()),
                 ..Default::default()
             };
+            if matches!(app_type, AppType::Claude)
+                && preset.claude_api_key_field == ClaudeApiKeyField::ApiKey
+            {
+                meta.api_key_field = Some(preset.claude_api_key_field.as_env_key().to_string());
+            }
             if matches!(app_type, AppType::Codex) {
                 meta.api_format = Some("openai_responses".to_string());
             }
@@ -461,6 +474,7 @@ fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> 
         | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds => None,
@@ -479,6 +493,7 @@ fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
@@ -507,6 +522,7 @@ fn build_provider_template_settings_config(
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
@@ -535,13 +551,20 @@ fn build_sponsor_template_settings_config(
                 "ANTHROPIC_BASE_URL": preset.claude_base_url,
             }
         })),
-        AppType::Codex => Ok(build_codex_settings_config(
-            None,
-            preset.codex_base_url,
-            CODEX_DEFAULT_MODEL,
-            "responses",
-            preset.provider_name,
-        )),
+        AppType::Codex => {
+            let provider_name = if preset.id == "patewayai" {
+                preset.id
+            } else {
+                preset.provider_name
+            };
+            Ok(build_codex_settings_config(
+                None,
+                preset.codex_base_url,
+                CODEX_DEFAULT_MODEL,
+                "responses",
+                provider_name,
+            ))
+        }
         AppType::Gemini => Ok(json!({
             "env": {
                 "GOOGLE_GEMINI_BASE_URL": preset.gemini_base_url,
@@ -1145,6 +1168,7 @@ requires_openai_auth = true
                 "Codex",
                 "* AICodeMirror",
                 "* ClaudeAPI",
+                "* PatewayAI",
                 "* Cubence",
                 "* OpenModel",
                 "* RunAPI",
@@ -1160,6 +1184,7 @@ requires_openai_auth = true
                 "Custom",
                 "OpenAI Official",
                 "* AICodeMirror",
+                "* PatewayAI",
                 "* Cubence",
                 "* OpenModel",
                 "* RunAPI",
@@ -1231,6 +1256,22 @@ requires_openai_auth = true
         assert!(
             validate_provider_add_template(&AppType::Gemini, ProviderAddTemplate::Dds).is_err()
         );
+        for app_type in [AppType::Claude, AppType::Codex] {
+            validate_provider_add_template(&app_type, ProviderAddTemplate::Patewayai)
+                .expect("PatewayAI should support Claude and Codex");
+        }
+        for app_type in [
+            AppType::Gemini,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+            AppType::Pi,
+        ] {
+            assert!(
+                validate_provider_add_template(&app_type, ProviderAddTemplate::Patewayai).is_err(),
+                "PatewayAI should not be exposed for {app_type:?}"
+            );
+        }
         for app_type in [AppType::OpenCode, AppType::Hermes, AppType::OpenClaw] {
             validate_provider_add_template(&app_type, ProviderAddTemplate::Packycode)
                 .expect("PackyCode should match the upstream additive-app support matrix");
@@ -1371,6 +1412,43 @@ requires_openai_auth = true
         assert_eq!(
             provider.meta.as_ref().and_then(|meta| meta.is_partner),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn patewayai_template_matches_upstream_claude_and_codex_settings() {
+        let claude =
+            build_provider_template_seed(&AppType::Claude, ProviderAddTemplate::Patewayai, &[])
+                .expect("build PatewayAI Claude seed");
+        assert_eq!(claude.id, "patewayai");
+        assert_eq!(claude.name, "PatewayAI");
+        assert_eq!(claude.website_url.as_deref(), Some("https://pateway.ai"));
+        assert_eq!(
+            claude.settings_config["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.pateway.ai"
+        );
+        assert_eq!(
+            claude
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_key_field.as_deref()),
+            Some("ANTHROPIC_API_KEY")
+        );
+
+        let codex =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Patewayai, &[])
+                .expect("build PatewayAI Codex seed");
+        let config = codex.settings_config["config"]
+            .as_str()
+            .expect("PatewayAI Codex config should be TOML");
+        assert!(config.contains("model = \"gpt-5.6-sol\""));
+        assert!(config.contains("base_url = \"https://api.pateway.ai/v1\""));
+        assert!(config.contains("name = \"patewayai\""));
+        assert!(config.contains("wire_api = \"responses\""));
+        assert!(config.contains("requires_openai_auth = true"));
+        assert_eq!(
+            codex.meta.and_then(|meta| meta.api_format),
+            Some("openai_responses".to_string())
         );
     }
 

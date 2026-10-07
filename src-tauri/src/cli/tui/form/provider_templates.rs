@@ -739,11 +739,22 @@ impl ProviderAddFormState {
         match self.app_type {
             AppType::Claude => {
                 self.reset_claude_template_state();
+                self.claude_api_key_field = preset.claude_api_key_field;
                 self.claude_base_url.set(preset.claude_base_url);
             }
             AppType::Codex => {
                 self.reset_codex_template_state();
                 self.codex_base_url.set(preset.codex_base_url);
+                if preset.id == "patewayai" {
+                    self.extra["settingsConfig"] = json!({
+                        "config": crate::codex_config::build_codex_third_party_config_toml(
+                            preset.id,
+                            preset.codex_base_url,
+                            CODEX_DEFAULT_MODEL,
+                            "responses",
+                        ),
+                    });
+                }
             }
             AppType::Gemini => {
                 self.gemini_auth_type = GeminiAuthType::ApiKey;

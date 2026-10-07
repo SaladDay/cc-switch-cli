@@ -810,5 +810,9 @@ fn codex_model_catalog_field_prompt(field: form::CodexModelCatalogField) -> &'st
         form::CodexModelCatalogField::ContextWindow => {
             texts::tui_codex_model_catalog_context_prompt()
         }
+        form::CodexModelCatalogField::ReasoningLevels => texts::tui_codex_reasoning_levels(),
+        form::CodexModelCatalogField::DefaultReasoningLevel => {
+            texts::tui_codex_default_reasoning_level()
+        }
     }
 }

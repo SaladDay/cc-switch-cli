@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 mod claude;
 mod codex;
+pub(crate) mod codex_live;
+pub(crate) mod codex_login;
 #[cfg(test)]
 mod codex_openai_auth_tests;
 mod common;
@@ -152,6 +154,7 @@ struct PostCommitAction {
     previous_provider: Option<Provider>,
     backup: LiveSnapshot,
     sync_mcp: bool,
+    edit_common_config: bool,
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
     previous_common_config_snippet: Option<String>,
@@ -248,7 +251,27 @@ fn sync_provider_to_live_respecting_takeover(
         return Ok(false);
     }
 
-    ProviderService::write_live_snapshot(&app_type, provider, common_config_snippet, true)?;
+    if matches!(app_type, AppType::Codex) {
+        let rows = state
+            .db
+            .get_all_providers("codex")?
+            .into_values()
+            .collect::<Vec<_>>();
+        let prepared = ProviderService::prepare_live_snapshot(
+            &app_type,
+            provider,
+            Some(provider),
+            common_config_snippet,
+            None,
+            true,
+            &rows,
+        )?;
+        if let PreparedLiveWrite::Codex { plan, config } = &prepared {
+            codex_live::apply(plan, config.model_catalog.as_ref(), Some((&state.db, None)))?;
+        }
+    } else {
+        ProviderService::write_live_snapshot(&app_type, provider, common_config_snippet, true)?;
+    }
     if ownership.refresh_stale_backup {
         if let Err(err) = futures::executor::block_on(
             state
@@ -286,7 +309,7 @@ enum PreparedLiveWrite {
         settings: Value,
     },
     Codex {
-        auth: PreparedCodexAuthWrite,
+        plan: codex_live::Prepared,
         config: crate::codex_config::PreparedCodexConfigText,
     },
     Gemini {
@@ -306,13 +329,6 @@ enum PreparedLiveWrite {
     OpenClaw {
         models: Value,
     },
-}
-
-#[derive(Clone)]
-enum PreparedCodexAuthWrite {
-    Preserve,
-    Write(Value),
-    Delete,
 }
 
 impl ProviderService {
@@ -814,6 +830,18 @@ impl ProviderService {
 
         let save_result = match preserved_current_apps {
             Some(apps) => state.save_config_snapshot_preserving_current_providers(&candidate, apps),
+            None if prepared.as_ref().is_some_and(|prepared| {
+                matches!(
+                    prepared.effect,
+                    PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
+                )
+            }) =>
+            {
+                state.save_config_snapshot_preserving_current_providers(
+                    &candidate,
+                    &[AppType::Codex],
+                )
+            }
             None => state.save_config_snapshot(&candidate),
         };
 
@@ -836,6 +864,30 @@ impl ProviderService {
 
         if let Some(prepared) = prepared {
             if let Err(err) = Self::apply_prepared_post_commit_action(state, &prepared) {
+                if matches!(
+                    prepared.effect,
+                    PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
+                ) {
+                    // Upstream owns live-file recovery. Before publication it
+                    // leaves external edits intact; after publication pending
+                    // recovers forward. Never restore our older file snapshot.
+                    if crate::mode::state::pending(
+                        &crate::live::engine::DeviceStore::for_device(),
+                        "codex",
+                    )?
+                    .is_some()
+                    {
+                        state.reload_config_snapshot_from_db()?;
+                    } else {
+                        match preserved_current_apps {
+                            Some(apps) => Self::restore_config_only_preserving_current_providers(
+                                state, original, apps,
+                            )?,
+                            None => Self::restore_config_only(state, original)?,
+                        }
+                    }
+                    return Err(err);
+                }
                 let rollback_result = match preserved_current_apps {
                     Some(apps) => Self::rollback_after_failure_preserving_current_providers(
                         state,
@@ -921,6 +973,15 @@ impl ProviderService {
         state: &AppState,
         action: PostCommitAction,
     ) -> Result<PreparedPostCommitAction, AppError> {
+        if matches!(action.app_type, AppType::Codex)
+            && crate::mode::operation::settle(&state.db, "codex")?.is_some()
+        {
+            state.reload_config_snapshot_from_db()?;
+            return Err(AppError::Message(
+                "An unfinished Codex write was recovered; please retry with the current state"
+                    .into(),
+            ));
+        }
         let effect = if action.takeover_active {
             let previous_backup =
                 futures::executor::block_on(state.db.get_live_backup(action.app_type.as_str()))?
@@ -978,16 +1039,73 @@ impl ProviderService {
                 .as_ref()
                 .and_then(|meta| meta.apply_common_config)
                 .unwrap_or(false);
+            let mut provider = action.provider.clone();
+            if action.edit_common_config && matches!(action.app_type, AppType::Codex) {
+                provider.settings_config = Self::build_effective_live_snapshot(
+                    &AppType::Codex,
+                    &provider,
+                    action.common_config_snippet.as_deref(),
+                    apply_common_config,
+                )?;
+            }
             PreparedPostCommitEffect::Live(Self::prepare_live_snapshot(
                 &action.app_type,
-                &action.provider,
+                &provider,
                 action.previous_provider.as_ref(),
                 action.common_config_snippet.as_deref(),
                 action.previous_common_config_snippet.as_deref(),
                 apply_common_config,
+                &if matches!(action.app_type, AppType::Codex) {
+                    state
+                        .db
+                        .get_all_providers("codex")?
+                        .into_values()
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                },
             )?)
         };
 
+        let mut action = action;
+        if matches!(
+            effect,
+            PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
+        ) {
+            action.refresh_snapshot = false;
+            action.sync_mcp = false;
+        }
+        let mut effect = effect;
+        if let PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { plan, .. }) = &mut effect {
+            if action.edit_common_config {
+                let apply = Self::resolve_live_apply_common_config(
+                    &AppType::Codex,
+                    &action.provider,
+                    action.common_config_snippet.as_deref(),
+                    action
+                        .provider
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.apply_common_config)
+                        .unwrap_or(false),
+                );
+                plan.common = codex_live::common_patch(
+                    action.common_config_snippet.as_deref().filter(|_| apply),
+                    action.previous_common_config_snippet.as_deref(),
+                )?;
+            }
+            if let crate::live::project::codex::RouteWrite::Official { dormant_base_url } =
+                &mut plan.config.route
+            {
+                *dormant_base_url = futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .build_proxy_urls_for_app(&AppType::Codex),
+                )
+                .map_err(AppError::Message)?
+                .1;
+            }
+        }
         Ok(PreparedPostCommitAction { action, effect })
     }
 
@@ -997,7 +1115,15 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
-                Self::apply_prepared_live_snapshot(live)?;
+                if let PreparedLiveWrite::Codex { plan, config } = live {
+                    codex_live::apply(
+                        plan,
+                        config.model_catalog.as_ref(),
+                        Some((&state.db, Some(prepared.action.provider.id.as_str()))),
+                    )?;
+                } else {
+                    Self::apply_prepared_live_snapshot(live)?;
+                }
                 if prepared.action.activate_provider
                     && matches!(prepared.action.app_type, AppType::Hermes)
                 {
@@ -1080,37 +1206,51 @@ impl ProviderService {
             }
         }
 
-        if prepared.action.sync_mcp {
-            use crate::services::mcp::McpService;
-            McpService::sync_all_enabled(state)?;
-        }
-        if !prepared.action.takeover_active
-            && prepared.action.refresh_snapshot
-            && crate::sync_policy::should_sync_live(&prepared.action.app_type)
-        {
-            Self::refresh_provider_snapshot(
-                state,
-                &prepared.action.app_type,
-                &prepared.action.provider.id,
-            )?;
-        }
-        if prepared.action.refresh_stale_backup {
-            if let Err(err) =
-                futures::executor::block_on(state.proxy_service.update_live_backup_from_provider(
-                    prepared.action.app_type.as_str(),
-                    &prepared.action.provider,
-                ))
+        let housekeeping = || -> Result<(), AppError> {
+            if prepared.action.sync_mcp {
+                use crate::services::mcp::McpService;
+                McpService::sync_all_enabled(state)?;
+            }
+            if !prepared.action.takeover_active
+                && prepared.action.refresh_snapshot
+                && crate::sync_policy::should_sync_live(&prepared.action.app_type)
             {
-                log::warn!(
-                    "刷新 {} 残留 Live 备份失败（不影响本次 live 写入）: {err}",
-                    prepared.action.app_type.as_str()
-                );
+                Self::refresh_provider_snapshot(
+                    state,
+                    &prepared.action.app_type,
+                    &prepared.action.provider.id,
+                )?;
+            }
+            if prepared.action.refresh_stale_backup {
+                if let Err(err) = futures::executor::block_on(
+                    state.proxy_service.update_live_backup_from_provider(
+                        prepared.action.app_type.as_str(),
+                        &prepared.action.provider,
+                    ),
+                ) {
+                    log::warn!(
+                        "刷新 {} 残留 Live 备份失败（不影响本次 live 写入）: {err}",
+                        prepared.action.app_type.as_str()
+                    );
+                }
+            }
+
+            if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
+                log::warn!("同步 Skills 失败: {e}");
+            }
+            Ok(())
+        };
+        if let Err(err) = housekeeping() {
+            if matches!(
+                prepared.effect,
+                PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
+            ) {
+                log::warn!("Codex switch committed; CLI post-switch synchronization failed: {err}");
+            } else {
+                return Err(err);
             }
         }
 
-        if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
-            log::warn!("同步 Skills 失败: {e}");
-        }
         Ok(())
     }
 
@@ -1193,7 +1333,9 @@ impl ProviderService {
 
                 // Read auth from disk; if absent, fall back to the DB snapshot's auth
                 // so that WebDAV-synced credentials are not overwritten with empty data.
-                let auth = if auth_path.exists() {
+                let auth = if Self::codex_live_write_category(&provider) == Some("official") {
+                    provider.settings_config.get("auth").cloned()
+                } else if auth_path.exists() {
                     Some(read_json_file::<Value>(&auth_path)?)
                 } else {
                     provider.settings_config.get("auth").cloned()
@@ -1258,6 +1400,10 @@ impl ProviderService {
                         obj.insert("auth".to_string(), sanitized);
                     }
                 }
+                Self::preserve_codex_model_catalog_for_backfill(
+                    &provider,
+                    &mut settings_for_storage,
+                );
                 let mut snapshot_provider = provider.clone();
                 snapshot_provider.settings_config = settings_for_storage;
 
@@ -1518,7 +1664,7 @@ impl ProviderService {
             return Ok(None);
         };
 
-        Self::build_post_commit_action_for_current_provider(
+        let mut action = Self::build_post_commit_action_for_current_provider(
             config,
             app_type,
             current_provider_id,
@@ -1526,7 +1672,11 @@ impl ProviderService {
             live_taken_over,
             refresh_stale_backup,
             previous_common_config_snippet,
-        )
+        )?;
+        if let Some(action) = &mut action {
+            action.edit_common_config = true;
+        }
+        Ok(action)
     }
 
     fn build_post_commit_action_for_current_provider(
@@ -1551,6 +1701,7 @@ impl ProviderService {
             previous_provider: Some(provider.clone()),
             provider,
             backup: Self::capture_live_snapshot(app_type)?,
+            edit_common_config: false,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -2213,8 +2364,7 @@ impl ProviderService {
                     provider: provider_to_store.clone(),
                     previous_provider: None,
                     backup,
-                    // Codex current-provider saves rewrite live config from the stored snapshot,
-                    // so managed MCP must be synced back after the write.
+                    edit_common_config: false,
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
                     refresh_snapshot: false,
                     common_config_snippet,
@@ -2388,8 +2538,7 @@ impl ProviderService {
                     provider: merged,
                     previous_provider,
                     backup,
-                    // Codex current-provider saves rewrite live config from the stored snapshot,
-                    // so managed MCP must be synced back after the write.
+                    edit_common_config: false,
                     sync_mcp: matches!(&app_type_clone, AppType::Codex)
                         && !ownership.takeover_active,
                     refresh_snapshot: false,
@@ -2998,6 +3147,7 @@ impl ProviderService {
                 provider,
                 previous_provider: None,
                 backup: Self::capture_live_snapshot(app_type)?,
+                edit_common_config: false,
                 sync_mcp: matches!(app_type, AppType::OpenCode),
                 refresh_snapshot: false,
                 common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -3011,7 +3161,7 @@ impl ProviderService {
 
         let backup = Self::capture_live_snapshot(app_type)?;
         let previous_provider = effective_current_provider
-            .filter(|current_id| *current_id != provider_id)
+            .filter(|current_id| matches!(app_type, AppType::Codex) || *current_id != provider_id)
             .and_then(|current_id| {
                 config
                     .get_manager(app_type)
@@ -3039,6 +3189,7 @@ impl ProviderService {
             provider,
             previous_provider,
             backup,
+            edit_common_config: false,
             sync_mcp: true,
             refresh_snapshot: true,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -3052,6 +3203,11 @@ impl ProviderService {
 
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Codex)
+            && crate::mode::operation::settle(&state.db, "codex")?.is_some()
+        {
+            state.reload_config_snapshot_from_db()?;
+        }
         if matches!(app_type, AppType::Pi) {
             return pi::enable(state, provider_id).map(|_| ());
         }
@@ -3139,6 +3295,7 @@ impl ProviderService {
             common_config_snippet,
             None,
             apply_common_config,
+            &[],
         )?;
         Self::apply_prepared_live_snapshot(&prepared)
     }
@@ -3150,6 +3307,7 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
+        codex_rows: &[Provider],
     ) -> Result<PreparedLiveWrite, AppError> {
         let apply_common_config = Self::resolve_live_apply_common_config(
             app_type,
@@ -3165,6 +3323,8 @@ impl ProviderService {
                 previous_common_config_snippet,
                 apply_common_config,
                 false,
+                codex_rows,
+                previous_provider,
             ),
             AppType::Claude => Self::prepare_claude_live_write(
                 provider,

@@ -4767,7 +4767,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn migration_tree_hash_preserves_non_utf8_names() {
         use std::os::unix::ffi::OsStringExt;

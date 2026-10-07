@@ -6,7 +6,7 @@
 
 **Manage Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, and Pi from one interactive TUI or scriptable CLI.**
 
-[![Version](https://img.shields.io/badge/version-5.10.4-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.10.5-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -49,6 +49,18 @@ AICodeMirror also offers an exclusive benefit to users of the CC-Switch CLI proj
     </td>
     <td>
       Thanks to <b>ClaudeAPI</b> for supporting this project! <b>ClaudeAPI</b> is a Claude-focused API access provider built on official and AWS channels, offering high stability, low latency, and full support for Claude Code, Codex, Agent workflows, and enterprise use cases. It also supports business onboarding, team usage management, and invoicing. Exclusive offer for CC-Switch CLI users: register via this <a href="https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii">exclusive link</a> to receive free trial credits and get started with Claude Code instantly.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://pateway.ai/?ch=18fxbjo">
+        <img src="assets/partners/logos/pateway.png" alt="PatewayAI" width="150">
+      </a>
+    </td>
+    <td>
+      PatewayAI is an API relay service tailored for seasoned AI developers. It offers full‑fledged support for Claude and Codex model families. All models are sourced from high‑quality official channels with no diluted or counterfeit outputs. Transparent billing details are available for full traceability.<br/>
+      Enjoy rates as low as 95% off official pricing. Sign up via <a href="https://pateway.ai/?ch=18fxbjo">this link</a> to receive trial credits, and stay tuned for periodic promotional campaigns to earn free credits.<br/>
+      The platform also delivers enterprise‑grade concurrency capacity, a dedicated admin dashboard, formal contracts and invoicing support. Earn up to $150 in mutual referral bonuses.
     </td>
   </tr>
   <tr>
@@ -156,6 +168,7 @@ cc-switch provider export <id>       # Export a Claude provider to a standalone 
 cc-switch provider stream-check <id> # Check provider stream health
 cc-switch start claude <id>          # Launch Claude with this provider without switching globally
 cc-switch start codex <id>           # Launch Codex with this provider without switching globally
+cc-switch start codex <id> --shared-sessions # Share persistent Codex history across providers
 cc-switch start claude <id> --dry-run # Preview the launch without starting Claude
 cc-switch auth list                  # List managed ChatGPT/Codex OAuth accounts
 cc-switch sessions list --all        # Review saved assistant sessions
@@ -177,6 +190,10 @@ cc-switch --app pi provider list        # Manage Pi providers
 ```
 
 Use `cc-switch start` when you want different providers in multiple terminals. It only affects the Claude or Codex session launched by that command; `provider switch` and `use` still change the global provider. In the TUI, select a provider on the Providers page and press `o` for the same behavior.
+
+On macOS/Linux, add `--shared-sessions` to `start codex` to share the configured Codex home's sessions, archived sessions, and SQLite history index. Each provider uses a persistent, private directory under that home's `.cc-switch-launches/`; these directories must remain in place because Codex records session paths through them. Different providers can run concurrently; a second shared launch of the same provider is rejected while the first is running. Codex's per-thread writer locks are shared too, so close an active session before resuming it from another provider. Login changes are saved back to that provider, while launch-specific configuration is kept out of the saved provider settings. Native `--model`, `resume`, and `fork` arguments are supported; `--config`, `--profile`, and `--oss` overrides are not supported in shared mode.
+
+Shared launches use the existing unified `custom` provider identifier without changing the global history setting. To include older official sessions, use the existing **Unified Codex session history** setting and its optional migration. Cross-provider continuation still depends on the upstream accepting the old conversation's content, including encrypted reasoning. The default temporary launch and the TUI `o` shortcut remain unchanged.
 
 See the "Features" section for full command list.
 
@@ -564,7 +581,7 @@ When `CC_SWITCH_CONFIG_DIR` is set, CC-Switch uses that directory as its config 
   - Codex config directory uses CC-Switch's manual override first. If no override is configured, CC-Switch follows Codex's `$CODEX_HOME` when it points to an existing directory, otherwise it uses `$HOME/.codex`.
 - Gemini: `~/.gemini/.env` (provider env), `~/.gemini/settings.json` (settings + MCP), `~/.gemini/GEMINI.md` (prompts)
 - OpenCode: `~/.config/opencode/opencode.json` (providers + MCP + runtime config), `~/.config/opencode/AGENTS.md` (prompts)
-- Hermes: `~/.hermes/config.yaml` (providers + MCP + memory settings), `~/.hermes/AGENTS.md` (prompts), `~/.hermes/skills/` (skills), `~/.hermes/memories/` (memory)
+- Hermes: `<Hermes home>/config.yaml` (providers + MCP + memory settings), `AGENTS.md` (prompts), `skills/`, and `memories/`. Directory priority: `hermesConfigDir` in CC-Switch settings, then nonblank `HERMES_HOME`, then the platform default (`~/.hermes` on macOS/Linux; `%LOCALAPPDATA%\hermes` on Windows). Launch CC-Switch from an environment that exports the same `HERMES_HOME` as Hermes.
 - OpenClaw: `~/.openclaw/openclaw.json` (providers + env/tools/agents defaults), `~/.openclaw/AGENTS.md` (prompts)
 - Pi: `~/.pi/agent/models.json` (additive providers), `~/.pi/agent/settings.json` (read-only defaults/session location), `~/.pi/agent/AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `prompts/`, `skills/`, and `sessions/`
 

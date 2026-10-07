@@ -29,6 +29,7 @@ Examples:
 const CODEX_START_AFTER_LONG_HELP: &str = "\
 Examples:
   cc-switch start codex demo
+  cc-switch start codex demo --shared-sessions
   cc-switch start codex demo --dry-run
   cc-switch start codex demo -- --model gpt-5.4";
 
@@ -54,6 +55,9 @@ pub enum StartCommand {
         /// Preview the resolved launch without starting Codex
         #[arg(long)]
         dry_run: bool,
+        /// Share persistent Codex history while keeping provider credentials isolated
+        #[arg(long)]
+        shared_sessions: bool,
         /// Native Codex CLI arguments to pass through after `--`
         #[arg(last = true, value_name = "NATIVE_ARGS")]
         native_args: Vec<OsString>,
@@ -70,8 +74,9 @@ pub fn execute(cmd: StartCommand) -> Result<(), AppError> {
         StartCommand::Codex {
             selector,
             dry_run,
+            shared_sessions,
             native_args,
-        } => start_codex(&selector, dry_run, &native_args),
+        } => start_codex(&selector, dry_run, shared_sessions, &native_args),
     }
 }
 
@@ -104,7 +109,12 @@ fn start_claude(selector: &str, dry_run: bool, native_args: &[OsString]) -> Resu
     handoff_claude_and_cleanup(&prepared, native_args)
 }
 
-fn start_codex(selector: &str, dry_run: bool, native_args: &[OsString]) -> Result<(), AppError> {
+fn start_codex(
+    selector: &str,
+    dry_run: bool,
+    shared_sessions: bool,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
     start_with(
         selector,
         "Codex",
@@ -114,6 +124,12 @@ fn start_codex(selector: &str, dry_run: bool, native_args: &[OsString]) -> Resul
         },
         |provider| {
             ensure_codex_temp_launch_supported()?;
+            #[cfg(unix)]
+            if shared_sessions {
+                return crate::cli::codex_shared_launch::launch(provider, native_args, dry_run);
+            }
+            #[cfg(not(unix))]
+            let _ = shared_sessions;
             if dry_run {
                 let prepared = preview_codex_launch_with(
                     provider,

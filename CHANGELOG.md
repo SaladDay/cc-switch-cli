@@ -9,6 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.5] - 2026-09-15
+
+### Added
+
+- **Codex / Shared Sessions**: Add opt-in `cc-switch start codex <provider> --shared-sessions` on macOS/Linux. Providers keep separate credentials and configuration while sharing persistent native session history and session locks. Includes [#440](https://github.com/SaladDay/cc-switch-cli/pull/440), addressing [#436](https://github.com/SaladDay/cc-switch-cli/issues/436).
+- **Codex / Per-Model Reasoning**: Expose supported reasoning levels and a default for each model in both TUI model-catalog editors, with the existing Auto behavior and contextual help. Includes [#442](https://github.com/SaladDay/cc-switch-cli/pull/442), addressing [#441](https://github.com/SaladDay/cc-switch-cli/issues/441).
+- **Providers / PatewayAI**: Add the PatewayAI sponsor preset and its provider setup support.
+
+### Changed
+
+- **Quota / Reset Times**: Show quota reset timestamps in the local timezone, with UTC offsets and remaining time in CLI text; add compact reset countdowns to the TUI. Raw JSON timestamps and upstream quota calculations retain their existing semantics. Includes [#456](https://github.com/SaladDay/cc-switch-cli/pull/456), fixing [#445](https://github.com/SaladDay/cc-switch-cli/issues/445).
+- **Pricing / GPT-6 Astra**: Add standard prices per million tokens: $10 input, $50 output, $1 cached input, and $12.50 cache writes. Missing entries are added without replacing user-customized prices or restoring user-deleted entries. Includes [#460](https://github.com/SaladDay/cc-switch-cli/pull/460), fixing [#459](https://github.com/SaladDay/cc-switch-cli/issues/459).
+
+### Fixed
+
+- **Codex / Model Mapping Persistence**: Preserve stored model catalogs and per-model reasoning settings during provider switches and temporary-launch capture. Fixes [#447](https://github.com/SaladDay/cc-switch-cli/issues/447).
+- **Codex / User-Owned Catalogs**: Preserve custom `model_catalog_json` paths when generating a cc-switch catalog. Includes [#454](https://github.com/SaladDay/cc-switch-cli/pull/454).
+- **Codex / OpenCode Go Reasoning**: Recognize the OpenCode Zen gateway before applying model-vendor reasoning defaults, and constrain effort to the model's catalog settings. Fixes [#443](https://github.com/SaladDay/cc-switch-cli/issues/443).
+- **Proxy / Chat Completions Compatibility**: Convert null or missing message content to an empty string when translating Responses requests to Chat Completions, preserving tool payloads and multimodal content. Fixes the Azure compatibility issue in [#448](https://github.com/SaladDay/cc-switch-cli/issues/448).
+- **Windows / Session Scanning**: Open existing session-cache files with the access required for synchronization, avoiding `Access denied (os error 5)` without truncating their contents. Includes [#455](https://github.com/SaladDay/cc-switch-cli/pull/455), fixing [#450](https://github.com/SaladDay/cc-switch-cli/issues/450).
+- **Configuration / SQL Import**: Acquire the sync lock before synchronous import and live-config projection to avoid a nested-executor panic when importing or restoring SQL backups. Fixes [#453](https://github.com/SaladDay/cc-switch-cli/issues/453).
+- **TUI / Claude Quick Config**: Correct the displayed item total in the quick-configuration menu. Fixes [#435](https://github.com/SaladDay/cc-switch-cli/issues/435).
+
+### Upgrade notes
+
+- The database schema remains at v18; upgrading from v5.10.4 requires no schema migration.
+- Shared Codex sessions are opt-in and limited to macOS/Linux. Keep the persistent `.cc-switch-launches/` directories, allow only one shared launch per provider, and close a session before continuing it through another provider. See the [shared-session usage notes](https://github.com/SaladDay/cc-switch-cli/blob/v5.10.5/README.md) for argument restrictions and cross-provider limitations.
+- GPT-6 Astra uses the existing standard-rate calculator. Long-context and service-tier pricing are outside this release's pricing change.
+
+### Thanks
+
+Thank you to everyone who opened an issue or pull request, shared diagnostics, reviewed a change, or joined a discussion. This list covers issues and pull requests active since v5.10.4, including participants in their earlier discussions.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@6UOOON9](https://github.com/6UOOON9) | [#447](https://github.com/SaladDay/cc-switch-cli/issues/447) |
+| [@ChanthMiao](https://github.com/ChanthMiao) | [#409](https://github.com/SaladDay/cc-switch-cli/pull/409) |
+| [@Curious-r](https://github.com/Curious-r) | [#441](https://github.com/SaladDay/cc-switch-cli/issues/441), [#443](https://github.com/SaladDay/cc-switch-cli/issues/443) |
+| [@czfhhh](https://github.com/czfhhh) | [#454](https://github.com/SaladDay/cc-switch-cli/pull/454) |
+| [@Devin-Pi](https://github.com/Devin-Pi) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358), [#446](https://github.com/SaladDay/cc-switch-cli/pull/446) |
+| [@dividduang](https://github.com/dividduang) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@GMOogway](https://github.com/GMOogway) | [#433](https://github.com/SaladDay/cc-switch-cli/issues/433) |
+| [@HappyLiang12](https://github.com/HappyLiang12) | [#448](https://github.com/SaladDay/cc-switch-cli/issues/448) |
+| [@jinjiwu](https://github.com/jinjiwu) | [#436](https://github.com/SaladDay/cc-switch-cli/issues/436), [#445](https://github.com/SaladDay/cc-switch-cli/issues/445) |
+| [@JounQin](https://github.com/JounQin) | [#457](https://github.com/SaladDay/cc-switch-cli/issues/457) |
+| [@kelvkhiu](https://github.com/kelvkhiu) | [#444](https://github.com/SaladDay/cc-switch-cli/issues/444) |
+| [@moonjoke001](https://github.com/moonjoke001) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@netcatty](https://github.com/netcatty) | [#450](https://github.com/SaladDay/cc-switch-cli/issues/450) |
+| [@neverdie0710](https://github.com/neverdie0710) | [#451](https://github.com/SaladDay/cc-switch-cli/pull/451) |
+| [@odup](https://github.com/odup) | [#453](https://github.com/SaladDay/cc-switch-cli/issues/453) |
+| [@paopjian](https://github.com/paopjian) | [#439](https://github.com/SaladDay/cc-switch-cli/issues/439) |
+| [@RainyPixel](https://github.com/RainyPixel) | [#449](https://github.com/SaladDay/cc-switch-cli/pull/449) |
+| [@SaladDay](https://github.com/SaladDay) | [#440](https://github.com/SaladDay/cc-switch-cli/pull/440), [#442](https://github.com/SaladDay/cc-switch-cli/pull/442), [#455](https://github.com/SaladDay/cc-switch-cli/pull/455), [#456](https://github.com/SaladDay/cc-switch-cli/pull/456), [#460](https://github.com/SaladDay/cc-switch-cli/pull/460) |
+| [@suntory1](https://github.com/suntory1) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@SyaJask](https://github.com/SyaJask) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@tangjunyi1](https://github.com/tangjunyi1) | [#458](https://github.com/SaladDay/cc-switch-cli/issues/458) |
+| [@TheBoYang](https://github.com/TheBoYang) | [#432](https://github.com/SaladDay/cc-switch-cli/issues/432) |
+| [@tianzhuwei](https://github.com/tianzhuwei) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@Tonystarkw12](https://github.com/Tonystarkw12) | [#434](https://github.com/SaladDay/cc-switch-cli/pull/434) |
+| [@u1544096979](https://github.com/u1544096979) | [#437](https://github.com/SaladDay/cc-switch-cli/issues/437), [#438](https://github.com/SaladDay/cc-switch-cli/pull/438) |
+| [@wangsiqidahaoren](https://github.com/wangsiqidahaoren) | [#459](https://github.com/SaladDay/cc-switch-cli/issues/459) |
+| [@wbbo](https://github.com/wbbo) | [#435](https://github.com/SaladDay/cc-switch-cli/issues/435) |
+| [@xiaoshidebug](https://github.com/xiaoshidebug) | [#452](https://github.com/SaladDay/cc-switch-cli/issues/452) |
+
+We also thank [@farion1231](https://github.com/farion1231) and upstream CC-Switch contributors, including [@zayokami](https://github.com/zayokami) for the [OpenCode Zen reasoning fix](https://github.com/farion1231/cc-switch/pull/6123), and [@misaka-myu](https://github.com/misaka-myu) for the [user-owned catalog fix](https://github.com/farion1231/cc-switch/pull/6087).
+
+Some acknowledged reports and proposals remain open or are not included in this release; a thank-you does not imply that an issue is fixed or a pull request is merged.
+
 ## [5.10.4] - 2026-08-30
 
 ### Added

@@ -1532,6 +1532,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_quota_resets_at(time: &str) -> String {
+        if is_chinese() {
+            format!("重置时间: {time}")
+        } else {
+            format!("reset: {time}")
+        }
+    }
+
     pub fn tui_quota_resets_in(time: &str) -> String {
         if is_chinese() {
             format!("{time} 后重置")
@@ -2300,6 +2308,46 @@ pub mod texts {
         }
     }
 
+    pub fn tui_codex_reasoning_levels_header() -> &'static str {
+        if is_chinese() {
+            "档位"
+        } else {
+            "Levels"
+        }
+    }
+
+    pub fn tui_codex_reasoning_levels() -> &'static str {
+        if is_chinese() {
+            "推理档位"
+        } else {
+            "Reasoning Levels"
+        }
+    }
+
+    pub fn tui_codex_default_reasoning_header() -> &'static str {
+        if is_chinese() {
+            "默认"
+        } else {
+            "Default"
+        }
+    }
+
+    pub fn tui_codex_default_reasoning_level() -> &'static str {
+        if is_chinese() {
+            "默认推理档位"
+        } else {
+            "Default Reasoning Level"
+        }
+    }
+
+    pub fn tui_codex_reasoning_auto() -> &'static str {
+        if is_chinese() {
+            "自动"
+        } else {
+            "Auto"
+        }
+    }
+
     pub fn tui_codex_model_catalog_model_prompt() -> &'static str {
         if is_chinese() {
             "模型 ID"
@@ -2364,11 +2412,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_claude_quick_config_summary(enabled: usize) -> String {
+    pub fn tui_claude_quick_config_summary(enabled: usize, total: usize) -> String {
         if is_chinese() {
-            format!("已启用 {}/4", enabled)
+            format!("已启用 {}/{}", enabled, total)
         } else {
-            format!("{}/4 enabled", enabled)
+            format!("{}/{} enabled", enabled, total)
         }
     }
 

@@ -258,6 +258,8 @@ mod tests {
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
         old_config_dir: Option<OsString>,
+        old_hermes_home: Option<OsString>,
+        old_localappdata: Option<OsString>,
         old_disable_open: Option<OsString>,
         home: TempDir,
     }
@@ -269,7 +271,11 @@ mod tests {
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            let old_hermes_home = std::env::var_os("HERMES_HOME");
+            let old_localappdata = std::env::var_os("LOCALAPPDATA");
             let old_disable_open = std::env::var_os("CC_SWITCH_TEST_DISABLE_OPEN");
+            std::env::set_var("HERMES_HOME", home.path().join(".hermes"));
+            std::env::set_var("LOCALAPPDATA", home.path().join("AppData").join("Local"));
             std::env::set_var("HOME", home.path());
             std::env::set_var("USERPROFILE", home.path());
             std::env::set_var("CC_SWITCH_CONFIG_DIR", home.path().join(".cc-switch"));
@@ -281,6 +287,8 @@ mod tests {
                 old_home,
                 old_userprofile,
                 old_config_dir,
+                old_hermes_home,
+                old_localappdata,
                 old_disable_open,
                 home,
             }
@@ -297,6 +305,8 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
+            crate::test_support::restore_env("HERMES_HOME", &self.old_hermes_home);
+            crate::test_support::restore_env("LOCALAPPDATA", &self.old_localappdata);
             match &self.old_home {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),

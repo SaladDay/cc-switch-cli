@@ -453,6 +453,20 @@ fn infer_aggregator_platform_config(
         });
     }
 
+    // Zen uses gateway-level reasoning_effort with each model's catalog levels,
+    // rather than the model vendor's native thinking parameters (upstream #6123).
+    if platform.contains("opencode.ai") {
+        return Some(CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("none".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some("zen".to_string()),
+            output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
+        });
+    }
+
     None
 }
 
@@ -1088,6 +1102,63 @@ wire_api = "chat"
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("reasoning.effort"));
         assert_eq!(config.effort_value_mode.as_deref(), Some("openrouter"));
+    }
+
+    #[test]
+    fn opencode_zen_inference_uses_catalog_levels_in_chat_requests() {
+        let provider = create_provider(json!({
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_format": "openai_chat",
+            "modelCatalog": {"models": [
+                {"model": "glm-5.2", "reasoningLevels": ["high", "max"]},
+                {"model": "deepseek-v4-flash", "reasoning_levels": ["low", "high", "max"]},
+                {"model": "kimi-k3", "reasoningLevels": ["max"]},
+                {"model": "glm-5.1"}
+            ]}
+        }));
+        for (model, effort, expected) in [
+            ("GLM-5.2", "medium", Some("high")),
+            ("glm-5.2", "xhigh", Some("max")),
+            ("glm-5.2", "ultra", Some("max")),
+            ("deepseek-v4-flash", "low", Some("low")),
+            ("deepseek-v4-flash", "medium", Some("high")),
+            ("kimi-k3", "minimal", Some("max")),
+            ("glm-5.1", "high", None),
+            ("uncataloged-model", "high", None),
+            ("glm-5.2", "none", None),
+        ] {
+            let body = json!({"model": model, "input": "hello", "reasoning": {"effort": effort}});
+            let config = resolve_codex_chat_reasoning_config(&provider, &body)
+                .expect("infer Zen gateway reasoning");
+            assert_eq!(config.effort_value_mode.as_deref(), Some("zen"));
+            let result =
+                super::super::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+                    body,
+                    Some(&config),
+                )
+                .expect("translate Zen request");
+            assert_eq!(
+                result.get("reasoning_effort").and_then(JsonValue::as_str),
+                expected,
+                "{model}/{effort}"
+            );
+            assert!(result.get("thinking").is_none(), "{model}/{effort}");
+            assert!(result.get("reasoning").is_none(), "{model}/{effort}");
+        }
+    }
+
+    #[test]
+    fn opencode_name_alone_does_not_override_vendor_reasoning() {
+        let mut provider = create_provider(json!({
+            "base_url": "https://api.example.com/v1",
+            "api_format": "openai_chat"
+        }));
+        provider.name = "OpenCode compatible".to_string();
+        let config = resolve_codex_chat_reasoning_config(&provider, &json!({"model": "glm-5.2"}))
+            .expect("infer model vendor reasoning");
+        assert_eq!(config.thinking_param.as_deref(), Some("thinking"));
+        assert_eq!(config.supports_effort, Some(false));
+        assert_ne!(config.effort_value_mode.as_deref(), Some("zen"));
     }
 
     #[test]

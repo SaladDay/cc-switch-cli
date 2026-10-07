@@ -82,6 +82,12 @@ jobs:
           cargo check --lib --no-default-features
           cargo test --lib --no-default-features --no-run
 
+      - name: Test Windows session cache file synchronization
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        # These tests use only their own temporary directories.
+        run: cargo test --lib --no-default-features session_manager::paged_manifest::tests::sync_private_file -- --nocapture
+
       - name: Check default Windows CLI build
         if: runner.os == 'Windows'
         working-directory: src-tauri
@@ -93,7 +99,8 @@ jobs:
         run: |
           # This guard is deliberately limited to direct dependencies. A full-graph
           # guard would need an allowlist for legitimate core transitives.
-          cli_dependency_names='clap clap_complete colored comfy-table console crossterm env_logger indicatif inquire minisign-verify ratatui self-replace semver shlex tachyonfx tar unicode-width which windows-sys winreg'
+          # windows-sys is also required by the core atomic file writer.
+          cli_dependency_names='clap clap_complete colored comfy-table console crossterm env_logger indicatif inquire minisign-verify ratatui self-replace semver shlex tachyonfx tar unicode-width which winreg'
           cli_dependency_pattern="^($(printf '%s' "$cli_dependency_names" | tr ' ' '|')) v"
 
           cargo tree --target all -e normal --depth 1 --prefix none > default-direct-dependencies.txt

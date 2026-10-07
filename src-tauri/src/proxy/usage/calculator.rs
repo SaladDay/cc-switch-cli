@@ -240,6 +240,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_gpt_6_astra_seeded_cost() {
+        let db = Database::memory().unwrap();
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 200,
+            cache_creation_tokens: 100,
+            model: None,
+            message_id: None,
+        };
+
+        for model in ["gpt-6-astra", "gpt-6-astra-high", "openai/gpt-6-astra"] {
+            let pricing = lookup_model_pricing(&db, model).expect("Astra pricing");
+            let cost = calculate_cost(&AppType::Codex, &usage, Some(&pricing), Decimal::ONE)
+                .expect("Astra cost");
+            assert_eq!(format_decimal(cost.input_cost), "0.007");
+            assert_eq!(format_decimal(cost.output_cost), "0.025");
+            assert_eq!(format_decimal(cost.cache_read_cost), "0.0002");
+            assert_eq!(format_decimal(cost.cache_creation_cost), "0.00125");
+            assert_eq!(format_decimal(cost.total_cost), "0.03345");
+        }
+    }
+
+    #[test]
     fn test_cost_calculation() {
         let usage = TokenUsage {
             input_tokens: 1000,

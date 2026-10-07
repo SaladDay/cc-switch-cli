@@ -3,6 +3,8 @@ use clap_complete::Shell;
 use std::io::Write;
 
 mod claude_temp_launch;
+#[cfg(unix)]
+mod codex_shared_launch;
 mod codex_temp_launch;
 pub mod commands;
 pub mod editor;
@@ -754,6 +756,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_auth_reset_quota_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "auth",
+            "reset-quota",
+            "--confirm",
+            "--credit-id",
+            "RateLimitResetCredit_456",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::ResetQuota {
+                account_id,
+                credit_id,
+                confirm,
+                json,
+            })) => {
+                assert!(confirm);
+                assert!(json);
+                assert_eq!(credit_id.as_deref(), Some("RateLimitResetCredit_456"));
+                assert_eq!(account_id, None);
+            }
+            _ => panic!("expected auth reset-quota command"),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn parses_start_claude_subcommand() {
@@ -848,10 +878,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(!dry_run);
+                assert!(!shared_sessions);
                 assert!(native_args.is_empty());
             }
             _ => panic!("expected start codex command"),
@@ -876,10 +908,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(dry_run);
+                assert!(!shared_sessions);
                 assert_eq!(
                     native_args,
                     vec![OsString::from("--model"), OsString::from("gpt-5.4")]
@@ -908,10 +942,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(!dry_run);
+                assert!(!shared_sessions);
                 assert_eq!(
                     native_args,
                     vec![
@@ -1168,6 +1204,7 @@ mod tests {
             Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
                 id,
                 json,
+                ..
             })) => {
                 assert_eq!(id, "demo");
                 assert!(!json);
@@ -1184,11 +1221,43 @@ mod tests {
             Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
                 id,
                 json,
+                ..
             })) => {
                 assert_eq!(id, "demo");
                 assert!(json);
             }
             _ => panic!("expected provider quota json command"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_quota_reset_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "quota",
+            "demo",
+            "--reset",
+            "--confirm",
+            "--credit-id",
+            "RateLimitResetCredit_123",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
+                id,
+                json,
+                reset,
+                credit_id,
+                confirm,
+            })) => {
+                assert_eq!(id, "demo");
+                assert!(!json);
+                assert!(reset);
+                assert!(confirm);
+                assert_eq!(credit_id.as_deref(), Some("RateLimitResetCredit_123"));
+            }
+            _ => panic!("expected provider quota reset command"),
         }
     }
 

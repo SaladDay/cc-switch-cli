@@ -6,7 +6,7 @@
 
 **通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw 和 Pi。**
 
-[![Version](https://img.shields.io/badge/version-5.10.4-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.10.5-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -45,6 +45,18 @@ AICodeMirror 为 CC-Switch CLI 项目的用户提供了特别福利，通过[此
     </td>
     <td>
       感谢 <b>ClaudeAPI</b> 赞助本项目！<b>ClaudeAPI</b> 是一家专注 Claude 的 API 接入服务商，走官方与 AWS 渠道，主打高稳定、低延迟，完整支持 Claude Code、Codex 与 Agent 工作流。支持企业对接、发票服务，并可在 <b>CC-Switch CLI</b> 中一键配置调用。CC-Switch CLI 用户专属福利：通过<a href="https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii">此链接</a>注册，即可领取免费测试额度。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://pateway.ai/?ch=18fxbjo">
+        <img src="assets/partners/logos/pateway.png" alt="PatewayAI" width="150">
+      </a>
+    </td>
+    <td>
+      PatewayAI 是一家面向资深 AI 开发者的 API 中继服务商，完整支持 Claude 与 Codex 系列模型。所有模型均来自官方高质量渠道，绝无稀释、绝无伪造，计费明细透明可查。<br/>
+      经济模式低至 0.5 折，通过<a href="https://pateway.ai/?ch=18fxbjo">此链接</a>注册即可获得试用额度，还可参与不定时营销活动领取免费额度。<br/>
+      平台同时支持企业级并发、专属管理后台、正式合同与发票，并提供最高 150 美元的双向推荐奖励。
     </td>
   </tr>
   <tr>
@@ -155,6 +167,7 @@ cc-switch provider export <id>       # 导出 Claude 供应商为独立 settings
 cc-switch provider stream-check <id> # 检查供应商流式健康
 cc-switch start claude <id>          # 用指定供应商启动 Claude，不切换全局供应商
 cc-switch start codex <id>           # 用指定供应商启动 Codex，不切换全局供应商
+cc-switch start codex <id> --shared-sessions # 不同供应商共享持久化 Codex 历史
 cc-switch start claude <id> --dry-run # 仅预览启动配置
 cc-switch auth list                  # 查看托管的 ChatGPT/Codex OAuth 账号
 cc-switch sessions list --all        # 查看历史会话
@@ -176,6 +189,10 @@ cc-switch --app pi provider list        # 管理 Pi 供应商
 ```
 
 需要在多个终端同时使用不同供应商时，请使用 `cc-switch start`。它只影响由该命令启动的 Claude 或 Codex 会话；`provider switch` 和 `use` 仍会切换全局供应商。在 TUI 的供应商页选中供应商后按 `o`，效果相同。
+
+在 macOS/Linux 上，为 `start codex` 添加 `--shared-sessions`，即可共享当前配置的 Codex 目录中的会话、归档会话和 SQLite 历史索引。各供应商使用该目录下 `.cc-switch-launches/` 中独立、持久化的私有目录；Codex 会通过这些目录记录会话路径，因此请保留它们。不同供应商可以并行运行；同一供应商已有共享实例运行时，会拒绝第二次共享启动。原生 Codex 的会话写锁也会共享，因此切换供应商继续同一会话前，请先退出原会话。登录变更会回写到对应供应商，启动专用配置不会写回供应商设置。支持透传 `--model`、`resume` 和 `fork`；共享模式不支持 `--config`、`--profile` 和 `--oss` 覆盖。
+
+共享启动复用已有的统一 `custom` 供应商标识，不改变全局历史设置。若需纳入旧的官方会话，请使用现有的「统一 Codex 会话历史」设置及其可选迁移。跨供应商继续对话仍取决于上游能否接受原会话内容，包括加密推理内容。默认临时启动和 TUI 的 `o` 快捷键保持原有行为。
 
 完整命令列表请参考「功能特性」章节。
 

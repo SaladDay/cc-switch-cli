@@ -113,10 +113,10 @@ pub fn get_app_config_dir() -> PathBuf {
 /// 校验 CC_SWITCH_CONFIG_DIR 是否为安全的应用专属目录
 ///
 /// 拒绝系统关键目录（如 `/`、`/etc`、`/usr` 等），防止下游权限操作破坏系统。
-/// 未设置环境变量时默认路径 `~/.cc-switch` 始终安全，直接放行。
+/// 父目录可包含符号链接；配置目录本身及其内部仍受独立的写入保护。
 pub fn validate_config_dir() -> Result<(), AppError> {
     let path = get_app_config_dir();
-    let resolved = resolve_config_dir_without_following_user_symlinks(&path)?;
+    let resolved = resolve_config_dir(&path)?;
 
     if is_system_dir(&path) || is_system_dir(&resolved) {
         return Err(AppError::InvalidInput(texts::config_dir_is_system_dir(
@@ -452,7 +452,7 @@ pub(crate) fn resolve_managed_storage_path(path: &Path) -> Result<Option<PathBuf
         return Ok(None);
     }
 
-    let resolved_root = resolve_config_dir_without_following_user_symlinks(&raw_root)?;
+    let resolved_root = resolve_config_dir(&raw_root)?;
     let suffix = path
         .strip_prefix(&raw_root)
         .unwrap_or_else(|_| Path::new(""));
@@ -474,9 +474,9 @@ fn validate_managed_storage_suffix(suffix: &Path, original_path: &Path) -> Resul
     Ok(())
 }
 
-pub(crate) fn resolve_config_dir_without_following_user_symlinks(
-    path: &Path,
-) -> Result<PathBuf, AppError> {
+/// Resolve parent directory aliases (including NAS home mounts), while rejecting
+/// a symlink at the managed configuration root itself. Never change ancestor permissions.
+pub(crate) fn resolve_config_dir(path: &Path) -> Result<PathBuf, AppError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -502,7 +502,10 @@ pub(crate) fn resolve_config_dir_without_following_user_symlinks(
                 current.push(part);
                 match fs::symlink_metadata(&current) {
                     Ok(meta) if meta.file_type().is_symlink() => {
-                        if is_allowed_platform_config_symlink(&current) {
+                        if idx + 1 < components.len() {
+                            current = current
+                                .canonicalize()
+                                .map_err(|e| AppError::io(&current, e))?;
                             continue;
                         }
                         return Err(AppError::InvalidInput(format!(
@@ -536,8 +539,7 @@ pub(crate) fn create_managed_config_parent_dirs(path: &Path) -> Result<(), AppEr
         if let Some(parent) = resolved.parent() {
             #[cfg(unix)]
             {
-                let config_root =
-                    resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?;
+                let config_root = resolve_config_dir(&get_app_config_dir())?;
                 create_secure_config_dir_all_no_symlink(&config_root, parent)?;
             }
 
@@ -559,8 +561,7 @@ pub(crate) fn create_managed_config_dir_all(path: &Path) -> Result<(), AppError>
     if let Some(resolved) = resolve_managed_storage_path(path)? {
         #[cfg(unix)]
         {
-            let config_root =
-                resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?;
+            let config_root = resolve_config_dir(&get_app_config_dir())?;
             create_secure_config_dir_all_no_symlink(&config_root, &resolved)?;
         }
 
@@ -1003,7 +1004,7 @@ mod tests {
             "config dir should reject parent components instead of normalizing to the parent"
         );
         assert!(
-            resolve_config_dir_without_following_user_symlinks(&config_dir).is_err(),
+            resolve_config_dir(&config_dir).is_err(),
             "managed config root resolution must reject parent components"
         );
     }
@@ -1030,7 +1031,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn validate_config_dir_rejects_symlink_parent_without_touching_target() {
+    fn validate_config_dir_accepts_symlink_parent_without_touching_target() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let _guard = lock_test_home_and_settings();
@@ -1049,8 +1050,8 @@ mod tests {
             ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(raw_config.to_str().unwrap()));
 
         assert!(
-            validate_config_dir().is_err(),
-            "validation should reject the symlink parent component"
+            validate_config_dir().is_ok(),
+            "validation should accept a symlinked home parent"
         );
         let mode = std::fs::metadata(&external_config)
             .expect("metadata external config")
@@ -1277,10 +1278,10 @@ mod tests {
             &get_app_config_dir().join("settings.json"),
             &serde_json::json!({ "token": "secret" }),
         )
-        .expect_err("symlink component should be rejected before lexical dotdot collapse");
+        .expect_err("parent traversal should be rejected before lexical dotdot collapse");
 
         assert!(
-            err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+            err.to_string().contains("父目录组件"),
             "unexpected error: {err}"
         );
         assert!(
@@ -1327,4 +1328,207 @@ pub fn get_claude_config_status() -> ConfigStatus {
         exists: path.exists(),
         path: path.to_string_lossy().to_string(),
     }
+}
+
+/// 已写好、还没替换目标的临时文件。原子写的前半步：写入引擎先把一次操作涉及的
+/// 所有文件都备好临时文件、记下写前意图，再逐个 [`StagedWrite::commit`]。
+#[derive(Debug)]
+pub struct StagedWrite {
+    tmp: PathBuf,
+    path: PathBuf,
+}
+
+impl StagedWrite {
+    pub fn tmp_path(&self) -> &Path {
+        &self.tmp
+    }
+
+    /// 用临时文件替换目标（失败时删掉临时文件）。
+    pub fn commit(self) -> Result<(), AppError> {
+        commit_staged(&self.tmp, &self.path).inspect_err(|_| {
+            let _ = fs::remove_file(&self.tmp);
+        })
+    }
+}
+
+/// 写入临时文件：Unix 下 `unix_mode` 为 `None` 时沿用目标文件现有的权限位。
+/// `durable` 为真时写完先 fsync，崩溃恢复要靠这份临时文件前滚。
+pub(crate) fn stage_write(
+    path: &Path,
+    data: &[u8],
+    unix_mode: Option<u32>,
+    durable: bool,
+) -> Result<StagedWrite, AppError> {
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+
+    // Keep the CLI's managed-directory policy when upstream staging creates
+    // the device store before settings.json. In particular a permissive umask
+    // must not create a group-writable directory that later CLI writes reject.
+    create_managed_config_parent_dirs(path)?;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?
+        .to_string_lossy()
+        .to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (tmp, mut file) = (|| -> Result<(PathBuf, fs::File), AppError> {
+        let mut last_collision = None;
+        for _ in 0..16 {
+            let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                "{file_name}.tmp.{}.{ts}.{counter}",
+                std::process::id()
+            ));
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            if let Some(mode) = unix_mode {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(mode);
+            }
+            match options.open(&candidate) {
+                Ok(file) => return Ok((candidate, file)),
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_collision = Some((candidate, source));
+                }
+                Err(source) => return Err(AppError::io(&candidate, source)),
+            }
+        }
+
+        let (candidate, source) = last_collision.expect("temporary filename loop must run");
+        Err(AppError::io(&candidate, source))
+    })()?;
+
+    let written = file
+        .write_all(data)
+        .and_then(|_| file.flush())
+        .and_then(|_| if durable { file.sync_all() } else { Ok(()) });
+    if let Err(source) = written {
+        drop(file);
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::io(&tmp, source));
+    }
+    drop(file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = unix_mode {
+            if let Err(source) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+                let _ = fs::remove_file(&tmp);
+                return Err(AppError::io(&tmp, source));
+            }
+        } else if let Ok(meta) = fs::metadata(path) {
+            let perm = meta.permissions().mode();
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
+        }
+    }
+
+    Ok(StagedWrite {
+        tmp,
+        path: path.to_path_buf(),
+    })
+}
+
+/// 原子写的后半步：用 `tmp` 替换 `path`。崩溃恢复也用它提交上次留下的临时文件。
+///
+/// 失败时临时文件留在原处：写入引擎的 pending 指着它，下次恢复要靠它前滚（目标文件被
+/// 占用、只读这类失败，过后多半能补完）。只做一次性原子写的调用方自己删。
+pub(crate) fn commit_staged(tmp: &Path, path: &Path) -> Result<(), AppError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::ERROR_NOT_SUPPORTED, Storage::FileSystem::ReplaceFileW,
+        };
+
+        let replaced: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let replacement: Vec<u16> = tmp
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut completed = false;
+        let mut last_error = None;
+
+        for _ in 0..3 {
+            // SAFETY: both path buffers are NUL-terminated UTF-16 and remain alive for the
+            // duration of the call. Backup, exclusion, and reserved pointers are intentionally null.
+            let replaced_ok = unsafe {
+                ReplaceFileW(
+                    replaced.as_ptr(),
+                    replacement.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            if replaced_ok != 0 {
+                completed = true;
+                break;
+            }
+
+            let replace_error = std::io::Error::last_os_error();
+            // WSL UNC paths reject ReplaceFileW with ERROR_NOT_SUPPORTED (50).
+            // std::fs::rename uses a different replace-existing API on Windows.
+            let replace_not_supported =
+                replace_error.raw_os_error() == Some(ERROR_NOT_SUPPORTED as i32);
+            if replace_error.kind() != std::io::ErrorKind::NotFound && !replace_not_supported {
+                last_error = Some(replace_error);
+                break;
+            }
+
+            match fs::rename(tmp, path) {
+                Ok(()) => {
+                    completed = true;
+                    break;
+                }
+                Err(source)
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    last_error = Some(source);
+                }
+                Err(source) => {
+                    last_error = Some(source);
+                    break;
+                }
+            }
+        }
+
+        if !completed {
+            let source = last_error.unwrap_or_else(std::io::Error::last_os_error);
+            return Err(AppError::IoContext {
+                context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
+                source,
+            });
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(source) = fs::rename(tmp, path) {
+            return Err(AppError::IoContext {
+                context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
+                source,
+            });
+        }
+    }
+    Ok(())
 }

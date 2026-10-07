@@ -109,6 +109,12 @@ fn current_help_target(app: &App) -> HelpTarget {
                 provider_usage_query_overlay_target(app, UsageQueryField::Template)
             }
             Overlay::ProviderTemplatePicker { .. } => HelpTarget::ProviderTemplate,
+            Overlay::CodexReasoningLevelsPicker { .. } => HelpTarget::CodexModelCatalogField {
+                field: CodexModelCatalogField::ReasoningLevels,
+            },
+            Overlay::CodexDefaultReasoningPicker { .. } => HelpTarget::CodexModelCatalogField {
+                field: CodexModelCatalogField::DefaultReasoningLevel,
+            },
             Overlay::ClaudeApiFormatPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeApiFormat)
             }
@@ -234,11 +240,19 @@ fn current_help_target(app: &App) -> HelpTarget {
 
     if matches!(provider.page, ProviderFormPage::CodexLocalRouting) {
         return match provider.focus {
-            FormFocus::Fields => provider
-                .selected_codex_local_routing_field()
-                .map_or(HelpTarget::Empty, |field| {
-                    HelpTarget::CodexLocalRoutingField { field }
-                }),
+            FormFocus::Fields => {
+                provider
+                    .selected_codex_local_routing_field()
+                    .map_or(HelpTarget::Empty, |field| {
+                        if field == CodexLocalRoutingField::ModelCatalog {
+                            HelpTarget::CodexModelCatalogField {
+                                field: provider.codex_model_catalog_field,
+                            }
+                        } else {
+                            HelpTarget::CodexLocalRoutingField { field }
+                        }
+                    })
+            }
             _ => HelpTarget::Empty,
         };
     }
@@ -996,6 +1010,20 @@ fn local_proxy_settings_field_help(field: LocalProxySettingsField) -> HelpConten
 
 fn codex_model_catalog_field_help(field: CodexModelCatalogField) -> HelpContent {
     let mut content = match field {
+        CodexModelCatalogField::ReasoningLevels => HelpContent::new(
+            texts::tui_codex_reasoning_levels(),
+            help_lines(
+                "选择此模型支持的推理档位。Space 勾选，Enter 应用，Esc 取消。全部取消表示沿用目录模板；移除默认档位后，默认值恢复为自动。",
+                "Choose the reasoning levels supported by this model. Space toggles, Enter applies, Esc cancels. Clear all to inherit the catalog template; removing the default level resets the default to Auto.",
+            ),
+        ),
+        CodexModelCatalogField::DefaultReasoningLevel => HelpContent::new(
+            texts::tui_codex_default_reasoning_level(),
+            help_lines(
+                "默认值只能从此模型已选的推理档位中选择。自动表示优先沿用模板默认值；若不在已选档位中，则使用最高的已选档位。",
+                "Choose a default from this model's selected reasoning levels. Auto keeps the template default when supported, otherwise it uses the highest selected level.",
+            ),
+        ),
         CodexModelCatalogField::Model => HelpContent::new(
             tr("模型 ID", "Model ID"),
             help_lines(

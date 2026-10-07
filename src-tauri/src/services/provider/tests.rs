@@ -277,6 +277,9 @@ disable_response_storage = true
 
 #[test]
 fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
+    let catalog = json!({"models": [{"model": "gpt-5.4", "reasoningLevels": ["high"]}]});
+    let mut settings = codex_settings("model_reasoning_effort = \"medium\"\n");
+    settings["modelCatalog"] = catalog.clone();
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
     {
@@ -289,7 +292,7 @@ fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
             Provider::with_id(
                 "official".to_string(),
                 "OpenAI Official".to_string(),
-                codex_settings("model_reasoning_effort = \"medium\"\n"),
+                settings,
                 None,
             ),
         );
@@ -312,6 +315,7 @@ fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
 
     let providers = ProviderService::list(&state, AppType::Codex).expect("list providers");
     let provider = providers.get("official").expect("provider should remain");
+    assert_eq!(provider.settings_config["modelCatalog"], catalog);
     assert_eq!(
         provider
             .settings_config
@@ -637,7 +641,7 @@ fn official_codex_live_write_strips_stale_unified_bucket_when_disabled() {
     );
     provider.category = Some("official".to_string());
 
-    ProviderService::write_codex_live_force(&provider, None, false)
+    ProviderService::write_codex_live_force(&provider, None, false, &[])
         .expect("write official live config");
 
     let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
@@ -687,7 +691,86 @@ fn set_common_config_snippet_rejects_non_object_opencode_json() {
 
 #[test]
 #[serial]
-fn switch_codex_writes_auth_json_when_live_auth_file_is_missing() {
+fn switch_codex_preserves_all_model_catalogs_and_reasoning_levels() {
+    for wire_api in ["responses", "chat"] {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("initialize Codex");
+        let mut config = MultiAppConfig::default();
+        config.ensure_app(&AppType::Codex);
+        let manager = config.get_manager_mut(&AppType::Codex).unwrap();
+        let mut expected = Vec::new();
+        for id in ["a", "b", "c"] {
+            let mut settings = codex_settings(&format!(
+                "model_provider = \"custom\"\nmodel = \"model-{id}\"\n[model_providers.custom]\nname = \"{id}\"\nbase_url = \"https://{id}.example/v1\"\nwire_api = \"{wire_api}\"\n"
+            ));
+            let catalog = json!({"models": [{
+                "model": format!("model-{id}"), "displayName": id,
+                "contextWindow": 128000,
+                "reasoningLevels": ["low", "high"], "defaultReasoningLevel": "high"
+            }]});
+            settings["modelCatalog"] = catalog.clone();
+            expected.push((id, catalog));
+            manager.providers.insert(
+                id.into(),
+                Provider::with_id(id.into(), id.into(), settings, None),
+            );
+        }
+        manager.current = "a".into();
+        let initial_config = manager.providers["a"].settings_config["config"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let state = state_from_config(config);
+        // The outgoing live config has lost its catalog pointer, as can happen
+        // after a client rewrite. Stored mappings must still win on backfill.
+        std::fs::write(get_codex_config_path(), initial_config).unwrap();
+        for target in ["b", "c", "a"] {
+            ProviderService::switch(&state, AppType::Codex, target).expect("switch Codex provider");
+            for (id, catalog) in &expected {
+                let stored = state.db.get_provider_by_id(id, "codex").unwrap().unwrap();
+                assert_eq!(
+                    stored.settings_config.get("modelCatalog"),
+                    Some(catalog),
+                    "{wire_api}: {id} after switching to {target}"
+                );
+            }
+            state
+                .refresh_config_from_db()
+                .expect("reload saved snapshots");
+            let live: Value =
+                read_json_file(&crate::codex_config::get_codex_model_catalog_path()).unwrap();
+            assert_eq!(live["models"][0]["slug"], format!("model-{target}"));
+            assert_eq!(live["models"][0]["default_reasoning_level"], "high");
+            assert_eq!(
+                live["models"][0]["supported_reasoning_levels"][0]["effort"],
+                "low"
+            );
+            // A missing generated file must not erase the next outgoing catalog.
+            std::fs::remove_file(crate::codex_config::get_codex_model_catalog_path()).unwrap();
+        }
+
+        let mut cleared = state.db.get_provider_by_id("a", "codex").unwrap().unwrap();
+        cleared
+            .settings_config
+            .as_object_mut()
+            .unwrap()
+            .remove("modelCatalog");
+        ProviderService::update(&state, AppType::Codex, cleared).expect("explicitly clear mapping");
+        ProviderService::switch(&state, AppType::Codex, "b").unwrap();
+        ProviderService::switch(&state, AppType::Codex, "a").unwrap();
+        let stored = state.db.get_provider_by_id("a", "codex").unwrap().unwrap();
+        assert!(stored.settings_config.get("modelCatalog").is_none());
+        assert!(!std::fs::read_to_string(get_codex_config_path())
+            .unwrap()
+            .contains("model_catalog_json"));
+    }
+}
+
+#[test]
+#[serial]
+fn switch_codex_writes_scoped_key_when_live_auth_file_is_missing() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
@@ -731,14 +814,7 @@ fn switch_codex_writes_auth_json_when_live_auth_file_is_missing() {
     ProviderService::switch(&state, AppType::Codex, "p1")
         .expect("switch should write auth.json from provider snapshot");
 
-    assert!(
-        get_codex_auth_path().exists(),
-        "auth.json should be created from provider auth"
-    );
-    let live_auth: Value =
-        crate::config::read_json_file(&get_codex_auth_path()).expect("read auth");
-    assert_eq!(live_auth["OPENAI_API_KEY"], json!("sk-keyring"));
-
+    assert!(!get_codex_auth_path().exists());
     let live_config_text =
         std::fs::read_to_string(get_codex_config_path()).expect("read live config.toml");
 
@@ -1063,8 +1139,8 @@ trust_level = "trusted"
         "provider snapshot should not duplicate runtime project trust once it is auto-extracted into common config"
     );
     assert!(
-        p1_stored.contains("base_url = \"https://api.one-live.example/v1\""),
-        "effective current provider should receive live provider settings"
+        p1_stored.contains("base_url = \"https://api.one.example/v1\""),
+        "switching must not rewrite the stored provider template"
     );
     assert!(
         cfg.common_config_snippets
@@ -1091,24 +1167,19 @@ trust_level = "trusted"
         "state.save should persist the de-duplicated provider snapshot"
     );
 
-    // Upstream parity (clean overwrite): switching to p2 OVERWRITES config.toml
-    // with p2's effective config. p2 is not opted into the common config, so the
-    // runtime project trust (auto-extracted from p1's live config) is not forced
-    // into p2's live file. It is preserved in the common snippet instead.
+    // Upstream only patches provider fields; runtime project trust stays live.
     let p2_live = std::fs::read_to_string(get_codex_config_path()).expect("read p2 live config");
     assert!(
-        !p2_live.contains("/tmp/codex-project-a"),
-        "clean overwrite should not inject p1's runtime project trust into p2's live config"
+        p2_live.contains("/tmp/codex-project-a"),
+        "switching must preserve runtime project trust"
     );
 
     ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
-    // Switching back to p1 reapplies its common-config opt-in (set during the
-    // backfill that auto-extracted the runtime projects), so the project trust
-    // returns to the live config via the common snippet.
+    // Upstream leaves runtime project trust in live config across both switches.
     let p1_live = std::fs::read_to_string(get_codex_config_path()).expect("read p1 live config");
     assert!(
         p1_live.contains("[projects.\"/tmp/codex-project-a\"]"),
-        "runtime project trust should survive switching away and back via the common snippet"
+        "runtime project trust should survive switching away and back"
     );
 }
 
@@ -1189,8 +1260,8 @@ fn codex_switch_backfill_migrates_existing_common_meta_for_current_provider() {
     ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
     let live_config = std::fs::read_to_string(get_codex_config_path()).expect("read live config");
     assert!(
-        live_config.contains("disable_response_storage = true"),
-        "strict runtime opt-in should reapply the common snippet after switching back"
+        !live_config.contains("disable_response_storage = true"),
+        "ordinary switches must project the stored provider fields without merging common snippets"
     );
 }
 
@@ -5309,7 +5380,7 @@ fn clearing_claude_common_snippet_tolerates_invalid_stored_snippet() {
 
 #[test]
 #[serial]
-fn common_config_snippet_is_merged_into_codex_config_on_write() {
+fn ordinary_codex_write_does_not_merge_saved_common_config() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
@@ -5335,8 +5406,8 @@ fn common_config_snippet_is_merged_into_codex_config_on_write() {
 
     let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
-        live_text.contains("disable_response_storage = true"),
-        "common snippet should be merged into config.toml"
+        !live_text.contains("disable_response_storage = true"),
+        "ordinary provider writes must not replay saved common snippets"
     );
 }
 

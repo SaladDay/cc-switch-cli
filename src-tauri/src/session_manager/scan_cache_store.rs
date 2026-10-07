@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
-use crate::config::{get_app_config_dir, resolve_config_dir_without_following_user_symlinks};
+use crate::config::{get_app_config_dir, resolve_config_dir};
 use crate::error::AppError;
 use crate::session_manager::cache::{CachedScanRow, SessionScanCacheEntry};
 
@@ -82,7 +82,7 @@ pub struct SyncResumeHint {
 impl ScanCacheStore {
     /// 打开（必要时创建）配置目录下的 sidecar 缓存库。
     pub fn open() -> Result<Self, AppError> {
-        let config_dir = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?;
+        let config_dir = resolve_config_dir(&get_app_config_dir())?;
         Self::open_at(&config_dir.join(SCAN_CACHE_DB_FILE))
     }
 
@@ -184,7 +184,7 @@ impl ScanCacheStore {
     /// sidecar 缓存库的磁盘路径（不打开连接；诊断/清理用）。
     #[allow(dead_code)]
     pub fn path() -> Result<PathBuf, AppError> {
-        let config_dir = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?;
+        let config_dir = resolve_config_dir(&get_app_config_dir())?;
         Ok(config_dir.join(SCAN_CACHE_DB_FILE))
     }
 

@@ -336,11 +336,22 @@ impl ConfigService {
             provider,
             common_config_snippet.as_deref(),
             apply_common_config,
+            &config
+                .get_manager(&AppType::Codex)
+                .map(|manager| manager.providers.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default(),
         )?;
         crate::mcp::sync_enabled_to_codex(config)?;
 
         let auth_path = crate::codex_config::get_codex_auth_path();
-        let auth_after = if auth_path.exists() {
+        let auth_after = if ProviderService::codex_live_write_category(provider) == Some("official")
+        {
+            provider
+                .settings_config
+                .get("auth")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else if auth_path.exists() {
             crate::config::read_json_file(&auth_path)?
         } else {
             serde_json::json!({})
