@@ -1,6 +1,7 @@
 pub mod body_filter;
 pub mod cache_injector;
 pub mod circuit_breaker;
+pub(crate) mod content_encoding;
 pub mod copilot_optimizer;
 pub mod error;
 pub mod forwarder;

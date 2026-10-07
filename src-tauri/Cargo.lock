@@ -564,6 +564,7 @@ dependencies = [
  "windows-sys 0.61.1",
  "winreg",
  "zip",
+ "zstd",
 ]
 
 [[package]]
