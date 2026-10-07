@@ -18,7 +18,7 @@ fn third_party_codex_provider(api_key: &str) -> Provider {
 
 #[test]
 #[serial]
-fn switch_codex_provider_writes_stored_config_directly() {
+fn switch_codex_provider_projects_route_with_provider_scoped_credentials() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
@@ -50,8 +50,8 @@ fn switch_codex_provider_writes_stored_config_directly() {
     let config_text =
         std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");
     assert!(
-        config_text.contains("requires_openai_auth = true"),
-        "config.toml should contain requires_openai_auth from stored config"
+        config_text.contains("requires_openai_auth = false"),
+        "a third-party route without an official login must not require one"
     );
     assert!(
         config_text.contains("base_url = \"https://api.openai.com/v1\""),
@@ -224,22 +224,14 @@ fn force_sync_codex_third_party_refreshes_auth_when_preserve_is_disabled() {
     .expect("seed stale auth.json");
 
     let provider = third_party_codex_provider("sk-current-provider");
-    ProviderService::write_codex_live_force(&provider, None, false)
+    ProviderService::write_codex_live_force(&provider, None, false, &[])
         .expect("force sync should succeed");
 
-    let auth: Value =
-        crate::config::read_json_file(&get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth.get("OPENAI_API_KEY").and_then(Value::as_str),
-        Some("sk-current-provider"),
-        "force sync must replace a stale third-party API key"
-    );
-
+    assert!(!get_codex_auth_path().exists());
     let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert_eq!(
-        crate::codex_config::extract_codex_experimental_bearer_token(&config_text),
-        None,
-        "preserve disabled must keep the provider API key in auth.json"
+        crate::codex_config::extract_codex_experimental_bearer_token(&config_text).as_deref(),
+        Some("sk-current-provider")
     );
 }
 
@@ -265,7 +257,7 @@ fn force_sync_codex_third_party_preserves_oauth_when_preserve_is_enabled() {
         .expect("seed OAuth auth.json");
 
     let provider = third_party_codex_provider("sk-current-provider");
-    ProviderService::write_codex_live_force(&provider, None, false)
+    ProviderService::write_codex_live_force(&provider, None, false, &[])
         .expect("force sync should succeed");
 
     let auth: Value =
@@ -326,6 +318,7 @@ fn switch_codex_third_party_discards_stray_chatgpt_oauth_after_login() {
                 Some("official".to_string()),
             ),
         );
+        manager.providers.get_mut("official").unwrap().category = Some("official".into());
         manager.current = "thirdparty".to_string();
     }
 
@@ -371,18 +364,11 @@ fn switch_codex_third_party_discards_stray_chatgpt_oauth_after_login() {
     ProviderService::switch(&state, AppType::Codex, "thirdparty")
         .expect("switch back to thirdparty");
 
-    let auth_final: Value =
-        crate::config::read_json_file(&get_codex_auth_path()).expect("auth.json final");
+    assert!(!get_codex_auth_path().exists());
     let cfg_final = std::fs::read_to_string(get_codex_config_path()).expect("config.toml final");
-
-    assert!(
-        auth_final.pointer("/tokens/access_token").is_none(),
-        "live auth.json must not retain ChatGPT OAuth tokens after switching to third-party: {auth_final}"
-    );
     assert_eq!(
-        auth_final.get("OPENAI_API_KEY").and_then(Value::as_str),
-        Some("sk-thirdparty"),
-        "live auth.json must carry the third-party API key: {auth_final}"
+        crate::codex_config::extract_codex_experimental_bearer_token(&cfg_final).as_deref(),
+        Some("sk-thirdparty")
     );
     assert!(
         cfg_final.contains("base_url = \"http://localhost:8317/v1\""),
@@ -445,4 +431,371 @@ fn migrate_legacy_codex_config_preserves_extra_keys() {
         result.contains("disable_response_storage = true"),
         "should preserve disable_response_storage: {result}"
     );
+}
+
+fn auth_switch_state() -> AppState {
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    let manager = config.get_manager_mut(&AppType::Codex).unwrap();
+    manager.providers.insert(
+        "thirdparty".into(),
+        third_party_codex_provider("sk-thirdparty"),
+    );
+    manager.providers.insert(
+        "official".into(),
+        Provider::with_id(
+            "official".into(),
+            "OpenAI Official".into(),
+            json!({"auth": {}, "config": "model = \"gpt-5.2\"\n"}),
+            Some("official".into()),
+        ),
+    );
+    manager.providers.get_mut("official").unwrap().category = Some("official".into());
+    manager.current = "official".into();
+    state_from_config(config)
+}
+
+#[test]
+#[serial]
+fn official_login_round_trip_uses_local_stash_without_backfilling_tokens() {
+    for preserve in [false, true] {
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::isolated(home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+        crate::settings::set_preserve_codex_official_auth_on_switch(preserve).unwrap();
+        let state = auth_switch_state();
+        let login = json!({"auth_mode":"chatgpt", "tokens": {"access_token":"fresh", "refresh_token":"rotated", "account_id":"a"}});
+        write_json_file(&get_codex_auth_path(), &login).unwrap();
+        crate::config::write_text_file(
+            &get_codex_config_path(),
+            "model = \"gpt-5.2\"\n# user setting\napproval_policy = \"never\"\n",
+        )
+        .unwrap();
+        ProviderService::switch(&state, AppType::Codex, "thirdparty").unwrap();
+        assert_eq!(get_codex_auth_path().exists(), preserve);
+        let text = std::fs::read_to_string(get_codex_config_path()).unwrap();
+        assert_eq!(
+            crate::codex_config::extract_codex_experimental_bearer_token(&text).as_deref(),
+            Some("sk-thirdparty")
+        );
+        assert!(text.contains("# user setting"));
+        assert!(text.contains("approval_policy = \"never\""));
+        let providers = state.db.get_all_providers("codex").unwrap();
+        assert_eq!(providers["official"].settings_config["auth"], json!({}));
+        ProviderService::switch(&state, AppType::Codex, "official").unwrap();
+        assert_eq!(
+            read_json_file::<Value>(&get_codex_auth_path()).unwrap(),
+            login
+        );
+        assert_eq!(
+            state.db.get_all_providers("codex").unwrap()["official"].settings_config["auth"],
+            json!({})
+        );
+        let text = std::fs::read_to_string(get_codex_config_path()).unwrap();
+        assert!(!text.contains("sk-thirdparty"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(codex_live::stash_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn official_switch_removes_known_legacy_key_but_preserves_independent_api_login() {
+    for (key, remains) in [("sk-thirdparty", false), ("sk-my-openai-login", true)] {
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::isolated(home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+        let state = auth_switch_state();
+        write_json_file(
+            &get_codex_auth_path(),
+            &json!({"OPENAI_API_KEY":key, "last_refresh":"metadata"}),
+        )
+        .unwrap();
+        ProviderService::switch(&state, AppType::Codex, "official").unwrap();
+        assert_eq!(get_codex_auth_path().exists(), remains);
+    }
+}
+
+#[test]
+#[serial]
+fn unreadable_login_stash_blocks_switch_before_any_credentials_change() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    crate::settings::set_preserve_codex_official_auth_on_switch(false).unwrap();
+    let state = auth_switch_state();
+    let login = json!({"tokens":{"access_token":"fresh"}});
+    write_json_file(&get_codex_auth_path(), &login).unwrap();
+    crate::config::atomic_write_private(&codex_live::stash_path(), b"broken").unwrap();
+    assert!(ProviderService::switch(&state, AppType::Codex, "thirdparty").is_err());
+    assert_eq!(
+        read_json_file::<Value>(&get_codex_auth_path()).unwrap(),
+        login
+    );
+    assert_eq!(std::fs::read(codex_live::stash_path()).unwrap(), b"broken");
+}
+
+#[test]
+#[serial]
+fn interrupted_switch_recovers_credentials_and_pointer_before_switching_again() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    crate::settings::set_preserve_codex_official_auth_on_switch(false).unwrap();
+    let state = auth_switch_state();
+    let login = json!({"tokens":{"access_token":"fresh", "account_id":"a"}});
+    write_json_file(&get_codex_auth_path(), &login).unwrap();
+    crate::mode::operation::failpoint::crash_at(Some("published:0"));
+    let result = ProviderService::switch(&state, AppType::Codex, "thirdparty");
+    crate::mode::operation::failpoint::crash_at(None);
+    assert!(result.is_err());
+    assert!(
+        crate::mode::state::pending(&crate::live::engine::DeviceStore::for_device(), "codex")
+            .unwrap()
+            .is_some()
+    );
+    ProviderService::switch(&state, AppType::Codex, "official").unwrap();
+    assert_eq!(
+        read_json_file::<Value>(&get_codex_auth_path()).unwrap(),
+        login
+    );
+    assert_eq!(
+        ProviderService::current(&state, AppType::Codex).unwrap(),
+        "official"
+    );
+    assert!(
+        crate::mode::state::pending(&crate::live::engine::DeviceStore::for_device(), "codex")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+#[serial]
+fn reselecting_official_after_logout_does_not_restore_legacy_row_tokens() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let state = auth_switch_state();
+    {
+        let mut config = state.config.write().unwrap();
+        config
+            .get_manager_mut(&AppType::Codex)
+            .unwrap()
+            .providers
+            .get_mut("official")
+            .unwrap()
+            .settings_config["auth"] = json!({"tokens":{"access_token":"stale", "account_id":"a"}});
+    }
+    state.save().unwrap();
+    ProviderService::switch(&state, AppType::Codex, "official").unwrap();
+    assert!(!get_codex_auth_path().exists());
+}
+
+#[test]
+#[serial]
+fn unpublished_conflict_keeps_external_token_rotation_and_config_edit() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let state = auth_switch_state();
+    write_json_file(
+        &get_codex_auth_path(),
+        &json!({"tokens":{"access_token":"old"}}),
+    )
+    .unwrap();
+    crate::mode::operation::failpoint::on_before_publish(Some(Box::new(|index, _path| {
+        if index == 0 {
+            std::fs::write(
+                get_codex_auth_path(),
+                br#"{"tokens":{"access_token":"rotated"}}"#,
+            )
+            .unwrap();
+            std::fs::write(get_codex_config_path(), b"user_edit = [").unwrap();
+        }
+    })));
+    let result = ProviderService::switch(&state, AppType::Codex, "thirdparty");
+    crate::mode::operation::failpoint::on_before_publish(None);
+    assert!(result.is_err());
+    assert_eq!(
+        read_json_file::<Value>(&get_codex_auth_path()).unwrap()["tokens"]["access_token"],
+        "rotated"
+    );
+    assert_eq!(
+        std::fs::read_to_string(get_codex_config_path()).unwrap(),
+        "user_edit = ["
+    );
+    assert_eq!(
+        ProviderService::current(&state, AppType::Codex).unwrap(),
+        "official"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn codex_switch_with_group_writable_umask_creates_compatible_managed_directory() {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    const CHILD: &str = "CC_SWITCH_TEST_480_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "services::provider::codex_openai_auth_tests::codex_switch_with_group_writable_umask_creates_compatible_managed_directory", "--nocapture"])
+            .env(CHILD, "1");
+        // Change umask only in the child; other tests in this process are unaffected.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0o002);
+                Ok(())
+            });
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let state = auth_switch_state();
+    ProviderService::switch(&state, AppType::Codex, "thirdparty").unwrap();
+    assert_eq!(
+        std::fs::metadata(crate::config::get_app_config_dir())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(codex_live::stash_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[test]
+#[serial]
+fn ordinary_switch_preserves_live_edits_after_common_snippet_was_saved() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let state = auth_switch_state();
+    {
+        let mut config = state.config.write().unwrap();
+        config.common_config_snippets.codex = Some("approval_policy = \"on-request\"".into());
+        for provider in config
+            .get_manager_mut(&AppType::Codex)
+            .unwrap()
+            .providers
+            .values_mut()
+        {
+            provider
+                .meta
+                .get_or_insert_with(Default::default)
+                .apply_common_config = Some(true);
+        }
+    }
+    state.save().unwrap();
+    crate::config::write_text_file(&get_codex_config_path(), "approval_policy = \"never\"\n")
+        .unwrap();
+    for id in ["thirdparty", "official"] {
+        ProviderService::switch(&state, AppType::Codex, id).unwrap();
+        let live = std::fs::read_to_string(get_codex_config_path()).unwrap();
+        assert!(live.contains("approval_policy = \"never\""), "{live}");
+    }
+}
+
+#[test]
+#[serial]
+fn token_rotation_rejects_switch_before_route_or_stash_publication() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    crate::settings::set_preserve_codex_official_auth_on_switch(false).unwrap();
+    let state = auth_switch_state();
+    let config = "model = \"gpt-5.2\"\napproval_policy = \"never\"\n";
+    crate::config::write_text_file(&get_codex_config_path(), config).unwrap();
+    write_json_file(
+        &get_codex_auth_path(),
+        &json!({"tokens":{"access_token":"old"}}),
+    )
+    .unwrap();
+    crate::mode::operation::failpoint::on_before_publish(Some(Box::new(|index, _| {
+        if index == 0 {
+            std::fs::write(
+                get_codex_auth_path(),
+                br#"{"tokens":{"access_token":"rotated"}}"#,
+            )
+            .unwrap();
+        }
+    })));
+    let result = ProviderService::switch(&state, AppType::Codex, "thirdparty");
+    crate::mode::operation::failpoint::on_before_publish(None);
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read_to_string(get_codex_config_path()).unwrap(),
+        config
+    );
+    assert_eq!(
+        read_json_file::<Value>(&get_codex_auth_path()).unwrap()["tokens"]["access_token"],
+        "rotated"
+    );
+    assert!(!super::codex_live::stash_path().exists());
+    assert_eq!(
+        ProviderService::current(&state, AppType::Codex).unwrap(),
+        "official"
+    );
+    assert!(crate::mode::operation::settle(&state.db, "codex")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+#[serial]
+fn malformed_or_unreadable_auth_does_not_block_upstream_route_switching() {
+    for unreadable in [false, true] {
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::isolated(home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+        crate::settings::set_preserve_codex_official_auth_on_switch(false).unwrap();
+        let auth_path = get_codex_auth_path();
+        if unreadable {
+            std::fs::create_dir(&auth_path).unwrap();
+        } else {
+            std::fs::write(&auth_path, "{").unwrap();
+        }
+        let state = auth_switch_state();
+        for id in ["thirdparty", "official"] {
+            ProviderService::switch(&state, AppType::Codex, id).unwrap();
+            assert_eq!(
+                ProviderService::current(&state, AppType::Codex).unwrap(),
+                id
+            );
+            if unreadable {
+                assert!(auth_path.is_dir());
+            } else {
+                assert!(
+                    !auth_path.exists(),
+                    "upstream clears malformed auth when preservation is off"
+                );
+            }
+        }
+    }
 }

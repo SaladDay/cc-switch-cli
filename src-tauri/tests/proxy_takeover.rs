@@ -1172,16 +1172,19 @@ async fn app_state_try_new_restores_codex_from_current_provider_and_auth_json() 
     let restored_config =
         std::fs::read_to_string(get_codex_config_path()).expect("read restored codex config.toml");
     assert!(
-        restored_config.contains("https://api.openai.com/v1"),
-        "startup recovery should restore the current Codex provider config"
+        !restored_config.contains("model_provider ="),
+        "official recovery should use the built-in OpenAI route"
     );
     assert!(
         restored_config.contains("disable_response_storage = true"),
         "startup recovery should reapply the Codex common snippet when restoring from the current provider"
     );
     assert!(
-        !restored_config.contains("127.0.0.1"),
-        "startup recovery should clear stale Codex localhost proxy routing"
+        toml::from_str::<toml::Value>(&restored_config)
+            .unwrap()
+            .get("openai_base_url")
+            .is_none(),
+        "startup recovery must not redirect the built-in OpenAI route to the proxy"
     );
     assert!(
         !recovered

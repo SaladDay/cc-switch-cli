@@ -15,9 +15,7 @@ use serde::de::{Error as _, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{sort_by_recent, SessionMeta, CACHED_PROVIDERS, SCAN_CACHE_FIRST_PAINT_LIMIT};
-use crate::config::{
-    atomic_write, get_app_config_dir, resolve_config_dir_without_following_user_symlinks,
-};
+use crate::config::{atomic_write, get_app_config_dir, resolve_config_dir};
 use crate::error::AppError;
 
 const SNAPSHOT_FORMAT_VERSION: u32 = 1;
@@ -296,8 +294,7 @@ fn write_scope<'a>(
 /// Remove a deleted session from the bounded provider and global snapshots so
 /// stale first paint cannot briefly resurrect it before revalidation finishes.
 pub(crate) fn purge(provider_id: &str, session_id: &str, source_path: &str) {
-    let Ok(config_dir) = resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())
-    else {
+    let Ok(config_dir) = resolve_config_dir(&get_app_config_dir()) else {
         return;
     };
     register_delete_and_purge_at(&config_dir, provider_id, session_id, source_path);

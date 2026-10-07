@@ -2,7 +2,7 @@ use clap::Subcommand;
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
-use crate::cli::ui::{create_table, info, success, to_json};
+use crate::cli::ui::{create_table, highlight, info, success, to_json, warning};
 use crate::error::AppError;
 use crate::services::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse};
 
@@ -47,6 +47,21 @@ pub enum AuthCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Reset Codex rate limit quota using a banked reset credit
+    ResetQuota {
+        /// Account ID (defaults to active account)
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Specific credit ID to consume (defaults to earliest expiring)
+        #[arg(long)]
+        credit_id: Option<String>,
+        /// Confirm consumption (safety gate; without this, runs in dry-run mode)
+        #[arg(long)]
+        confirm: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -66,6 +81,12 @@ pub fn execute(cmd: AuthCommand) -> Result<(), AppError> {
         AuthCommand::Default { account_id } => set_default(&runtime, &account_id),
         AuthCommand::Remove { account_id, yes } => remove_account(&runtime, &account_id, yes),
         AuthCommand::Logout { yes } => logout(&runtime, yes),
+        AuthCommand::ResetQuota {
+            account_id,
+            credit_id,
+            confirm,
+            json,
+        } => reset_quota(&runtime, account_id, credit_id, confirm, json),
     }
 }
 
@@ -324,4 +345,120 @@ mod tests {
         assert!(normalize_account_id("  \n").is_err());
         assert_eq!(normalize_account_id(" acc-123 ").unwrap(), "acc-123");
     }
+}
+
+fn reset_quota(
+    runtime: &tokio::runtime::Runtime,
+    account_id: Option<String>,
+    credit_id: Option<String>,
+    confirm: bool,
+    json: bool,
+) -> Result<(), AppError> {
+    let quota = runtime
+        .block_on(AuthService::get_quota(
+            AUTH_PROVIDER_CODEX_OAUTH,
+            account_id.as_deref(),
+        ))
+        .map_err(AppError::Message)?;
+
+    let summary = quota.reset_credits.as_ref();
+    let available_count = summary.map(|s| s.available_count).unwrap_or(0);
+    if available_count == 0 {
+        return Err(AppError::Message(
+            "No rate limit reset credits are available for this account.".to_string(),
+        ));
+    }
+
+    let credits = summary.map(|s| &s.credits[..]).unwrap_or(&[]);
+    let selected_credit = match &credit_id {
+        Some(cid) => credits
+            .iter()
+            .find(|c| &c.id == cid)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::Message(format!(
+                    "Specified credit ID '{cid}' was not found in available credits."
+                ))
+            })?,
+        None => credits.first().cloned().ok_or_else(|| {
+            AppError::Message("No available reset credit to consume.".to_string())
+        })?,
+    };
+
+    if !confirm {
+        if json {
+            let dry_run = serde_json::json!({
+                "dryRun": true,
+                "targetCredit": selected_credit,
+                "availableCount": available_count,
+                "message": "To redeem this credit and reset rate limits, run again with --confirm.",
+            });
+            println!(
+                "{}",
+                to_json(&dry_run).map_err(|source| AppError::JsonSerialize { source })?
+            );
+            return Ok(());
+        }
+
+        println!("{}", highlight("=== Rate Limit Reset Credit (Dry Run) ==="));
+        println!("Credit ID:       {}", selected_credit.id);
+        if let Some(title) = &selected_credit.title {
+            println!("Title:           {}", title);
+        }
+        if let Some(expires) = &selected_credit.expires_at {
+            println!("Expires at:      {}", expires);
+        }
+        println!("Available Cards: {}", available_count);
+        println!();
+        println!(
+            "{}",
+            warning("⚠ Consuming a reset credit is permanent and cannot be undone.")
+        );
+        println!(
+            "{}",
+            info(
+                "To consume this credit, re-run with --confirm:
+  cc-switch auth reset-quota --confirm"
+            )
+        );
+        return Ok(());
+    }
+
+    let result = runtime
+        .block_on(AuthService::reset_quota(
+            AUTH_PROVIDER_CODEX_OAUTH,
+            account_id.as_deref(),
+            Some(&selected_credit.id),
+        ))
+        .map_err(AppError::Message)?;
+
+    if json {
+        println!(
+            "{}",
+            to_json(&result).map_err(|source| AppError::JsonSerialize { source })?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        success("✓ Rate limit reset credit successfully redeemed!")
+    );
+    println!("Credit ID:         {}", result.credit_id);
+    println!("Redeem Request ID: {}", result.redeem_request_id);
+    println!("Upstream Code:     {}", result.code);
+    if let Some(win) = result.windows_reset {
+        println!("Windows Reset:     {}", win);
+    }
+    if let Some(new_q) = &result.new_quota {
+        println!();
+        println!("{}", highlight("Updated Quota:"));
+        for tier in &new_q.tiers {
+            println!("  {}: {:.1}%", tier.name, tier.utilization);
+        }
+        if let Some(rc) = &new_q.reset_credits {
+            println!("  Remaining Credits: {}", rc.available_count);
+        }
+    }
+    Ok(())
 }

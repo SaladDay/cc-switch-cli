@@ -109,7 +109,7 @@ fn insert_codex_managed_mcp(config: &mut MultiAppConfig) {
 }
 
 #[test]
-fn reapply_codex_official_live_resyncs_mcp_servers() {
+fn reapply_codex_official_live_preserves_existing_mcp_servers() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -119,7 +119,11 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         "OPENAI_API_KEY": null,
         "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
     });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
+    write_codex_live_atomic(
+        &live_auth,
+        Some("[mcp_servers.echo-server]\ncommand = \"user-command\"\n"),
+    )
+    .expect("seed official live auth");
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -153,7 +157,7 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         .expect("read config.toml after switch");
     assert!(
         live.contains("mcp_servers.echo-server"),
-        "switch should sync enabled MCP servers into live"
+        "switch should preserve existing MCP servers in live"
     );
 
     let reapplied =
@@ -167,7 +171,7 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         .expect("read config.toml after reapply");
     assert!(
         live.contains("mcp_servers.echo-server"),
-        "reapply must re-project enabled MCP servers after the full live rewrite, got: {live}"
+        "reapply must preserve existing MCP servers, got: {live}"
     );
 }
 
@@ -182,7 +186,11 @@ fn codex_unified_session_bucket_stays_live_only_across_provider_switches() {
         "OPENAI_API_KEY": null,
         "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
     });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
+    write_codex_live_atomic(
+        &live_auth,
+        Some("[mcp_servers.echo-server]\ncommand = \"user-command\"\n"),
+    )
+    .expect("seed official live auth");
 
     let mut settings = AppSettings::load();
     settings.unify_codex_session_history = true;
@@ -337,14 +345,14 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
+        config_text.contains("mcp_servers.legacy"),
+        "switch must preserve live MCP servers instead of resyncing stored definitions"
     );
     let parsed_config: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
     assert_eq!(
         parsed_config
             .get("model_providers")
-            .and_then(|value| value.get("latest"))
+            .and_then(|value| value.get("custom"))
             .and_then(|value| value.get("experimental_bearer_token"))
             .and_then(|value| value.as_str()),
         Some("fresh-key"),
@@ -386,8 +394,8 @@ command = "echo"
         .and_then(|v| v.as_str())
         .unwrap_or("");
     assert_eq!(
-        legacy_auth_value, "legacy-key",
-        "previous provider should be backfilled with live auth"
+        legacy_auth_value, "stale",
+        "switching must not backfill native login into a provider row"
     );
 }
 
@@ -460,28 +468,13 @@ requires_openai_auth = true
 
     let state = state_from_config(initial_config);
 
-    // Upstream parity (clean-write, preservation OFF): switching to a
-    // third-party provider OVERWRITES auth.json with the provider's API key and
-    // overwrites config.toml. The live OAuth cache is intentionally replaced
-    // because preserve_codex_official_auth_on_switch is off.
-    ProviderService::switch(&state, AppType::Codex, "third-party")
-        .expect("clean-write switch should succeed");
-
-    let auth_value: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth_value
-            .get("OPENAI_API_KEY")
-            .and_then(|value| value.as_str()),
-        Some("third-party-key"),
-        "clean switch should overwrite auth.json with the incoming provider key"
-    );
-
+    ProviderService::switch(&state, AppType::Codex, "third-party").expect("switch should succeed");
+    assert!(!cc_switch_lib::get_codex_auth_path().exists());
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("aihubmix"),
-        "clean switch should overwrite config.toml with the third-party provider: {config_text}"
+        config_text.contains("experimental_bearer_token = \"third-party-key\""),
+        "the key belongs to the custom route: {config_text}"
     );
 
     let guard = state.config.read().expect("read config after switch");
@@ -568,8 +561,8 @@ requires_openai_auth = true
 
     assert_eq!(
         parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("aihubmix"),
-        "live Codex model_provider should preserve the selected provider template"
+        Some("custom"),
+        "live routing uses the upstream stable custom bucket"
     );
 
     let model_providers = parsed
@@ -578,7 +571,7 @@ requires_openai_auth = true
         .expect("model_providers table exists");
     assert_eq!(
         model_providers
-            .get("aihubmix")
+            .get("custom")
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str()),
         Some("https://aihubmix.example/v1"),
@@ -840,8 +833,8 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("disable_response_storage = true"),
-        "common snippet should still be present after update"
+        !config_text.contains("disable_response_storage = true"),
+        "provider-owned fields follow the row without replaying saved common snippets"
     );
     assert!(
         config_text.contains("[mcp_servers.echo-server]"),
@@ -4278,21 +4271,13 @@ fn provider_service_switch_codex_openai_official_preserves_oauth_auth_and_common
     ProviderService::switch(&state, AppType::Codex, "p1")
         .expect("switch to stripped OpenAI official provider should succeed");
 
-    // Upstream parity (clean-write): the official provider's stored OAuth auth
-    // snapshot is written to auth.json (Write branch). The auth.json is
-    // overwritten, so live-only fields are not retained.
     let auth_value: serde_json::Value =
         read_json_file(&auth_path).expect("read auth.json after switch");
     assert_eq!(
-        auth_value["access_token"],
-        json!("oauth-token"),
-        "official provider should restore the stored OAuth auth snapshot"
+        auth_value,
+        json!({"LOCAL_ONLY":"preserve-me"}),
+        "do not restore stale row metadata over the native auth file"
     );
-    assert!(
-        auth_value.get("LOCAL_ONLY").is_none(),
-        "clean overwrite should not retain local-only auth fields"
-    );
-
     let live_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(

@@ -6,7 +6,8 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::provider_quota::{
     display_usage_plan_name, provider_display_name, query_quota, quota_reset_display,
-    quota_target_for_provider, usage_value_summary, ProviderUsageQuota, QuotaTarget,
+    quota_target_for_provider, reset_provider_quota, usage_value_summary, ProviderUsageQuota,
+    QuotaTarget, QuotaTargetKind,
 };
 use crate::cli::ui::{create_table, error, highlight, info, success, to_json, warning};
 use crate::error::AppError;
@@ -424,7 +425,14 @@ fn print_fetched_models(models: &[String]) {
     );
 }
 
-pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
+pub(crate) fn quota_provider(
+    app_type: AppType,
+    id: &str,
+    json: bool,
+    reset: bool,
+    credit_id: Option<String>,
+    confirm: bool,
+) -> Result<(), AppError> {
     let state = get_state()?;
     let providers = ProviderService::list(&state, app_type.clone())?;
     let provider = providers
@@ -437,6 +445,132 @@ pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<
     let output = if let Some(target) = target {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::Message(format!("Failed to create async runtime: {}", e)))?;
+
+        if reset {
+            let is_codex = matches!(&target.kind, QuotaTargetKind::CodexOAuth { .. })
+                || matches!(&target.kind, QuotaTargetKind::SubscriptionTool { tool } if tool == "codex");
+            if !is_codex {
+                return Err(AppError::Message(
+                    "Rate limit reset credits are only supported for Codex / OpenAI accounts."
+                        .to_string(),
+                ));
+            }
+
+            let current_quota = match runtime.block_on(query_quota(&target)) {
+                Ok(ProviderUsageQuota::Subscription(q)) => q,
+                Ok(_) => {
+                    return Err(AppError::Message(
+                        "Unexpected quota response format".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    return Err(AppError::Message(format!(
+                        "Failed to query current quota: {e}"
+                    )));
+                }
+            };
+
+            let summary = current_quota.reset_credits.as_ref();
+            let available_count = summary.map(|s| s.available_count).unwrap_or(0);
+            if available_count == 0 {
+                return Err(AppError::Message(
+                    "No rate limit reset credits are available for this account.".to_string(),
+                ));
+            }
+
+            let credits = summary.map(|s| &s.credits[..]).unwrap_or(&[]);
+            let selected_credit = match &credit_id {
+                Some(cid) => credits
+                    .iter()
+                    .find(|c| &c.id == cid)
+                    .cloned()
+                    .ok_or_else(|| {
+                        AppError::Message(format!(
+                            "Specified credit ID '{cid}' was not found in available credits."
+                        ))
+                    })?,
+                None => credits.first().cloned().ok_or_else(|| {
+                    AppError::Message("No available reset credit to consume.".to_string())
+                })?,
+            };
+
+            if !confirm {
+                if json {
+                    let dry_run = serde_json::json!({
+                        "dryRun": true,
+                        "providerId": id,
+                        "targetCredit": selected_credit,
+                        "availableCount": available_count,
+                        "message": "To redeem this credit and reset rate limits, run again with --confirm.",
+                    });
+                    println!(
+                        "{}",
+                        to_json(&dry_run).map_err(|source| AppError::JsonSerialize { source })?
+                    );
+                    return Ok(());
+                }
+
+                println!("{}", highlight("=== Rate Limit Reset Credit (Dry Run) ==="));
+                println!("Provider:        {} ({})", provider_name, id);
+                println!("Credit ID:       {}", selected_credit.id);
+                if let Some(title) = &selected_credit.title {
+                    println!("Title:           {}", title);
+                }
+                if let Some(expires) = &selected_credit.expires_at {
+                    println!("Expires at:      {}", expires);
+                }
+                println!("Available Cards: {}", available_count);
+                println!();
+                println!(
+                    "{}",
+                    warning("⚠ Consuming a reset credit is permanent and cannot be undone.")
+                );
+                println!(
+                    "{}",
+                    info(&format!(
+                        "To consume this credit, re-run with --confirm:
+  cc-switch provider quota {} --reset --confirm",
+                        id
+                    ))
+                );
+                return Ok(());
+            }
+
+            let result = runtime
+                .block_on(reset_provider_quota(&target, Some(&selected_credit.id)))
+                .map_err(AppError::Message)?;
+
+            if json {
+                println!(
+                    "{}",
+                    to_json(&result).map_err(|source| AppError::JsonSerialize { source })?
+                );
+                return Ok(());
+            }
+
+            println!(
+                "{}",
+                success("✓ Rate limit reset credit successfully redeemed!")
+            );
+            println!("Credit ID:         {}", result.credit_id);
+            println!("Redeem Request ID: {}", result.redeem_request_id);
+            println!("Upstream Code:     {}", result.code);
+            if let Some(win) = result.windows_reset {
+                println!("Windows Reset:     {}", win);
+            }
+            if let Some(new_q) = &result.new_quota {
+                println!();
+                println!("{}", highlight("Updated Quota:"));
+                for tier in &new_q.tiers {
+                    println!("  {}: {:.1}%", tier.name, tier.utilization);
+                }
+                if let Some(rc) = &new_q.reset_credits {
+                    println!("  Remaining Credits: {}", rc.available_count);
+                }
+            }
+            return Ok(());
+        }
+
         match runtime.block_on(query_quota(&target)) {
             Ok(result) => quota_output_from_result(
                 app_type,
@@ -459,6 +593,12 @@ pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<
             },
         }
     } else {
+        if reset {
+            return Err(AppError::Message(
+                "Rate limit reset credits are only supported for Codex / OpenAI accounts."
+                    .to_string(),
+            ));
+        }
         ProviderQuotaOutput {
             app: app_type,
             provider_id: id.to_string(),
@@ -698,6 +838,22 @@ fn push_subscription_quota_lines(
             }
         }
         lines.push(line);
+    }
+    if let Some(reset_credits) = &quota.reset_credits {
+        if reset_credits.available_count > 0 {
+            lines.push(format!(
+                "Reset Credits: {} available",
+                reset_credits.available_count
+            ));
+            for credit in &reset_credits.credits {
+                let expires = credit.expires_at.as_deref().unwrap_or("never");
+                let title = credit.title.as_deref().unwrap_or("Rate Limit Reset");
+                lines.push(format!(
+                    "  - {} (expires: {}) [{}]",
+                    title, expires, credit.id
+                ));
+            }
+        }
     }
     if let Some(extra) = quota.extra_usage.as_ref().filter(|extra| extra.is_enabled) {
         let mut parts = Vec::new();
@@ -1235,6 +1391,7 @@ mod tests {
             extra_usage: None,
             error: None,
             queried_at: Some(1_700_000_000_000),
+            reset_credits: None,
         }
     }
 

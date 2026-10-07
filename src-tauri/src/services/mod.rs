@@ -57,7 +57,12 @@ pub use s3_sync::{S3RemoteInfo, S3SyncService, S3SyncSummary};
 pub use skill::{ImportSkillSelection, MigrationResult, SkillService, SkillStorageLocation};
 pub use speedtest::{EndpointLatency, SpeedtestService};
 pub use stream_check::{HealthStatus, StreamCheckConfig, StreamCheckResult, StreamCheckService};
-pub use subscription::{CredentialStatus, ExtraUsage, QuotaTier, SubscriptionQuota};
+#[allow(unused_imports)]
+pub use subscription::{
+    consume_codex_reset_credit, reset_codex_subscription_quota, CodexResetConsumeResult,
+    CodexResetCredit, CodexResetCreditsSummary, CredentialStatus, ExtraUsage, QuotaTier,
+    SubscriptionQuota,
+};
 #[allow(unused_imports)]
 pub use usage_stats::{
     DailyStats, LogFilters, ModelStats, PaginatedLogs, ProviderLimitStatus, ProviderStats,

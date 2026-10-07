@@ -819,6 +819,15 @@ pub enum ProviderCommand {
         /// Output raw quota result as JSON
         #[arg(long)]
         json: bool,
+        /// Redeem a rate limit reset credit to reset quota (Codex / OpenAI only)
+        #[arg(long)]
+        reset: bool,
+        /// Specific credit ID to consume (defaults to earliest expiring credit)
+        #[arg(long)]
+        credit_id: Option<String>,
+        /// Confirm consumption of a rate limit reset credit (safety gate; required to actually consume)
+        #[arg(long)]
+        confirm: bool,
     },
     /// Configure provider Usage Query
     #[command(subcommand)]
@@ -922,9 +931,13 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                 )
             }
         }
-        ProviderCommand::Quota { id, json } => {
-            provider_inspect::quota_provider(app_type, &id, json)
-        }
+        ProviderCommand::Quota {
+            id,
+            json,
+            reset,
+            credit_id,
+            confirm,
+        } => provider_inspect::quota_provider(app_type, &id, json, reset, credit_id, confirm),
         ProviderCommand::UsageQuery(cmd) => provider_usage_query::execute(cmd, app_type),
         ProviderCommand::Export { id, output } => export_provider(app_type, &id, output),
     }
