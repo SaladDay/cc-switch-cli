@@ -3407,7 +3407,7 @@ impl ProxyService {
             .map(|(live, provider)| (live, false, provider))
     }
 
-    async fn build_proxy_urls_for_app(
+    pub(crate) async fn build_proxy_urls_for_app(
         &self,
         app_type: &AppType,
     ) -> Result<(String, String), String> {
@@ -3734,12 +3734,13 @@ impl ProxyService {
         }
 
         let profile = crate::proxy::providers::codex_provider_catalog_tool_profile(provider);
-        crate::codex_config::write_codex_provider_live_with_catalog(
+        crate::codex_config::write_codex_provider_live_with_catalog_and_db(
             &settings,
             crate::services::provider::ProviderService::codex_live_write_category(provider),
             auth,
             config_text,
             profile,
+            Some(&self.db),
         )
         .map_err(|error| format!("write Codex live config failed: {error}"))
     }
@@ -5878,12 +5879,11 @@ wire_api = "responses"
 
         let restored_config =
             std::fs::read_to_string(get_codex_config_path()).expect("read restored Codex config");
-        let restored_auth: Value =
-            read_json_file(&get_codex_auth_path()).expect("read restored Codex auth");
+        assert!(!get_codex_auth_path().exists());
         assert_eq!(
-            restored_auth,
-            json!({ "OPENAI_API_KEY": "third-party-key" }),
-            "with direct-switch preservation disabled, upstream fallback replaces only a legacy proxy auth placeholder"
+            crate::codex_config::extract_codex_experimental_bearer_token(&restored_config)
+                .as_deref(),
+            Some("third-party-key")
         );
         assert!(
             restored_config.contains("https://provider.example/v1"),
@@ -8465,7 +8465,7 @@ wire_api = "responses"
 
     #[test]
     #[serial]
-    fn codex_custom_provider_live_write_can_overwrite_auth_when_preserve_disabled() {
+    fn codex_proxy_route_preserves_native_login_even_when_direct_preserve_is_disabled() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
 
@@ -8526,19 +8526,12 @@ wire_api = "responses"
             .expect("write provider-driven Codex live config");
 
         let live_auth: Value = read_json_file(&get_codex_auth_path()).expect("read live auth");
-        assert_eq!(
-            live_auth,
-            json!({
-                "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
-            }),
-            "disabled preservation should let third-party switches overwrite auth.json"
-        );
-
+        assert_eq!(live_auth, oauth_auth);
         let live_config =
             std::fs::read_to_string(get_codex_config_path()).expect("read live config");
-        assert!(
-            !live_config.contains("experimental_bearer_token"),
-            "provider token should stay in auth.json when preservation is disabled"
+        assert_eq!(
+            crate::codex_config::extract_codex_experimental_bearer_token(&live_config).as_deref(),
+            Some(PROXY_TOKEN_PLACEHOLDER)
         );
     }
 

@@ -18,6 +18,7 @@ pub(super) enum LiveSnapshot {
     Codex {
         auth: Option<Value>,
         config: Option<String>,
+        stash: Option<Vec<u8>>,
     },
     Gemini {
         env: Option<HashMap<String, String>>,
@@ -45,7 +46,12 @@ impl LiveSnapshot {
                     delete_file(&path)?;
                 }
             }
-            LiveSnapshot::Codex { auth, config } => {
+            LiveSnapshot::Codex {
+                auth,
+                config,
+                stash,
+            } => {
+                super::codex_live::restore_stash(stash.as_deref())?;
                 let auth_path = get_codex_auth_path();
                 let config_path = get_codex_config_path();
                 if let Some(value) = auth {
@@ -136,7 +142,11 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
             } else {
                 None
             };
-            Ok(LiveSnapshot::Codex { auth, config })
+            Ok(LiveSnapshot::Codex {
+                auth,
+                config,
+                stash: super::codex_live::read_stash_bytes()?,
+            })
         }
         AppType::Gemini => {
             use crate::gemini_config::{

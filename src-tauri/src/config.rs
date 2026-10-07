@@ -1328,3 +1328,205 @@ pub fn get_claude_config_status() -> ConfigStatus {
         path: path.to_string_lossy().to_string(),
     }
 }
+
+/// 已写好、还没替换目标的临时文件。原子写的前半步：写入引擎先把一次操作涉及的
+/// 所有文件都备好临时文件、记下写前意图，再逐个 [`StagedWrite::commit`]。
+#[derive(Debug)]
+pub struct StagedWrite {
+    tmp: PathBuf,
+    path: PathBuf,
+}
+
+impl StagedWrite {
+    pub fn tmp_path(&self) -> &Path {
+        &self.tmp
+    }
+
+    /// 用临时文件替换目标（失败时删掉临时文件）。
+    pub fn commit(self) -> Result<(), AppError> {
+        commit_staged(&self.tmp, &self.path).inspect_err(|_| {
+            let _ = fs::remove_file(&self.tmp);
+        })
+    }
+}
+
+/// 写入临时文件：Unix 下 `unix_mode` 为 `None` 时沿用目标文件现有的权限位。
+/// `durable` 为真时写完先 fsync，崩溃恢复要靠这份临时文件前滚。
+pub(crate) fn stage_write(
+    path: &Path,
+    data: &[u8],
+    unix_mode: Option<u32>,
+    durable: bool,
+) -> Result<StagedWrite, AppError> {
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?
+        .to_string_lossy()
+        .to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (tmp, mut file) = (|| -> Result<(PathBuf, fs::File), AppError> {
+        let mut last_collision = None;
+        for _ in 0..16 {
+            let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                "{file_name}.tmp.{}.{ts}.{counter}",
+                std::process::id()
+            ));
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            if let Some(mode) = unix_mode {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(mode);
+            }
+            match options.open(&candidate) {
+                Ok(file) => return Ok((candidate, file)),
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_collision = Some((candidate, source));
+                }
+                Err(source) => return Err(AppError::io(&candidate, source)),
+            }
+        }
+
+        let (candidate, source) = last_collision.expect("temporary filename loop must run");
+        Err(AppError::io(&candidate, source))
+    })()?;
+
+    let written = file
+        .write_all(data)
+        .and_then(|_| file.flush())
+        .and_then(|_| if durable { file.sync_all() } else { Ok(()) });
+    if let Err(source) = written {
+        drop(file);
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::io(&tmp, source));
+    }
+    drop(file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = unix_mode {
+            if let Err(source) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+                let _ = fs::remove_file(&tmp);
+                return Err(AppError::io(&tmp, source));
+            }
+        } else if let Ok(meta) = fs::metadata(path) {
+            let perm = meta.permissions().mode();
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
+        }
+    }
+
+    Ok(StagedWrite {
+        tmp,
+        path: path.to_path_buf(),
+    })
+}
+
+/// 原子写的后半步：用 `tmp` 替换 `path`。崩溃恢复也用它提交上次留下的临时文件。
+///
+/// 失败时临时文件留在原处：写入引擎的 pending 指着它，下次恢复要靠它前滚（目标文件被
+/// 占用、只读这类失败，过后多半能补完）。只做一次性原子写的调用方自己删。
+pub(crate) fn commit_staged(tmp: &Path, path: &Path) -> Result<(), AppError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::ERROR_NOT_SUPPORTED, Storage::FileSystem::ReplaceFileW,
+        };
+
+        let replaced: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let replacement: Vec<u16> = tmp
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut completed = false;
+        let mut last_error = None;
+
+        for _ in 0..3 {
+            // SAFETY: both path buffers are NUL-terminated UTF-16 and remain alive for the
+            // duration of the call. Backup, exclusion, and reserved pointers are intentionally null.
+            let replaced_ok = unsafe {
+                ReplaceFileW(
+                    replaced.as_ptr(),
+                    replacement.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            if replaced_ok != 0 {
+                completed = true;
+                break;
+            }
+
+            let replace_error = std::io::Error::last_os_error();
+            // WSL UNC paths reject ReplaceFileW with ERROR_NOT_SUPPORTED (50).
+            // std::fs::rename uses a different replace-existing API on Windows.
+            let replace_not_supported =
+                replace_error.raw_os_error() == Some(ERROR_NOT_SUPPORTED as i32);
+            if replace_error.kind() != std::io::ErrorKind::NotFound && !replace_not_supported {
+                last_error = Some(replace_error);
+                break;
+            }
+
+            match fs::rename(tmp, path) {
+                Ok(()) => {
+                    completed = true;
+                    break;
+                }
+                Err(source)
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    last_error = Some(source);
+                }
+                Err(source) => {
+                    last_error = Some(source);
+                    break;
+                }
+            }
+        }
+
+        if !completed {
+            let source = last_error.unwrap_or_else(std::io::Error::last_os_error);
+            return Err(AppError::IoContext {
+                context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
+                source,
+            });
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(source) = fs::rename(tmp, path) {
+            return Err(AppError::IoContext {
+                context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
+                source,
+            });
+        }
+    }
+    Ok(())
+}
