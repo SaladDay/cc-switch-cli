@@ -636,6 +636,15 @@ fn append_responses_input_as_chat_messages(
         &mut pending_reasoning,
         &mut last_assistant_index,
     );
+    // 整个 input 处理完毕后仍剩余的 pending reasoning 属于「真正的尾部」思考
+    // （其后已没有任何可前向附挂的 message / function_call），回溯附挂到最后一条
+    // assistant；目标已有 reasoning_content 时追加，以保留同一 turn 的 embedded
+    // reasoning 与 trailing reasoning。
+    attach_pending_reasoning_to_previous_assistant(
+        messages,
+        last_assistant_index,
+        &mut pending_reasoning,
+    );
     backfill_tool_call_reasoning_placeholders(messages);
     Ok(())
 }
@@ -738,12 +747,14 @@ fn append_responses_item_as_chat_message(
             }));
         }
         Some("reasoning") => {
-            let reasoning = responses_reasoning_item_text(item);
-            let attached_to_previous = pending_tool_calls.is_empty()
-                && attach_reasoning_to_last_assistant(messages, *last_assistant_index, &reasoning);
-            if !attached_to_previous {
-                append_pending_reasoning(pending_reasoning, reasoning);
-            }
+            // reasoning 一律先进入 pending_reasoning，前向附挂到其后的
+            // message / function_call（后者经 flush_pending_tool_calls 消费）。
+            // 此前这里在 pending_tool_calls 为空时直接回溯附挂到上一条 assistant，
+            // 会把新一轮的思考错拼进旧消息，导致紧跟的纯文本 assistant 丢失
+            // reasoning_content，思考型模型（kimi 等）多轮对话因此中途"断片"。
+            // 真正的尾部剩余由 input 结束时的收尾逻辑、或回合边界消息（user 等）
+            // 到达时回溯附挂，见 attach_pending_reasoning_to_previous_assistant。
+            append_pending_reasoning(pending_reasoning, responses_reasoning_item_text(item));
         }
         // An `additional_tools` carrier declares tools for this request; its
         // nested tools are lifted via `build_codex_tool_context_from_request`
@@ -752,6 +763,47 @@ fn append_responses_item_as_chat_message(
         // to fabricate a `content: null` system message that strict chat
         // gateways reject with `messages[N]: missing field "content"`.
         Some("additional_tools") => {}
+        Some("input_text" | "input_image" | "input_file" | "input_audio") => {
+            flush_pending_tool_calls(
+                messages,
+                pending_tool_calls,
+                pending_media,
+                pending_reasoning,
+                last_assistant_index,
+            );
+            // `flush_pending_tool_calls` intentionally returns early when
+            // there is no new assistant batch. A previous tool result may
+            // still have media waiting, so flush it before this new message.
+            flush_pending_chat_tool_media(messages, pending_media);
+            let role = item
+                .get("role")
+                .and_then(|v| v.as_str())
+                .map(responses_role_to_chat_role)
+                .unwrap_or("user");
+            let message = json!({
+                "role": role,
+                "content": responses_content_to_chat_content(role, &Value::Array(vec![item.clone()]))
+            });
+            if role == "assistant" {
+                let mut message = message;
+                attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
+                update_last_assistant_index(messages, &message, last_assistant_index);
+                messages.push(message);
+                return Ok(());
+            } else {
+                // 非 assistant 的回合边界消息（user 等）：pending reasoning 不再直接
+                // 丢弃，优先回溯附挂到上一条 assistant；其已有 reasoning_content 时
+                // 追加尾部 reasoning。reasoning 不允许跨 user 回合泄漏到之后的
+                // assistant 消息；无上一条 assistant 可附挂时自然丢弃（等同原行为）。
+                attach_pending_reasoning_to_previous_assistant(
+                    messages,
+                    *last_assistant_index,
+                    pending_reasoning,
+                );
+            }
+            update_last_assistant_index(messages, &message, last_assistant_index);
+            messages.push(message);
+        }
         Some("message") | None => {
             if item.get("role").is_some() || item.get("content").is_some() {
                 flush_pending_tool_calls(
@@ -762,7 +814,12 @@ fn append_responses_item_as_chat_message(
                     last_assistant_index,
                 );
                 flush_pending_chat_tool_media(messages, pending_media);
-                let message = responses_message_item_to_chat_message(item, pending_reasoning);
+                let message = responses_message_item_to_chat_message(
+                    item,
+                    pending_reasoning,
+                    messages,
+                    *last_assistant_index,
+                );
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
             } else if pending_media.is_empty() {
@@ -787,7 +844,12 @@ fn append_responses_item_as_chat_message(
                     last_assistant_index,
                 );
                 flush_pending_chat_tool_media(messages, pending_media);
-                let message = responses_message_item_to_chat_message(item, pending_reasoning);
+                let message = responses_message_item_to_chat_message(
+                    item,
+                    pending_reasoning,
+                    messages,
+                    *last_assistant_index,
+                );
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
             } else if pending_media.is_empty() {
@@ -818,6 +880,20 @@ fn flush_pending_tool_calls(
         return;
     }
 
+    // One Responses model turn can contain an assistant commentary message
+    // directly followed by function-call items. Keep them on the same Chat
+    // assistant message: a standalone text-only assistant turn teaches Chat
+    // models to stop after a progress update instead of emitting the expected
+    // tool call.
+    if merge_pending_tool_calls_into_adjacent_assistant(
+        messages,
+        pending_tool_calls,
+        pending_reasoning,
+    ) {
+        *last_assistant_index = Some(messages.len() - 1);
+        return;
+    }
+
     // Media from the preceding tool-result batch must be presented before a
     // new assistant tool-call turn. Consecutive outputs do not enter here
     // because `pending_tool_calls` is empty after the first output.
@@ -833,9 +909,88 @@ fn flush_pending_tool_calls(
     messages.push(message);
 }
 
+/// Merge pending Chat tool calls into a directly adjacent assistant message
+/// that does not carry tool calls yet. The Responses input preserves both the
+/// commentary text and the calls as separate items of the same model turn;
+/// serializing them as two consecutive assistant messages lets Chat models
+/// imitate the first text-only message as a complete turn.
+fn merge_pending_tool_calls_into_adjacent_assistant(
+    messages: &mut [Value],
+    pending_tool_calls: &mut Vec<Value>,
+    pending_reasoning: &mut Option<String>,
+) -> bool {
+    let Some(message) = messages.last_mut() else {
+        return false;
+    };
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return false;
+    }
+    let has_tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty());
+    if has_tool_calls {
+        return false;
+    }
+
+    let Some(obj) = message.as_object_mut() else {
+        return false;
+    };
+    obj.insert(
+        "tool_calls".to_string(),
+        Value::Array(std::mem::take(pending_tool_calls)),
+    );
+    attach_pending_reasoning_to_assistant_unique(message, pending_reasoning);
+    true
+}
+
+fn attach_pending_reasoning_to_assistant_unique(
+    message: &mut Value,
+    pending_reasoning: &mut Option<String>,
+) {
+    let Some(reasoning) = pending_reasoning.take() else {
+        return;
+    };
+    let reasoning = reasoning.trim();
+    if reasoning.is_empty() {
+        return;
+    }
+
+    let existing_text = message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let existing_segments: Vec<&str> = existing_text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let missing_segments: Vec<&str> = reasoning
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty() && !existing_segments.contains(segment))
+        .collect();
+    if missing_segments.is_empty() {
+        return;
+    }
+
+    let merged = if existing_segments.is_empty() {
+        missing_segments.join("\n\n")
+    } else {
+        let existing = existing_segments.join("\n\n");
+        let missing = missing_segments.join("\n\n");
+        format!("{existing}\n\n{missing}")
+    };
+    if let Some(obj) = message.as_object_mut() {
+        obj.insert("reasoning_content".to_string(), Value::String(merged));
+    }
+}
+
 fn responses_message_item_to_chat_message(
     item: &Value,
     pending_reasoning: &mut Option<String>,
+    messages: &mut [Value],
+    last_assistant_index: Option<usize>,
 ) -> Value {
     let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
     let chat_role = responses_role_to_chat_role(role);
@@ -853,8 +1008,15 @@ fn responses_message_item_to_chat_message(
     if chat_role == "assistant" {
         append_pending_reasoning(pending_reasoning, responses_message_reasoning_text(item));
         attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
-    } else if pending_reasoning.is_some() {
-        pending_reasoning.take();
+    } else {
+        // 非 assistant 的回合边界消息（user 等）：pending reasoning 不再直接丢弃，
+        // 回溯附挂到上一条 assistant；其已有 reasoning_content 时追加尾部
+        // reasoning，同时防止 reasoning 跨 user 回合泄漏到之后的 assistant 消息。
+        attach_pending_reasoning_to_previous_assistant(
+            messages,
+            last_assistant_index,
+            pending_reasoning,
+        );
     }
 
     message
@@ -948,8 +1110,8 @@ fn attach_pending_reasoning_to_assistant(
 
 /// 在所有 input 处理完毕后，对仍缺 `reasoning_content` 的 assistant tool-call 消息补占位。
 /// 必须作为管线末端的最终兜底执行：真实 reasoning 可能以尾随 `reasoning` item 的形式经
-/// `attach_reasoning_to_last_assistant` 回填，过早注入占位会被 `append_reasoning_content`
-/// 追加而污染真实思考。
+/// `attach_pending_reasoning_to_previous_assistant` 回填，过早注入占位会被
+/// `append_reasoning_content` 追加而污染真实思考。
 fn backfill_tool_call_reasoning_placeholders(messages: &mut [Value]) {
     for message in messages.iter_mut() {
         let is_assistant_tool_call = message.get("role").and_then(|value| value.as_str())
@@ -985,34 +1147,39 @@ fn ensure_tool_call_reasoning_content(message: &mut Value) {
     }
 }
 
-fn attach_reasoning_to_last_assistant(
+/// 将仍未消费的 pending reasoning 回溯附挂到上一条 assistant 消息。
+///
+/// 只允许两种「真正的尾部」场景调用：
+/// 1. 整个 input 处理完毕后 pending_reasoning 仍有剩余——其后已没有任何可
+///    前向附挂的 message / function_call；
+/// 2. user 等回合边界消息到达时 pending_reasoning 非空——reasoning 不允许
+///    跨 user 回合泄漏到之后的 assistant 消息，也不能直接丢弃可归属的思考。
+///
+/// 这里已经处于尾部/边界收尾点，不是普通 reasoning 的前向归属路径；
+/// 若目标已有 reasoning_content，追加尾部 reasoning 以保留同一 assistant turn
+/// 中同时出现的 embedded reasoning 与尾随 reasoning。无论是否附挂成功，
+/// pending 都会被消费（拿走），绝不留到下一条 assistant。
+fn attach_pending_reasoning_to_previous_assistant(
     messages: &mut [Value],
     last_assistant_index: Option<usize>,
-    reasoning: &Option<String>,
-) -> bool {
-    let Some(reasoning) = reasoning
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return true;
+    pending_reasoning: &mut Option<String>,
+) {
+    let Some(reasoning) = pending_reasoning.take() else {
+        return;
     };
-    let Some(index) = last_assistant_index else {
-        return false;
-    };
-    let Some(message) = messages.get_mut(index) else {
-        return false;
+    let reasoning = reasoning.trim();
+    if reasoning.is_empty() {
+        return;
+    }
+    let Some(message) = last_assistant_index.and_then(|index| messages.get_mut(index)) else {
+        return;
     };
     if message.get("role").and_then(|v| v.as_str()) != Some("assistant") {
-        return false;
+        return;
     }
-
     if let Some(obj) = message.as_object_mut() {
         append_reasoning_content(obj, reasoning);
-        return true;
     }
-
-    false
 }
 
 fn responses_message_reasoning_text(item: &Value) -> Option<String> {
@@ -2764,6 +2931,44 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_to_chat_preserves_trailing_reasoning_after_embedded_reasoning() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "reasoning_content": "Embedded thought.",
+                    "content": "Done."
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [
+                        {"type": "summary_text", "text": "Trailing thought."}
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Continue"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "Done.");
+        assert_eq!(
+            messages[0]["reasoning_content"],
+            "Embedded thought.\n\nTrailing thought."
+        );
+        assert_eq!(messages[1]["role"], "user");
+        assert!(messages[1].get("reasoning_content").is_none());
+    }
+
+    #[test]
     fn responses_request_to_chat_attaches_reasoning_to_tool_call_message() {
         let input = json!({
             "model": "gpt-5.4",
@@ -2884,6 +3089,106 @@ mod tests {
         assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
         assert_eq!(messages[0]["reasoning_content"], "Need to read a file.");
         assert_eq!(messages[1]["role"], "tool");
+    }
+
+    #[test]
+    fn responses_request_to_chat_attaches_reasoning_forward_to_following_assistant() {
+        // 回归：reasoning 必须前向附挂到其后的 assistant 消息，不得回溯拼进
+        // 上一条 assistant。此前多轮序列 [r1, m1, r2, m2] 中 r2 会被拼到 m1
+        // 尾部、 m2 丢失 reasoning_content，思考型模型（kimi 等）因此中途"断片"。
+        let input = json!({
+            "model": "kimi-k2-thinking",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "first thought"}]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "First answer."
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "second thought"}]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Second answer."
+                },
+                {
+                    "role": "user",
+                    "content": "Continue"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "First answer.");
+        assert_eq!(messages[0]["reasoning_content"], "first thought");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "Second answer.");
+        assert_eq!(messages[1]["reasoning_content"], "second thought");
+        assert_eq!(messages[2]["role"], "user");
+        assert!(messages[2].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_reasoning_on_final_answer_after_tool_call() {
+        // 回归（Kimi 契约）：[reasoning, function_call, output, reasoning, message]
+        // 最后一个纯文本 assistant 必须保留自己的 reasoning_content，且该 reasoning
+        // 不得被回溯拼进前面的 tool-call 消息（否则上游历史里 tool-call 消息的思考
+        // 被污染、最终答复消息反而没有 reasoning_content）。
+        let input = json!({
+            "model": "kimi-k2-thinking",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "need to read a file"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "Readme content"
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "now I can answer"}]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "The file says hello."
+                },
+                {
+                    "role": "user",
+                    "content": "Continue"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[0]["reasoning_content"], "need to read a file");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "The file says hello.");
+        assert_eq!(messages[2]["reasoning_content"], "now I can answer");
+        assert_eq!(messages[3]["role"], "user");
+        assert!(messages[3].get("reasoning_content").is_none());
     }
 
     #[test]
@@ -4039,5 +4344,318 @@ mod tests {
             result["output"][0]["input"],
             "*** Begin Patch\n*** End Patch"
         );
+    }
+    #[test]
+    fn responses_request_to_chat_coalesces_adjacent_commentary_with_tool_calls() {
+        let mut call = test_function_call("call_1");
+        call["reasoning_content"] = json!("need to update the file");
+
+        let result = convert_test_input(vec![
+            json!({
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": "need to update the file"}
+                ]
+            }),
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Part 1 written. Appending sections 4-5."}
+                ]
+            }),
+            call,
+            test_function_output("call_1", json!("Success")),
+        ]);
+        let messages = result_messages(&result);
+
+        assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+        assert_eq!(
+            messages[0]["content"],
+            "Part 1 written. Appending sections 4-5."
+        );
+        let calls = messages[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_1");
+        assert_eq!(messages[0]["reasoning_content"], "need to update the file");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn responses_request_to_chat_deduplicates_repeated_call_reasoning_segments() {
+        let mut call_1 = test_function_call("call_1");
+        call_1["reasoning_content"] = json!("need to update the file");
+        let mut call_2 = test_function_call("call_2");
+        call_2["reasoning_content"] = json!("second section planning");
+
+        let result = convert_test_input(vec![
+            json!({
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": "need to update the file"}
+                ]
+            }),
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Part 1 written. Appending sections 4-5."}
+                ]
+            }),
+            call_1,
+            call_2,
+            test_function_output("call_1", json!("Success 1")),
+            test_function_output("call_2", json!("Success 2")),
+        ]);
+        let messages = result_messages(&result);
+
+        assert_eq!(message_roles(&result), vec!["assistant", "tool", "tool"]);
+        assert_eq!(
+            messages[0]["reasoning_content"],
+            "need to update the file\n\nsecond section planning"
+        );
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_user_boundary_before_tool_call_turn() {
+        let result = convert_test_input(vec![
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Done for now."}
+                ]
+            }),
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": "Continue with the next file."
+            }),
+            test_function_call("call_next"),
+            test_function_output("call_next", json!("Next result")),
+        ]);
+        let messages = result_messages(&result);
+
+        assert_eq!(
+            message_roles(&result),
+            vec!["assistant", "user", "assistant", "tool"]
+        );
+        assert!(messages[0].get("tool_calls").is_none());
+        assert_eq!(messages[0]["content"], "Done for now.");
+        assert_eq!(messages[2]["content"], "");
+        assert_eq!(messages[2]["tool_calls"][0]["id"], "call_next");
+    }
+
+    #[test]
+    fn responses_request_to_chat_coalesces_when_reasoning_sits_between_commentary_and_call() {
+        let mut call = test_function_call("call_1");
+        call["reasoning_content"] = json!("need to update the file");
+
+        let result = convert_test_input(vec![
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Part 1 written. Appending sections 4-5."}
+                ]
+            }),
+            json!({
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": "need to update the file"}
+                ]
+            }),
+            call,
+            test_function_output("call_1", json!("Success")),
+        ]);
+        let messages = result_messages(&result);
+
+        assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+        assert_eq!(
+            messages[0]["content"],
+            "Part 1 written. Appending sections 4-5."
+        );
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[0]["reasoning_content"], "need to update the file");
+    }
+
+    #[test]
+    fn responses_request_to_chat_backfills_reasoning_placeholder_for_coalesced_call() {
+        let result = convert_test_input(vec![
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Running the build now."}
+                ]
+            }),
+            test_function_call("call_build"),
+            test_function_output("call_build", json!("Build succeeded")),
+        ]);
+        let messages = result_messages(&result);
+
+        assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+        assert_eq!(messages[0]["content"], "Running the build now.");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_build");
+        assert_eq!(messages[0]["reasoning_content"], "tool call");
+    }
+
+    #[test]
+    fn responses_request_to_chat_coalesces_custom_tool_call_with_commentary() {
+        let input = json!({
+            "model": "kimi-k3",
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Apply a patch to files."
+            }],
+            "input": [
+                json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "Applying the next patch."}
+                    ]
+                }),
+                json!({
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch"
+                }),
+                json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_patch",
+                    "output": {"text": "Success"}
+                })
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+        assert_eq!(messages[0]["content"], "Applying the next patch.");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_patch");
+        assert_eq!(messages[1]["tool_call_id"], "call_patch");
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_media_before_coalesced_commentary_tool_call() {
+        let data_url = large_test_image_data_url();
+        let result = convert_test_input(vec![
+            test_function_call("call_media"),
+            test_function_output(
+                "call_media",
+                json!({
+                    "content": [{
+                        "type": "input_image",
+                        "image_url": data_url
+                    }]
+                }),
+            ),
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Viewing the image now."}
+                ]
+            }),
+            test_function_call("call_next"),
+            test_function_output("call_next", json!("Next result")),
+        ]);
+        let messages = result_messages(&result);
+
+        assert_eq!(
+            message_roles(&result),
+            vec!["assistant", "tool", "user", "assistant", "tool"]
+        );
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_media");
+        let media_content = messages[2]["content"].as_array().unwrap();
+        assert!(media_content.iter().any(|part| part
+            .get("image_url")
+            .and_then(|value| value.get("url"))
+            .and_then(Value::as_str)
+            .is_some_and(|url| url == data_url)));
+        assert_eq!(messages[3]["content"], "Viewing the image now.");
+        assert_eq!(messages[3]["tool_calls"][0]["id"], "call_next");
+        assert_eq!(messages[4]["tool_call_id"], "call_next");
+    }
+
+    #[test]
+    fn responses_request_to_chat_multi_round_history_has_no_text_only_assistant_turns() {
+        let mut items = vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": "Fix the failing build."
+        })];
+        for index in 1..=5 {
+            let call_id = format!("call_round_{index}");
+            items.push(json!({
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": format!("round {index} reasoning")}
+                ]
+            }));
+            items.push(json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": format!("Step {index}: checking the logs.")}
+                ]
+            }));
+            let mut call = test_function_call(&call_id);
+            call["reasoning_content"] = json!(format!("round {index} reasoning"));
+            items.push(call);
+            items.push(test_function_output(
+                &call_id,
+                json!(format!("round {index} result")),
+            ));
+        }
+        items.push(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "Build fixed."}
+            ]
+        }));
+
+        let result = convert_test_input(items);
+        let messages = result_messages(&result);
+
+        assert_eq!(
+            message_roles(&result),
+            vec![
+                "user",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant"
+            ]
+        );
+        for (index, message) in messages.iter().enumerate() {
+            if message["role"] == "assistant" && index + 1 < messages.len() {
+                assert!(
+                    message["tool_calls"]
+                        .as_array()
+                        .is_some_and(|calls| !calls.is_empty()),
+                    "assistant at index {index} must carry tool calls"
+                );
+            }
+        }
+        assert_eq!(messages[1]["content"], "Step 1: checking the logs.");
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_round_1");
+        assert_eq!(messages[1]["reasoning_content"], "round 1 reasoning");
+        assert_eq!(messages[11]["content"], "Build fixed.");
+        assert!(messages[11].get("tool_calls").is_none());
     }
 }
