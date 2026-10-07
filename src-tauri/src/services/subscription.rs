@@ -50,6 +50,9 @@ pub struct CodexResetCreditsSummary {
     pub available_count: usize,
     pub applicable_available_count: Option<usize>,
     pub credits: Vec<CodexResetCredit>,
+    /// A successful usage query does not imply successful credit inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -786,16 +789,24 @@ pub(crate) async fn query_codex_quota(
                 available_count,
                 applicable_available_count,
                 credits,
+                inspection_error: None,
             })
         }
-        Err(_) => body
-            .rate_limit_reset_credits
-            .as_ref()
-            .map(|rc| CodexResetCreditsSummary {
-                available_count: rc.available_count.unwrap_or(0),
-                applicable_available_count: rc.applicable_available_count,
-                credits: Vec::new(),
-            }),
+        Err(_) => Some(CodexResetCreditsSummary {
+            available_count: body
+                .rate_limit_reset_credits
+                .as_ref()
+                .and_then(|rc| rc.available_count)
+                .unwrap_or(0),
+            applicable_available_count: body
+                .rate_limit_reset_credits
+                .as_ref()
+                .and_then(|rc| rc.applicable_available_count),
+            credits: Vec::new(),
+            inspection_error: Some(
+                "Reset credit inspection failed; retry the query before redeeming.".into(),
+            ),
+        }),
     };
 
     SubscriptionQuota {

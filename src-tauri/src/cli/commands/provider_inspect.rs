@@ -442,7 +442,7 @@ pub(crate) fn quota_provider(
     let target = quota_target_for_provider(&app_type, id, provider);
     let queried_at = chrono::Utc::now().timestamp_millis();
 
-    let output = if let Some(target) = target {
+    let output = if let Some(mut target) = target {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::Message(format!("Failed to create async runtime: {}", e)))?;
 
@@ -454,6 +454,23 @@ pub(crate) fn quota_provider(
                     "Rate limit reset credits are only supported for Codex / OpenAI accounts."
                         .to_string(),
                 ));
+            }
+
+            if let QuotaTargetKind::CodexOAuth { account_id } = &mut target.kind {
+                if account_id.is_none() {
+                    *account_id = Some(
+                        runtime
+                            .block_on(CodexOAuthService::get_status())
+                            .default_account_id
+                            .ok_or_else(|| {
+                                AppError::localized(
+                                    "quota.reset.no_account",
+                                    "没有可用的 ChatGPT 账号",
+                                    "No ChatGPT account available",
+                                )
+                            })?,
+                    );
+                }
             }
 
             let current_quota = match runtime.block_on(query_quota(&target)) {
@@ -470,35 +487,32 @@ pub(crate) fn quota_provider(
                 }
             };
 
-            let summary = current_quota.reset_credits.as_ref();
-            let available_count = summary.map(|s| s.available_count).unwrap_or(0);
-            if available_count == 0 {
-                return Err(AppError::Message(
-                    "No rate limit reset credits are available for this account.".to_string(),
-                ));
-            }
-
-            let credits = summary.map(|s| &s.credits[..]).unwrap_or(&[]);
-            let selected_credit = match &credit_id {
-                Some(cid) => credits
-                    .iter()
-                    .find(|c| &c.id == cid)
-                    .cloned()
-                    .ok_or_else(|| {
-                        AppError::Message(format!(
-                            "Specified credit ID '{cid}' was not found in available credits."
-                        ))
-                    })?,
-                None => credits.first().cloned().ok_or_else(|| {
-                    AppError::Message("No available reset credit to consume.".to_string())
-                })?,
+            let selected_credit =
+                super::quota_reset::select_credit(&current_quota, credit_id.as_deref())?;
+            let available_count = current_quota
+                .reset_credits
+                .as_ref()
+                .map(|s| s.available_count)
+                .unwrap_or(0);
+            let account_id = match &target.kind {
+                QuotaTargetKind::CodexOAuth { account_id } => account_id.as_deref(),
+                _ => None,
             };
+            let command = super::quota_reset::provider_confirmation(
+                app_type.as_str(),
+                id,
+                &selected_credit.id,
+                account_id,
+            )?;
 
             if !confirm {
                 if json {
                     let dry_run = serde_json::json!({
                         "dryRun": true,
                         "providerId": id,
+                        "app": app_type,
+                        "accountId": account_id,
+                        "confirmationCommand": command,
                         "targetCredit": selected_credit,
                         "availableCount": available_count,
                         "message": "To redeem this credit and reset rate limits, run again with --confirm.",
@@ -512,6 +526,17 @@ pub(crate) fn quota_provider(
 
                 println!("{}", highlight("=== Rate Limit Reset Credit (Dry Run) ==="));
                 println!("Provider:        {} ({})", provider_name, id);
+                if let Some(account_id) = account_id {
+                    println!(
+                        "{}: {}",
+                        if crate::cli::i18n::is_chinese() {
+                            "账号 ID"
+                        } else {
+                            "Account ID"
+                        },
+                        account_id
+                    );
+                }
                 println!("Credit ID:       {}", selected_credit.id);
                 if let Some(title) = &selected_credit.title {
                     println!("Title:           {}", title);
@@ -528,9 +553,12 @@ pub(crate) fn quota_provider(
                 println!(
                     "{}",
                     info(&format!(
-                        "To consume this credit, re-run with --confirm:
-  cc-switch provider quota {} --reset --confirm",
-                        id
+                        "{}\n  {command}",
+                        if crate::cli::i18n::is_chinese() {
+                            "确认兑换此卡，请执行："
+                        } else {
+                            "To consume this credit, run:"
+                        }
                     ))
                 );
                 return Ok(());
@@ -558,16 +586,7 @@ pub(crate) fn quota_provider(
             if let Some(win) = result.windows_reset {
                 println!("Windows Reset:     {}", win);
             }
-            if let Some(new_q) = &result.new_quota {
-                println!();
-                println!("{}", highlight("Updated Quota:"));
-                for tier in &new_q.tiers {
-                    println!("  {}: {:.1}%", tier.name, tier.utilization);
-                }
-                if let Some(rc) = &new_q.reset_credits {
-                    println!("  Remaining Credits: {}", rc.available_count);
-                }
-            }
+            super::quota_reset::print_updated_quota(result.new_quota.as_ref());
             return Ok(());
         }
 
@@ -840,7 +859,16 @@ fn push_subscription_quota_lines(
         lines.push(line);
     }
     if let Some(reset_credits) = &quota.reset_credits {
-        if reset_credits.available_count > 0 {
+        if reset_credits.inspection_error.is_some() {
+            lines.push(
+                if crate::cli::i18n::is_chinese() {
+                    "重置卡查询失败，请重试查询。"
+                } else {
+                    "Reset credit inspection failed; retry the query."
+                }
+                .to_string(),
+            );
+        } else if reset_credits.available_count > 0 {
             lines.push(format!(
                 "Reset Credits: {} available",
                 reset_credits.available_count
