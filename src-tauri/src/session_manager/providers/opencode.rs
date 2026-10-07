@@ -790,7 +790,11 @@ fn load_messages_sqlite_v2(
         .query_map([session_id], decode_v2_message)
         .map_err(|e| format!("Failed to query V2 messages: {e}"))?;
     let mut batch = SessionMessageBatchBuilder::new();
-    for row in rows {
+    for (index, row) in rows.enumerate() {
+        if index >= SESSION_MESSAGE_PREVIEW_MAX_MESSAGES {
+            batch.mark_truncated();
+            break;
+        }
         if is_cancelled() {
             return Err("Session message preview was cancelled".to_string());
         }
@@ -3102,5 +3106,31 @@ mod tests {
             "cancelled query must stop before completing the aggregation"
         );
         conn.progress_handler(0, None::<fn() -> bool>);
+    }
+    #[test]
+    fn v2_preview_marks_source_window_truncated_even_when_rows_have_no_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_sqlite_schema_v2(&conn);
+        conn.execute_batch("INSERT INTO session_v2 VALUES ('ses_v2','Title','/project',1,2)")
+            .unwrap();
+        for seq in 0..SESSION_MESSAGE_PREVIEW_MAX_MESSAGES + 2 {
+            let data = if seq >= SESSION_MESSAGE_PREVIEW_MAX_MESSAGES - 1 {
+                serde_json::json!({"content":[]})
+            } else {
+                serde_json::json!({"text":format!("message {seq}")})
+            };
+            conn.execute(
+                "INSERT INTO session_message VALUES (?1,'ses_v2','assistant',?2,?3,1,2)",
+                rusqlite::params![format!("m{seq}"), seq as i64, data.to_string()],
+            )
+            .unwrap();
+        }
+        let batch = load_messages_sqlite_v2(&conn, "ses_v2", &|| false).unwrap();
+        assert!(batch.messages.len() < SESSION_MESSAGE_PREVIEW_MAX_MESSAGES);
+        assert!(
+            batch.truncated,
+            "source rows outside the window were omitted"
+        );
+        assert!(batch.messages.iter().all(|m| m.content != "message 0"));
     }
 }
