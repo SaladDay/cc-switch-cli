@@ -1361,9 +1361,10 @@ pub(crate) fn stage_write(
     #[cfg(not(unix))]
     let _ = unix_mode;
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
+    // Keep the CLI's managed-directory policy when upstream staging creates
+    // the device store before settings.json. In particular a permissive umask
+    // must not create a group-writable directory that later CLI writes reject.
+    create_managed_config_parent_dirs(path)?;
 
     let parent = path
         .parent()

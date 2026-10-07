@@ -41,14 +41,13 @@ pub(crate) fn prepare(
         .iter()
         .filter(|p| !is_official(p))
         .filter_map(|p| {
-            extract_codex_api_key(
-                p.settings_config.get("auth"),
-                p.settings_config.get("config").and_then(Value::as_str),
-            )
+            p.settings_config
+                .get("auth")
+                .and_then(extract_codex_auth_api_key)
         })
         .collect();
     if !official {
-        if let Some(key) = extract_codex_api_key(Some(row_auth), Some(config)) {
+        if let Some(key) = extract_codex_auth_api_key(row_auth) {
             keys.push(key);
         }
     }

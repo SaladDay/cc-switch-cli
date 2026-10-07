@@ -40,7 +40,6 @@ cli = [
     "dep:tar",
     "dep:unicode-width",
     "dep:which",
-    "dep:windows-sys",
     "dep:winreg",
 ]
 test-hooks = []
@@ -117,7 +116,8 @@ tachyonfx = { version = "0.25", optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = { version = "0.52", optional = true }
 self-replace = { version = "1", optional = true }
-windows-sys = { version = "0.61", optional = true, features = [
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Diagnostics_ToolHelp",

@@ -601,3 +601,91 @@ fn reselecting_official_after_logout_does_not_restore_legacy_row_tokens() {
     ProviderService::switch(&state, AppType::Codex, "official").unwrap();
     assert!(!get_codex_auth_path().exists());
 }
+
+#[test]
+#[serial]
+fn unpublished_conflict_keeps_external_token_rotation_and_config_edit() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let state = auth_switch_state();
+    write_json_file(
+        &get_codex_auth_path(),
+        &json!({"tokens":{"access_token":"old"}}),
+    )
+    .unwrap();
+    crate::mode::operation::failpoint::on_before_publish(Some(Box::new(|index, path| {
+        if index == 0 {
+            std::fs::write(
+                get_codex_auth_path(),
+                br#"{"tokens":{"access_token":"rotated"}}"#,
+            )
+            .unwrap();
+            std::fs::write(path, b"user_edit = [").unwrap();
+        }
+    })));
+    let result = ProviderService::switch(&state, AppType::Codex, "thirdparty");
+    crate::mode::operation::failpoint::on_before_publish(None);
+    assert!(result.is_err());
+    assert_eq!(
+        read_json_file::<Value>(&get_codex_auth_path()).unwrap()["tokens"]["access_token"],
+        "rotated"
+    );
+    assert_eq!(
+        std::fs::read_to_string(get_codex_config_path()).unwrap(),
+        "user_edit = ["
+    );
+    assert_eq!(
+        ProviderService::current(&state, AppType::Codex).unwrap(),
+        "official"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn codex_switch_with_group_writable_umask_creates_compatible_managed_directory() {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    const CHILD: &str = "CC_SWITCH_TEST_480_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "services::provider::codex_openai_auth_tests::codex_switch_with_group_writable_umask_creates_compatible_managed_directory", "--nocapture"])
+            .env(CHILD, "1");
+        // Change umask only in the child; other tests in this process are unaffected.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0o002);
+                Ok(())
+            });
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let state = auth_switch_state();
+    ProviderService::switch(&state, AppType::Codex, "thirdparty").unwrap();
+    assert_eq!(
+        std::fs::metadata(crate::config::get_app_config_dir())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(codex_live::stash_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}

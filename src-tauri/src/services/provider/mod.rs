@@ -866,13 +866,25 @@ impl ProviderService {
                 if matches!(
                     prepared.effect,
                     PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
-                ) && crate::mode::state::pending(
-                    &crate::live::engine::DeviceStore::for_device(),
-                    "codex",
-                )?
-                .is_some()
-                {
-                    state.reload_config_snapshot_from_db()?;
+                ) {
+                    // Upstream owns live-file recovery. Before publication it
+                    // leaves external edits intact; after publication pending
+                    // recovers forward. Never restore our older file snapshot.
+                    if crate::mode::state::pending(
+                        &crate::live::engine::DeviceStore::for_device(),
+                        "codex",
+                    )?
+                    .is_some()
+                    {
+                        state.reload_config_snapshot_from_db()?;
+                    } else {
+                        match preserved_current_apps {
+                            Some(apps) => Self::restore_config_only_preserving_current_providers(
+                                state, original, apps,
+                            )?,
+                            None => Self::restore_config_only(state, original)?,
+                        }
+                    }
                     return Err(err);
                 }
                 let rollback_result = match preserved_current_apps {
