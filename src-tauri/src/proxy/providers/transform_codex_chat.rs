@@ -247,7 +247,7 @@ pub(crate) fn build_codex_tool_context_from_request(body: &Value) -> CodexToolCo
     }
 
     if let Some(input) = body.get("input") {
-        collect_tool_search_output_tools(input, &mut context);
+        collect_input_declared_tools(input, &mut context);
     }
 
     context
@@ -745,6 +745,13 @@ fn append_responses_item_as_chat_message(
                 append_pending_reasoning(pending_reasoning, reasoning);
             }
         }
+        // An `additional_tools` carrier declares tools for this request; its
+        // nested tools are lifted via `build_codex_tool_context_from_request`
+        // and the carrier itself is not a message. It carries a `role` but no
+        // `content`, so letting it fall through the generic message arm used
+        // to fabricate a `content: null` system message that strict chat
+        // gateways reject with `messages[N]: missing field "content"`.
+        Some("additional_tools") => {}
         Some("message") | None => {
             if item.get("role").is_some() || item.get("content").is_some() {
                 flush_pending_tool_calls(
@@ -1086,15 +1093,25 @@ fn responses_content_to_chat_content(_role: &str, content: &Value) -> Value {
     Value::Array(chat_parts)
 }
 
-fn collect_tool_search_output_tools(value: &Value, context: &mut CodexToolContext) {
+/// Collect tools declared inline in the request `input` instead of top-level
+/// `tools`: `tool_search_output` items (dynamically loaded tool groups) and
+/// `additional_tools` carriers (Codex 0.154+ ships extra tools — the
+/// `functions`/`collaboration` exec sandbox, plugins — in this Responses
+/// private-extension carrier). The xAI Responses passthrough already promotes
+/// the same carriers (`promote_additional_tools`); the Chat and Anthropic
+/// converters go through this registry so they keep the carried tools too.
+fn collect_input_declared_tools(value: &Value, context: &mut CodexToolContext) {
     match value {
         Value::Array(items) => {
             for item in items {
-                collect_tool_search_output_tools(item, context);
+                collect_input_declared_tools(item, context);
             }
         }
         Value::Object(obj) => {
-            if obj.get("type").and_then(|v| v.as_str()) == Some("tool_search_output") {
+            if matches!(
+                obj.get("type").and_then(|v| v.as_str()),
+                Some("tool_search_output" | "additional_tools")
+            ) {
                 if let Some(tools) = obj.get("tools").and_then(|v| v.as_array()) {
                     for tool in tools {
                         context.add_response_tool(tool);
@@ -1102,7 +1119,7 @@ fn collect_tool_search_output_tools(value: &Value, context: &mut CodexToolContex
                 }
             }
             for value in obj.values() {
-                collect_tool_search_output_tools(value, context);
+                collect_input_declared_tools(value, context);
             }
         }
         _ => {}
@@ -3763,6 +3780,264 @@ mod tests {
         assert!(
             result.get("tool_choice").is_none(),
             "tool_choice should be omitted when tools is empty"
+        );
+    }
+    #[test]
+    fn additional_tools_carrier_is_lifted_not_converted_to_a_message() {
+        // Shape from #7451: Codex 0.154+ ships extra tools in an
+        // `additional_tools` input carrier (role `developer`, no `content`).
+        let input = json!({
+            "model": "agnes-3.0-flash",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "id": "at_a8d5b9f5",
+                    "role": "developer",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "functions",
+                            "description": "",
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "exec_command",
+                                    "description": "Run a shell command.",
+                                    "strict": false,
+                                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+                                }
+                            ]
+                        },
+                        {
+                            "type": "function",
+                            "name": "wait",
+                            "description": "Waits on a yielded exec cell.",
+                            "strict": false,
+                            "parameters": {"type": "object", "properties": {"cell_id": {"type": "string"}}, "required": ["cell_id"]}
+                        }
+                    ]
+                },
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are Codex, a coding agent."}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "你好"}]}
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        // The carrier is not a message: every emitted message must carry
+        // real content, and the developer instruction must remain the only
+        // system head.
+        for (idx, message) in messages.iter().enumerate() {
+            assert!(
+                !matches!(message.get("content"), None | Some(Value::Null)),
+                "messages[{idx}] lost its content: {message}"
+            );
+        }
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are Codex, a coding agent.");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "你好");
+
+        // The carried tools survive as flattened chat tools.
+        let tool_names: Vec<&str> = result["tools"]
+            .as_array()
+            .expect("carried tools must be lifted into top-level tools")
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            tool_names.contains(&"functions__exec_command"),
+            "{tool_names:?}"
+        );
+        assert!(tool_names.contains(&"wait"), "{tool_names:?}");
+    }
+
+    #[test]
+    fn additional_tools_carrier_tools_dedup_against_top_level_tools() {
+        let input = json!({
+            "model": "m",
+            "tools": [
+                {"type": "function", "name": "wait", "description": "Top-level wait.", "parameters": {"type": "object", "properties": {}}}
+            ],
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [
+                        {"type": "function", "name": "wait", "description": "Carried wait.", "parameters": {"type": "object", "properties": {}}}
+                    ]
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1, "duplicate carried tool must be dropped");
+        assert_eq!(tools[0]["function"]["name"], "wait");
+        assert_eq!(tools[0]["function"]["description"], "Top-level wait.");
+    }
+
+    #[test]
+    fn plain_developer_messages_convert_without_additional_tools_carrier() {
+        // No carrier present: developer messages keep mapping to system and
+        // no tools array is fabricated.
+        let input = json!({
+            "model": "m",
+            "input": [
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Instructions."}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "Instructions.");
+        assert_eq!(messages[1]["role"], "user");
+        assert!(result.get("tools").is_none());
+    }
+    #[test]
+    fn chat_response_to_responses_restores_loaded_namespace_tool_call_from_additional_tools() {
+        let request = json!({
+            "model": "gpt-5.4",
+            "tools": [{"type": "tool_search"}],
+            "input": [{
+                "type": "tool_search_output",
+                "call_id": "call_tool_search_1",
+                "status": "completed",
+                "execution": "client",
+                "tools": [{
+                    "type": "namespace",
+                    "name": "mcp__codex_apps__gmail",
+                    "description": "Find and reference emails from your inbox.",
+                    "tools": [{
+                        "type": "function",
+                        "name": "_search_emails",
+                        "description": "Search Gmail for emails matching a query.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "label_ids": {"type": "array", "items": {"type": "string"}},
+                                "max_results": {"type": "integer"}
+                            }
+                        }
+                    }]
+                }]
+            }]
+        });
+        let mut request = request;
+        let carried = if request["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.first().is_some_and(|tool| tool["type"] == "custom"))
+        {
+            request.as_object_mut().unwrap().remove("tools").unwrap()
+        } else {
+            request["input"][0]["tools"].clone()
+        };
+        request.as_object_mut().unwrap().remove("tools");
+        request["input"] = json!([
+            {"type":"additional_tools", "role":"developer", "tools":carried},
+            {"type":"message", "role":"user", "content":"Use the tool."}
+        ]);
+        let converted = responses_to_chat_completions(request.clone()).unwrap();
+        assert_eq!(converted["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(converted["messages"].as_array().unwrap().len(), 1);
+        let context = build_codex_tool_context_from_request(&request);
+        let chat = json!({
+            "id": "chatcmpl_gmail",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "gpt-5.4",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_gmail",
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__codex_apps__gmail___search_emails",
+                            "arguments": "{\"query\":\"-in:spam -in:trash\",\"label_ids\":[\"UNREAD\"],\"max_results\":5}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let result = chat_completion_to_response_with_context(chat, &context).unwrap();
+
+        assert_eq!(result["output"][0]["type"], "function_call");
+        assert_eq!(result["output"][0]["call_id"], "call_gmail");
+        assert_eq!(result["output"][0]["namespace"], "mcp__codex_apps__gmail");
+        assert_eq!(result["output"][0]["name"], "_search_emails");
+        assert_eq!(
+            result["output"][0]["arguments"],
+            r#"{"label_ids":["UNREAD"],"max_results":5,"query":"-in:spam -in:trash"}"#
+        );
+    }
+
+    #[test]
+    fn chat_response_to_responses_restores_custom_tool_call_from_additional_tools() {
+        let request = json!({
+            "model": "gpt-5.4",
+            "tools": [{"type": "custom", "name": "apply_patch"}],
+            "input": "Patch it."
+        });
+        let mut request = request;
+        let carried = if request["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.first().is_some_and(|tool| tool["type"] == "custom"))
+        {
+            request.as_object_mut().unwrap().remove("tools").unwrap()
+        } else {
+            request["input"][0]["tools"].clone()
+        };
+        request.as_object_mut().unwrap().remove("tools");
+        request["input"] = json!([
+            {"type":"additional_tools", "role":"developer", "tools":carried},
+            {"type":"message", "role":"user", "content":"Use the tool."}
+        ]);
+        let converted = responses_to_chat_completions(request.clone()).unwrap();
+        assert_eq!(converted["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(converted["messages"].as_array().unwrap().len(), 1);
+        let context = build_codex_tool_context_from_request(&request);
+        let chat = json!({
+            "id": "chatcmpl_custom",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "gpt-5.4",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_patch",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": "{\"input\":\"*** Begin Patch\\n*** End Patch\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let result = chat_completion_to_response_with_context(chat, &context).unwrap();
+
+        assert_eq!(result["output"][0]["type"], "custom_tool_call");
+        assert_eq!(result["output"][0]["id"], "ctc_call_patch");
+        assert_eq!(result["output"][0]["call_id"], "call_patch");
+        assert_eq!(result["output"][0]["name"], "apply_patch");
+        assert_eq!(
+            result["output"][0]["input"],
+            "*** Begin Patch\n*** End Patch"
         );
     }
 }
