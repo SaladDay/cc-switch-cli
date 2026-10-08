@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::cli::ui::{highlight, info, success};
+use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -217,6 +217,15 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
     }
 }
 
+fn print_monitor_traffic_warning_if_disabled(disables_monitor_traffic: bool) {
+    if disables_monitor_traffic {
+        println!(
+            "{}",
+            warning(texts::common_config_snippet_disables_monitor_traffic())
+        );
+    }
+}
+
 fn format(
     app_type: AppType,
     snippet_text: Option<&str>,
@@ -246,6 +255,8 @@ fn set(
         texts::config_common_snippet_require_json_or_file(),
     )?;
     let snippet = canonical_common_snippet(app_type.clone(), &raw)?.unwrap_or_default();
+    let disables_monitor_traffic =
+        ProviderService::common_config_snippet_disables_monitor_traffic(&app_type, &snippet);
 
     let state = get_state()?;
     ProviderService::set_common_config_snippet(&state, app_type.clone(), Some(snippet))?;
@@ -254,6 +265,7 @@ fn set(
         "{}",
         success(&texts::config_common_snippet_set_for_app(app_type.as_str()))
     );
+    print_monitor_traffic_warning_if_disabled(disables_monitor_traffic);
 
     let current_id = if app_type.is_additive_mode() {
         String::new()
@@ -310,12 +322,15 @@ fn extract(
 
     if save {
         let snippet = canonical_common_snippet(app_type.clone(), &extracted)?.unwrap_or_default();
+        let disables_monitor_traffic =
+            ProviderService::common_config_snippet_disables_monitor_traffic(&app_type, &snippet);
         ProviderService::set_common_config_snippet(
             &state,
             app_type.clone(),
             Some(snippet.clone()),
         )?;
         println!("{}", success(texts::common_config_snippet_extracted()));
+        print_monitor_traffic_warning_if_disabled(disables_monitor_traffic);
         if !snippet.trim().is_empty() {
             println!();
             println!("{}", snippet);
@@ -477,6 +492,36 @@ mod tests {
         assert!(
             live.get("alwaysThinkingEnabled").is_none(),
             "setting a new common snippet must not opt the current provider into common config"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn set_succeeds_when_snippet_disables_monitor_traffic() {
+        let (_temp_home, _env) = seed_current_claude_provider();
+
+        set(
+            AppType::Claude,
+            Some(r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#),
+            None,
+            false,
+        )
+        .expect("set should still succeed for a snippet that disables Monitor traffic");
+
+        let state = AppState::try_new().expect("reload state");
+        let stored = state
+            .config
+            .read()
+            .expect("read config")
+            .common_config_snippets
+            .claude
+            .clone()
+            .expect("stored claude snippet");
+        let stored_json: serde_json::Value =
+            serde_json::from_str(&stored).expect("stored snippet should be valid JSON");
+        assert_eq!(
+            stored_json["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+            1
         );
     }
 
