@@ -649,6 +649,7 @@ fn build_proxy_overview_lines(
 }
 
 fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
+    let proxy_running = state.proxy_service.is_running_blocking().unwrap_or(false);
     [
         (AppType::Claude, "Claude"),
         (AppType::Codex, "Codex"),
@@ -668,8 +669,18 @@ fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
         let route_mode = match state.db.get_route_mode_group(app.as_str()) {
             Ok(group) if group.enabled => {
                 let enabled_members = group.members.iter().filter(|member| member.enabled).count();
-                let en = format!("route mode on ({enabled_members} members)");
-                let zh = format!("路由模式开启（{enabled_members} 个成员）");
+                let dormant = !proxy_running;
+                let (en, zh) = if dormant {
+                    (
+                        format!("route mode on ({enabled_members} members; proxy stopped)"),
+                        format!("路由模式开启（{enabled_members} 个成员；代理未运行）"),
+                    )
+                } else {
+                    (
+                        format!("route mode on ({enabled_members} members)"),
+                        format!("路由模式开启（{enabled_members} 个成员）"),
+                    )
+                };
                 crate::t!(&en, &zh).to_string()
             }
             _ => crate::t!("auto failover off", "自动故障转移关闭").to_string(),

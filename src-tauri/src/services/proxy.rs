@@ -9888,6 +9888,38 @@ base_url = "https://api.example/v1"
 
     #[tokio::test]
     #[serial]
+    async fn route_mode_enable_without_daemon_routing_reports_route_mode_wording() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_route_group(&db, "claude", &["p1"]).await;
+        // Attempt the enable from a disabled group so the assertion proves
+        // the failed enable leaves the flag untouched
+        db.set_route_mode_enabled("claude", false)
+            .expect("disable route group");
+
+        // The isolated runtime dir has no daemon, so the routing
+        // precondition fails; the error must name route mode, not
+        // automatic failover.
+        let error = service
+            .enable_route_mode_for_app("claude")
+            .await
+            .expect_err("no daemon routing must be refused");
+
+        assert!(
+            error.contains("route mode requires daemon-managed proxy routing"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !db.route_mode_enabled_for_app("claude").expect("read flag"),
+            "flag must stay off after a failed enable"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn route_mode_enable_conflicts_with_auto_failover() {
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());

@@ -7,6 +7,7 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -48,6 +49,53 @@ impl RouteModeMember {
 
 fn route_mode_key(app_type: &str) -> String {
     format!("route_mode_{app_type}")
+}
+
+/// Member ids carried by the stored doc, best-effort: used only to exempt
+/// unchanged members from the provider-existence check, so unreadable or
+/// corrupt docs simply yield an empty set (every id gets validated).
+fn stored_route_member_ids(
+    conn: &rusqlite::Connection,
+    key: &str,
+) -> std::collections::HashSet<String> {
+    let Ok(Some(json)) = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            rusqlite::params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| ())
+    else {
+        return Default::default();
+    };
+    serde_json::from_str::<RouteModeGroup>(&json)
+        .map(|group| {
+            group
+                .members
+                .into_iter()
+                .map(|member| member.provider_id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Corruption warnings fire on every read in the request path (3-4 reads per
+/// request), so log the first occurrence per app at warn level and stay quiet
+/// afterwards instead of spamming the proxy log at request rate.
+fn warn_corrupt_once(app_type: &str, message: &str) {
+    static WARNED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+        std::sync::Mutex::new(None);
+    let Ok(mut warned) = WARNED.lock() else {
+        log::debug!("{message}");
+        return;
+    };
+    let warned = warned.get_or_insert_with(Default::default);
+    if warned.insert(app_type.to_string()) {
+        log::warn!("{message}");
+    } else {
+        log::debug!("{message}");
+    }
 }
 
 impl RouteModeGroup {
@@ -99,15 +147,21 @@ impl Database {
                 // Defend against out-of-band writes (WebDAV restore, older
                 // versions): structurally invalid data also means disabled
                 if let Err(error) = group.validate_structure() {
-                    log::warn!(
-                        "invalid route mode config for {app_type}, treating as disabled: {error}"
+                    warn_corrupt_once(
+                        app_type,
+                        &format!(
+                            "invalid route mode config for {app_type}, treating as disabled: {error}"
+                        ),
                     );
                     return Ok(RouteModeGroup::default());
                 }
                 Ok(group)
             }
             Err(error) => {
-                log::warn!("failed to parse route mode config for {app_type}, treating as disabled: {error}");
+                warn_corrupt_once(
+                    app_type,
+                    &format!("failed to parse route mode config for {app_type}, treating as disabled: {error}"),
+                );
                 Ok(RouteModeGroup::default())
             }
         }
@@ -136,7 +190,16 @@ impl Database {
 
         let conn = lock_conn!(self.conn);
         if check_providers {
+            // Members carried over unchanged from the stored doc skip the
+            // existence check: their provider may have been deleted after
+            // the original save (external deletion, WebDAV restore), and
+            // rejecting unrelated edits because of that dangling member
+            // would name the wrong row. New or changed ids are validated.
+            let stored_ids = stored_route_member_ids(&conn, &route_mode_key(app_type));
             for member in &group.members {
+                if stored_ids.contains(&member.provider_id) {
+                    continue;
+                }
                 let exists: bool = conn
                     .query_row(
                         "SELECT COUNT(*) FROM providers WHERE id = ?1 AND app_type = ?2",
@@ -281,13 +344,25 @@ mod tests {
             .expect("re-enable with dangling member");
         assert!(db.route_mode_enabled_for_app("claude").expect("flag"));
 
-        // Direct member edits still reject the dangling id.
+        // Unchanged members ride the stored-doc exemption: saving the same
+        // dangling member back succeeds, while a NEW dangling id is rejected.
+        db.save_route_mode_group(
+            "claude",
+            &RouteModeGroup {
+                enabled: true,
+                members: vec![RouteModeMember::new("p1", 1)],
+            },
+        )
+        .expect("unchanged dangling member must save");
         let err = db
             .save_route_mode_group(
                 "claude",
                 &RouteModeGroup {
                     enabled: true,
-                    members: vec![RouteModeMember::new("p1", 1)],
+                    members: vec![
+                        RouteModeMember::new("p1", 1),
+                        RouteModeMember::new("ghost", 1),
+                    ],
                 },
             )
             .unwrap_err();
