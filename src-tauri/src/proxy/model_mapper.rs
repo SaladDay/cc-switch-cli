@@ -3,6 +3,7 @@ use crate::{
     provider::Provider,
 };
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 const ONE_M_CONTEXT_MARKER: &str = "[1m]";
 
@@ -114,6 +115,25 @@ pub fn apply_model_mapping(
     }
 
     (body, original_model, None)
+}
+
+/// Route mode exact mapping: replaces the model only on an exact table hit,
+/// leaves it untouched otherwise
+///
+/// Called before the existing role-keyword mapping (`apply_model_mapping`);
+/// the mapped result then flows through normal `[1m]` handling and upstream
+/// override logic
+pub fn apply_route_model_mapping(mut body: Value, mappings: &BTreeMap<String, String>) -> Value {
+    if mappings.is_empty() {
+        return body;
+    }
+
+    if let Some(model) = body.get("model").and_then(Value::as_str) {
+        if let Some(actual) = mappings.get(model) {
+            body["model"] = serde_json::json!(actual);
+        }
+    }
+    body
 }
 
 pub fn strip_one_m_suffix_for_upstream(model: &str) -> &str {
@@ -271,5 +291,47 @@ mod tests {
         let body = json!({"model": "deepseek-v4-pro"});
         let result = strip_one_m_suffix_for_upstream_from_body(body);
         assert_eq!(result["model"], "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn route_mapping_rewrites_only_matched_model() {
+        let mut mappings = BTreeMap::new();
+        mappings.insert("m-a".to_string(), "m-b".to_string());
+
+        let hit = apply_route_model_mapping(json!({"model": "m-a"}), &mappings);
+        assert_eq!(hit["model"], "m-b");
+
+        let miss = apply_route_model_mapping(json!({"model": "m-x"}), &mappings);
+        assert_eq!(miss["model"], "m-x");
+
+        let no_model = apply_route_model_mapping(json!({"prompt": "hi"}), &mappings);
+        assert_eq!(no_model.get("model"), None);
+    }
+
+    #[test]
+    fn route_mapping_empty_table_is_noop() {
+        let mappings = BTreeMap::new();
+        let body = json!({"model": "m-a"});
+
+        let result = apply_route_model_mapping(body, &mappings);
+
+        assert_eq!(result["model"], "m-a");
+    }
+
+    #[test]
+    fn route_mapping_applies_before_role_mapping() {
+        // The route mapping output must contain the role keyword ("sonnet")
+        // to keep triggering the existing role mapping
+        let mut mappings = BTreeMap::new();
+        mappings.insert("claude-sonnet-4-6".to_string(), "m-sonnet-a".to_string());
+        let provider = provider_with_mapping("sonnet-mapped");
+        let body = json!({"model": "claude-sonnet-4-6"});
+
+        let routed = apply_route_model_mapping(body, &mappings);
+        assert_eq!(routed["model"], "m-sonnet-a");
+
+        let (result, _, _) = apply_model_mapping(routed, &provider);
+
+        assert_eq!(result["model"], "sonnet-mapped");
     }
 }

@@ -3,11 +3,15 @@ use bytes::Bytes;
 use futures::{stream::BoxStream, StreamExt};
 use serde_json::Value;
 use std::{
+    collections::{BTreeMap, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use crate::{app_config::AppType, provider::Provider};
+
+/// Route mode model mappings: provider_id → (request model → actual model)
+pub type RouteModelMappings = Arc<HashMap<String, BTreeMap<String, String>>>;
 
 use super::{
     error::ProxyError,
@@ -33,6 +37,7 @@ pub struct RequestForwarder {
     session_client_provided: bool,
     codex_chat_history: Option<Arc<CodexChatHistoryStore>>,
     gemini_shadow: Option<Arc<GeminiShadowStore>>,
+    route_model_mappings: Option<RouteModelMappings>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,6 +176,7 @@ impl RequestForwarder {
             session_client_provided: false,
             codex_chat_history: None,
             gemini_shadow: None,
+            route_model_mappings: None,
         })
     }
 
@@ -206,6 +212,11 @@ impl RequestForwarder {
 
     pub fn with_gemini_shadow(mut self, shadow: Arc<GeminiShadowStore>) -> Self {
         self.gemini_shadow = Some(shadow);
+        self
+    }
+
+    pub fn with_route_model_mappings(mut self, mappings: Option<RouteModelMappings>) -> Self {
+        self.route_model_mappings = mappings;
         self
     }
 
