@@ -1,18 +1,38 @@
 use axum::http::HeaderMap;
 use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app_config::AppType;
+use crate::database::Database;
 use crate::provider::Provider;
 
 use super::{
     error::ProxyError,
+    forwarder::RouteModelMappings,
     provider_router::ProviderRouter,
     server::ProxyServerState,
     session::extract_session_id,
     types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
 };
+
+/// Builds the member-level model mapping table while route mode is enabled;
+/// returns None when there is nothing to map
+fn build_route_model_mappings(db: &Database, app_type: &str) -> Option<RouteModelMappings> {
+    let group = db.get_route_mode_group(app_type).ok()?;
+    if !group.enabled {
+        return None;
+    }
+
+    let mappings: HashMap<String, BTreeMap<String, String>> = group
+        .members
+        .into_iter()
+        .filter(|member| !member.model_mappings.is_empty())
+        .map(|member| (member.provider_id, member.model_mappings))
+        .collect();
+    (!mappings.is_empty()).then(|| Arc::new(mappings))
+}
 
 pub struct HandlerContext {
     pub start_time: Instant,
@@ -28,6 +48,8 @@ pub struct HandlerContext {
     pub session_id: String,
     pub session_client_provided: bool,
     pub current_provider_id_at_start: String,
+    pub route_mode_active: bool,
+    pub route_model_mappings: Option<RouteModelMappings>,
 }
 
 impl HandlerContext {
@@ -68,6 +90,15 @@ impl HandlerContext {
             .unwrap_or("unknown")
             .to_string();
         let session_result = extract_session_id(headers, body, app_type.as_str());
+        let route_mode_active = state
+            .db
+            .route_mode_enabled_for_app(app_type.as_str())
+            .unwrap_or(false);
+        let route_model_mappings = if route_mode_active {
+            build_route_model_mappings(&state.db, app_type.as_str())
+        } else {
+            None
+        };
 
         Ok(Self {
             start_time,
@@ -83,6 +114,8 @@ impl HandlerContext {
             session_id: session_result.session_id,
             session_client_provided: session_result.client_provided,
             current_provider_id_at_start,
+            route_mode_active,
+            route_model_mappings,
         })
     }
 
@@ -94,9 +127,14 @@ impl HandlerContext {
         self.providers.first()
     }
 
+    /// Whether breaker/timeout health checks are engaged: auto failover or
+    /// route mode being on counts as engaged
+    pub fn health_checks_engaged(&self) -> bool {
+        self.app_proxy.auto_failover_enabled || self.route_mode_active
+    }
+
     pub fn streaming_first_byte_timeout(&self) -> Option<Duration> {
-        if !self.app_proxy.auto_failover_enabled || self.app_proxy.streaming_first_byte_timeout == 0
-        {
+        if !self.health_checks_engaged() || self.app_proxy.streaming_first_byte_timeout == 0 {
             return None;
         }
 
@@ -106,7 +144,7 @@ impl HandlerContext {
     }
 
     pub fn streaming_idle_timeout(&self) -> Option<Duration> {
-        if !self.app_proxy.auto_failover_enabled {
+        if !self.health_checks_engaged() {
             return None;
         }
 
@@ -117,7 +155,7 @@ impl HandlerContext {
     }
 
     pub fn non_streaming_timeout(&self) -> Option<Duration> {
-        if !self.app_proxy.auto_failover_enabled || self.app_proxy.non_streaming_timeout == 0 {
+        if !self.health_checks_engaged() || self.app_proxy.non_streaming_timeout == 0 {
             return None;
         }
 

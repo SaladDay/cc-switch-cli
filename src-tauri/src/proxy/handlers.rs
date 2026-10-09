@@ -237,7 +237,8 @@ async fn handle_claude_request(
             .with_optimizer_config(context.optimizer_config.clone())
             .with_copilot_optimizer_config(context.copilot_optimizer_config.clone())
             .with_session(context.session_id.clone(), context.session_client_provided)
-            .with_gemini_shadow(context.state.gemini_shadow.clone()),
+            .with_gemini_shadow(context.state.gemini_shadow.clone())
+            .with_route_model_mappings(context.route_model_mappings.clone()),
         Err(error) => {
             context.state.record_request_error(&error).await;
             return proxy_error_response(error);
@@ -260,7 +261,7 @@ async fn handle_claude_request(
         let options = ForwardOptions {
             max_retries: context.app_proxy.max_retries,
             request_timeout: first_byte_timeout,
-            bypass_circuit_breaker: !context.app_proxy.auto_failover_enabled,
+            bypass_circuit_breaker: !context.health_checks_engaged(),
         };
         let forward_result = match forwarder
             .forward_response_detailed(
@@ -376,7 +377,7 @@ async fn handle_claude_request(
     let options = ForwardOptions {
         max_retries: context.app_proxy.max_retries,
         request_timeout: context.non_streaming_timeout(),
-        bypass_circuit_breaker: !context.app_proxy.auto_failover_enabled,
+        bypass_circuit_breaker: !context.health_checks_engaged(),
     };
 
     let forward_result = match forwarder
@@ -580,7 +581,8 @@ async fn handle_passthrough_request(
             .with_optimizer_config(context.optimizer_config.clone())
             .with_copilot_optimizer_config(context.copilot_optimizer_config.clone())
             .with_session(context.session_id.clone(), context.session_client_provided)
-            .with_codex_chat_history(context.state.codex_chat_history.clone()),
+            .with_codex_chat_history(context.state.codex_chat_history.clone())
+            .with_route_model_mappings(context.route_model_mappings.clone()),
         Err(error) => {
             context.state.record_request_error(&error).await;
             return proxy_error_response(error);
@@ -596,13 +598,13 @@ async fn handle_passthrough_request(
         ForwardOptions {
             max_retries: context.app_proxy.max_retries,
             request_timeout: context.streaming_first_byte_timeout(),
-            bypass_circuit_breaker: !context.app_proxy.auto_failover_enabled,
+            bypass_circuit_breaker: !context.health_checks_engaged(),
         }
     } else {
         ForwardOptions {
             max_retries: context.app_proxy.max_retries,
             request_timeout: context.non_streaming_timeout(),
-            bypass_circuit_breaker: !context.app_proxy.auto_failover_enabled,
+            bypass_circuit_breaker: !context.health_checks_engaged(),
         }
     };
 

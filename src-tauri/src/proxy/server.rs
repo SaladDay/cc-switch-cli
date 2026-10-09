@@ -110,6 +110,16 @@ impl ProxyServerState {
     ) {
         self.record_active_target(app_type, provider).await;
 
+        // Route mode: do not rewrite the current provider, do not refresh the
+        // failover snapshot, do not bump the switch counter
+        if self
+            .db
+            .route_mode_enabled_for_app(app_type.as_str())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
         if provider.id == current_provider_id_at_start {
             return;
         }
@@ -758,6 +768,74 @@ model = "gpt-5.4"
         assert_eq!(status.active_targets.len(), 1);
         assert_eq!(status.active_targets[0].app_type, "claude");
         assert_eq!(status.active_targets[0].provider_id, "claude-failover");
+    }
+
+    #[tokio::test]
+    #[serial(home_settings)]
+    async fn sync_successful_provider_selection_is_a_no_op_under_route_mode() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider("claude-current", "Claude Current");
+        let routed = test_provider("claude-routed", "Claude Routed");
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &routed)
+            .expect("save routed provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&current.id))
+            .expect("set local current provider");
+        set_takeover_enabled(&db, "claude", true).await;
+
+        let mut group = crate::database::RouteModeGroup::default();
+        group
+            .members
+            .push(crate::database::RouteModeMember::new("claude-routed", 1));
+        db.save_route_mode_group("claude", &group)
+            .expect("save route group");
+        db.set_route_mode_enabled("claude", true)
+            .expect("enable route mode");
+        assert!(
+            db.route_mode_enabled_for_app("claude")
+                .expect("read route flag"),
+            "seed must leave route mode enabled"
+        );
+
+        let state = test_state(db.clone());
+        state
+            .sync_successful_provider_selection(&AppType::Claude, &routed, &current.id)
+            .await;
+
+        // Route mode must not rewrite the current provider, refresh the
+        // failover snapshot, or bump the switch counter; only the in-memory
+        // observability target is recorded
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("read current provider after sync")
+                .as_deref(),
+            Some("claude-current")
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            Some("claude-current")
+        );
+        assert!(
+            db.get_failover_live_snapshot("claude", "claude-routed")
+                .await
+                .expect("read failover snapshot after sync")
+                .is_none(),
+            "route mode must not refresh failover snapshots"
+        );
+
+        let status = state.snapshot_status().await;
+        assert_eq!(status.failover_count, 0);
+        // record_active_target is kept under route mode: the status view
+        // shows the active routed target while the persisted current
+        // provider stays untouched
+        assert_eq!(status.current_provider_id.as_deref(), Some("claude-routed"));
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].provider_id, "claude-routed");
     }
 
     #[tokio::test]
