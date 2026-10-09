@@ -4221,9 +4221,10 @@ pub(super) fn render_route_mode(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    // A dormant flag (route mode enabled while the proxy is stopped) must be
-    // distinguishable from an actively routing one
-    let status_value = match (data.proxy.route_mode_enabled, data.proxy.running) {
+    // A dormant flag (route mode enabled while this app isn't actually
+    // routing through the proxy) must be distinguishable from an active one
+    let actively_routing = data.proxy.routes_current_app_through_proxy(&app.app_type) == Some(true);
+    let status_value = match (data.proxy.route_mode_enabled, actively_routing) {
         (true, true) => texts::enabled().to_string(),
         (true, false) => crate::t!("enabled (proxy stopped)", "开启（代理未运行）").to_string(),
         (false, _) => texts::disabled().to_string(),
