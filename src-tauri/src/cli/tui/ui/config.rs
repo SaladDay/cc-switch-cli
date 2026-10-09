@@ -4221,10 +4221,12 @@ pub(super) fn render_route_mode(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let status_value = if data.proxy.route_mode_enabled {
-        texts::enabled().to_string()
-    } else {
-        texts::disabled().to_string()
+    // A dormant flag (route mode enabled while the proxy is stopped) must be
+    // distinguishable from an actively routing one
+    let status_value = match (data.proxy.route_mode_enabled, data.proxy.running) {
+        (true, true) => texts::enabled().to_string(),
+        (true, false) => crate::t!("enabled (proxy stopped)", "开启（代理未运行）").to_string(),
+        (false, _) => texts::disabled().to_string(),
     };
 
     // Row 0 is the route-mode status toggle; rows 1.. are members in stored
