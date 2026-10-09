@@ -343,6 +343,35 @@ pub enum Action {
     EnableProxyAndAutoFailover {
         app_type: AppType,
     },
+    SetRouteModeEnabled {
+        app_type: AppType,
+        enabled: bool,
+    },
+    EnableProxyAndRouteMode {
+        app_type: AppType,
+    },
+    AddRouteModeMember {
+        app_type: AppType,
+        provider_id: String,
+    },
+    RemoveRouteModeMember {
+        app_type: AppType,
+        provider_id: String,
+    },
+    ToggleRouteModeMember {
+        app_type: AppType,
+        provider_id: String,
+    },
+    SetRouteModeMemberWeight {
+        app_type: AppType,
+        provider_id: String,
+        weight: u32,
+    },
+    SetRouteModeMemberMappings {
+        app_type: AppType,
+        provider_id: String,
+        mappings: std::collections::BTreeMap<String, String>,
+    },
     SetOpenClawConfigDir {
         path: Option<String>,
     },
@@ -808,6 +837,9 @@ pub struct App {
     pub language_idx: usize,
     pub settings_idx: usize,
     pub settings_proxy_idx: usize,
+    /// Route Mode screen cursor: row 0 is the status toggle, rows 1.. are
+    /// group members in stored (fallback) order
+    pub route_mode_idx: usize,
     pub settings_outbound_proxy_idx: usize,
     pub global_outbound_proxy_draft: Option<crate::services::GlobalOutboundProxyConfig>,
     pub settings_managed_accounts_idx: usize,

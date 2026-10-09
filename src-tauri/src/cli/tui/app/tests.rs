@@ -19,7 +19,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use crate::cli::i18n::{texts, use_test_language, Language};
-    use crate::cli::tui::data::ProviderRow;
+    use crate::cli::tui::data::{ProviderRow, RouteMemberSnapshot};
     use crate::cli::tui::form::{
         CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, McpKeyValueKind,
         McpKeyValueRow, McpTransport, PromptCacheRoutingMode, ProviderAddFormState, TextInput,
@@ -20937,5 +20937,266 @@ mod tests {
                 ..
             }) if model_id == "claude-sonnet-4-5"
         ));
+    }
+
+    fn route_member_row(id: &str, name: &str, weight: u32, enabled: bool) -> RouteMemberSnapshot {
+        RouteMemberSnapshot {
+            provider_id: id.to_string(),
+            name: name.to_string(),
+            weight,
+            enabled,
+            mapping_count: 0,
+            model_mappings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn route_mode_enter_on_status_row_requests_enable_when_routed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.claude_takeover = true;
+        data.proxy.route_mode_enabled = false;
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 1, true));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SetRouteModeEnabled { app_type, enabled }
+                if app_type == AppType::Claude && enabled
+        ));
+    }
+
+    #[test]
+    fn route_mode_enter_on_status_row_prompts_to_enable_proxy_when_not_routed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.claude_takeover = false;
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 1, true));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ProxyEnableAndRouteMode {
+                    app_type: AppType::Claude
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn route_mode_enable_without_enabled_member_warns() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.claude_takeover = true;
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 1, false));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
+        ));
+    }
+
+    #[test]
+    fn route_mode_enter_on_member_row_toggles_member() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.route_mode_idx = 1;
+
+        let mut data = UiData::default();
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 3, true));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::ToggleRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id,
+            } if provider_id == "p1"
+        ));
+    }
+
+    #[test]
+    fn route_mode_w_opens_weight_input_for_selected_member() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.route_mode_idx = 1;
+
+        let mut data = UiData::default();
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 3, true));
+
+        let action = app.on_key(key(KeyCode::Char('w')), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::TextInput(input) => {
+                assert!(matches!(
+                    &input.submit,
+                    TextSubmit::RouteModeWeight { provider_id }
+                        if provider_id == "p1"
+                ));
+                assert_eq!(input.input.value, "3");
+            }
+            _ => panic!("weight key should open a text input"),
+        }
+    }
+
+    #[test]
+    fn route_mode_a_opens_member_picker() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+
+        let action = app.on_key(key(KeyCode::Char('a')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::RouteMemberPicker { .. }));
+    }
+
+    #[test]
+    fn route_mode_unsupported_app_ignores_keys() {
+        let mut app = App::new(Some(AppType::OpenCode));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_mode_member_actions_persist_through_dao() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            let provider = Provider::with_id("p1".to_string(), "One".to_string(), json!({}), None);
+            state
+                .db
+                .save_provider("claude", &provider)
+                .expect("save provider");
+        }
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::AddRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("add route member");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::SetRouteModeMemberWeight {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+                weight: 3,
+            },
+        )
+        .expect("set member weight");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::ToggleRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("toggle member");
+        let mut mappings = std::collections::BTreeMap::new();
+        mappings.insert("m-a".to_string(), "m-b".to_string());
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::SetRouteModeMemberMappings {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+                mappings: mappings.clone(),
+            },
+        )
+        .expect("set member mappings");
+
+        {
+            let state = crate::cli::tui::data::load_state().expect("reload state");
+            let group = state.db.get_route_mode_group("claude").expect("read group");
+            assert_eq!(group.members.len(), 1);
+            let member = &group.members[0];
+            assert_eq!(member.provider_id, "p1");
+            assert_eq!(member.weight, 3);
+            assert!(!member.enabled, "toggle must have disabled the member");
+            assert_eq!(member.model_mappings, mappings);
+        }
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::RemoveRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("remove route member");
+
+        let state = crate::cli::tui::data::load_state().expect("reload state");
+        let group = state.db.get_route_mode_group("claude").expect("read group");
+        assert!(group.members.is_empty());
+        assert!(
+            !group.enabled,
+            "member edits must not flip the enabled flag"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_mode_add_member_rejects_unknown_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+
+        let result = run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::AddRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "ghost".to_string(),
+            },
+        );
+        assert!(result.is_err(), "unknown provider must fail DAO validation");
     }
 }

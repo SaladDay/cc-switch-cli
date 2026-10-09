@@ -4214,6 +4214,129 @@ pub(super) fn render_settings_proxy(
     );
 }
 
+pub(super) fn render_route_mode(
+    frame: &mut Frame<'_>,
+    app: &App,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let status_value = if data.proxy.route_mode_enabled {
+        texts::enabled().to_string()
+    } else {
+        texts::disabled().to_string()
+    };
+
+    // Row 0 is the route-mode status toggle; rows 1.. are members in stored
+    // (fallback) order
+    let mut rows_data = vec![(
+        texts::tui_route_mode_title().to_string(),
+        status_value,
+        String::new(),
+        String::new(),
+    )];
+    for member in &data.proxy.route_members {
+        rows_data.push((
+            if member.name.trim().is_empty() {
+                member.provider_id.clone()
+            } else {
+                member.name.clone()
+            },
+            if member.enabled {
+                texts::enabled().to_string()
+            } else {
+                texts::disabled().to_string()
+            },
+            member.weight.to_string(),
+            member.mapping_count.to_string(),
+        ));
+    }
+
+    let label_col_width = field_label_column_width(
+        rows_data
+            .iter()
+            .map(|(label, _status, _weight, _mappings)| label.as_str())
+            .chain(std::iter::once(texts::tui_settings_header_setting()))
+            .chain(std::iter::once(crate::t!("Member", "成员"))),
+        0,
+    );
+
+    let header = Row::new(vec![
+        Cell::from(texts::tui_settings_header_setting()),
+        Cell::from(texts::tui_settings_header_value()),
+        Cell::from(crate::t!("Weight", "权重")),
+        Cell::from(crate::t!("Mappings", "模型映射")),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+    let rows = rows_data.iter().map(|(label, status, weight, mappings)| {
+        Row::new(vec![
+            Cell::from(label.clone()),
+            Cell::from(status.clone()),
+            Cell::from(weight.clone()),
+            Cell::from(mappings.clone()),
+        ])
+    });
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(breadcrumb_title(&[texts::tui_route_mode_title()]));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &crate::cli::tui::keymap::route_mode::key_bar_items(app, data),
+        app.focus == Focus::Content,
+    );
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(label_col_width),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Min(6),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = TableState::default();
+    state.select(Some(app.route_mode_idx));
+    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+
+    let endpoint = format!(
+        "http://{}:{}",
+        data.proxy.listen_address, data.proxy.listen_port
+    );
+    let hint = crate::t!(
+        format!("Endpoint: {endpoint} · Press ? for help"),
+        format!("端点：{endpoint} · 按 ? 查看帮助")
+    );
+    frame.render_widget(
+        Paragraph::new(hint)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.dim)),
+        chunks[2],
+    );
+}
+
 pub(super) fn render_settings_outbound_proxy(
     frame: &mut Frame<'_>,
     app: &App,

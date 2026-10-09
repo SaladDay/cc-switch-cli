@@ -183,6 +183,11 @@ impl App {
                             app_type: app_type.clone(),
                         }
                     }
+                    ConfirmAction::ProxyEnableAndRouteMode { app_type } => {
+                        Action::EnableProxyAndRouteMode {
+                            app_type: app_type.clone(),
+                        }
+                    }
                     ConfirmAction::PromptOpenImportCandidate { filename, content } => {
                         Action::PromptOpenImportCandidate {
                             filename: filename.clone(),
@@ -386,6 +391,46 @@ impl App {
             }
             TextSubmit::SettingsProxyListenPort => {
                 self.handle_settings_proxy_listen_port_submit(data, raw)
+            }
+            TextSubmit::RouteModeWeight { provider_id } => {
+                let trimmed = raw.trim().to_string();
+                let Ok(weight) = trimmed.parse::<u32>() else {
+                    self.push_toast(
+                        crate::t!(
+                            "Weight must be a whole number between 1 and 1000.",
+                            "权重必须是 1 到 1000 之间的整数。"
+                        ),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                };
+                Action::SetRouteModeMemberWeight {
+                    app_type: self.app_type.clone(),
+                    provider_id: provider_id.clone(),
+                    weight,
+                }
+            }
+            TextSubmit::RouteModeMappings { provider_id } => {
+                let trimmed = raw.trim().to_string();
+                let parsed: Result<std::collections::BTreeMap<String, String>, _> =
+                    serde_json::from_str(&trimmed);
+                match parsed {
+                    Ok(mappings) => Action::SetRouteModeMemberMappings {
+                        app_type: self.app_type.clone(),
+                        provider_id: provider_id.clone(),
+                        mappings,
+                    },
+                    Err(_) => {
+                        self.push_toast(
+                            crate::t!(
+                                "Mappings must be a JSON object of string to string.",
+                                "映射必须是字符串到字符串的 JSON 对象。"
+                            ),
+                            ToastKind::Warning,
+                        );
+                        Action::None
+                    }
+                }
             }
             TextSubmit::SettingsOutboundProxyUrl => {
                 let trimmed = raw.trim().to_string();
