@@ -369,3 +369,152 @@ async fn test_record_result_uses_app_failure_threshold_for_health_updates() {
     assert_eq!(second_health.consecutive_failures, 2);
     assert_eq!(second_health.last_error.as_deref(), Some("fail-2"));
 }
+
+fn seed_route_members(db: &Database, members: &[(&str, u32, bool)]) {
+    for (id, _, _) in members {
+        let provider = Provider::with_id((*id).to_string(), (*id).to_string(), json!({}), None);
+        db.save_provider("claude", &provider).unwrap();
+    }
+    let group = crate::database::RouteModeGroup {
+        enabled: false,
+        members: members
+            .iter()
+            .map(|(id, weight, enabled)| {
+                let mut member = crate::database::RouteModeMember::new(*id, *weight);
+                member.enabled = *enabled;
+                member
+            })
+            .collect(),
+    };
+    db.save_route_mode_group("claude", &group).unwrap();
+    db.set_route_mode_enabled("claude", true).unwrap();
+}
+
+#[tokio::test]
+#[serial(home_settings)]
+async fn test_route_mode_uses_members_and_ignores_failover_queue() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    let queued = Provider::with_id("c".to_string(), "Queued".to_string(), json!({}), None);
+    db.save_provider("claude", &queued).unwrap();
+    db.set_current_provider("claude", "c").unwrap();
+    db.add_to_failover_queue("claude", "c").unwrap();
+
+    seed_route_members(&db, &[("a", 3, true), ("b", 1, true)]);
+
+    let router = ProviderRouter::new(db.clone());
+    let mut a_count = 0;
+    let mut b_count = 0;
+    for _ in 0..8 {
+        let providers = router.select_providers("claude").await.unwrap();
+        assert_eq!(providers.len(), 2, "only route members are selected");
+        assert!(
+            providers.iter().all(|provider| provider.id != "c"),
+            "failover-queued non-member must never be selected"
+        );
+        if providers[0].id == "a" {
+            a_count += 1;
+        } else {
+            b_count += 1;
+        }
+    }
+
+    assert_eq!((a_count, b_count), (6, 2), "3:1 weights over 8 selects");
+}
+
+#[tokio::test]
+#[serial(home_settings)]
+async fn test_route_mode_drops_disabled_and_dangling_members() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    seed_route_members(&db, &[("a", 1, true), ("b", 1, false)]);
+    // Out-of-band write simulating a provider deleted after the group was
+    // saved: the dangling "ghost" member must be dropped at selection time
+    db.set_setting(
+        "route_mode_claude",
+        &json!({
+            "enabled": true,
+            "members": [
+                {"providerId": "a", "weight": 1, "enabled": true, "modelMappings": {}},
+                {"providerId": "ghost", "weight": 1, "enabled": true, "modelMappings": {}}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let router = ProviderRouter::new(db.clone());
+    let providers = router.select_providers("claude").await.unwrap();
+
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].id, "a");
+}
+
+#[tokio::test]
+#[serial(home_settings)]
+async fn test_route_mode_all_breakers_open_returns_circuit_open_error() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    db.update_circuit_breaker_config(&CircuitBreakerConfig {
+        failure_threshold: 1,
+        timeout_seconds: 3600,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    seed_route_members(&db, &[("a", 1, true), ("b", 1, true)]);
+
+    let router = ProviderRouter::new(db.clone());
+    router
+        .record_result("a", "claude", false, false, Some("fail".to_string()))
+        .await
+        .unwrap();
+    router
+        .record_result("b", "claude", false, false, Some("fail".to_string()))
+        .await
+        .unwrap();
+
+    let error = router
+        .select_providers("claude")
+        .await
+        .expect_err("all breakers open must surface the circuit-open error");
+
+    assert!(matches!(error, ProxyError::AllProvidersCircuitOpen));
+}
+
+#[tokio::test]
+#[serial(home_settings)]
+async fn test_route_mode_without_enabled_members_returns_no_providers() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    seed_route_members(&db, &[]);
+
+    let router = ProviderRouter::new(db.clone());
+    let error = router
+        .select_providers("claude")
+        .await
+        .expect_err("empty route group must surface no-providers");
+
+    assert!(matches!(error, ProxyError::NoProvidersConfigured));
+}
+
+#[tokio::test]
+#[serial(home_settings)]
+async fn test_route_mode_winner_leads_and_rest_follow_in_stored_order() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    seed_route_members(&db, &[("a", 1, true), ("b", 1, true)]);
+
+    let router = ProviderRouter::new(db.clone());
+    let first = router.select_providers("claude").await.unwrap();
+    assert_eq!([first[0].id.as_str(), first[1].id.as_str()], ["a", "b"]);
+
+    let second = router.select_providers("claude").await.unwrap();
+    assert_eq!([second[0].id.as_str(), second[1].id.as_str()], ["b", "a"]);
+}
