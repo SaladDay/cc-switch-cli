@@ -518,3 +518,33 @@ async fn test_route_mode_winner_leads_and_rest_follow_in_stored_order() {
     let second = router.select_providers("claude").await.unwrap();
     assert_eq!([second[0].id.as_str(), second[1].id.as_str()], ["b", "a"]);
 }
+
+#[tokio::test]
+#[serial(home_settings)]
+async fn test_route_mode_takes_priority_when_both_modes_enabled() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    let provider_a = Provider::with_id("a".to_string(), "A".to_string(), json!({}), None);
+    let provider_b = Provider::with_id("b".to_string(), "B".to_string(), json!({}), None);
+    db.save_provider("claude", &provider_a).unwrap();
+    db.save_provider("claude", &provider_b).unwrap();
+    db.set_current_provider("claude", "a").unwrap();
+    db.add_to_failover_queue("claude", "a").unwrap();
+
+    seed_route_members(&db, &[("a", 1, true), ("b", 1, true)]);
+
+    let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
+    config.auto_failover_enabled = true;
+    db.update_proxy_config_for_app(config).await.unwrap();
+
+    let router = ProviderRouter::new(db.clone());
+    let providers = router.select_providers("claude").await.unwrap();
+
+    // Legacy failover with this queue would return only "a"; the route
+    // branch must win and return both members with the winner first.
+    assert_eq!(providers.len(), 2);
+    assert_eq!(providers[0].id, "a");
+    assert_eq!(providers[1].id, "b");
+}

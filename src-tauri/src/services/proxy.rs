@@ -816,7 +816,7 @@ impl ProxyService {
             .unwrap_or(false)
         {
             return Err(format!(
-                "route mode is active for {}; disable route mode before disabling the proxy",
+                "route mode is active for {}; disable route mode first",
                 app_type_enum.as_str()
             ));
         }
