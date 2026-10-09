@@ -640,20 +640,18 @@ impl ProxyService {
 
         // Disable: route through the daemon when one is running so it stays
         // the sole writer of `proxy_runtime_session`.
-        if !enabled {
-            // Refuse to disable the proxy while route mode is active (route
-            // mode must be disabled first); startup recovery does not go
-            // through this path and stays unaffected
-            if self
-                .db
-                .route_mode_enabled_for_app(app_type_enum.as_str())
-                .unwrap_or(false)
-            {
-                return Err(format!(
-                    "route mode is active for {}; disable route mode before disabling the proxy",
-                    app_type_enum.as_str()
-                ));
-            }
+        // Refuse to disable the proxy while route mode is active (route
+        // mode must be disabled first); startup recovery does not go
+        // through this path and stays unaffected
+        if self
+            .db
+            .route_mode_enabled_for_app(app_type_enum.as_str())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "route mode is active for {}; disable route mode before disabling the proxy",
+                app_type_enum.as_str()
+            ));
         }
         if self.should_drop_takeover_via_daemon(&app_type_enum).await? {
             self.daemon_drop_takeover(app_type_enum.as_str()).await
@@ -1719,12 +1717,23 @@ impl ProxyService {
     }
 
     async fn ensure_proxy_routing_active_for_app(&self, app_type: &str) -> Result<(), String> {
+        self.ensure_proxy_routing_active_for_feature(app_type, "automatic failover")
+            .await
+    }
+
+    /// Shared routing precondition; `feature` names the caller so the error
+    /// text matches what the user actually asked for
+    async fn ensure_proxy_routing_active_for_feature(
+        &self,
+        app_type: &str,
+        feature: &str,
+    ) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
         let has_managed_worker = self.has_managed_worker_for_app(&app_type).await;
         if !has_managed_worker {
-            return Err(
-                "automatic failover requires daemon-managed proxy routing for this app".to_string(),
-            );
+            return Err(format!(
+                "{feature} requires daemon-managed proxy routing for this app"
+            ));
         }
 
         let app_key = app_type.as_str();
@@ -1734,9 +1743,9 @@ impl ProxyService {
             .await
             .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
         if !config.enabled {
-            return Err(
-                "automatic failover requires proxy takeover for this app to be enabled".to_string(),
-            );
+            return Err(format!(
+                "{feature} requires proxy takeover for this app to be enabled"
+            ));
         }
 
         Ok(())
@@ -1791,7 +1800,8 @@ impl ProxyService {
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
         self.ensure_route_mode_prerequisites(app_key).await?;
-        self.ensure_proxy_routing_active_for_app(app_key).await?;
+        self.ensure_proxy_routing_active_for_feature(app_key, "route mode")
+            .await?;
         // Flip the flag last: activation failure leaves no half-open state
         self.db
             .set_route_mode_enabled(app_key, true)

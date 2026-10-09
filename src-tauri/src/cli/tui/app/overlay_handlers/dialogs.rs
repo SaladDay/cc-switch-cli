@@ -394,7 +394,11 @@ impl App {
             }
             TextSubmit::RouteModeWeight { provider_id } => {
                 let trimmed = raw.trim().to_string();
-                let Ok(weight) = trimmed.parse::<u32>() else {
+                let weight = trimmed
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|weight| (1..=crate::database::ROUTE_MODE_MAX_WEIGHT).contains(weight));
+                let Some(weight) = weight else {
                     self.push_toast(
                         crate::t!(
                             "Weight must be a whole number between 1 and 1000.",
