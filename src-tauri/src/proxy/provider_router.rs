@@ -4,7 +4,10 @@ use tokio::sync::RwLock;
 
 use crate::{app_config::AppType, database::Database, provider::Provider};
 
+mod route_selection;
 mod upstream_endpoint;
+
+use route_selection::SmoothWrrState;
 
 use super::{
     circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats},
@@ -14,6 +17,8 @@ use super::{
 pub struct ProviderRouter {
     db: Arc<Database>,
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+    /// Route mode smooth weighted round-robin state (app → state)
+    wrr: Arc<tokio::sync::Mutex<HashMap<String, SmoothWrrState>>>,
 }
 
 impl ProviderRouter {
@@ -21,6 +26,7 @@ impl ProviderRouter {
         Self {
             db,
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
+            wrr: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -28,6 +34,17 @@ impl ProviderRouter {
         let mut result = Vec::new();
         let mut total_providers = 0usize;
         let mut circuit_open_count = 0usize;
+
+        // Route mode takes priority: while enabled the failover queue does
+        // not participate (mutually exclusive modes)
+        let route_group = self
+            .db
+            .get_route_mode_group(app_type)
+            .map_err(|error| ProxyError::DatabaseError(error.to_string()))?;
+
+        if route_group.enabled {
+            return self.select_route_providers(app_type, &route_group).await;
+        }
 
         let auto_failover_enabled = self
             .db
@@ -80,6 +97,74 @@ impl ProviderRouter {
         }
 
         Ok(result)
+    }
+
+    /// Route mode selection: smooth weighted round-robin picks the primary
+    /// member; the remaining healthy members follow in stored order so an
+    /// in-request failure reuses the forwarder's existing skip-on-failure
+    /// replay
+    async fn select_route_providers(
+        &self,
+        app_type: &str,
+        route_group: &crate::database::RouteModeGroup,
+    ) -> Result<Vec<Provider>, ProxyError> {
+        let all_providers = self
+            .db
+            .get_all_providers(app_type)
+            .map_err(|error| ProxyError::DatabaseError(error.to_string()))?;
+
+        // Resolve members: dangling or disabled members are dropped
+        let mut candidates = Vec::new();
+        let mut candidate_weights = Vec::new();
+        for member in &route_group.members {
+            if !member.enabled {
+                continue;
+            }
+            let Some(provider) = all_providers.get(&member.provider_id) else {
+                continue;
+            };
+            candidates.push(provider.clone());
+            candidate_weights.push((provider.id.clone(), member.weight));
+        }
+        let total_members = candidates.len();
+
+        // Circuit-breaker filter, consistent with the failover branch
+        let mut healthy = Vec::new();
+        let mut healthy_weights = Vec::new();
+        for (provider, weight) in candidates.into_iter().zip(candidate_weights) {
+            let breaker = self
+                .get_or_create_circuit_breaker(&format!("{app_type}:{}", provider.id))
+                .await;
+
+            if breaker.is_available().await {
+                healthy.push(provider);
+                healthy_weights.push(weight);
+            }
+        }
+
+        if healthy.is_empty() {
+            return if total_members > 0 {
+                Err(ProxyError::AllProvidersCircuitOpen)
+            } else {
+                Err(ProxyError::NoProvidersConfigured)
+            };
+        }
+
+        let winner = {
+            let mut wrr = self.wrr.lock().await;
+            let state = wrr.entry(app_type.to_string()).or_default();
+            state.pick(&healthy_weights)
+        };
+
+        let mut ordered = Vec::with_capacity(healthy.len());
+        for (index, provider) in healthy.into_iter().enumerate() {
+            if index == winner {
+                ordered.insert(0, provider);
+            } else {
+                ordered.push(provider);
+            }
+        }
+        Ok(ordered)
     }
 
     pub async fn allow_provider_request(&self, provider_id: &str, app_type: &str) -> AllowResult {
