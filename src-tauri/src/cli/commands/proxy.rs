@@ -657,15 +657,24 @@ fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
     .into_iter()
     .map(|(app, label)| {
         let (_, auto_failover_enabled) = state.db.get_proxy_flags_sync(app.as_str());
-        format!(
-            "- {}: {}",
-            label,
-            if auto_failover_enabled {
+        if auto_failover_enabled {
+            return format!(
+                "- {}: {}",
+                label,
                 crate::t!("auto failover on", "自动故障转移开启")
-            } else {
-                crate::t!("auto failover off", "自动故障转移关闭")
+            );
+        }
+
+        let route_mode = match state.db.get_route_mode_group(app.as_str()) {
+            Ok(group) if group.enabled => {
+                let enabled_members = group.members.iter().filter(|member| member.enabled).count();
+                let en = format!("route mode on ({enabled_members} members)");
+                let zh = format!("路由模式开启（{enabled_members} 个成员）");
+                crate::t!(&en, &zh).to_string()
             }
-        )
+            _ => crate::t!("auto failover off", "自动故障转移关闭").to_string(),
+        };
+        format!("- {}: {}", label, route_mode)
     })
     .collect()
 }
