@@ -346,6 +346,16 @@ pub struct ProviderHealthSnapshot {
     pub consecutive_failures: u32,
 }
 
+/// One route-mode member as shown on the Route Mode screen
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteMemberSnapshot {
+    pub provider_id: String,
+    pub name: String,
+    pub weight: u32,
+    pub enabled: bool,
+    pub mapping_count: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProxySnapshot {
     pub enabled: bool,
@@ -354,6 +364,8 @@ pub struct ProxySnapshot {
     #[allow(dead_code)]
     pub active_worker_apps: HashSet<String>,
     pub auto_failover_enabled: bool,
+    pub route_mode_enabled: bool,
+    pub route_members: Vec<RouteMemberSnapshot>,
     pub claude_takeover: bool,
     pub codex_takeover: bool,
     pub gemini_takeover: bool,
@@ -3634,6 +3646,28 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
+    // Route mode group: stored member order doubles as the fallback order
+    // on the screen; dangling members keep their raw id as the name
+    let route_group = state
+        .db
+        .get_route_mode_group(app_type.as_str())
+        .unwrap_or_default();
+    let route_provider_names = state.db.get_all_providers(app_type.as_str())?;
+    let route_members = route_group
+        .members
+        .iter()
+        .map(|member| RouteMemberSnapshot {
+            name: route_provider_names
+                .get(&member.provider_id)
+                .map(|provider| provider.name.clone())
+                .unwrap_or_else(|| member.provider_id.clone()),
+            provider_id: member.provider_id.clone(),
+            weight: member.weight,
+            enabled: member.enabled,
+            mapping_count: member.model_mappings.len(),
+        })
+        .collect();
+
     Ok(ProxySnapshot {
         enabled: config.proxy_enabled,
         running: runtime_status.running,
@@ -3641,6 +3675,8 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
             || !runtime_status.active_workers.is_empty(),
         active_worker_apps,
         auto_failover_enabled: app_proxy_config.auto_failover_enabled,
+        route_mode_enabled: route_group.enabled,
+        route_members,
         claude_takeover,
         codex_takeover,
         gemini_takeover,
