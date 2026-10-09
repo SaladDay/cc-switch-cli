@@ -612,3 +612,52 @@ async fn hung_member_times_out_and_backup_completes_the_request() {
     service.stop().await.expect("stop proxy service");
     drop_upstreams(vec![hung, upstream_b]);
 }
+
+#[tokio::test]
+#[serial]
+async fn group_edits_take_effect_on_the_next_request() {
+    let (upstream_a, _state_a) = spawn_ok_upstream().await;
+    let (upstream_b, _state_b) = spawn_ok_upstream().await;
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    db.save_provider(
+        "claude",
+        &anthropic_provider("p-a", "Alpha", &upstream_a.base_url),
+    )
+    .expect("save provider a");
+    db.save_provider(
+        "claude",
+        &anthropic_provider("p-b", "Beta", &upstream_b.base_url),
+    )
+    .expect("save provider b");
+    save_route_group(&db, vec![RouteModeMember::new("p-a", 1)]).await;
+
+    let (service, base) = start_proxy(db.clone()).await;
+
+    let first = send_request(&base, "claude-sonnet-4-6").await;
+    assert!(first.status().is_success());
+    assert_eq!(upstream_a.state.hits(), 1);
+    assert_eq!(upstream_b.state.hits(), 0);
+
+    // Live edit without touching the proxy: add a heavy member; the very
+    // next request must see it.
+    save_route_group(
+        &db,
+        vec![
+            RouteModeMember::new("p-a", 1),
+            RouteModeMember::new("p-b", 3),
+        ],
+    )
+    .await;
+
+    let second = send_request(&base, "claude-sonnet-4-6").await;
+    assert!(second.status().is_success());
+    assert_eq!(
+        upstream_b.state.hits(),
+        1,
+        "newly added member must serve the next request"
+    );
+
+    service.stop().await.expect("stop proxy service");
+    drop_upstreams(vec![upstream_a, upstream_b]);
+}

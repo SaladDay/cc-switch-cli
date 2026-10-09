@@ -119,22 +119,37 @@ impl Database {
         app_type: &str,
         group: &RouteModeGroup,
     ) -> Result<(), AppError> {
+        self.write_route_mode_group(app_type, group, true)
+    }
+
+    /// Shared write path. `check_providers` skips the provider-existence
+    /// check: the flag flip uses it so route mode stays disableable (and
+    /// re-enableable) even when a member references a provider deleted
+    /// after the group was saved — the read path already drops such members.
+    fn write_route_mode_group(
+        &self,
+        app_type: &str,
+        group: &RouteModeGroup,
+        check_providers: bool,
+    ) -> Result<(), AppError> {
         group.validate_structure()?;
 
         let conn = lock_conn!(self.conn);
-        for member in &group.members {
-            let exists: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM providers WHERE id = ?1 AND app_type = ?2",
-                    rusqlite::params![member.provider_id, app_type],
-                    |row| row.get::<_, i64>(0).map(|count| count > 0),
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            if !exists {
-                return Err(AppError::InvalidInput(format!(
-                    "Route mode member {} does not exist for app {app_type}.",
-                    member.provider_id
-                )));
+        if check_providers {
+            for member in &group.members {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM providers WHERE id = ?1 AND app_type = ?2",
+                        rusqlite::params![member.provider_id, app_type],
+                        |row| row.get::<_, i64>(0).map(|count| count > 0),
+                    )
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                if !exists {
+                    return Err(AppError::InvalidInput(format!(
+                        "Route mode member {} does not exist for app {app_type}.",
+                        member.provider_id
+                    )));
+                }
             }
         }
 
@@ -158,11 +173,12 @@ impl Database {
     }
 
     /// Flip only the enabled flag (members preserved; precondition guards
-    /// live in the service layer)
+    /// live in the service layer). Provider existence is not re-checked so a
+    /// dangling member can never wedge the mode in the on state.
     pub fn set_route_mode_enabled(&self, app_type: &str, enabled: bool) -> Result<(), AppError> {
         let mut group = self.get_route_mode_group(app_type)?;
         group.enabled = enabled;
-        self.save_route_mode_group(app_type, &group)
+        self.write_route_mode_group(app_type, &group, false)
     }
 }
 
@@ -239,6 +255,60 @@ mod tests {
             (false, false),
             "must not touch proxy_config"
         );
+    }
+
+    #[test]
+    fn set_route_mode_enabled_survives_dangling_member() {
+        // A provider deleted after the group was saved must never wedge the
+        // mode on: disable and re-enable both have to succeed.
+        let db = Database::memory().expect("create memory db");
+        save_provider(&db, "claude", "p1");
+        let group = RouteModeGroup {
+            enabled: true,
+            members: vec![RouteModeMember::new("p1", 1)],
+        };
+        db.save_route_mode_group("claude", &group).expect("save");
+        db.delete_provider("claude", "p1").expect("delete provider");
+
+        db.set_route_mode_enabled("claude", false)
+            .expect("disable with dangling member");
+        assert!(
+            !db.route_mode_enabled_for_app("claude").expect("flag"),
+            "flag must be off"
+        );
+
+        db.set_route_mode_enabled("claude", true)
+            .expect("re-enable with dangling member");
+        assert!(db.route_mode_enabled_for_app("claude").expect("flag"));
+
+        // Direct member edits still reject the dangling id.
+        let err = db
+            .save_route_mode_group(
+                "claude",
+                &RouteModeGroup {
+                    enabled: true,
+                    members: vec![RouteModeMember::new("p1", 1)],
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn structurally_invalid_object_fails_closed_to_disabled_default() {
+        // Valid JSON, invalid structure (weight out of range): the read path
+        // must fall back to the disabled default, not surface the object.
+        let db = Database::memory().expect("create memory db");
+        db.set_setting(
+            &route_mode_key("claude"),
+            r#"{"enabled":true,"members":[{"providerId":"p1","weight":0,"enabled":true,"modelMappings":{}}]}"#,
+        )
+        .expect("write structurally invalid json");
+
+        let group = db.get_route_mode_group("claude").expect("read group");
+
+        assert!(!group.enabled);
+        assert!(group.members.is_empty());
     }
 
     #[test]
