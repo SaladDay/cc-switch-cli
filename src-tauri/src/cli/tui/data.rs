@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -354,6 +354,8 @@ pub struct RouteMemberSnapshot {
     pub weight: u32,
     pub enabled: bool,
     pub mapping_count: usize,
+    /// Full request-model → actual-model table, kept for the mapping editor
+    pub model_mappings: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3665,6 +3667,7 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
             weight: member.weight,
             enabled: member.enabled,
             mapping_count: member.model_mappings.len(),
+            model_mappings: member.model_mappings.clone(),
         })
         .collect();
 

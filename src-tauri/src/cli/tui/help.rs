@@ -53,6 +53,7 @@ enum HelpTarget {
     PiSystemPrompts,
     PiPromptTemplates,
     FailoverQueue,
+    RouteMode,
     PreferredEditor,
     SkillStorageLocation,
     SkillSyncMethod,
@@ -134,6 +135,7 @@ fn current_help_target(app: &App) -> HelpTarget {
                 provider_field_overlay_target(app, ProviderAddField::CodexOAuthAccount)
             }
             Overlay::FailoverQueueManager { .. } => HelpTarget::FailoverQueue,
+            Overlay::RouteMemberPicker { .. } => HelpTarget::RouteMode,
             Overlay::SessionProjectPicker(_) => HelpTarget::Sessions,
             Overlay::McpKeyValuePicker { kind, .. } => HelpTarget::McpField {
                 field: match kind {
@@ -162,6 +164,7 @@ fn current_help_target(app: &App) -> HelpTarget {
         super::route::Route::Sessions => return HelpTarget::Sessions,
         super::route::Route::PiSystemPrompts => return HelpTarget::PiSystemPrompts,
         super::route::Route::PiPromptTemplates => return HelpTarget::PiPromptTemplates,
+        super::route::Route::RouteMode => return HelpTarget::RouteMode,
         _ => {}
     }
 
@@ -366,6 +369,13 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
             help_lines(
                 "Enter 将当前供应商加入或移出队列。Ctrl+↑/↓ 调整已加入供应商的优先级；J/K 是移动的备用键。按 f 开关自动故障转移。\nP1、P2… 就是实际尝试顺序。开启自动故障转移后，供应商主页的普通切换会停用，由此队列控制路由。\n“当前目标”来自正在运行的代理。健康状态来自历史请求结果：“无记录”不代表健康检查失败，“失败”是尚未达到不健康阈值的连续失败；这里不显示实时断路器状态。",
                 "Press Enter to add or remove the focused provider. Ctrl+Up/Down changes the priority of queued providers; J/K are secondary move aliases. Press f to toggle automatic failover.\nP1, P2, and so on are the actual attempt order. While automatic failover is on, ordinary switching on the Providers page is disabled and this queue controls routing.\nActive target comes from the running proxy. Health is passive history from past request attempts: no record is not a failed health check, and failures means consecutive failures below the unhealthy threshold. This view does not claim to show the live circuit-breaker state.",
+            ),
+        ),
+        HelpTarget::RouteMode => HelpContent::new(
+            texts::tui_route_mode_title(),
+            help_lines(
+                "路由模式把同一个端点暴露给多个已启用供应商，按权重分配请求（平滑加权轮询，同 nginx）：权重 3:1 时请求序列为 a,a,b,a 循环。Enter 在第 0 行开关整个路由模式，在其他行切换成员启用状态；w 设置权重（1-1000），m 编辑模型映射，a 添加成员，d 移除成员。\n模型映射是精确匹配的 JSON 对象，形如 {\"请求模型\": \"实际模型\"}：请求模型命中后才改写，未命中的保持现有行为。改写结果仍走正常的 [1m] 后缀处理与角色关键词映射。\n路由模式与自动故障转移互斥：开启路由模式会忽略故障转移队列；开启路由模式前必须先关闭自动故障转移。同请求内首个成员失败时，会按成员存储顺序跳到下一个健康成员（受 max_retries 限制，极端情况下队列尾部可能轮不到）。\n开启路由模式要求代理接管已开启（会自动拉起守护会话，CLI 退出后端点仍可用）；代理关闭前需先关闭路由模式。路由模式的配置在代理禁用期间保留（休眠，与自动故障转移标志一致）。轮询状态按代理进程内存保存，代理重启后立即按权重重新收敛。",
+                "Route mode exposes one endpoint across multiple enabled providers, distributing requests by weight (smooth weighted round-robin, like nginx): with weights 3:1 the picks cycle a,a,b,a. Enter toggles route mode on row 0 or the focused member's enabled flag on other rows; w sets the weight (1-1000), m edits model mappings, a adds a member, d removes one.\nModel mappings are an exact-match JSON object such as {\"request model\": \"actual model\"}: the rewrite happens only on an exact hit and unmatched models keep their existing behavior. The mapped name still flows through normal [1m] suffix handling and role-keyword mapping.\nRoute mode is mutually exclusive with automatic failover: the failover queue is ignored while route mode is on, and automatic failover must be off before enabling route mode. When the winning member fails mid-request, the next healthy member in stored order serves it (bounded by max_retries, so tail members may never be reached in cascading failures).\nEnabling route mode requires proxy takeover (it brings up the daemon-backed session so the endpoint survives CLI exit); the proxy cannot be disabled while route mode is on. Route mode config persists while the proxy is disabled (dormant, same as the automatic failover flag). The round-robin state lives in the proxy process and re-converges immediately after a restart.",
             ),
         ),
         HelpTarget::PreferredEditor => HelpContent::new(

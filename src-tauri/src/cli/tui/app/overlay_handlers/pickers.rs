@@ -220,6 +220,9 @@ impl App {
         if let Some(action) = self.handle_failover_queue_manager_key(key, data) {
             return Some(action);
         }
+        if let Some(action) = self.handle_route_member_picker_key(key, data) {
+            return Some(action);
+        }
         None
     }
 
@@ -1880,6 +1883,67 @@ impl App {
                     }
                 } else {
                     Action::None
+                }
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_route_member_picker_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
+        let Overlay::RouteMemberPicker {
+            selected_provider_id,
+        } = &mut self.overlay
+        else {
+            return None;
+        };
+
+        let rows = route_member_picker_rows(data);
+        if rows.is_empty() {
+            return Some(match key.code {
+                KeyCode::Esc => {
+                    self.overlay = Overlay::None;
+                    Action::None
+                }
+                _ => Action::None,
+            });
+        }
+
+        let selected = route_member_picker_selected_index(data, selected_provider_id.as_deref())
+            .unwrap_or_default();
+        let selected_id = rows[selected].id.clone();
+        let selected_is_member = data
+            .proxy
+            .route_members
+            .iter()
+            .any(|member| member.provider_id == selected_id);
+        if selected_provider_id.as_deref() != Some(selected_id.as_str()) {
+            *selected_provider_id = Some(selected_id.clone());
+        }
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected_provider_id = Some(rows[selected.saturating_sub(1)].id.clone());
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected_provider_id = Some(rows[(selected + 1).min(rows.len() - 1)].id.clone());
+                Action::None
+            }
+            KeyCode::Enter => {
+                if selected_is_member {
+                    Action::RemoveRouteModeMember {
+                        app_type: self.app_type.clone(),
+                        provider_id: selected_id,
+                    }
+                } else {
+                    Action::AddRouteModeMember {
+                        app_type: self.app_type.clone(),
+                        provider_id: selected_id,
+                    }
                 }
             }
             _ => Action::None,

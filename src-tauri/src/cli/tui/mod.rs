@@ -2327,6 +2327,13 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SetGlobalOutboundProxy { .. }
         | Action::SetProxyAutoFailover { .. }
         | Action::EnableProxyAndAutoFailover { .. }
+        | Action::SetRouteModeEnabled { .. }
+        | Action::EnableProxyAndRouteMode { .. }
+        | Action::AddRouteModeMember { .. }
+        | Action::RemoveRouteModeMember { .. }
+        | Action::ToggleRouteModeMember { .. }
+        | Action::SetRouteModeMemberWeight { .. }
+        | Action::SetRouteModeMemberMappings { .. }
         | Action::SetOpenClawConfigDir { .. }
         | Action::SetPiConfigDir { .. } => CacheInvalidation::DataReloaded,
     }

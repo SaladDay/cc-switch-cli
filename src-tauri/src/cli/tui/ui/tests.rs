@@ -14975,3 +14975,41 @@ fn home_usage_card_rail_falls_back_to_the_glyph_when_the_label_will_not_fit() {
     let wide_rail = line_at(&wide, wide_row);
     assert!(wide_rail.contains("⠸ Refreshing"), "{wide_rail}");
 }
+
+#[test]
+fn route_mode_screen_renders_status_and_member_rows() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::RouteMode;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.route_mode_enabled = false;
+    data.proxy.route_members = vec![
+        crate::cli::tui::data::RouteMemberSnapshot {
+            provider_id: "p1".to_string(),
+            name: "Alpha".to_string(),
+            weight: 3,
+            enabled: true,
+            mapping_count: 2,
+            model_mappings: Default::default(),
+        },
+        crate::cli::tui::data::RouteMemberSnapshot {
+            provider_id: "p2".to_string(),
+            name: "Beta".to_string(),
+            weight: 1,
+            enabled: false,
+            mapping_count: 0,
+            model_mappings: Default::default(),
+        },
+    ];
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Route Mode"), "{all}");
+    assert!(all.contains("Alpha"), "{all}");
+    assert!(all.contains("Beta"), "{all}");
+    assert!(all.contains("http://"), "{all}");
+}

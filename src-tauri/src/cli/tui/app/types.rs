@@ -4419,6 +4419,9 @@ pub enum ConfirmAction {
     ProxyEnableAndAutoFailover {
         app_type: AppType,
     },
+    ProxyEnableAndRouteMode {
+        app_type: AppType,
+    },
     PromptOpenImportCandidate {
         filename: String,
         content: String,
@@ -4499,6 +4502,12 @@ pub enum TextSubmit {
     ConfigBackupName,
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
+    RouteModeWeight {
+        provider_id: String,
+    },
+    RouteModeMappings {
+        provider_id: String,
+    },
     SettingsOutboundProxyUrl,
     SettingsOutboundProxyUsername,
     SettingsOutboundProxyPassword,
@@ -4677,6 +4686,9 @@ pub enum Overlay {
         selected: usize,
     },
     FailoverQueueManager {
+        selected_provider_id: Option<String>,
+    },
+    RouteMemberPicker {
         selected_provider_id: Option<String>,
     },
     ClaudeModelPicker {
@@ -4941,6 +4953,7 @@ impl Overlay {
                 | Overlay::CommonSnippetPicker { .. }
                 | Overlay::ProviderTestMenu { .. }
                 | Overlay::FailoverQueueManager { .. }
+                | Overlay::RouteMemberPicker { .. }
                 | Overlay::ClaudeApiFormatPicker { .. }
                 | Overlay::CodexReasoningLevelsPicker { .. }
                 | Overlay::CodexDefaultReasoningPicker { .. }
@@ -4990,6 +5003,7 @@ impl Overlay {
             | Overlay::CommonSnippetPicker { .. }
             | Overlay::ProviderTestMenu { .. }
             | Overlay::FailoverQueueManager { .. }
+            | Overlay::RouteMemberPicker { .. }
             | Overlay::ClaudeApiFormatPicker { .. }
             | Overlay::CodexReasoningLevelsPicker { .. }
             | Overlay::CodexDefaultReasoningPicker { .. }

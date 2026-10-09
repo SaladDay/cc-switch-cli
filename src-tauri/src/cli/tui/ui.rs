@@ -200,6 +200,7 @@ fn render_content(
         }
         Route::Settings => render_settings(frame, app, data, content_area, theme),
         Route::SettingsProxy => render_settings_proxy(frame, app, data, content_area, theme),
+        Route::RouteMode => render_route_mode(frame, app, data, content_area, theme),
         Route::SettingsOutboundProxy => {
             render_settings_outbound_proxy(frame, app, data, content_area, theme)
         }

@@ -713,6 +713,7 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
             | Route::SettingsProxy
             | Route::SettingsOutboundProxy
             | Route::SettingsManagedAccounts
+            | Route::RouteMode
     )
 }
 
@@ -1515,6 +1516,20 @@ pub(crate) fn failover_queue_position(data: &UiData, provider_id: &str) -> Optio
         .filter(|row| row.provider.in_failover_queue)
         .position(|row| row.id == provider_id)
         .map(|idx| idx + 1)
+}
+
+pub(crate) fn route_member_picker_rows(data: &UiData) -> Vec<&super::data::ProviderRow> {
+    data.providers.rows.iter().collect()
+}
+
+pub(crate) fn route_member_picker_selected_index(
+    data: &UiData,
+    selected_provider_id: Option<&str>,
+) -> Option<usize> {
+    let rows = route_member_picker_rows(data);
+    selected_provider_id
+        .and_then(|provider_id| rows.iter().position(|row| row.id == provider_id))
+        .or_else(|| (!rows.is_empty()).then_some(0))
 }
 
 pub(crate) fn supports_provider_stream_check(app_type: &AppType) -> bool {

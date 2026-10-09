@@ -5194,6 +5194,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_route_mode_title() -> &'static str {
+        if is_chinese() {
+            "路由模式"
+        } else {
+            "Route Mode"
+        }
+    }
+
     pub fn tui_settings_proxy_listen_address_label() -> &'static str {
         if is_chinese() {
             "监听地址"
@@ -9512,6 +9520,19 @@ pub mod texts {
 
     pub fn menu_manage_providers_variants() -> (&'static str, &'static str) {
         ("🔑 Providers", "🔑 供应商")
+    }
+
+    pub fn menu_route_mode_variants() -> (&'static str, &'static str) {
+        ("🧭 Route Mode", "🧭 路由模式")
+    }
+
+    pub fn menu_route_mode() -> &'static str {
+        let (en, zh) = menu_route_mode_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
     }
 
     pub fn menu_usage() -> &'static str {
