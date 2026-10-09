@@ -174,7 +174,8 @@ pub(super) fn set_route_mode_member_mappings(
 
 /// Loads the stored group, applies `mutate`, and saves only when something
 /// changed. Clamps the route-mode cursor when the member list shrank so it
-/// never points past the last row.
+/// never points past the last row, and warns when a saved group has no
+/// enabled member left while the mode stays on (requests would fail).
 fn mutate_route_mode_group(
     ctx: &mut RuntimeActionContext<'_>,
     app_type: &AppType,
@@ -186,6 +187,15 @@ fn mutate_route_mode_group(
     if changed {
         state.db.save_route_mode_group(app_type.as_str(), &group)?;
         ctx.app.route_mode_idx = ctx.app.route_mode_idx.min(group.members.len());
+        if group.enabled && !group.members.iter().any(|member| member.enabled) {
+            ctx.app.push_toast(
+                crate::t!(
+                    "Route mode is on but no member is enabled; requests will fail until one is enabled.",
+                    "路由模式已开启但没有启用的成员；在启用成员之前请求都会失败。"
+                ),
+                ToastKind::Warning,
+            );
+        }
     }
 
     *ctx.data = UiData::load(&ctx.app.app_type)?;

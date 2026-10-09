@@ -661,3 +661,70 @@ async fn group_edits_take_effect_on_the_next_request() {
     service.stop().await.expect("stop proxy service");
     drop_upstreams(vec![upstream_a, upstream_b]);
 }
+
+#[tokio::test]
+#[serial]
+async fn failover_between_members_applies_each_members_own_mappings() {
+    // Member a answers 500; member b answers ok. Both carry a different
+    // exact mapping for the same request model, proving each retry attempt
+    // derives the body from the original request with its own member's
+    // table (no mapping chaining across attempts).
+    let listener = bind_test_listener().await;
+    let addr = listener
+        .local_addr()
+        .expect("read failing upstream address");
+    let failing_state = UpstreamState::default();
+    let failing_router = Router::new()
+        .route("/v1/messages", post(handle_anthropic_500))
+        .with_state(failing_state.clone());
+    let failing_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, failing_router).await;
+    });
+    let failing = MockUpstream {
+        state: failing_state.clone(),
+        base_url: format!("http://{addr}"),
+        handle: failing_handle,
+    };
+    let (upstream_b, _state_b) = spawn_ok_upstream().await;
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    db.save_provider(
+        "claude",
+        &anthropic_provider("p-a", "Failing", &failing.base_url),
+    )
+    .expect("save failing provider");
+    db.save_provider(
+        "claude",
+        &anthropic_provider("p-b", "Backup", &upstream_b.base_url),
+    )
+    .expect("save backup provider");
+
+    let mut member_a = RouteModeMember::new("p-a", 1);
+    member_a
+        .model_mappings
+        .insert("m-shared".to_string(), "m-from-a".to_string());
+    let mut member_b = RouteModeMember::new("p-b", 1);
+    member_b
+        .model_mappings
+        .insert("m-shared".to_string(), "m-from-b".to_string());
+    save_route_group(&db, vec![member_a, member_b]).await;
+
+    let (service, base) = start_proxy(db).await;
+
+    let response = send_request(&base, "m-shared").await;
+    assert!(response.status().is_success());
+
+    assert_eq!(
+        failing.state.last_model().as_deref(),
+        Some("m-from-a"),
+        "first attempt must use member a's mapping"
+    );
+    assert_eq!(
+        upstream_b.state.last_model().as_deref(),
+        Some("m-from-b"),
+        "retry attempt must use member b's mapping, not chain from a"
+    );
+
+    service.stop().await.expect("stop proxy service");
+    drop_upstreams(vec![failing, upstream_b]);
+}
