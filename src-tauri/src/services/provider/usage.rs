@@ -96,11 +96,6 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<UsageResult, AppError> {
-        if matches!(app_type, AppType::Dsh) {
-            return Err(AppError::InvalidInput(
-                "DeepSeek Harness does not support usage queries".to_string(),
-            ));
-        }
         let (script_code, timeout, api_key, base_url, access_token, user_id, template_type) = {
             let providers = state.db.get_all_providers(app_type.as_str())?;
             let provider = providers.get(provider_id).ok_or_else(|| {
@@ -162,9 +157,6 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<UsageResult, String> {
-        if matches!(app_type, AppType::Dsh) {
-            return Err("DeepSeek Harness does not support usage queries".to_string());
-        }
         let providers = state
             .db
             .get_all_providers(app_type.as_str())
@@ -490,9 +482,9 @@ impl ProviderService {
                 .and_then(Value::as_str)
                 .ok_or_else(|| AppError::InvalidInput("Pi provider API key is missing".to_string()))
                 .map(str::to_string),
-            AppType::Dsh => Err(AppError::InvalidInput(
-                "DeepSeek Harness usage queries are unsupported".to_string(),
-            )),
+            AppType::Dsh => provider
+                .configured_api_key(app_type)
+                .ok_or_else(|| AppError::InvalidInput("DSH provider API key is missing".into())),
         }
     }
 
@@ -574,9 +566,12 @@ impl ProviderService {
                 .unwrap_or_default()
                 .to_string()),
             AppType::Pi => crate::pi_config::provider_base_url(&provider.settings_config),
-            AppType::Dsh => Err(AppError::InvalidInput(
-                "DeepSeek Harness usage queries are unsupported".to_string(),
-            )),
+            AppType::Dsh => Ok(provider
+                .settings_config
+                .get("baseUrl")
+                .and_then(Value::as_str)
+                .unwrap_or(crate::dsh_provider_config::DEFAULT_BASE_URL)
+                .to_string()),
         }
     }
 
@@ -596,11 +591,6 @@ impl ProviderService {
         app_type: &AppType,
         usage_script: &UsageScript,
     ) -> Result<(String, String), AppError> {
-        if matches!(app_type, AppType::Dsh) {
-            return Err(AppError::InvalidInput(
-                "DeepSeek Harness does not support usage queries".to_string(),
-            ));
-        }
         let api_key = usage_script
             .api_key
             .clone()

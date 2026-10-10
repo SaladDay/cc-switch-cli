@@ -121,7 +121,8 @@ impl ProviderAddFormState {
         let is_codex = matches!(app_type, AppType::Codex);
         let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
-            AppType::OpenClaw | AppType::Pi | AppType::Dsh => OPENCLAW_DEFAULT_API_PROTOCOL,
+            AppType::OpenClaw | AppType::Pi => OPENCLAW_DEFAULT_API_PROTOCOL,
+            AppType::Dsh => "deepseek",
             _ => "@ai-sdk/openai-compatible",
         };
 
@@ -151,6 +152,9 @@ impl ProviderAddFormState {
             codex_model_catalog_idx: 0,
             codex_model_catalog_field: CodexModelCatalogField::Model,
             extra: json!({}),
+            dsh_profile: TextInput::new("web"),
+            dsh_default_model: TextInput::new("deepseek-flash"),
+            dsh_reasoning_effort: TextInput::new(""),
             id: TextInput::new(""),
             id_is_manual: false,
             name: TextInput::new(""),
@@ -252,6 +256,14 @@ impl ProviderAddFormState {
             initial_snapshot: Value::Null,
             initial_pi_settings_config: None,
         };
+        if matches!(form.app_type, AppType::Dsh) {
+            form.opencode_base_url
+                .set(crate::dsh_provider_config::DEFAULT_BASE_URL);
+            form.openclaw_models = crate::dsh_provider_config::default_settings("")["models"]
+                .as_array()
+                .unwrap()
+                .clone();
+        }
         let _ = form.refresh_quick_config_from_common_snippet(common_snippet);
         form.capture_initial_snapshot();
         form
@@ -588,7 +600,13 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenClawModels);
             }
             AppType::Dsh => {
+                fields.push(ProviderAddField::DshProfile);
+                fields.push(ProviderAddField::OpenClawApiProtocol);
                 fields.push(ProviderAddField::OpenCodeApiKey);
+                fields.push(ProviderAddField::OpenCodeBaseUrl);
+                fields.push(ProviderAddField::OpenClawModels);
+                fields.push(ProviderAddField::DshDefaultModel);
+                fields.push(ProviderAddField::DshReasoningEffort);
             }
         }
 
@@ -606,10 +624,8 @@ impl ProviderAddFormState {
             AppType::Codex => fields.push(ProviderAddField::CodexQuickConfig),
             _ => {}
         }
-        if !matches!(self.app_type, AppType::Dsh) {
-            fields.push(ProviderAddField::UsageQueryDivider);
-            fields.push(ProviderAddField::UsageQuery);
-        }
+        fields.push(ProviderAddField::UsageQueryDivider);
+        fields.push(ProviderAddField::UsageQuery);
 
         // Add mode leads with the template picker row plus its divider, so the
         // template reads as its own group above the real fields. Inserted last
@@ -748,6 +764,9 @@ impl ProviderAddFormState {
             ProviderAddField::OpenCodeNpmPackage => Some(&self.opencode_npm_package),
             ProviderAddField::OpenCodeApiKey => Some(&self.opencode_api_key),
             ProviderAddField::OpenCodeBaseUrl => Some(&self.opencode_base_url),
+            ProviderAddField::DshProfile => Some(&self.dsh_profile),
+            ProviderAddField::DshDefaultModel => Some(&self.dsh_default_model),
+            ProviderAddField::DshReasoningEffort => Some(&self.dsh_reasoning_effort),
             ProviderAddField::OpenCodeModelId => Some(&self.opencode_model_id),
             ProviderAddField::OpenCodeModelName => Some(&self.opencode_model_name),
             ProviderAddField::OpenCodeModelContextLimit => Some(&self.opencode_model_context_limit),
@@ -814,6 +833,9 @@ impl ProviderAddFormState {
             ProviderAddField::OpenCodeNpmPackage => Some(&mut self.opencode_npm_package),
             ProviderAddField::OpenCodeApiKey => Some(&mut self.opencode_api_key),
             ProviderAddField::OpenCodeBaseUrl => Some(&mut self.opencode_base_url),
+            ProviderAddField::DshProfile => Some(&mut self.dsh_profile),
+            ProviderAddField::DshDefaultModel => Some(&mut self.dsh_default_model),
+            ProviderAddField::DshReasoningEffort => Some(&mut self.dsh_reasoning_effort),
             ProviderAddField::OpenCodeModelId => Some(&mut self.opencode_model_id),
             ProviderAddField::OpenCodeModelName => Some(&mut self.opencode_model_name),
             ProviderAddField::OpenCodeModelContextLimit => {
@@ -2252,7 +2274,7 @@ impl ProviderAddFormState {
                 let provider = self.to_provider_json_value();
                 crate::pi_config::provider_base_url(&provider["settingsConfig"]).unwrap_or_default()
             }
-            AppType::Dsh => String::new(),
+            AppType::Dsh => self.opencode_base_url.value.clone(),
         }
     }
 
@@ -2272,20 +2294,15 @@ impl ProviderAddFormState {
             );
         }
 
-        if matches!(self.app_type, AppType::Dsh) {
-            return (String::new(), String::new());
-        }
-
         let (api_key, base_url) = match self.app_type {
             AppType::Claude => (&self.claude_api_key.value, &self.claude_base_url.value),
             AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
             AppType::Gemini => (&self.gemini_api_key.value, &self.gemini_base_url.value),
             AppType::Hermes => (&self.hermes_api_key.value, &self.hermes_base_url.value),
-            AppType::OpenCode | AppType::OpenClaw => {
+            AppType::OpenCode | AppType::OpenClaw | AppType::Dsh => {
                 (&self.opencode_api_key.value, &self.opencode_base_url.value)
             }
             AppType::Pi => unreachable!("Pi credentials are resolved above"),
-            AppType::Dsh => unreachable!("DSH credentials are resolved above"),
         };
         (
             Self::usage_query_comment_value(api_key),
@@ -3059,6 +3076,17 @@ impl ProviderAddFormState {
     }
 
     pub(crate) fn openclaw_models_summary(&self) -> String {
+        if self.app_type == AppType::Dsh {
+            return format!(
+                "{} {}",
+                self.openclaw_models.len(),
+                if crate::cli::i18n::is_chinese() {
+                    "个模型"
+                } else {
+                    "models"
+                }
+            );
+        }
         let total = self.openclaw_models.len();
         texts::tui_openclaw_models_summary(total)
     }

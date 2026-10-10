@@ -17,6 +17,7 @@ pub mod daemon;
 mod database;
 mod deeplink;
 mod dsh_config;
+pub mod dsh_provider_config;
 mod error;
 mod gemini_config;
 mod gemini_mcp;

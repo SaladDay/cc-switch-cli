@@ -1518,7 +1518,7 @@ pub(crate) fn failover_queue_position(data: &UiData, provider_id: &str) -> Optio
 }
 
 pub(crate) fn supports_provider_stream_check(app_type: &AppType) -> bool {
-    !matches!(app_type, AppType::OpenClaw | AppType::Dsh)
+    !matches!(app_type, AppType::OpenClaw)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1528,9 +1528,6 @@ pub(crate) enum ProviderTestMenuItem {
 }
 
 pub(crate) fn provider_test_menu_items(app_type: &AppType) -> Vec<ProviderTestMenuItem> {
-    if matches!(app_type, AppType::Dsh) {
-        return Vec::new();
-    }
     let mut items = vec![ProviderTestMenuItem::Speedtest];
     if supports_provider_stream_check(app_type) {
         items.push(ProviderTestMenuItem::StreamCheck);

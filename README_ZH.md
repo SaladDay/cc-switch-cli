@@ -326,7 +326,9 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 Pi 供应商遵循原生的增量管理模型：是否启用完全取决于 `models.json.providers` 中的成员关系。CC-Switch 不会修改 Pi 的登录凭据或全局默认供应商/模型。
 Pi TUI 延续其他应用的表格、表单与快捷键交互，并将预设、系统提示词和 Prompt Templates 分为独立页面。
 
-DeepSeek Harness（`--app dsh`，别名 `deepseek` 和 `deepseek-harness`）支持在 CLI 和 TUI 中管理 API key 配置。切换仅更新 `$DSH_HOME/.credentials.yaml`（默认 `~/.dsh/.credentials.yaml`）中的 `refs.DEEPSEEK_API_KEY`，保留浏览器授权及其他 YAML 字段。Base URL 和模型仍由 DSH 管理。DSH 暂不支持代理接管、故障转移、MCP、提示词、技能、会话、通用配置片段、用量查询及模型/流式诊断。使用手动应用可见性模式时，可在设置中启用 DSH 标签页。
+DeepSeek Harness（`--app dsh`，别名 `deepseek` 和 `deepseek-harness`）支持 CLI 和 TUI 的供应商添加、编辑、复制、删除、导入、切换、模型拉取、端点检查、用量脚本和私有 JSON 导出。供应商绑定已初始化的 DSH profile（默认 `web`，可通过 `--dsh-profile` 指定）。表单提供 API key、Base URL、协议、模型目录、默认模型和推理等级；JSON 编辑器中的 `providerConfig` 支持原生请求头、兼容性、重试等高级参数。协议包括 `deepseek`、`openai-completions`、`openai-responses` 和 `anthropic-messages`。
+
+切换原子发布 `profiles/<profile>/cordis.patch.yml`，密钥使用 `$DSH_HOME/.credentials.yaml`（默认目录 `~/.dsh`）中的独立凭据引用，保留其他插件、注释、JavaScript 表达式和授权记录。DSH HMR 将变更应用到后续请求；已有会话保留自身模型选择。存在更高优先级的 home patch 时会拒绝冲突操作；管理前也需移除启动参数 `--patch` 的冲突覆盖。旧的仅 API key 配置保持兼容。代理接管、故障转移、MCP、提示词、技能、会话和通用片段不属于 DSH provider 管理范围。手动应用可见性模式可在设置中启用 DSH 标签页。
 
 ```bash
 cc-switch --app dsh provider add --name DeepSeek --api-key <key>
@@ -334,7 +336,12 @@ cc-switch --app dsh                      # 在 TUI 中交互管理供应商
 cc-switch --app dsh provider list
 cc-switch --app dsh provider switch <id>
 cc-switch --app dsh provider current
+cc-switch --app dsh provider add --name Gateway --dsh-profile web --api-key <key> --base-url https://gateway.example/v1 --api-format openai-completions --model custom-model
+cc-switch --app dsh provider export <id> --output provider.json # 含凭据，Unix 权限为 0600
+cc-switch --app dsh provider add --name Imported --config-file provider.json
 ```
+
+`deepseek` 协议从配置中的模型目录发现模型，与 DSH 原生适配器一致；其他协议查询远程端点。请求头和兼容性配置适用于三个 Pi AI 协议，DeepSeek 使用自身的文件、图片、超时和重试参数。导入按已安装 bundle、profile 和 home 的顺序读取配置，不执行 JavaScript。依赖 Pi AI 内置目录的路由需先明确协议、凭据引用、Base URL 和模型；动态 provider 表达式需使用 DSH 原生编辑器。
 
 **功能：** 一键切换、Claude 独立 settings 导出、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 
@@ -596,7 +603,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 - Hermes: `~/.hermes/config.yaml`（供应商 + MCP + 记忆设置）, `~/.hermes/AGENTS.md`（提示词）, `~/.hermes/skills/`（技能）, `~/.hermes/memories/`（记忆）
 - OpenClaw: `~/.openclaw/openclaw.json`（供应商 + Env/Tools/Agents Defaults）, `~/.openclaw/AGENTS.md`（提示词）
 - Pi: `~/.pi/agent/models.json`（增量供应商）, `~/.pi/agent/settings.json`（只读默认项 / 会话位置）, `~/.pi/agent/AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`prompts/`、`skills/` 与 `sessions/`
-- DeepSeek Harness: `$DSH_HOME/.credentials.yaml`（默认 `~/.dsh/.credentials.yaml`），仅管理 `refs.DEEPSEEK_API_KEY`
+- DeepSeek Harness: `$DSH_HOME/.credentials.yaml` 和 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`（默认目录 `~/.dsh`）
 
 ---
 

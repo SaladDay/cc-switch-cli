@@ -621,9 +621,9 @@ pub mod texts {
     pub fn tui_help_line_providers(app_type: &crate::app_config::AppType) -> &'static str {
         if matches!(app_type, crate::app_config::AppType::Dsh) {
             if is_chinese() {
-                "供应商：Space 切换，Enter/e 编辑，a 新增，c 复制，d 删除"
+                "供应商：Space 切换，Enter/e 编辑，a 新增，c 复制，d 删除，t 测试，r 刷新"
             } else {
-                "Providers: Space switch, Enter/e edit, a add, c copy, d delete"
+                "Providers: Space switch, Enter/e edit, a add, c copy, d delete, t test, r refresh"
             }
         } else if matches!(app_type, crate::app_config::AppType::Hermes) {
             if is_chinese() {

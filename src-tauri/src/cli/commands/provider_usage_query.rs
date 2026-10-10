@@ -156,11 +156,6 @@ impl fmt::Display for UsageQueryTemplate {
 }
 
 pub fn execute(cmd: ProviderUsageQueryCommand, app_type: AppType) -> Result<(), AppError> {
-    if matches!(app_type, AppType::Dsh) {
-        return Err(AppError::InvalidInput(
-            "DeepSeek Harness does not support usage queries".to_string(),
-        ));
-    }
     match cmd {
         ProviderUsageQueryCommand::Show { id, json } => show(app_type, &id, json),
         ProviderUsageQueryCommand::Set(command) => set(app_type, command),

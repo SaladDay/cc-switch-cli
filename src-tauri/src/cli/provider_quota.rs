@@ -92,9 +92,6 @@ pub(crate) fn quota_target_for_provider(
     id: &str,
     provider: &Provider,
 ) -> Option<QuotaTarget> {
-    if matches!(app_type, AppType::Dsh) {
-        return None;
-    }
     let provider_name = provider_display_name(app_type, id, provider);
     let usage_script = provider
         .meta
@@ -137,6 +134,10 @@ pub(crate) fn quota_target_for_provider(
                 auto_query_interval_minutes: script.auto_query_interval.unwrap_or(0),
             });
         }
+    }
+
+    if matches!(app_type, AppType::Dsh) {
+        return None;
     }
 
     if is_codex_oauth_provider(provider) {
@@ -408,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn dsh_imported_quota_metadata_never_creates_query_targets() {
+    fn dsh_quota_uses_scripts_but_ignores_foreign_oauth_metadata() {
         let mut provider = test_provider("dsh", "DSH", json!({"apiKey": "synthetic-key"}));
         for template in ["general", "official_subscription"] {
             set_usage_script(&mut provider, true, template);
@@ -420,7 +421,10 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .auto_query_interval = Some(1);
-            assert!(quota_target_for_provider(&AppType::Dsh, "dsh", &provider).is_none());
+            assert_eq!(
+                quota_target_for_provider(&AppType::Dsh, "dsh", &provider).is_some(),
+                template == "general"
+            );
         }
         let imported_script = provider.meta.as_ref().unwrap().usage_script.clone();
         provider.meta = Some(ProviderMeta {

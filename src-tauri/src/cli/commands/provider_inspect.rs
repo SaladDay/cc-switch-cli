@@ -30,6 +30,7 @@ pub(crate) enum ProviderModelFetchStrategy {
 enum ModelFetchSource {
     Http(ModelFetchTarget),
     CodexOAuth { account_id: Option<String> },
+    DshCatalog(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +213,24 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
         );
     } else if matches!(app_type, AppType::Dsh) {
         println!("\n{}", highlight("API 配置 / API Configuration"));
+        for field in [
+            "profile",
+            "baseUrl",
+            "api",
+            "defaultModel",
+            "reasoningEffort",
+        ] {
+            if let Some(value) = provider
+                .settings_config
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+            {
+                println!("  {field}: {value}");
+            }
+        }
+        if let Some(models) = provider.settings_config.get("models") {
+            println!("  models: {models}");
+        }
         println!(
             "  API Key:  {}",
             if provider.configured_api_key(&app_type).is_some() {
@@ -373,6 +392,9 @@ pub(crate) fn fetch_models_once(
 
 fn print_model_fetch_source(source: &ModelFetchSource) {
     match &source {
+        ModelFetchSource::DshCatalog(_) => {
+            println!("{}", info("Source: DSH configured DeepSeek model catalog"))
+        }
         ModelFetchSource::Http(target) => {
             println!("{}", info(&format!("Endpoint: {}", target.base_url)));
         }
@@ -394,6 +416,7 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
         .map_err(|e| AppError::Message(format!("Failed to create async runtime: {}", e)))?;
 
     match &source {
+        ModelFetchSource::DshCatalog(models) => Ok(models.clone()),
         ModelFetchSource::Http(target) => runtime.block_on(async {
             crate::cli::tui::fetch_provider_models_for_tui(
                 &target.base_url,
@@ -1057,9 +1080,32 @@ fn model_fetch_target(
             })
         }
         AppType::Dsh => {
-            return Err(AppError::InvalidInput(
-                "DeepSeek Harness model inspection is unsupported".to_string(),
-            ));
+            let api = provider
+                .settings_config
+                .get("api")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("deepseek");
+            Ok(ModelFetchTarget {
+                base_url,
+                is_full_url: false,
+                auth_value: provider.configured_api_key(app_type),
+                custom_user_agent,
+                request_headers: provider
+                    .settings_config
+                    .pointer("/providerConfig/headers")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|headers| {
+                        headers
+                            .iter()
+                            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                            .collect()
+                    }),
+                strategy: if matches!(api, "deepseek" | "anthropic-messages") {
+                    ProviderModelFetchStrategy::Anthropic
+                } else {
+                    ProviderModelFetchStrategy::Bearer
+                },
+            })
         }
         AppType::Codex => {
             Ok(ModelFetchTarget {
@@ -1240,6 +1286,28 @@ fn model_fetch_source(
     provider: &Provider,
     app_type: &AppType,
 ) -> Result<ModelFetchSource, AppError> {
+    if matches!(app_type, AppType::Dsh)
+        && provider
+            .settings_config
+            .get("api")
+            .and_then(Value::as_str)
+            .unwrap_or("deepseek")
+            == "deepseek"
+    {
+        let settings = if crate::dsh_provider_config::is_legacy(&provider.settings_config) {
+            crate::dsh_provider_config::default_settings("")
+        } else {
+            provider.settings_config.clone()
+        };
+        return Ok(ModelFetchSource::DshCatalog(
+            settings["models"]
+                .as_array()
+                .ok_or_else(|| AppError::InvalidInput("DSH model catalog is missing".into()))?
+                .iter()
+                .filter_map(|model| model["id"].as_str().map(str::to_owned))
+                .collect(),
+        ));
+    }
     if matches!(app_type, AppType::Claude) && provider.is_codex_oauth() {
         return Ok(ModelFetchSource::CodexOAuth {
             account_id: codex_oauth_account_id(provider),

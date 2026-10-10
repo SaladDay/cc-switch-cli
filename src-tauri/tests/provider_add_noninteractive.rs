@@ -51,6 +51,7 @@ fn add_command(name: Option<&str>, opts: AddOpts) -> ProviderCommand {
         id: opts.id,
         base_url: opts.base_url,
         api_key: opts.api_key,
+        dsh_profile: None,
         model: opts.model,
         haiku_model: opts.haiku_model,
         sonnet_model: opts.sonnet_model,

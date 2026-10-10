@@ -3023,7 +3023,36 @@ mod tests {
     }
 
     #[test]
-    fn dsh_provider_diagnostics_are_hidden_and_do_not_dispatch() {
+    fn dsh_model_picker_uses_native_catalog_and_protocol_headers() {
+        let mut app = open_provider_fields_form(AppType::Dsh);
+        let mut form = ProviderAddFormState::new(AppType::Dsh);
+        form.opencode_api_key.set("synthetic-key");
+        app.form = Some(FormState::ProviderAdd(form.clone()));
+        assert!(matches!(
+            {
+                select_provider_field(&mut app, ProviderAddField::OpenClawModels);
+                app.on_key(key(KeyCode::Char('f')), &data())
+            },
+            Action::None
+        ));
+        assert!(
+            matches!(&app.overlay, Overlay::ModelFetchPicker { fetching: false, models, .. } if models == &vec!["deepseek-flash".to_string(), "deepseek-v4-pro".to_string()])
+        );
+        form.opencode_npm_package.set("anthropic-messages");
+        form.opencode_base_url.set("https://synthetic.example");
+        form.extra["settingsConfig"]["providerConfig"] = json!({"headers":{"X-Test":"custom"}});
+        app.form = Some(FormState::ProviderAdd(form));
+        app.overlay = Overlay::None;
+        select_provider_field(&mut app, ProviderAddField::OpenClawModels);
+        let action = app.on_key(key(KeyCode::Char('f')), &data());
+        assert!(
+            matches!(action, Action::ProviderModelFetch { api_key: None, request_headers: Some(headers), .. }
+            if headers.get("x-api-key").map(String::as_str) == Some("synthetic-key") && headers.get("X-Test").map(String::as_str) == Some("custom"))
+        );
+    }
+
+    #[test]
+    fn dsh_provider_diagnostics_offer_endpoint_speedtest() {
         let mut app = App::new(Some(AppType::Dsh));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -3031,26 +3060,33 @@ mod tests {
         let mut data = UiData::default();
         data.providers.rows.push(row.clone());
 
-        assert!(provider_test_menu_items(&app.app_type).is_empty());
-        assert!(!supports_provider_stream_check(&app.app_type));
+        assert_eq!(
+            provider_test_menu_items(&app.app_type),
+            vec![
+                ProviderTestMenuItem::Speedtest,
+                ProviderTestMenuItem::StreamCheck
+            ]
+        );
+        assert!(supports_provider_stream_check(&app.app_type));
         assert!(
             crate::cli::tui::keymap::providers::key_bar_items(&app, &data)
                 .iter()
-                .all(|(key, _)| *key != "t")
+                .any(|(key, _)| *key == "t")
         );
-        assert!(!texts::tui_help_line_providers(&app.app_type).contains("t test"));
-        assert!(!texts::tui_help_line_providers(&app.app_type).contains("t 测试"));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('t')), &data),
             Action::None
         ));
-        assert!(matches!(app.overlay, Overlay::None));
-        assert!(matches!(app.provider_speedtest_action(&row), Action::None));
+        assert!(matches!(app.overlay, Overlay::ProviderTestMenu { .. }));
+        assert!(matches!(
+            app.provider_speedtest_action(&row),
+            Action::ProviderSpeedtest { .. }
+        ));
         assert!(matches!(
             app.provider_stream_check_action(&row),
-            Action::None
+            Action::ProviderStreamCheck { .. }
         ));
-        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(app.overlay, Overlay::StreamCheckRunning { .. }));
 
         app.overlay = Overlay::ProviderTestMenu {
             provider_id: "p1".to_string(),
@@ -3058,9 +3094,9 @@ mod tests {
         };
         assert!(matches!(
             app.on_key(key(KeyCode::Enter), &data),
-            Action::None
+            Action::ProviderSpeedtest { .. }
         ));
-        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(app.overlay, Overlay::SpeedtestRunning { .. }));
     }
 
     #[test]

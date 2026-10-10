@@ -330,7 +330,7 @@ enum PreparedLiveWrite {
         models: Value,
     },
     Dsh {
-        api_key: String,
+        settings: Value,
     },
 }
 
@@ -1595,17 +1595,22 @@ impl ProviderService {
                 state.save()?;
             }
             AppType::Dsh => {
-                let api_key = crate::dsh_config::read_dsh_api_key()?.ok_or_else(|| {
-                    AppError::localized(
-                        "dsh.live.missing",
-                        "DeepSeek Harness 凭据文件中没有 DEEPSEEK_API_KEY",
-                        "DeepSeek Harness credentials do not contain DEEPSEEK_API_KEY",
-                    )
-                })?;
+                let profile = state
+                    .config
+                    .read()
+                    .map_err(AppError::from)?
+                    .get_manager(app_type)
+                    .and_then(|manager| manager.providers.get(provider_id))
+                    .map(|provider| {
+                        crate::dsh_provider_config::profile_name(&provider.settings_config)
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "web".into());
+                let settings = crate::dsh_provider_config::read_provider(&profile)?;
                 let mut guard = state.config.write().map_err(AppError::from)?;
                 if let Some(manager) = guard.get_manager_mut(app_type) {
                     if let Some(target) = manager.providers.get_mut(provider_id) {
-                        target.settings_config = crate::dsh_config::dsh_api_key_settings(&api_key);
+                        target.settings_config = settings;
                     }
                 }
                 drop(guard);
@@ -2699,16 +2704,7 @@ impl ProviderService {
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
             AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
             AppType::Pi => unreachable!("Pi uses native provider import"),
-            AppType::Dsh => {
-                let api_key = crate::dsh_config::read_dsh_api_key()?.ok_or_else(|| {
-                    AppError::localized(
-                        "dsh.live.missing",
-                        "DeepSeek Harness 凭据文件中没有 DEEPSEEK_API_KEY",
-                        "DeepSeek Harness credentials do not contain DEEPSEEK_API_KEY",
-                    )
-                })?;
-                crate::dsh_config::dsh_api_key_settings(&api_key)
-            }
+            AppType::Dsh => crate::dsh_provider_config::read_provider("web")?,
         };
 
         let mut provider = Provider::with_id(
@@ -2851,16 +2847,7 @@ impl ProviderService {
             AppType::Pi => Err(AppError::InvalidInput(
                 "Pi providers are read from models.json".to_string(),
             )),
-            AppType::Dsh => {
-                let api_key = crate::dsh_config::read_dsh_api_key()?.ok_or_else(|| {
-                    AppError::localized(
-                        "dsh.live.missing",
-                        "DeepSeek Harness 凭据文件中没有 DEEPSEEK_API_KEY",
-                        "DeepSeek Harness credentials do not contain DEEPSEEK_API_KEY",
-                    )
-                })?;
-                Ok(crate::dsh_config::dsh_api_key_settings(&api_key))
-            }
+            AppType::Dsh => crate::dsh_provider_config::read_provider("web"),
         }
     }
 
@@ -2987,6 +2974,40 @@ impl ProviderService {
             AppType::OpenClaw => Self::import_openclaw_providers_from_live(state),
             AppType::Hermes => Self::import_hermes_providers_from_live(state),
             AppType::Pi => Self::import_pi_providers_from_live(state),
+            AppType::Dsh => {
+                let _guard = Self::lock_dsh_provider_operation(state, &AppType::Dsh)?;
+                let providers = crate::dsh_provider_config::read_all_providers()?;
+                let mut config = state.config.write().map_err(AppError::from)?;
+                let previous = config.clone();
+                config.ensure_app(&AppType::Dsh);
+                let manager = config.get_manager_mut(&AppType::Dsh).unwrap();
+                let mut count = 0;
+                for (id, settings) in providers {
+                    if manager
+                        .providers
+                        .values()
+                        .any(|provider| provider.settings_config == settings)
+                    {
+                        continue;
+                    }
+                    if manager.providers.contains_key(&id) {
+                        continue;
+                    }
+                    manager.providers.insert(
+                        id.clone(),
+                        Provider::with_id(id.clone(), id, settings, None),
+                    );
+                    count += 1;
+                }
+                drop(config);
+                if count > 0 {
+                    if let Err(error) = state.save() {
+                        *state.config.write().map_err(AppError::from)? = previous;
+                        return Err(error);
+                    }
+                }
+                Ok(count)
+            }
             _ => Self::import_default_config(state, app_type).map(usize::from),
         }
     }
@@ -2998,6 +3019,10 @@ impl ProviderService {
         model_id: Option<&str>,
     ) -> Result<String, AppError> {
         match app_type {
+            AppType::Dsh => {
+                Self::switch_with_dsh_model(state, AppType::Dsh, provider_id, model_id)?;
+                Ok(provider_id.to_string())
+            }
             AppType::Hermes => {
                 Self::switch(state, AppType::Hermes, provider_id)?;
                 Ok(provider_id.to_string())
@@ -3318,6 +3343,15 @@ impl ProviderService {
 
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        Self::switch_with_dsh_model(state, app_type, provider_id, None)
+    }
+
+    fn switch_with_dsh_model(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+        model_id: Option<&str>,
+    ) -> Result<(), AppError> {
         let _dsh_guard = Self::lock_dsh_provider_operation(state, &app_type)?;
         if matches!(app_type, AppType::Codex)
             && crate::mode::operation::settle(&state.db, "codex")?.is_some()
@@ -3382,6 +3416,20 @@ impl ProviderService {
 
         let previous_dsh_selection = crate::settings::get_current_provider(&app_type);
         let switch_result = Self::run_transaction(state, move |config| {
+            if let Some(model) = model_id.filter(|_| matches!(app_type_clone, AppType::Dsh)) {
+                let provider = config
+                    .get_manager_mut(&AppType::Dsh)
+                    .and_then(|manager| manager.providers.get_mut(&provider_id_owned))
+                    .ok_or_else(|| AppError::InvalidInput("DSH provider not found".into()))?;
+                if crate::dsh_provider_config::is_legacy(&provider.settings_config) {
+                    provider.settings_config = crate::dsh_provider_config::default_settings(
+                        provider.settings_config["apiKey"]
+                            .as_str()
+                            .unwrap_or_default(),
+                    );
+                }
+                provider.settings_config["defaultModel"] = json!(model);
+            }
             let action = Self::prepare_switch_post_commit_action(
                 config,
                 &app_type_clone,
@@ -3549,17 +3597,11 @@ impl ProviderService {
             }
             AppType::Dsh => {
                 crate::dsh_config::validate_dsh_provider_settings(&provider.settings_config)?;
-                let api_key = provider
-                    .settings_config
-                    .get("apiKey")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| AppError::InvalidInput("DSH provider requires apiKey".into()))?
-                    .to_string();
                 let source = crate::dsh_config::read_dsh_credentials_source()?;
                 crate::dsh_config::validate_dsh_credentials_source(source.as_deref())?;
-                Ok(PreparedLiveWrite::Dsh { api_key })
+                Ok(PreparedLiveWrite::Dsh {
+                    settings: provider.settings_config.clone(),
+                })
             }
             AppType::Pi => Ok(PreparedLiveWrite::Noop),
         }
@@ -3584,7 +3626,9 @@ impl ProviderService {
                     .map(|_| ())
                     .map_err(Self::normalize_openclaw_live_write_error)
             }
-            PreparedLiveWrite::Dsh { api_key } => crate::dsh_config::write_dsh_api_key(api_key),
+            PreparedLiveWrite::Dsh { settings } => {
+                crate::dsh_provider_config::write_provider(settings)
+            }
         }
     }
 

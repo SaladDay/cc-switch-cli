@@ -1744,7 +1744,13 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .as_str()
             .map(|s| s.to_string()),
         AppType::Pi => crate::pi_config::provider_base_url(settings_config).ok(),
-        AppType::Dsh => None,
+        AppType::Dsh => Some(
+            settings_config
+                .get("baseUrl")
+                .and_then(Value::as_str)
+                .unwrap_or(crate::dsh_provider_config::DEFAULT_BASE_URL)
+                .to_string(),
+        ),
     }
 }
 
@@ -1755,6 +1761,10 @@ fn extract_primary_model_id(
 ) -> Option<String> {
     match app_type {
         AppType::Hermes => hermes_primary_model_id(settings_config),
+        AppType::Dsh => settings_config
+            .get("defaultModel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         AppType::OpenClaw => match openclaw_live_provider {
             Some(live_provider) => openclaw_primary_model_id(live_provider),
             None => openclaw_primary_model_id(settings_config),

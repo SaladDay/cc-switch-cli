@@ -92,7 +92,7 @@ fn parse_credentials(source: &str) -> Result<serde_yaml::Value, AppError> {
 
 /// Cooperate with DSH's exclusive-create `<filename>.lock` writer protocol.
 /// DSH can recover a stale lock using the holder PID after this process exits.
-struct CredentialsWriteLock {
+pub(crate) struct CredentialsWriteLock {
     path: PathBuf,
 }
 
@@ -223,7 +223,7 @@ impl CredentialsWriteLock {
         )
     }
 
-    fn acquire_at(
+    pub(crate) fn acquire_at(
         lock_path: PathBuf,
         wait: Duration,
         timeout_message: &str,
@@ -303,6 +303,23 @@ pub fn validate_dsh_credentials_source(source: Option<&str>) -> Result<(), AppEr
 }
 
 pub fn write_dsh_api_key(api_key: &str) -> Result<(), AppError> {
+    write_dsh_credential_ref("DEEPSEEK_API_KEY", api_key)
+}
+
+pub(crate) fn read_dsh_credential_ref(reference: &str) -> Result<Option<String>, AppError> {
+    let Some(source) = read_dsh_credentials_source()? else {
+        return Ok(None);
+    };
+    let value = parse_credentials(&source)?;
+    validate_document(&value)?;
+    Ok(value
+        .get("refs")
+        .and_then(|refs| refs.get(reference))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::to_string))
+}
+
+pub(crate) fn write_dsh_credential_ref(reference: &str, api_key: &str) -> Result<(), AppError> {
     let api_key = api_key.trim();
     if api_key.is_empty() {
         return Err(AppError::InvalidInput(
@@ -325,7 +342,7 @@ pub fn write_dsh_api_key(api_key: &str) -> Result<(), AppError> {
             }
         })
         .map_err(|error| AppError::io(&path, error))?;
-    let rendered = update_credentials_source(&source, api_key)?;
+    let rendered = update_credentials_ref_source(&source, reference, api_key)?;
 
     // Set permissions before publication and perform no fallible work after it.
     // Thus an error always leaves the live document intact on every platform.
@@ -354,7 +371,16 @@ pub fn write_dsh_api_key(api_key: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn update_credentials_source(source: &str, api_key: &str) -> Result<String, AppError> {
+    update_credentials_ref_source(source, "DEEPSEEK_API_KEY", api_key)
+}
+
+fn update_credentials_ref_source(
+    source: &str,
+    reference: &str,
+    api_key: &str,
+) -> Result<String, AppError> {
     let mut root = parse_credentials(source)?;
 
     validate_document(&root)?;
@@ -375,7 +401,7 @@ fn update_credentials_source(source: &str, api_key: &str) -> Result<String, AppE
         AppError::Config("DSH credentials YAML refs must be a mapping".to_string())
     })?;
     refs_map.insert(
-        serde_yaml::Value::String("DEEPSEEK_API_KEY".to_string()),
+        serde_yaml::Value::String(reference.to_string()),
         serde_yaml::Value::String(api_key.to_string()),
     );
 
@@ -404,7 +430,7 @@ fn update_credentials_source(source: &str, api_key: &str) -> Result<String, AppE
     let refs = mapping
         .get_mapping("refs")
         .ok_or_else(|| AppError::Config("Cannot safely edit DSH credentials refs".into()))?;
-    let rendered = if let Some(existing) = refs.get("DEEPSEEK_API_KEY") {
+    let rendered = if let Some(existing) = refs.get(reference) {
         // Preserve the terminating line break of a block scalar. Replacing its
         // syntax node through the editor can otherwise join the following key
         // onto the replacement value.
@@ -427,10 +453,7 @@ fn update_credentials_source(source: &str, api_key: &str) -> Result<String, AppE
         rendered.replace_range(start..end, &quoted);
         rendered
     } else {
-        refs.set(
-            "DEEPSEEK_API_KEY",
-            yaml_edit::ScalarValue::double_quoted(api_key),
-        );
+        refs.set(reference, yaml_edit::ScalarValue::double_quoted(api_key));
         file.to_string()
     };
     // Fail before publication if an unsupported syntax or alias changes another
@@ -460,12 +483,7 @@ pub fn validate_dsh_provider_settings(settings: &Value) -> Result<(), AppError> 
             "DSH provider requires a non-empty apiKey".into(),
         ));
     }
-    if settings.keys().any(|key| key != "apiKey") {
-        return Err(AppError::InvalidInput(
-            "DSH provider supports only apiKey; base URL and model are configured by DeepSeek Harness".into(),
-        ));
-    }
-    Ok(())
+    crate::dsh_provider_config::validate_settings(&Value::Object(settings.clone()))
 }
 
 #[cfg(test)]

@@ -496,12 +496,53 @@ fn populate_openclaw_form(form: &mut ProviderAddFormState, provider: &Provider) 
 }
 
 fn populate_dsh_form(form: &mut ProviderAddFormState, provider: &Provider) {
-    if let Some(api_key) = provider
-        .settings_config
-        .get("apiKey")
-        .and_then(Value::as_str)
-    {
-        form.opencode_api_key.set(api_key);
+    let settings = if crate::dsh_provider_config::is_legacy(&provider.settings_config) {
+        crate::dsh_provider_config::default_settings(
+            provider.settings_config["apiKey"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+    } else {
+        provider.settings_config.clone()
+    };
+    let native = Provider {
+        settings_config: settings.clone(),
+        ..provider.clone()
+    };
+    populate_openclaw_form(form, &native);
+    form.opencode_npm_package.set(
+        settings
+            .get("api")
+            .and_then(Value::as_str)
+            .unwrap_or("deepseek"),
+    );
+    form.opencode_base_url.set(
+        settings
+            .get("baseUrl")
+            .and_then(Value::as_str)
+            .unwrap_or(crate::dsh_provider_config::DEFAULT_BASE_URL),
+    );
+    form.dsh_default_model.set(
+        settings
+            .get("defaultModel")
+            .and_then(Value::as_str)
+            .or_else(|| settings.pointer("/models/0/id").and_then(Value::as_str))
+            .unwrap_or_default(),
+    );
+    form.dsh_reasoning_effort.set(
+        settings
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    for (field, target) in [
+        ("profile", &mut form.dsh_profile),
+        ("defaultModel", &mut form.dsh_default_model),
+        ("reasoningEffort", &mut form.dsh_reasoning_effort),
+    ] {
+        if let Some(value) = settings.get(field).and_then(Value::as_str) {
+            target.set(value);
+        }
     }
 }
 

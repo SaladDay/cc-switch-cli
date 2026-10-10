@@ -56,6 +56,21 @@ fn seed_dsh_credentials(api_key: &str) {
     .expect("write DSH credentials");
 }
 
+fn seed_dsh_profile() {
+    let directory = ensure_test_home().join(".dsh/profiles/web");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base"]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("cordis.patch.yml"),
+        "# preserve\n- id: webserver\n  config: {port: 23080}\n",
+    )
+    .unwrap();
+}
+
 fn dsh_config() -> MultiAppConfig {
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Dsh);
@@ -75,6 +90,7 @@ fn dsh_current_masks_api_keys_in_command_output() {
     let _lock = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
+    seed_dsh_profile();
     for (id, api_key) in [
         ("long", "synthetic-current-secret-key"),
         ("short", "q7"),
@@ -326,7 +342,7 @@ fn dsh_switch_lock_timeout_preserves_native_refresh_and_rolls_back_selection() {
 }
 
 #[test]
-fn dsh_provider_rejects_base_url_or_model_settings() {
+fn dsh_provider_rejects_incomplete_model_catalog() {
     let _lock = lock_test_mutex();
     reset_test_fs();
     ensure_test_home();
@@ -340,8 +356,8 @@ fn dsh_provider_rejects_base_url_or_model_settings() {
         None,
     );
     let error = ProviderService::add(&state, AppType::Dsh, invalid)
-        .expect_err("DSH must reject provider-managed base URL");
-    assert!(error.to_string().contains("only apiKey"));
+        .expect_err("DSH requires a model catalog");
+    assert!(error.to_string().contains("model catalog"));
 }
 
 #[test]
@@ -376,7 +392,7 @@ fn dsh_imported_provider_with_unsupported_fields_cannot_switch() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(message.contains("only apiKey"));
+    assert!(message.contains("Unknown DSH provider field"));
     assert!(!message.contains("new-key"));
     assert_eq!(std::fs::read(&credentials).unwrap(), original);
     let state = AppState::try_new().unwrap();
@@ -458,12 +474,26 @@ fn dsh_common_config_service_rejects_mutations_without_side_effects() {
 }
 
 #[test]
-fn dsh_usage_queries_reject_saved_scripts_without_network_requests() {
+fn dsh_usage_queries_use_saved_custom_scripts() {
     let _lock = lock_test_mutex();
     reset_test_fs();
-    ensure_test_home();
+    let home = ensure_test_home();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let read = stream.read(&mut request).unwrap();
+            assert!(read > 0);
+            let body = r#"{"remaining":1}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        }
+    });
     let mut config = dsh_config();
     let provider = config
         .get_manager_mut(&AppType::Dsh)
@@ -471,33 +501,41 @@ fn dsh_usage_queries_reject_saved_scripts_without_network_requests() {
         .providers
         .get_mut("old")
         .unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
     provider.meta = Some(cc_switch_lib::ProviderMeta {
-        usage_script: Some(serde_json::from_value(json!({
-            "enabled": true,
-            "language": "javascript",
-            "code": format!("({{ request: {{ url: '{url}', method: 'GET' }}, extractor: function() {{ return {{ remaining: 1 }}; }} }})"),
-            "timeout": 1,
-            "apiKey": "override-key",
-            "baseUrl": url,
-            "templateType": "custom"
-        })).unwrap()),
+        usage_script: Some(
+            serde_json::from_value(json!({
+                "enabled": true,
+                "language": "javascript",
+            "code": "({ request: { url: '{{baseUrl}}', method: 'GET' }, extractor: function() { return { remaining: 1 }; } })",
+                "timeout": 1,
+                "apiKey": "override-key",
+                "baseUrl": base_url,
+                "templateType": "custom"
+            }))
+            .unwrap(),
+        ),
         ..Default::default()
     });
     let state = state_from_config(config);
-    let result =
-        futures::executor::block_on(ProviderService::query_usage(&state, AppType::Dsh, "old"));
-    assert!(result.unwrap_err().to_string().contains("does not support"));
-    let result = futures::executor::block_on(ProviderService::query_provider_usage(
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(ProviderService::query_usage(&state, AppType::Dsh, "old"));
+    assert!(result.unwrap().success);
+    let result = runtime.block_on(ProviderService::query_provider_usage(
         &state,
         AppType::Dsh,
         "old",
     ));
-    assert!(result.unwrap_err().contains("does not support"));
-    assert_eq!(
-        listener.accept().unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
+    assert!(result.unwrap().success);
+    state.save().unwrap();
+    let quota = run_dsh_cli(home, &["provider", "quota", "old", "--json"]);
+    assert!(
+        quota.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quota.stderr)
     );
+    let quota: serde_json::Value = serde_json::from_slice(&quota.stdout).unwrap();
+    assert_eq!(quota["available"], true);
+    server.join().unwrap();
 }
 
 #[test]
@@ -537,17 +575,6 @@ fn dsh_unsupported_cli_commands_leave_provider_mcp_and_credentials_unchanged() {
             "--settings-config",
             "{\"apiKey\":\"old-key\"}",
             "--save",
-        ],
-        vec!["provider", "usage-query", "show", "old"],
-        vec!["provider", "usage-query", "clear", "old"],
-        vec![
-            "provider",
-            "usage-query",
-            "set",
-            "old",
-            "--enabled",
-            "--template",
-            "custom",
         ],
     ] {
         let output = run_dsh_cli(home, &args);
@@ -593,13 +620,6 @@ fn dsh_unsupported_cli_commands_reject_before_initial_database_import() {
         vec!["sessions", "list", "--json"],
         vec!["sessions", "sync-usage", "--json"],
         vec!["config", "common", "clear"],
-        vec!["provider", "usage-query", "show", "old"],
-        vec!["provider", "quota", "old", "--json"],
-        vec!["provider", "speedtest", "old"],
-        vec!["provider", "stream-check", "old"],
-        vec!["provider", "fetch-models", "old"],
-        vec!["provider", "export", "old"],
-        vec!["provider", "set-default", "old"],
         vec!["provider", "remove-from-config", "old"],
         vec!["proxy", "enable"],
         vec!["proxy", "config", "--listen-port", "18090"],
@@ -675,8 +695,6 @@ fn dsh_add_preflight_rejects_unsupported_options_without_import() {
             vec!["--config-file", raw_file.to_str().unwrap()],
         ];
         for flag in [
-            "--base-url",
-            "--model",
             "--haiku-model",
             "--sonnet-model",
             "--opus-model",
@@ -708,6 +726,7 @@ fn dsh_add_accepts_custom_template_and_raw_api_key_config() {
     let _lock = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
+    seed_dsh_profile();
     let raw_file = home.join("supported-dsh.json");
     std::fs::write(&raw_file, r#"{"apiKey":"synthetic-file"}"#).unwrap();
     for (id, options) in [
@@ -735,7 +754,11 @@ fn dsh_add_accepts_custom_template_and_raw_api_key_config() {
     for id in ["field", "inline", "file"] {
         assert_eq!(
             providers[id].settings_config,
-            json!({"apiKey": format!("synthetic-{id}")})
+            if id == "field" {
+                cc_switch_lib::dsh_provider_config::default_settings("synthetic-field")
+            } else {
+                json!({"apiKey": format!("synthetic-{id}")})
+            }
         );
     }
 }
@@ -853,13 +876,26 @@ fn dsh_explicit_proxy_takeover_rejects_before_startup_without_global_app() {
 }
 
 #[test]
-fn dsh_one_off_model_fetch_rejects_before_network_access() {
+fn dsh_one_off_model_fetch_uses_explicit_endpoint() {
     let _lock = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut buffer = [0; 4096];
+        let length = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..length]).to_lowercase();
+        assert!(request.contains("get /models"));
+        assert!(request.contains("authorization: bearer test-key"));
+        let body = r#"{"data":[{"id":"test-model"}]}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+    });
     let output = run_dsh_cli(
         home,
         &[
@@ -871,11 +907,229 @@ fn dsh_one_off_model_fetch_rejects_before_network_access() {
             "test-key",
         ],
     );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("does not support"));
-    assert!(!home.join(".cc-switch/cc-switch.db").exists());
-    assert_eq!(
-        listener.accept().unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test-model"));
+    server.join().unwrap();
+}
+
+#[test]
+fn dsh_full_cli_add_switch_export_reimport_duplicate_and_delete() {
+    let _lock = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    seed_dsh_profile();
+    seed_dsh_credentials("original-key");
+    let settings = json!({"apiKey":"synthetic-gateway", "profile":"web", "api":"openai-responses",
+        "baseUrl":"https://gateway.example/v1", "models":[{"id":"a"},{"id":"b"}],
+        "defaultModel":"a", "reasoningEffort":"high", "providerConfig":{"headers":{"X-Gateway":"test"}}});
+    let source = serde_json::to_string(&settings).unwrap();
+    let output = run_dsh_cli(
+        home,
+        &[
+            "provider", "add", "--id", "gateway", "--name", "Gateway", "--config", &source,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(run_dsh_cli(home, &["provider", "switch", "gateway"])
+        .status
+        .success());
+    assert_eq!(
+        cc_switch_lib::dsh_provider_config::read_provider("web").unwrap(),
+        settings
+    );
+    assert!(run_dsh_cli(
+        home,
+        &["provider", "set-default", "gateway", "--model", "b"]
+    )
+    .status
+    .success());
+    let mut expected = settings;
+    expected["defaultModel"] = json!("b");
+    assert_eq!(
+        cc_switch_lib::dsh_provider_config::read_provider("web").unwrap(),
+        expected
+    );
+    let output = run_dsh_cli(home, &["provider", "current"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("gateway.example") && text.contains("openai-responses"));
+    assert!(!text.contains("synthetic-gateway"));
+    let exported = home.join("provider-export.json");
+    assert!(run_dsh_cli(
+        home,
+        &[
+            "provider",
+            "export",
+            "gateway",
+            "--output",
+            exported.to_str().unwrap()
+        ]
+    )
+    .status
+    .success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&exported).unwrap()).unwrap(),
+        expected
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&exported).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(run_dsh_cli(
+        home,
+        &[
+            "provider",
+            "add",
+            "--id",
+            "copy",
+            "--name",
+            "Copy",
+            "--config-file",
+            exported.to_str().unwrap()
+        ]
+    )
+    .status
+    .success());
+    let state = AppState::try_new().unwrap();
+    let copied = ProviderService::duplicate(&state, AppType::Dsh, "copy", None).unwrap();
+    assert_eq!(copied.settings_config, expected);
+    ProviderService::delete(&state, AppType::Dsh, &copied.id).unwrap();
+    assert!(!state
+        .db
+        .get_all_providers("dsh")
+        .unwrap()
+        .contains_key(&copied.id));
+    assert_eq!(
+        cc_switch_lib::dsh_provider_config::read_provider("web").unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn dsh_full_active_edit_replaces_advanced_options_and_failed_default_is_atomic() {
+    let _lock = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    seed_dsh_profile();
+    seed_dsh_credentials("old-key");
+    let state = state_from_config(dsh_config());
+    let mut settings = cc_switch_lib::dsh_provider_config::default_settings("synthetic-edit");
+    settings["api"] = json!("openai-completions");
+    settings["providerConfig"] = json!({"headers":{"X-Remove":"old"}});
+    ProviderService::add(
+        &state,
+        AppType::Dsh,
+        Provider::with_id("full".into(), "Full".into(), settings.clone(), None),
+    )
+    .unwrap();
+    ProviderService::switch(&state, AppType::Dsh, "full").unwrap();
+    settings.as_object_mut().unwrap().remove("providerConfig");
+    settings["baseUrl"] = json!("https://new.example/v1");
+    ProviderService::update(
+        &state,
+        AppType::Dsh,
+        Provider::with_id("full".into(), "Full".into(), settings.clone(), None),
+    )
+    .unwrap();
+    assert_eq!(
+        cc_switch_lib::dsh_provider_config::read_provider("web").unwrap(),
+        settings
+    );
+    let profile = home.join(".dsh/profiles/web/cordis.patch.yml");
+    let original = std::fs::read(&profile).unwrap();
+    std::fs::write(home.join(".dsh/cordis.patch.yml"), "- id: agent-default-model\n  config: {provider: deepseek-official, model: deepseek-flash}\n").unwrap();
+    let original_provider = state.db.get_all_providers("dsh").unwrap()["new"].clone();
+    assert!(ProviderService::set_default_model(
+        &state,
+        AppType::Dsh,
+        "new",
+        Some("deepseek-v4-pro")
+    )
+    .is_err());
+    assert_eq!(
+        state.db.get_all_providers("dsh").unwrap()["new"].settings_config,
+        original_provider.settings_config
+    );
+    assert_eq!(
+        ProviderService::current(&state, AppType::Dsh).unwrap(),
+        "full"
+    );
+    assert_eq!(std::fs::read(profile).unwrap(), original);
+}
+
+#[test]
+fn dsh_import_all_profiles_and_routes_is_idempotent_and_reads_managed_credentials() {
+    let _lock = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    seed_dsh_profile();
+    let settings = cc_switch_lib::dsh_provider_config::default_settings("direct-key");
+    cc_switch_lib::dsh_provider_config::write_provider(&settings).unwrap();
+    let second = home.join(".dsh/profiles/cli");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::copy(
+        home.join(".dsh/profiles/web/package.json"),
+        second.join("package.json"),
+    )
+    .unwrap();
+    let mut pi = settings.clone();
+    pi["profile"] = json!("cli");
+    pi["api"] = json!("anthropic-messages");
+    cc_switch_lib::dsh_provider_config::write_provider(&pi).unwrap();
+    let state = state_from_config(MultiAppConfig::default());
+    assert_eq!(
+        ProviderService::import_live_config(&state, AppType::Dsh).unwrap(),
+        2
+    );
+    assert_eq!(
+        ProviderService::import_live_config(&state, AppType::Dsh).unwrap(),
+        0
+    );
+    let providers = state.db.get_all_providers("dsh").unwrap();
+    assert_eq!(providers["web-deepseek"].settings_config, settings);
+    assert_eq!(providers["cli-cc-switch"].settings_config, pi);
+}
+
+#[test]
+fn dsh_profile_publish_failure_restores_selection_and_keeps_active_key() {
+    let _lock = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    seed_dsh_profile();
+    let state = state_from_config(dsh_config());
+    let settings = cc_switch_lib::dsh_provider_config::default_settings("candidate-key");
+    ProviderService::add(
+        &state,
+        AppType::Dsh,
+        Provider::with_id("full".into(), "Full".into(), settings, None),
+    )
+    .unwrap();
+    seed_dsh_credentials("old-key");
+    let path = home.join(".dsh/profiles/web/cordis.patch.yml");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(ProviderService::switch(&state, AppType::Dsh, "full").is_err());
+    assert_eq!(
+        ProviderService::current(&state, AppType::Dsh).unwrap(),
+        "old"
+    );
+    let credentials: serde_yaml::Value =
+        serde_yaml::from_slice(&std::fs::read(home.join(".dsh/.credentials.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        credentials["refs"]["DEEPSEEK_API_KEY"].as_str(),
+        Some("old-key")
+    );
+    assert!(path.is_dir());
 }
