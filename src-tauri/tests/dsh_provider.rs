@@ -917,6 +917,69 @@ fn dsh_one_off_model_fetch_uses_explicit_endpoint() {
 }
 
 #[test]
+fn dsh_cli_rejects_unserviceable_reasoning_and_empty_display_name_without_mutation() {
+    let _lock = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    seed_dsh_profile();
+    seed_dsh_credentials("original-key");
+    let patch = home.join(".dsh/profiles/web/cordis.patch.yml");
+    let credentials = home.join(".dsh/.credentials.yaml");
+    let original_patch = std::fs::read(&patch).unwrap();
+    let original_credentials = std::fs::read(&credentials).unwrap();
+    let mut settings = json!({"apiKey":"synthetic", "api":"openai-responses",
+        "models":[{"id":"plain"}], "reasoningEffort":"high"});
+    for candidate in [settings.clone(), {
+        let mut candidate = settings.clone();
+        candidate.as_object_mut().unwrap().remove("reasoningEffort");
+        candidate["providerConfig"] = json!({"displayName":""});
+        candidate
+    }] {
+        let source = candidate.to_string();
+        assert!(!run_dsh_cli(
+            home,
+            &["provider", "add", "--name", "Invalid", "--id", "invalid", "--config", &source]
+        )
+        .status
+        .success());
+        assert_eq!(std::fs::read(&patch).unwrap(), original_patch);
+        assert_eq!(std::fs::read(&credentials).unwrap(), original_credentials);
+    }
+    settings["models"] =
+        json!([{"id":"plain"}, {"id":"thinking", "reasoningEfforts":{"high":"high"}}]);
+    settings["defaultModel"] = json!("thinking");
+    let source = settings.to_string();
+    assert!(run_dsh_cli(
+        home,
+        &["provider", "add", "--name", "Valid", "--id", "valid", "--config", &source]
+    )
+    .status
+    .success());
+    assert!(run_dsh_cli(home, &["provider", "switch", "valid"])
+        .status
+        .success());
+    let published_patch = std::fs::read(&patch).unwrap();
+    let published_credentials = std::fs::read(&credentials).unwrap();
+    assert!(!run_dsh_cli(
+        home,
+        &["provider", "set-default", "valid", "--model", "plain"]
+    )
+    .status
+    .success());
+    assert_eq!(std::fs::read(&patch).unwrap(), published_patch);
+    assert_eq!(std::fs::read(&credentials).unwrap(), published_credentials);
+    assert_eq!(
+        cc_switch_lib::dsh_provider_config::read_provider("web").unwrap()["defaultModel"],
+        "thinking"
+    );
+    let state = AppState::try_new().unwrap();
+    assert_eq!(
+        state.db.get_all_providers("dsh").unwrap()["valid"].settings_config["defaultModel"],
+        "thinking"
+    );
+}
+
+#[test]
 fn dsh_full_cli_add_switch_export_reimport_duplicate_and_delete() {
     let _lock = lock_test_mutex();
     reset_test_fs();
@@ -924,7 +987,7 @@ fn dsh_full_cli_add_switch_export_reimport_duplicate_and_delete() {
     seed_dsh_profile();
     seed_dsh_credentials("original-key");
     let settings = json!({"apiKey":"synthetic-gateway", "profile":"web", "api":"openai-responses",
-        "baseUrl":"https://gateway.example/v1", "models":[{"id":"a"},{"id":"b"}],
+        "baseUrl":"https://gateway.example/v1", "models":[{"id":"a", "reasoningEfforts":{"high":"high"}},{"id":"b", "reasoningEfforts":{"high":"high"}}],
         "defaultModel":"a", "reasoningEffort":"high", "providerConfig":{"headers":{"X-Gateway":"test"}}});
     let source = serde_json::to_string(&settings).unwrap();
     let output = run_dsh_cli(

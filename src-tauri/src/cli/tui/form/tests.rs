@@ -6504,7 +6504,7 @@ fn provider_add_form_dsh_omitted_fields_use_native_defaults_when_editing() {
 #[test]
 fn provider_add_form_dsh_edits_full_fields_and_preserves_native_model_metadata() {
     let settings = json!({"apiKey":"synthetic", "profile":"web", "api":"openai-responses",
-        "baseUrl":"https://old.example/v1", "models":[{"id":"old", "contextWindow":32000, "compat":{"supportsStrictMode":false}}],
+        "baseUrl":"https://old.example/v1", "models":[{"id":"old", "contextWindow":32000, "reasoningEfforts":{"low":"low"}, "compat":{"supportsStrictMode":false}}],
         "defaultModel":"old", "reasoningEffort":"low", "providerConfig":{"headers":{"X-Test":"retained"}, "timeoutMs":1200}});
     let provider = Provider::with_id("dsh".into(), "DSH".into(), settings, None);
     let mut form = ProviderAddFormState::from_provider(AppType::Dsh, &provider);
@@ -6512,7 +6512,8 @@ fn provider_add_form_dsh_edits_full_fields_and_preserves_native_model_metadata()
     form.opencode_base_url.set("https://new.example/v1");
     form.opencode_npm_package.set("openai-completions");
     form.dsh_reasoning_effort.set("high");
-    form.openclaw_models.push(json!({"id":"new"}));
+    form.openclaw_models
+        .push(json!({"id":"new", "reasoningEfforts":{"high":"high"}}));
     form.dsh_default_model.set("new");
     let edited = form.to_provider_json_value();
     let settings = &edited["settingsConfig"];

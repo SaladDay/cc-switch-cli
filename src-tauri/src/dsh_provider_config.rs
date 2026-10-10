@@ -293,6 +293,34 @@ pub fn validate_settings(settings: &Value) -> Result<(), AppError> {
         validate_native_options(config, api == "deepseek")?;
         validate_compat(config.get("compat"), api)?;
     }
+    if api != "deepseek" {
+        let default_model = settings
+            .get("defaultModel")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| models[0]["id"].as_str().unwrap());
+        let effort = settings
+            .get("reasoningEffort")
+            .or_else(|| settings.pointer("/providerConfig/reasoning"))
+            .and_then(Value::as_str);
+        let model = models
+            .iter()
+            .find(|model| model["id"].as_str() == Some(default_model))
+            .unwrap();
+        if let Some(effort) = effort {
+            // The managed cc-switch route has no installed catalog to inherit.
+            // Undeclared/false capabilities support only off; a declared map
+            // pins every omitted level (including off) to unsupported.
+            let supported = match model.get("reasoningEfforts").and_then(Value::as_object) {
+                Some(efforts) => efforts.contains_key(effort),
+                None => effort == "off",
+            };
+            if !supported {
+                return Err(invalid(
+                    "DSH default model does not support the selected reasoning effort; declare its native reasoningEfforts or choose a supported level",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -480,8 +508,11 @@ fn validate_native_options(
             return Err(invalid("Invalid DSH native option value"));
         }
     }
-    if config.get("displayName").is_some_and(|v| !v.is_string()) {
-        return Err(invalid("DSH displayName must be a string"));
+    if config
+        .get("displayName")
+        .is_some_and(|v| !v.as_str().is_some_and(|name| !name.is_empty()))
+    {
+        return Err(invalid("DSH displayName must be a non-empty string"));
     }
     validate_modalities(config.get("defaultInput"))?;
     if let Some(headers) = config.get("headers") {
@@ -1302,6 +1333,9 @@ mod tests {
             settings["api"] = json!(api);
             settings["baseUrl"] = json!("https://gateway.example/v1");
             settings["models"] = json!([{ "id":"model-a", "contextWindow":200000,"maxTokens":8192 }, {"id":"model-b"}]);
+            if *api != "deepseek" {
+                settings["models"][1]["reasoningEfforts"] = json!({"high":"high"});
+            }
             settings["defaultModel"] = json!("model-b");
             settings["reasoningEffort"] = json!("high");
             settings["providerConfig"] = if *api == "deepseek" {
@@ -1391,6 +1425,7 @@ mod tests {
                 json!({"compat":{"supportsStore":"yes"}}),
             ),
             ("openai-responses", json!({"compat":{"unknown":true}})),
+            ("openai-responses", json!({"displayName":""})),
             ("openai-responses", json!({"thinkingBudgets":{"xhigh":100}})),
             (
                 "openai-responses",
@@ -1408,6 +1443,40 @@ mod tests {
         assert!(has_dynamic(
             &parse_patch("- id: other\n  config: {value: !!js expression}\n").unwrap()
         ));
+    }
+
+    #[test]
+    fn dsh_pi_default_reasoning_matches_the_selected_models_capabilities() {
+        for api in &DSH_API_PROTOCOLS[1..] {
+            let mut settings = json!({"apiKey":"synthetic", "api":api,
+                "models":[{"id":"plain"},{"id":"thinking", "reasoningEfforts":{"off":null,"low":"low","high":"high"}}]});
+            for effort in ["low", "high", "max"] {
+                settings["reasoningEffort"] = json!(effort);
+                assert!(validate_settings(&settings).is_err());
+            }
+            settings["reasoningEffort"] = json!("off");
+            validate_settings(&settings).unwrap();
+            settings["models"][0]["reasoningEfforts"] = json!(false);
+            settings["reasoningEffort"] = json!("high");
+            assert!(validate_settings(&settings).is_err());
+            settings["defaultModel"] = json!("thinking");
+            validate_settings(&settings).unwrap();
+            settings["reasoningEffort"] = json!("max");
+            assert!(validate_settings(&settings).is_err());
+            settings.as_object_mut().unwrap().remove("reasoningEffort");
+            settings["providerConfig"] = json!({"reasoning":"high"});
+            validate_settings(&settings).unwrap();
+            settings["defaultModel"] = json!("plain");
+            assert!(validate_settings(&settings).is_err());
+            settings["reasoningEffort"] = json!("off");
+            validate_settings(&settings).unwrap();
+            settings["defaultModel"] = json!("thinking");
+            settings["models"][1]["reasoningEfforts"]
+                .as_object_mut()
+                .unwrap()
+                .remove("off");
+            assert!(validate_settings(&settings).is_err());
+        }
     }
 
     #[test]

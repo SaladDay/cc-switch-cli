@@ -886,8 +886,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
             "新会话的默认模型，必须在模型目录内。已有会话保持自己的模型选择。",
             "Default model for new agents. Must be in the catalog; existing sessions retain their selection.")),
         ProviderAddField::DshReasoningEffort => HelpContent::new("Reasoning Effort", help_lines(
-            "默认推理等级：off、minimal、low、medium、high、xhigh、max。留空使用原生默认值。",
-            "Default effort: off, minimal, low, medium, high, xhigh, max. Leave blank for native defaults.")),
+            "留空使用原生默认值。DeepSeek 支持 off、low、high、max；其他协议须与默认模型的 reasoningEfforts 匹配，可在 JSON 编辑器中声明模型能力。",
+            "Leave blank for native defaults. DeepSeek supports off, low, high, max; other protocols must match the default model's reasoningEfforts, declared in the JSON editor.")),
         ProviderAddField::OpenCodeNpmPackage => HelpContent::new(
             texts::tui_label_provider_package(),
             help_lines(
