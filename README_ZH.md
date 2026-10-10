@@ -11,7 +11,7 @@
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[English](README.md) | 中文
+[English](README.md) | 中文 | [한국어](README_KO.md)
 
 </div>
 
