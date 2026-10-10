@@ -71,6 +71,14 @@ pub(crate) fn render_overlay(
             theme,
             selected_provider_id.as_deref(),
         ),
+        Overlay::RouteMappingsEditor(_) => {
+            super::route_mappings::render_route_mappings_editor_overlay(
+                frame,
+                content_area,
+                theme,
+                &app.overlay,
+            )
+        }
         Overlay::ClaudeModelPicker {
             selected,
             column,

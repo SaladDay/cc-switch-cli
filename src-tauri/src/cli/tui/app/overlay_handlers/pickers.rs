@@ -1076,8 +1076,10 @@ impl App {
                         request_headers: None,
                         codex_oauth,
                         codex_oauth_account_id,
-                        field: ProviderAddField::ClaudeModelConfig,
-                        claude_idx: Some(selected),
+                        target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                            field: ProviderAddField::ClaudeModelConfig,
+                            claude_idx: Some(selected),
+                        },
                     }
                 } else {
                     Action::None
@@ -1117,8 +1119,7 @@ impl App {
 
     fn handle_model_fetch_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
         let Overlay::ModelFetchPicker {
-            field,
-            claude_idx,
+            target,
             input,
             query,
             models,
@@ -1134,8 +1135,19 @@ impl App {
 
         let filtered_len = filtered_indices.as_ref().map_or(models.len(), Vec::len);
 
-        let is_claude_model = *field == ProviderAddField::ClaudeModelConfig;
-        let restore_idx = claude_idx.unwrap_or(0);
+        let is_claude_model = matches!(
+            target,
+            crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::ClaudeModelConfig,
+                ..
+            }
+        );
+        let restore_idx = match target {
+            crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                claude_idx, ..
+            } => claude_idx.unwrap_or(0),
+            crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappings { .. } => 0,
+        };
 
         Some(match key.code {
             KeyCode::Esc => {
@@ -1194,38 +1206,59 @@ impl App {
                     return Some(Action::None);
                 };
 
-                let field = *field;
-                let claude_idx = *claude_idx;
+                let target = target.clone();
 
-                if field == ProviderAddField::ClaudeModelConfig {
+                if is_claude_model {
                     self.overlay = Overlay::ClaudeModelPicker {
-                        selected: claude_idx.unwrap_or(0),
+                        selected: restore_idx,
                         column: ClaudeModelPickerColumn::Model,
                         editing: false,
                     };
                 } else {
+                    // Restores the stashed mapping editor (RouteMappings) or
+                    // closes to the underlying page (plain form fields).
                     self.close_overlay();
                 }
 
-                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                    if field == ProviderAddField::ClaudeModelConfig {
-                        if let Some(idx) = claude_idx {
-                            provider.set_claude_model_from_picker(idx, &selected_model);
+                match target {
+                    crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                        field,
+                        claude_idx,
+                    } => {
+                        if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                            if field == ProviderAddField::ClaudeModelConfig {
+                                if let Some(idx) = claude_idx {
+                                    provider.set_claude_model_from_picker(idx, &selected_model);
+                                }
+                            } else if field == ProviderAddField::HermesModels {
+                                provider.set_selected_hermes_model_id_from_picker(&selected_model);
+                            } else if field == ProviderAddField::OpenClawModels {
+                                if !provider.openclaw_models.iter().any(|model| {
+                                    model.get("id").and_then(Value::as_str)
+                                        == Some(selected_model.as_str())
+                                }) {
+                                    provider
+                                        .openclaw_models
+                                        .push(serde_json::json!({ "id": selected_model }));
+                                }
+                            } else if field == ProviderAddField::CodexLocalRouting {
+                                provider.upsert_codex_model_catalog_model(&selected_model);
+                            } else if let Some(input_field) = provider.input_mut(field) {
+                                input_field.set(selected_model);
+                            }
                         }
-                    } else if field == ProviderAddField::HermesModels {
-                        provider.set_selected_hermes_model_id_from_picker(&selected_model);
-                    } else if field == ProviderAddField::OpenClawModels {
-                        if !provider.openclaw_models.iter().any(|model| {
-                            model.get("id").and_then(Value::as_str) == Some(selected_model.as_str())
-                        }) {
-                            provider
-                                .openclaw_models
-                                .push(serde_json::json!({ "id": selected_model }));
+                    }
+                    crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappings {
+                        ..
+                    } => {
+                        // The mapping editor was parked in pending_overlay
+                        // when the fetch started; close_overlay() above
+                        // restored it as the active overlay.
+                        if let Overlay::RouteMappingsEditor(editor) = &mut self.overlay {
+                            if let Some(edit) = editor.editing.as_mut() {
+                                edit.actual.set(selected_model);
+                            }
                         }
-                    } else if field == ProviderAddField::CodexLocalRouting {
-                        provider.upsert_codex_model_catalog_model(&selected_model);
-                    } else if let Some(input_field) = provider.input_mut(field) {
-                        input_field.set(selected_model);
                     }
                 }
                 Action::None
@@ -1934,6 +1967,7 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
+                self.overlay = Overlay::None;
                 if selected_is_member {
                     Action::RemoveRouteModeMember {
                         app_type: self.app_type.clone(),

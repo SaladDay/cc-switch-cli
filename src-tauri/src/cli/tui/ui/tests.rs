@@ -895,8 +895,10 @@ fn model_fetch_picker_renders_only_the_selected_large_collection_window() {
     let mut app = App::new(Some(AppType::Claude));
     app.overlay = Overlay::ModelFetchPicker {
         request_id: 1,
-        field: ProviderAddField::ClaudeModelConfig,
-        claude_idx: Some(0),
+        target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(0),
+        },
         input: TextInput::new(""),
         query: String::new(),
         fetching: false,
@@ -927,8 +929,10 @@ fn model_fetch_picker_discloses_when_search_results_are_budget_limited() {
     let mut app = App::new(Some(AppType::Claude));
     app.overlay = Overlay::ModelFetchPicker {
         request_id: 1,
-        field: ProviderAddField::ClaudeModelConfig,
-        claude_idx: Some(0),
+        target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(0),
+        },
         input: TextInput::new("model"),
         query: "model".to_string(),
         fetching: false,
@@ -15012,4 +15016,88 @@ fn route_mode_screen_renders_status_and_member_rows() {
     assert!(all.contains("Alpha"), "{all}");
     assert!(all.contains("Beta"), "{all}");
     assert!(all.contains("http://"), "{all}");
+}
+
+#[test]
+fn route_mode_screen_warns_when_enabled_without_enabled_members() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::RouteMode;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.route_mode_enabled = true;
+    data.proxy.route_members = vec![crate::cli::tui::data::RouteMemberSnapshot {
+        provider_id: "p1".to_string(),
+        name: "Alpha".to_string(),
+        weight: 3,
+        enabled: false,
+        mapping_count: 0,
+        model_mappings: Default::default(),
+    }];
+
+    let all = all_text(&render(&app, &data));
+    assert!(all.contains("no enabled member"), "{all}");
+
+    // Disabling route mode clears the cue again.
+    data.proxy.route_mode_enabled = false;
+    let all = all_text(&render(&app, &data));
+    assert!(!all.contains("no enabled member"), "{all}");
+}
+
+#[test]
+fn route_mappings_editor_overlay_renders_list_and_entry_modes() {
+    use crate::cli::tui::app::{
+        RouteMappingEditorField, RouteMappingEntryEditingState, RouteMappingsEditorState,
+    };
+    use crate::cli::tui::form::TextInput;
+
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::RouteMode;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    // List mode: title, mapping rows, and list key bar.
+    app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+        provider_id: "p1".to_string(),
+        provider_name: "One".to_string(),
+        rows: vec![
+            ("req-a".to_string(), "act-a".to_string()),
+            ("req-b".to_string(), "act-b".to_string()),
+        ],
+        selected: 0,
+        editing: None,
+    });
+    let all = all_text(&render(&app, &data));
+    assert!(all.contains("Model Mappings — One"), "{all}");
+    assert!(all.contains("req-a → act-a"), "{all}");
+    assert!(all.contains("req-b → act-b"), "{all}");
+
+    // Entry mode with the actual-model field active: field labels show and
+    // the fetch trigger is labelled Ctrl+F, not plain f.
+    app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+        provider_id: "p1".to_string(),
+        provider_name: "One".to_string(),
+        rows: vec![("req-a".to_string(), "act-a".to_string())],
+        selected: 0,
+        editing: Some(RouteMappingEntryEditingState {
+            row: None,
+            field: RouteMappingEditorField::Actual,
+            request: TextInput::new("req-a"),
+            actual: TextInput::new("act-a"),
+        }),
+    });
+    let all = all_text(&render(&app, &data));
+    assert!(all.contains("Request Model"), "{all}");
+    assert!(all.contains("Actual Model"), "{all}");
+    assert!(all.contains("req-a"), "{all}");
+    assert!(all.contains("act-a"), "{all}");
+    assert!(all.contains("Ctrl+F"), "{all}");
 }

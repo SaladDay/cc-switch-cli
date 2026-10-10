@@ -532,8 +532,7 @@ pub(super) fn model_fetch(
     request_headers: Option<std::collections::BTreeMap<String, String>>,
     codex_oauth: bool,
     codex_oauth_account_id: Option<String>,
-    field: ProviderAddField,
-    claude_idx: Option<usize>,
+    target: crate::cli::tui::runtime_systems::ModelFetchTarget,
 ) -> Result<(), AppError> {
     let Some(tx) = ctx.model_fetch_req_tx else {
         ctx.app.push_toast(
@@ -546,8 +545,7 @@ pub(super) fn model_fetch(
 
     ctx.app.overlay = Overlay::ModelFetchPicker {
         request_id,
-        field,
-        claude_idx,
+        target: target.clone(),
         input: TextInput::new(""),
         query: String::new(),
         fetching: true,
@@ -558,8 +556,10 @@ pub(super) fn model_fetch(
         selected_idx: 0,
         selection_active: false,
     };
-    if matches!(field, ProviderAddField::HermesModels) {
-        ctx.app.pending_overlay = Some(Overlay::HermesModelsPicker { editing: false });
+    if let crate::cli::tui::runtime_systems::ModelFetchTarget::FormField { field, .. } = &target {
+        if matches!(field, ProviderAddField::HermesModels) {
+            ctx.app.pending_overlay = Some(Overlay::HermesModelsPicker { editing: false });
+        }
     }
 
     if let Err(err) = tx.send(ModelFetchReq::Fetch {
@@ -572,8 +572,7 @@ pub(super) fn model_fetch(
         request_headers,
         codex_oauth,
         codex_oauth_account_id,
-        field,
-        claude_idx,
+        target,
     }) {
         if let Overlay::ModelFetchPicker {
             fetching, error, ..

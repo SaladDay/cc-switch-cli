@@ -1239,6 +1239,35 @@ impl UiData {
         Ok(())
     }
 
+    /// Refreshes only the route-mode fields (enabled flag + member table)
+    /// from the database. Member weight/enable/mapping edits are frequent
+    /// small mutations, so they use this instead of the full `UiData::load`
+    /// (usage aggregation, skills, live sync) to keep key latency low.
+    /// Note: unlike `load_proxy_snapshot_from_state`, daemon/runtime probing
+    /// is skipped — member edits do not change proxy runtime status.
+    pub(crate) fn refresh_route_mode_data(&mut self, app_type: &AppType) -> Result<(), AppError> {
+        let db = crate::Database::open_readonly_current_schema()?;
+        let route_group = db.get_route_mode_group(app_type.as_str())?;
+        let provider_names = db.get_all_providers(app_type.as_str())?;
+        self.proxy.route_mode_enabled = route_group.enabled;
+        self.proxy.route_members = route_group
+            .members
+            .iter()
+            .map(|member| RouteMemberSnapshot {
+                name: provider_names
+                    .get(&member.provider_id)
+                    .map(|provider| provider.name.clone())
+                    .unwrap_or_else(|| member.provider_id.clone()),
+                provider_id: member.provider_id.clone(),
+                weight: member.weight,
+                enabled: member.enabled,
+                mapping_count: member.model_mappings.len(),
+                model_mappings: member.model_mappings.clone(),
+            })
+            .collect();
+        Ok(())
+    }
+
     pub(crate) fn refresh_current_app_config_data(
         &mut self,
         state: &AppState,

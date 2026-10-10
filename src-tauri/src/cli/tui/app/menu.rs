@@ -1326,6 +1326,9 @@ impl App {
             self.daily_memory_idx = self.daily_memory_idx.min(daily_memory_len - 1);
         }
 
+        // Route-mode rows: 0 is the status toggle, 1..=members are members.
+        self.route_mode_idx = self.route_mode_idx.min(data.proxy.route_members.len());
+
         let hermes_memory_len = crate::cli::tui::app::HERMES_MEMORY_ROW_COUNT;
         if hermes_memory_len == 0 {
             self.hermes_memory_idx = 0;

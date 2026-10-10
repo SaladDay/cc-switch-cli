@@ -51,6 +51,7 @@ fn pending_snapshot_app_data(request_id: u64) -> PendingAppDataLoad {
         request_id,
         generation: 0,
         app_state_epoch: 0,
+        reload_token: super::data::UiDataReloadToken::default(),
     }
 }
 
@@ -68,6 +69,7 @@ fn pending_full_app_data_with_epoch(
         request_id,
         generation,
         app_state_epoch,
+        reload_token: super::data::UiDataReloadToken::default(),
     }
 }
 
@@ -719,6 +721,33 @@ fn stale_app_data_result_does_not_overwrite_current_app() {
 }
 
 #[test]
+fn app_switch_retargets_pending_warm_load_to_projection_token() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+
+    // A warm load for Codex is still in flight with an older token.
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(1));
+    let (tx, rx) = mpsc::channel();
+
+    cache
+        .switch_to(&mut app, &mut data, Some(&tx), AppType::Codex)
+        .expect("switch to codex");
+
+    // The in-flight warm load must carry the projection's token so its result
+    // is accepted instead of being discarded as stale and requeued as a
+    // heavier Full reload; no duplicate request may be queued meanwhile.
+    let pending = cache
+        .pending_by_app
+        .get(&AppType::Codex)
+        .expect("pending load kept");
+    assert_eq!(pending.reload_token, data.reload_token);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn app_data_result_preserves_usage_pricing_that_finished_first() {
     let mut app = App::new(Some(AppType::Codex));
     let custom =
@@ -892,6 +921,110 @@ fn current_app_data_changed_queues_full_load_without_caching_stale_data() {
             .map(|cached| cached.providers.current_id.as_str()),
         Some("fresh-current")
     );
+}
+
+#[test]
+fn stale_snapshot_load_after_member_edit_is_discarded_and_requeued() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    data.proxy.route_members.push(data::RouteMemberSnapshot {
+        provider_id: "edited".to_string(),
+        name: "Edited".to_string(),
+        weight: 5,
+        enabled: true,
+        mapping_count: 0,
+        model_mappings: Default::default(),
+    });
+
+    // A Snapshot load queued before the edit carries the pre-edit token; the
+    // edit bumped the token, so finishing that load must not apply it (both
+    // Full and Snapshot loads carry the route table and would revert it).
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(7));
+    data.mark_current_app_data_changed();
+    let (tx, rx) = mpsc::channel();
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "stale-loaded".to_string();
+    loaded.proxy.route_members.clear();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&tx),
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 7,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    // The stale snapshot never reached the screen; a fresh Full load was
+    // requeued with the current token.
+    assert_eq!(data.providers.current_id, "");
+    assert_eq!(data.proxy.route_members.len(), 1);
+    assert!(matches!(
+        rx.recv().expect("fresh load should be requeued"),
+        AppDataReq::FullLoad { request_id: 1, .. }
+    ));
+}
+
+#[test]
+fn cold_app_switch_snapshot_queued_with_projection_token_applies() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    // Cold switch: no cache entry, so `switch_to` queues a Snapshot load and
+    // installs its loading projection. The pending token must match the
+    // projection's token or the stale-load guard would discard the finished
+    // load and requeue a heavier Full reload.
+    cache
+        .switch_to(&mut app, &mut data, Some(&tx), AppType::Claude)
+        .expect("switch should succeed");
+    assert!(app.app_type == AppType::Claude);
+    let queued = cache
+        .pending_by_app
+        .get(&AppType::Claude)
+        .copied()
+        .expect("snapshot load should be pending");
+    assert_eq!(queued.reload_token, data.reload_token);
+    assert!(matches!(
+        rx.recv().expect("snapshot request should be queued"),
+        AppDataReq::Load { request_id: 1, .. }
+    ));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "claude-loaded".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&tx),
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: queued.request_id,
+            generation: queued.generation,
+            app_state_epoch: queued.app_state_epoch,
+            app_type: AppType::Claude,
+            result: Ok(loaded),
+        },
+    );
+
+    // Token match: the snapshot applied directly, with no extra reload.
+    assert_eq!(data.providers.current_id, "claude-loaded");
+    assert!(!cache.pending_by_app.contains_key(&AppType::Claude));
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]
@@ -1603,6 +1736,7 @@ fn initial_app_data_result_restores_startup_overlay_and_caches_loaded_data() {
             request_id: 1,
             generation: 0,
             app_state_epoch: 0,
+            reload_token: super::data::UiDataReloadToken::default(),
         },
     );
     cache.incomplete_by_app.insert(AppType::Claude);
@@ -1678,6 +1812,7 @@ fn initial_app_data_error_returns_before_empty_shell_is_marked_loaded() {
             request_id: 1,
             generation: 0,
             app_state_epoch: 0,
+            reload_token: super::data::UiDataReloadToken::default(),
         },
     );
     cache.incomplete_by_app.insert(AppType::Claude);
@@ -1718,6 +1853,7 @@ fn initial_app_data_drain_prioritizes_error_before_quit_input() {
             request_id: 1,
             generation: 0,
             app_state_epoch: 0,
+            reload_token: super::data::UiDataReloadToken::default(),
         },
     );
     cache.incomplete_by_app.insert(AppType::Claude);
@@ -4241,6 +4377,7 @@ fn superseded_managed_proxy_result_updates_origin_cache_after_app_change() {
         ProxyReq::RefreshSnapshot {
             request_id: 4,
             app_type: AppType::Codex,
+            ..
         }
     ));
     assert!(app_data_rx.try_recv().is_err());
@@ -4450,6 +4587,7 @@ fn managed_proxy_result_does_not_overwrite_newer_ui_data() {
         ProxyReq::RefreshSnapshot {
             request_id: 1,
             app_type: AppType::Claude,
+            ..
         }
     ));
 }
@@ -4646,6 +4784,7 @@ fn managed_proxy_snapshot_failure_recovers_in_background_without_false_failure()
         ProxyReq::RefreshSnapshot {
             request_id: 1,
             app_type: AppType::Claude,
+            ..
         }
     ));
     let toast = app.toast.as_ref().expect("refresh warning");
@@ -4662,8 +4801,18 @@ fn proxy_snapshot_refresh_enqueues_single_background_request() {
     let mut tracker = RequestTracker::default();
     let (tx, rx) = mpsc::channel();
 
-    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Codex);
-    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Claude);
+    queue_proxy_snapshot_refresh(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Codex,
+        data::UiDataReloadToken::default(),
+    );
+    queue_proxy_snapshot_refresh(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Claude,
+        data::UiDataReloadToken::default(),
+    );
 
     let req = rx.recv().expect("proxy snapshot request should be queued");
     assert!(matches!(
@@ -4671,6 +4820,7 @@ fn proxy_snapshot_refresh_enqueues_single_background_request() {
         ProxyReq::RefreshSnapshot {
             request_id: 1,
             app_type: AppType::Codex,
+            ..
         }
     ));
     assert!(rx.try_recv().is_err(), "in-flight refresh should not stack");
@@ -4686,7 +4836,12 @@ fn proxy_snapshot_refresh_can_be_requeued_after_app_switch_cancel() {
     let (tx, rx) = mpsc::channel();
 
     tracker.cancel();
-    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::OpenCode);
+    queue_proxy_snapshot_refresh(
+        &mut tracker,
+        Some(&tx),
+        &AppType::OpenCode,
+        data::UiDataReloadToken::default(),
+    );
 
     let req = rx
         .recv()
@@ -4696,6 +4851,7 @@ fn proxy_snapshot_refresh_can_be_requeued_after_app_switch_cancel() {
         ProxyReq::RefreshSnapshot {
             request_id: 2,
             app_type: AppType::OpenCode,
+            ..
         }
     ));
     assert_eq!(tracker.active, Some(2));
@@ -4707,7 +4863,12 @@ fn proxy_snapshot_refresh_send_failure_clears_active_request() {
     let (tx, rx) = mpsc::channel();
     drop(rx);
 
-    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Claude);
+    queue_proxy_snapshot_refresh(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Claude,
+        data::UiDataReloadToken::default(),
+    );
 
     assert_eq!(tracker.active, None);
 }
@@ -4726,6 +4887,7 @@ fn proxy_snapshot_after_app_switch_queues_only_after_successful_change() {
         &AppType::Claude,
         &AppType::Codex,
         false,
+        data::UiDataReloadToken::default(),
     );
     assert_eq!(tracker.active, Some(7));
     assert!(rx.try_recv().is_err());
@@ -4736,6 +4898,7 @@ fn proxy_snapshot_after_app_switch_queues_only_after_successful_change() {
         &AppType::Claude,
         &AppType::Claude,
         true,
+        data::UiDataReloadToken::default(),
     );
     assert_eq!(tracker.active, Some(7));
     assert!(rx.try_recv().is_err());
@@ -4746,6 +4909,7 @@ fn proxy_snapshot_after_app_switch_queues_only_after_successful_change() {
         &AppType::Claude,
         &AppType::Codex,
         true,
+        data::UiDataReloadToken::default(),
     );
     let req = rx
         .recv()
@@ -4755,6 +4919,7 @@ fn proxy_snapshot_after_app_switch_queues_only_after_successful_change() {
         ProxyReq::RefreshSnapshot {
             request_id: 8,
             app_type: AppType::Codex,
+            ..
         }
     ));
     assert_eq!(tracker.active, Some(8));
@@ -4777,6 +4942,7 @@ fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
     };
     app.reset_proxy_activity(0, 0);
 
+    let current_token = data.reload_token;
     let effect = handle_proxy_msg(
         &mut app,
         &mut data,
@@ -4785,6 +4951,7 @@ fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
         ProxyMsg::SnapshotRefreshed {
             request_id: 1,
             app_type: AppType::Claude,
+            base_reload_token: current_token,
             result: Ok(proxy),
         },
     );
@@ -4807,6 +4974,7 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
         seq: 2,
         active: Some(2),
     };
+    let current_token = data.reload_token;
 
     handle_proxy_msg(
         &mut app,
@@ -4816,6 +4984,7 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
         ProxyMsg::SnapshotRefreshed {
             request_id: 1,
             app_type: AppType::Claude,
+            base_reload_token: current_token,
             result: Ok(data::ProxySnapshot {
                 running: true,
                 ..data::ProxySnapshot::default()
@@ -4833,6 +5002,33 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
         ProxyMsg::SnapshotRefreshed {
             request_id: 2,
             app_type: AppType::Codex,
+            base_reload_token: current_token,
+            result: Ok(data::ProxySnapshot {
+                running: true,
+                ..data::ProxySnapshot::default()
+            }),
+        },
+    );
+    assert!(!data.proxy.running);
+    assert_eq!(proxy_snapshot_refresh.active, None);
+
+    // A result queued before a key-path mutation bumped the token is dropped
+    // even when the request and app still match, so it cannot revert the
+    // newer visible state.
+    data.mark_current_app_data_changed();
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 3,
+        active: Some(3),
+    };
+    handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::SnapshotRefreshed {
+            request_id: 3,
+            app_type: AppType::Claude,
+            base_reload_token: crate::cli::tui::data::UiDataReloadToken::default(),
             result: Ok(data::ProxySnapshot {
                 running: true,
                 ..data::ProxySnapshot::default()

@@ -940,8 +940,7 @@ pub(crate) fn handle_action(
             request_headers,
             codex_oauth,
             codex_oauth_account_id,
-            field,
-            claude_idx,
+            target,
         } => providers::model_fetch(
             &mut ctx,
             base_url,
@@ -952,9 +951,11 @@ pub(crate) fn handle_action(
             request_headers,
             codex_oauth,
             codex_oauth_account_id,
-            field,
-            claude_idx,
+            target,
         ),
+        Action::RouteMemberModelFetch { provider_id } => {
+            route_mode::route_member_model_fetch(&mut ctx, provider_id)
+        }
         Action::UsageCustomRange { .. } => Ok(()),
         Action::PricingDelete { model_id } => pricing::delete(&mut ctx, model_id),
         Action::McpToggle { id, enabled } => mcp::toggle(&mut ctx, id, enabled),

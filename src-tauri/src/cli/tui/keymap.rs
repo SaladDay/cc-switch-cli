@@ -327,10 +327,17 @@ pub(crate) mod route_mode {
     pub(crate) const BINDINGS: &[Binding<Intent>] = &[
         Binding {
             display: "↑↓",
-            keys: &[KeyCode::Up, KeyCode::Down],
+            keys: &[KeyCode::Up],
             intent: Intent::CursorUp,
             label: |_, _| texts::tui_key_select(),
             shown: |_, _| true,
+        },
+        Binding {
+            display: "↓",
+            keys: &[KeyCode::Down],
+            intent: Intent::CursorDown,
+            label: |_, _| texts::tui_key_select(),
+            shown: super::never,
         },
         Binding {
             display: "Enter",
@@ -362,7 +369,7 @@ pub(crate) mod route_mode {
         },
         Binding {
             display: "d",
-            keys: &[KeyCode::Char('d')],
+            keys: &[KeyCode::Char('d'), KeyCode::Delete],
             intent: Intent::RemoveMember,
             label: |_, _| texts::tui_key_delete(),
             shown: member_selected,

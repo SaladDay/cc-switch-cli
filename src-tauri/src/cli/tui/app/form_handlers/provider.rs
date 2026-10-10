@@ -1275,8 +1275,10 @@ impl App {
             request_headers: None,
             codex_oauth: false,
             codex_oauth_account_id: None,
-            field: ProviderAddField::CodexLocalRouting,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::CodexLocalRouting,
+                claude_idx: None,
+            },
         }
     }
 
@@ -1525,8 +1527,10 @@ impl App {
             request_headers: None,
             codex_oauth: false,
             codex_oauth_account_id: None,
-            field: ProviderAddField::HermesModels,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::HermesModels,
+                claude_idx: None,
+            },
         }
     }
 
@@ -1622,8 +1626,10 @@ impl App {
             request_headers,
             codex_oauth: false,
             codex_oauth_account_id: None,
-            field: selected,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: selected,
+                claude_idx: None,
+            },
         }
     }
 

@@ -1052,8 +1052,7 @@ pub(crate) fn handle_model_fetch_msg(app: &mut App, msg: ModelFetchMsg) {
     match msg {
         ModelFetchMsg::Finished {
             request_id,
-            field,
-            claude_idx,
+            target,
             result,
         } => {
             if let Overlay::ModelFetchPicker {
@@ -1065,15 +1064,14 @@ pub(crate) fn handle_model_fetch_msg(app: &mut App, msg: ModelFetchMsg) {
                 filter_incomplete: ref mut incomplete,
                 error: ref mut e,
                 ref mut selection_active,
-                field: ref current_field,
-                claude_idx: ref current_claude_idx,
+                target: ref current_target,
                 ..
             } = app.overlay
             {
                 if current_request_id != request_id {
                     return;
                 }
-                if current_field == &field && current_claude_idx == &claude_idx {
+                if current_target == &target {
                     *f = false;
                     match result {
                         Ok(fetched_models) => {
@@ -1851,12 +1849,20 @@ pub(crate) fn handle_proxy_msg(
         ProxyMsg::SnapshotRefreshed {
             request_id,
             app_type,
+            base_reload_token,
             result,
         } => {
             if !proxy_snapshot_refresh.finish_if_active(request_id) {
                 return ProxyMsgEffect::None;
             }
             if app.app_type != app_type {
+                return ProxyMsgEffect::None;
+            }
+            // The snapshot was queued before a key-path mutation (route member
+            // edit, provider change) refreshed the table and bumped the token;
+            // applying it now would revert the visible change. Drop it — the
+            // queued app-data refresh already carries the fresh state.
+            if base_reload_token != data.reload_token {
                 return ProxyMsgEffect::None;
             }
 
@@ -2006,6 +2012,7 @@ mod tests {
     use crate::cli::tui::data::{ProviderUsageQuota, QuotaTarget, QuotaTargetKind};
     use crate::cli::tui::form::ProviderAddField;
     use crate::cli::tui::route::Route;
+    use crate::cli::tui::runtime_systems::types::ModelFetchTarget;
     use crate::cli::tui::text_edit::TextInput;
     use crate::services::local_env_check::{LocalTool, ToolCheckResult, ToolCheckStatus};
     use crate::services::{CredentialStatus, SubscriptionQuota};
@@ -2240,8 +2247,10 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 7,
-            field: ProviderAddField::ClaudeModelConfig,
-            claude_idx: Some(0),
+            target: ModelFetchTarget::FormField {
+                field: ProviderAddField::ClaudeModelConfig,
+                claude_idx: Some(0),
+            },
             input: TextInput::new("alp"),
             query: "alp".to_string(),
             fetching: true,
@@ -2257,8 +2266,10 @@ mod tests {
             &mut app,
             ModelFetchMsg::Finished {
                 request_id: 7,
-                field: ProviderAddField::ClaudeModelConfig,
-                claude_idx: Some(0),
+                target: ModelFetchTarget::FormField {
+                    field: ProviderAddField::ClaudeModelConfig,
+                    claude_idx: Some(0),
+                },
                 result: Ok(vec![
                     "beta".to_string(),
                     "alpha".to_string(),

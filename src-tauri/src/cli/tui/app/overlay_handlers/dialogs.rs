@@ -408,28 +408,6 @@ impl App {
                     weight,
                 }
             }
-            TextSubmit::RouteModeMappings { provider_id } => {
-                let trimmed = raw.trim().to_string();
-                let parsed: Result<std::collections::BTreeMap<String, String>, _> =
-                    serde_json::from_str(&trimmed);
-                match parsed {
-                    Ok(mappings) => Action::SetRouteModeMemberMappings {
-                        app_type: self.app_type.clone(),
-                        provider_id: provider_id.clone(),
-                        mappings,
-                    },
-                    Err(_) => {
-                        self.push_toast(
-                            crate::t!(
-                                "Mappings must be a JSON object of string to string.",
-                                "映射必须是字符串到字符串的 JSON 对象。"
-                            ),
-                            ToastKind::Warning,
-                        );
-                        Action::None
-                    }
-                }
-            }
             TextSubmit::SettingsOutboundProxyUrl => {
                 let trimmed = raw.trim().to_string();
                 let mut config = self

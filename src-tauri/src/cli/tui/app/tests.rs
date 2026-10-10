@@ -7,8 +7,8 @@ use super::*;
 )]
 mod tests {
     use super::types::{
-        McpKeyValueEditorField, McpKeyValueEntryEditorState, UsageLogPager,
-        MODEL_FETCH_FILTER_MAX_MATCHES,
+        McpKeyValueEditorField, McpKeyValueEntryEditorState, RouteMappingEditorField,
+        UsageLogPager, MODEL_FETCH_FILTER_MAX_MATCHES,
     };
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
@@ -29,7 +29,8 @@ mod tests {
         handle_action, run_external_editor_for_prompt_form_content,
     };
     use crate::cli::tui::runtime_systems::{
-        handle_managed_auth_msg, ManagedAuthMsg, RequestTracker,
+        handle_managed_auth_msg, handle_model_fetch_msg, ManagedAuthMsg, ModelFetchMsg,
+        ModelFetchTarget, RequestTracker,
     };
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::commands::workspace::{DailyMemoryFileInfo, DailyMemorySearchResult, ALLOWED_FILES};
@@ -175,8 +176,10 @@ mod tests {
         assert!(Overlay::HermesModelsPicker { editing: true }.is_editing());
         assert!(Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::Name,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::Name,
+                claude_idx: None,
+            },
             input: TextInput::new(""),
             query: String::new(),
             fetching: false,
@@ -561,6 +564,38 @@ mod tests {
             None,
             &mut update_check,
             None,
+            None,
+            action,
+        )
+    }
+
+    fn run_runtime_action_with_model_fetch_tx(
+        app: &mut App,
+        data: &mut UiData,
+        model_fetch_tx: &std::sync::mpsc::Sender<crate::cli::tui::runtime_systems::ModelFetchReq>,
+        action: Action,
+    ) -> Result<(), AppError> {
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+
+        handle_action(
+            &mut terminal,
+            app,
+            data,
+            None,
+            None,
+            None,
+            None,
+            &mut proxy_loading,
+            None,
+            None,
+            None,
+            &mut webdav_loading,
+            None,
+            &mut update_check,
+            Some(model_fetch_tx),
             None,
             action,
         )
@@ -2081,8 +2116,10 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::Name,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::Name,
+                claude_idx: None,
+            },
             input: TextInput::new("alpha beta"),
             query: "alpha beta".to_string(),
             fetching: false,
@@ -2165,8 +2202,10 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::Name,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::Name,
+                claude_idx: None,
+            },
             input: TextInput::new("needle"),
             query: "needle".to_string(),
             fetching: false,
@@ -2347,8 +2386,10 @@ mod tests {
                 request_headers: None,
                 codex_oauth: false,
                 codex_oauth_account_id: None,
-                field: ProviderAddField::HermesModels,
-                claude_idx: None,
+                target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                    field: ProviderAddField::HermesModels,
+                    claude_idx: None,
+                },
             } if base_url == "https://api.example.com/v1"
                 && api_key == "sk-hermes"
                 && custom_user_agent == "hermes-client/test"
@@ -2525,8 +2566,10 @@ mod tests {
         }
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::HermesModels,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::HermesModels,
+                claude_idx: None,
+            },
             input: TextInput::new("gpt-5.4"),
             query: "gpt-5.4".to_string(),
             fetching: false,
@@ -5391,7 +5434,10 @@ mod tests {
             api_key,
             api_protocol,
             request_headers,
-            field,
+            target:
+                crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                    field: pi_field, ..
+                },
             ..
         } = action
         else {
@@ -5400,7 +5446,7 @@ mod tests {
         assert_eq!(base_url, "https://pi.example.test/v1");
         assert_eq!(api_key, None, "Anthropic auth is carried by x-api-key");
         assert_eq!(api_protocol.as_deref(), Some("anthropic-messages"));
-        assert_eq!(field, ProviderAddField::OpenClawModels);
+        assert_eq!(pi_field, ProviderAddField::OpenClawModels);
         let headers = request_headers.expect("native request headers");
         assert_eq!(
             headers.get("X-Custom").map(String::as_str),
@@ -5420,8 +5466,10 @@ mod tests {
         )));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::OpenClawModels,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::OpenClawModels,
+                claude_idx: None,
+            },
             input: TextInput::new(""),
             query: String::new(),
             fetching: false,
@@ -15133,7 +15181,10 @@ mod tests {
         assert!(matches!(
             action,
             Action::ProviderModelFetch {
-                field: ProviderAddField::CodexLocalRouting,
+                target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                    field: ProviderAddField::CodexLocalRouting,
+                    ..
+                },
                 is_full_url: true,
                 ..
             }
@@ -15141,8 +15192,10 @@ mod tests {
 
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::CodexLocalRouting,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::CodexLocalRouting,
+                claude_idx: None,
+            },
             input: TextInput::new("kimi-k2"),
             query: "kimi-k2".to_string(),
             fetching: false,
@@ -15407,7 +15460,10 @@ mod tests {
             action,
             Action::ProviderModelFetch {
                 is_full_url: true,
-                field: ProviderAddField::ClaudeModelConfig,
+                target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                    field: ProviderAddField::ClaudeModelConfig,
+                    ..
+                },
                 ..
             }
         ));
@@ -15432,8 +15488,10 @@ mod tests {
             Action::ProviderModelFetch {
                 codex_oauth: true,
                 codex_oauth_account_id: None,
-                field: ProviderAddField::ClaudeModelConfig,
-                claude_idx: Some(0),
+                target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                    field: ProviderAddField::ClaudeModelConfig,
+                    claude_idx: Some(0),
+                },
                 ..
             }
         ));
@@ -16365,7 +16423,11 @@ mod tests {
         assert!(matches!(
             action,
             Action::ProviderModelFetch {
-                field: ProviderAddField::GeminiModel,
+                target:
+                    crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                        field: ProviderAddField::GeminiModel,
+                        ..
+                    },
                 base_url,
                 api_key: Some(api_key),
                 ..
@@ -17522,8 +17584,10 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::ClaudeModelConfig,
-            claude_idx: Some(0),
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::ClaudeModelConfig,
+                claude_idx: Some(0),
+            },
             input: TextInput::new(""),
             query: String::new(),
             fetching: false,
@@ -19064,8 +19128,10 @@ mod tests {
         ));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::ClaudeModelConfig,
-            claude_idx: Some(0),
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::ClaudeModelConfig,
+                claude_idx: Some(0),
+            },
             input: TextInput::new("claude-haiku-4-20250514"),
             query: String::new(),
             fetching: false,
@@ -19106,8 +19172,10 @@ mod tests {
         app.form = Some(FormState::ProviderAdd(form));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::ClaudeModelConfig,
-            claude_idx: Some(1),
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::ClaudeModelConfig,
+                claude_idx: Some(1),
+            },
             input: TextInput::new("new-sonnet"),
             query: String::new(),
             fetching: false,
@@ -19129,8 +19197,10 @@ mod tests {
 
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 2,
-            field: ProviderAddField::ClaudeModelConfig,
-            claude_idx: Some(2),
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::ClaudeModelConfig,
+                claude_idx: Some(2),
+            },
             input: TextInput::new("new-opus [1m]"),
             query: String::new(),
             fetching: false,
@@ -19167,8 +19237,10 @@ mod tests {
         ));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::ClaudeModelConfig,
-            claude_idx: Some(2),
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::ClaudeModelConfig,
+                claude_idx: Some(2),
+            },
             input: TextInput::new(""),
             query: String::new(),
             fetching: false,
@@ -19208,8 +19280,10 @@ mod tests {
         ));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::ClaudeModelConfig,
-            claude_idx: Some(0),
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::ClaudeModelConfig,
+                claude_idx: Some(0),
+            },
             input: TextInput::new(""),
             query: String::new(),
             fetching: false,
@@ -19252,8 +19326,10 @@ mod tests {
         }
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
-            field: ProviderAddField::HermesModels,
-            claude_idx: None,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::FormField {
+                field: ProviderAddField::HermesModels,
+                claude_idx: None,
+            },
             input: TextInput::new("gpt-5.4"),
             query: "gpt-5.4".to_string(),
             fetching: false,
@@ -21147,5 +21223,1398 @@ mod tests {
             },
         );
         assert!(result.is_err(), "unknown provider must fail DAO validation");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_mode_noop_weight_and_mappings_skip_db_write_and_token_bump() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            let provider = Provider::with_id("p1".to_string(), "One".to_string(), json!({}), None);
+            state
+                .db
+                .save_provider("claude", &provider)
+                .expect("save provider");
+        }
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::AddRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("add route member");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::SetRouteModeMemberWeight {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+                weight: 3,
+            },
+        )
+        .expect("set member weight");
+        let mut mappings = std::collections::BTreeMap::new();
+        mappings.insert("m-a".to_string(), "m-b".to_string());
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::SetRouteModeMemberMappings {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+                mappings: mappings.clone(),
+            },
+        )
+        .expect("set member mappings");
+
+        let token_before = data.reload_token;
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::SetRouteModeMemberWeight {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+                weight: 3,
+            },
+        )
+        .expect("re-set same member weight");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::SetRouteModeMemberMappings {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+                mappings: mappings.clone(),
+            },
+        )
+        .expect("re-set same member mappings");
+        assert_eq!(
+            data.reload_token, token_before,
+            "no-op weight/mappings submits must not bump the reload token"
+        );
+
+        // Control: a real change must still bump the token, so the assertion
+        // above cannot pass trivially.
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::SetRouteModeMemberWeight {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+                weight: 5,
+            },
+        )
+        .expect("set different member weight");
+        assert_ne!(
+            data.reload_token, token_before,
+            "a real weight change must bump the reload token"
+        );
+        let state = crate::cli::tui::data::load_state().expect("reload state");
+        let group = state.db.get_route_mode_group("claude").expect("read group");
+        assert_eq!(group.members[0].weight, 5);
+        assert_eq!(group.members[0].model_mappings, mappings);
+    }
+
+    #[test]
+    fn route_mode_keymap_resolves_arrows_to_separate_intents() {
+        use crate::cli::tui::keymap::route_mode::{intent_for, Intent};
+
+        assert_eq!(intent_for(KeyCode::Up), Some(Intent::CursorUp));
+        assert_eq!(intent_for(KeyCode::Down), Some(Intent::CursorDown));
+    }
+
+    #[test]
+    fn route_mode_down_moves_cursor_off_the_status_row() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 1, true));
+
+        let action = app.on_key(key(KeyCode::Down), &data);
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.route_mode_idx, 1);
+
+        // Up returns to the status row.
+        let action = app.on_key(key(KeyCode::Up), &data);
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.route_mode_idx, 0);
+    }
+
+    #[test]
+    fn route_mode_down_stays_on_last_member_row() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 1, true));
+        data.proxy
+            .route_members
+            .push(route_member_row("p2", "Two", 2, true));
+
+        // Rows = status + 2 members; start on the last member row.
+        app.route_mode_idx = 2;
+        let action = app.on_key(key(KeyCode::Down), &data);
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.route_mode_idx, 2);
+    }
+
+    #[test]
+    fn route_mode_member_chips_appear_once_a_member_is_selected() {
+        use crate::cli::tui::keymap::route_mode::key_bar_items;
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 1, true));
+
+        let displays: Vec<_> = key_bar_items(&app, &data)
+            .into_iter()
+            .map(|(display, _)| display)
+            .collect();
+        assert!(!displays.contains(&"w"), "weight chip hidden on status row");
+
+        app.route_mode_idx = 1;
+        let displays: Vec<_> = key_bar_items(&app, &data)
+            .into_iter()
+            .map(|(display, _)| display)
+            .collect();
+        for expected in ["w", "m", "d"] {
+            assert!(
+                displays.contains(&expected),
+                "missing {expected} chip on a member row"
+            );
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_mode_add_member_closes_picker_and_lands_cursor_on_new_row() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            let provider = Provider::with_id("p1".to_string(), "One".to_string(), json!({}), None);
+            state
+                .db
+                .save_provider("claude", &provider)
+                .expect("save provider");
+        }
+
+        app.overlay = Overlay::RouteMemberPicker {
+            selected_provider_id: Some("p1".to_string()),
+        };
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::AddRouteModeMember { provider_id, .. } if provider_id == "p1"
+        ));
+        assert!(
+            !app.overlay.is_active(),
+            "member picker must close after Enter"
+        );
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::AddRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("add route member");
+        assert_eq!(
+            app.route_mode_idx, 1,
+            "cursor must land on the newly added member row"
+        );
+        // The in-place refresh must surface the member without a full reload.
+        assert_eq!(data.proxy.route_members.len(), 1);
+        assert_eq!(data.proxy.route_members[0].provider_id, "p1");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_mode_remove_member_closes_picker_and_dispatches() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+        data.proxy
+            .route_members
+            .push(route_member_row("p1", "One", 1, true));
+
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            let provider = Provider::with_id("p1".to_string(), "One".to_string(), json!({}), None);
+            state
+                .db
+                .save_provider("claude", &provider)
+                .expect("save provider");
+            let mut group = crate::database::RouteModeGroup::default();
+            group
+                .members
+                .push(crate::database::RouteModeMember::new("p1", 1));
+            state
+                .db
+                .save_route_mode_group("claude", &group)
+                .expect("save group");
+        }
+
+        // p1 is already a member, so Enter takes the remove branch.
+        app.overlay = Overlay::RouteMemberPicker {
+            selected_provider_id: Some("p1".to_string()),
+        };
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            &action,
+            Action::RemoveRouteModeMember { provider_id, .. } if provider_id == "p1"
+        ));
+        assert!(
+            !app.overlay.is_active(),
+            "member picker must close after Enter"
+        );
+
+        run_runtime_action(&mut app, &mut data, action).expect("remove route member");
+        {
+            let state = crate::cli::tui::data::load_state().expect("reload state");
+            let group = state.db.get_route_mode_group("claude").expect("read group");
+            assert!(group.members.is_empty(), "member must be removed");
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_mode_blocks_disabling_the_last_enabled_member_while_on() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            let provider = Provider::with_id("p1".to_string(), "One".to_string(), json!({}), None);
+            state
+                .db
+                .save_provider("claude", &provider)
+                .expect("save provider");
+            state
+                .db
+                .set_route_mode_enabled("claude", true)
+                .expect("enable route mode");
+        }
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::AddRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("add route member");
+
+        let result = run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::ToggleRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        );
+        assert!(result.is_ok(), "block path must not error");
+        assert!(
+            matches!(
+                app.toast.as_ref(),
+                Some(toast) if toast.kind == ToastKind::Warning
+            ),
+            "a warning toast must explain the block"
+        );
+        {
+            let state = crate::cli::tui::data::load_state().expect("reload state");
+            let group = state.db.get_route_mode_group("claude").expect("read group");
+            assert!(
+                group.members[0].enabled,
+                "the last enabled member must stay enabled"
+            );
+        }
+
+        // Removing the last enabled member is blocked by the same rule.
+        app.toast = None;
+        let result = run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::RemoveRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        {
+            let state = crate::cli::tui::data::load_state().expect("reload state");
+            let group = state.db.get_route_mode_group("claude").expect("read group");
+            assert_eq!(group.members.len(), 1, "removal must be blocked");
+        }
+
+        // With route mode off, disabling and removing are allowed again.
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            state
+                .db
+                .set_route_mode_enabled("claude", false)
+                .expect("disable route mode");
+        }
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::ToggleRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("toggle member while mode off");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::RemoveRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("remove member while mode off");
+        let state = crate::cli::tui::data::load_state().expect("reload state");
+        let group = state.db.get_route_mode_group("claude").expect("read group");
+        assert!(group.members.is_empty());
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_mode_allows_disabling_one_of_two_enabled_members() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            for id in ["p1", "p2"] {
+                let provider = Provider::with_id(id.to_string(), id.to_string(), json!({}), None);
+                state
+                    .db
+                    .save_provider("claude", &provider)
+                    .expect("save provider");
+            }
+            state
+                .db
+                .set_route_mode_enabled("claude", true)
+                .expect("enable route mode");
+        }
+        for id in ["p1", "p2"] {
+            run_runtime_action(
+                &mut app,
+                &mut data,
+                Action::AddRouteModeMember {
+                    app_type: AppType::Claude,
+                    provider_id: id.to_string(),
+                },
+            )
+            .expect("add route member");
+        }
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::ToggleRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("disable one of two enabled members");
+        let state = crate::cli::tui::data::load_state().expect("reload state");
+        let group = state.db.get_route_mode_group("claude").expect("read group");
+        let p1 = group
+            .members
+            .iter()
+            .find(|member| member.provider_id == "p1")
+            .expect("p1 member");
+        assert!(!p1.enabled);
+        assert!(group.enabled, "route mode stays on");
+    }
+
+    #[test]
+    fn route_mode_mapping_editor_adds_two_rows_and_applies_on_esc() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: None,
+        });
+        let data = UiData::default();
+
+        // Add row one: request "req-a", actual "act-a".
+        let action = app.on_key(key(KeyCode::Char('a')), &data);
+        assert!(matches!(action, Action::None));
+        for ch in "req-a".chars() {
+            let action = app.on_key(key(KeyCode::Char(ch)), &data);
+            assert!(matches!(action, Action::None));
+        }
+        let action = app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(action, Action::None));
+        for ch in "act-a".chars() {
+            let action = app.on_key(key(KeyCode::Char(ch)), &data);
+            assert!(matches!(action, Action::None));
+        }
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None), "Enter saves the row");
+
+        // Add row two: request "req-b", actual "act-b".
+        let action = app.on_key(key(KeyCode::Char('a')), &data);
+        assert!(matches!(action, Action::None));
+        for ch in "req-b".chars() {
+            let action = app.on_key(key(KeyCode::Char(ch)), &data);
+            assert!(matches!(action, Action::None));
+        }
+        let action = app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(action, Action::None));
+        for ch in "act-b".chars() {
+            let action = app.on_key(key(KeyCode::Char(ch)), &data);
+            assert!(matches!(action, Action::None));
+        }
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+
+        // Esc applies the whole table.
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("req-a".to_string(), "act-a".to_string());
+        expected.insert("req-b".to_string(), "act-b".to_string());
+        assert!(matches!(
+            action,
+            Action::SetRouteModeMemberMappings { mappings, .. } if mappings == expected
+        ));
+        assert!(!app.overlay.is_active(), "Esc must close the editor");
+    }
+
+    #[test]
+    fn route_mode_mapping_list_down_stays_on_last_row() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: vec![
+                ("req-a".to_string(), "act-a".to_string()),
+                ("req-b".to_string(), "act-b".to_string()),
+            ],
+            selected: 1,
+            editing: None,
+        });
+        let data = UiData::default();
+
+        let action = app.on_key(key(KeyCode::Down), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                assert_eq!(editor.selected, 1, "Down must clamp on the last row");
+            }
+            _ => panic!("mappings editor must stay open"),
+        }
+
+        // Up still moves back one row.
+        let action = app.on_key(key(KeyCode::Up), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => assert_eq!(editor.selected, 0),
+            _ => panic!("mappings editor must stay open"),
+        }
+    }
+
+    #[test]
+    fn route_mode_mapping_esc_apply_reports_the_bad_row_and_stays_open() {
+        // A group written through the removed raw-JSON input path can hold
+        // rows the editor would never create; Esc must say which row is bad.
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: vec![
+                ("req-a".to_string(), "act-a".to_string()),
+                (String::new(), "legacy".to_string()),
+            ],
+            selected: 0,
+            editing: None,
+        });
+        let data = UiData::default();
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        assert!(matches!(action, Action::None), "nothing applies");
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Warning && toast.message.contains("Row 2")
+        ));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                assert_eq!(editor.rows.len(), 2, "editor must stay open");
+            }
+            _ => panic!("mappings editor must stay open"),
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_mode_mapping_esc_on_empty_table_clears_stored_mappings() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        let mut member = route_member_row("p1", "One", 1, true);
+        member.mapping_count = 1;
+        member
+            .model_mappings
+            .insert("req-a".to_string(), "act-a".to_string());
+        data.proxy.route_members.push(member);
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.route_mode_idx = 1;
+
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            let provider = Provider::with_id("p1".to_string(), "One".to_string(), json!({}), None);
+            state
+                .db
+                .save_provider("claude", &provider)
+                .expect("save provider");
+            let mut group = crate::database::RouteModeGroup::default();
+            let mut stored = crate::database::RouteModeMember::new("p1", 1);
+            stored
+                .model_mappings
+                .insert("req-a".to_string(), "act-a".to_string());
+            group.members.push(stored);
+            state
+                .db
+                .save_route_mode_group("claude", &group)
+                .expect("save group");
+        }
+
+        // `m` opens the editor seeded with the stored row; `d` deletes it.
+        let action = app.on_key(key(KeyCode::Char('m')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::RouteMappingsEditor(_)));
+        let action = app.on_key(key(KeyCode::Char('d')), &data);
+        assert!(matches!(action, Action::None));
+
+        // Esc on the now-empty table applies an empty map.
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        assert!(
+            matches!(&action, Action::SetRouteModeMemberMappings { mappings, .. } if mappings.is_empty()),
+            "empty table must apply an empty mapping map"
+        );
+        assert!(!app.overlay.is_active(), "Esc must close the editor");
+
+        run_runtime_action(&mut app, &mut data, action).expect("apply empty mappings");
+        {
+            let state = crate::cli::tui::data::load_state().expect("reload state");
+            let group = state.db.get_route_mode_group("claude").expect("read group");
+            assert!(
+                group.members[0].model_mappings.is_empty(),
+                "stored mappings must be cleared"
+            );
+        }
+    }
+
+    #[test]
+    fn route_mode_mapping_editor_rejects_duplicate_and_empty_rows() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: vec![("req-a".to_string(), "act-a".to_string())],
+            selected: 0,
+            editing: None,
+        });
+        let data = UiData::default();
+
+        // Duplicate request model is rejected with a toast and stays open.
+        let action = app.on_key(key(KeyCode::Char('a')), &data);
+        assert!(matches!(action, Action::None));
+        for ch in "req-a".chars() {
+            let action = app.on_key(key(KeyCode::Char(ch)), &data);
+            assert!(matches!(action, Action::None));
+        }
+        let action = app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(action, Action::None));
+        for ch in "other".chars() {
+            let action = app.on_key(key(KeyCode::Char(ch)), &data);
+            assert!(matches!(action, Action::None));
+        }
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Warning && toast.message.contains("Row 2")
+        ));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                assert!(editor.editing.is_some(), "editor must stay in row mode");
+                assert_eq!(editor.rows.len(), 1, "duplicate row must not commit");
+            }
+            _ => panic!("mapping editor must stay open"),
+        }
+
+        // Esc cancels the rejected row.
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                assert!(editor.editing.is_none(), "Esc cancels the row");
+            }
+            _ => panic!("editor must stay open after cancelling a row"),
+        }
+
+        // Empty request model is rejected on commit.
+        let action = app.on_key(key(KeyCode::Char('a')), &data);
+        assert!(matches!(action, Action::None));
+        let action = app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(action, Action::None));
+        for ch in "act".chars() {
+            let action = app.on_key(key(KeyCode::Char(ch)), &data);
+            assert!(matches!(action, Action::None));
+        }
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
+        ));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::RouteMappingsEditor(editor) if editor.editing.is_some()
+        ));
+    }
+
+    #[test]
+    fn route_mapping_actual_field_types_f_and_fetches_only_on_ctrl_f() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+        let data = UiData::default();
+
+        // The row editor is live-typing: a plain `f` must land in the field
+        // so model names like "gemini-2.0-flash" stay typeable.
+        let action = app.on_key(key(KeyCode::Char('f')), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                let edit = editor.editing.as_ref().expect("still editing");
+                assert_eq!(edit.actual.value, "f");
+            }
+            _ => panic!("mapping editor must stay open"),
+        }
+
+        // Ctrl+F is the fetch trigger on the actual-model field.
+        let action = app.on_key(ctrl(KeyCode::Char('f')), &data);
+        assert!(matches!(
+            action,
+            Action::RouteMemberModelFetch { ref provider_id } if provider_id == "p1"
+        ));
+
+        // On the request-model field Ctrl+F is not fetch; it moves the text
+        // cursor like every other field.
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Request,
+                request: TextInput::new("req"),
+                actual: TextInput::new("act"),
+            }),
+        });
+        let action = app.on_key(ctrl(KeyCode::Char('f')), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                let edit = editor.editing.as_ref().expect("still editing");
+                assert_eq!(edit.request.cursor, 3);
+            }
+            _ => panic!("mapping editor must stay open"),
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_member_model_fetch_restores_editor_when_provider_is_missing() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        // A real channel gets past the worker-unavailable guard so this test
+        // reaches the missing-provider branch.
+        let (model_fetch_tx, model_fetch_rx) = std::sync::mpsc::channel();
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "ghost".to_string(),
+            provider_name: "Ghost".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+
+        let result = run_runtime_action_with_model_fetch_tx(
+            &mut app,
+            &mut data,
+            &model_fetch_tx,
+            Action::RouteMemberModelFetch {
+                provider_id: "ghost".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                assert!(
+                    editor.editing.is_some(),
+                    "the draft row must survive a failed fetch"
+                );
+            }
+            _ => panic!("mapping editor must be restored after a failed fetch"),
+        }
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
+        ));
+        // No request was dispatched for the missing provider.
+        assert!(model_fetch_rx.try_recv().is_err());
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_member_model_fetch_keeps_editor_when_worker_is_unavailable() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+
+        // `run_runtime_action` wires no model-fetch channel, so this hits the
+        // worker-unavailable guard: the editor must stay open, not be parked.
+        let result = run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::RouteMemberModelFetch {
+                provider_id: "p1".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => assert!(
+                editor.editing.is_some(),
+                "the draft row must survive a disabled fetch worker"
+            ),
+            _ => panic!("mapping editor must stay open when the fetch worker is unavailable"),
+        }
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_member_model_fetch_requires_api_key_before_dispatch() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        let (model_fetch_tx, model_fetch_rx) = std::sync::mpsc::channel();
+        // Endpoint present but no extractable API key: the worker could only
+        // fail inside the picker, so the gate must fire before the editor is
+        // parked.
+        data.providers.rows.push(ProviderRow {
+            provider: Provider::with_id(
+                "p1".to_string(),
+                "One".to_string(),
+                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+                None,
+            ),
+            ..claude_provider_row("p1")
+        });
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+
+        let result = run_runtime_action_with_model_fetch_tx(
+            &mut app,
+            &mut data,
+            &model_fetch_tx,
+            Action::RouteMemberModelFetch {
+                provider_id: "p1".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => assert!(
+                editor.editing.is_some(),
+                "the draft row must survive a missing API key"
+            ),
+            _ => panic!("mapping editor must stay open when the API key is missing"),
+        }
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
+        ));
+        assert!(model_fetch_rx.try_recv().is_err());
+    }
+
+    /// Asserts the dispatched fetch request carries exactly the endpoint,
+    /// auth, and protocol parameters for an Anthropic-format Claude member.
+    #[test]
+    #[serial(home_settings)]
+    fn route_member_model_fetch_dispatches_anthropic_params_for_claude_member() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        let (model_fetch_tx, model_fetch_rx) = std::sync::mpsc::channel();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+
+        let result = run_runtime_action_with_model_fetch_tx(
+            &mut app,
+            &mut data,
+            &model_fetch_tx,
+            Action::RouteMemberModelFetch {
+                provider_id: "p1".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        // The picker opened over the parked editor, draft row intact.
+        assert!(matches!(
+            app.overlay,
+            Overlay::ModelFetchPicker {
+                target: crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappings {
+                    provider_id
+                },
+                ..
+            } if provider_id == "p1"
+        ));
+        match &app.pending_overlay {
+            Some(Overlay::RouteMappingsEditor(editor)) => {
+                assert!(editor.editing.is_some(), "the draft row must be parked");
+            }
+            _ => panic!("mapping editor must be parked in pending_overlay"),
+        }
+
+        let req = model_fetch_rx.try_recv().expect("fetch must be dispatched");
+        let crate::cli::tui::runtime_systems::ModelFetchReq::Fetch {
+            base_url,
+            is_full_url,
+            api_key,
+            custom_user_agent,
+            api_protocol,
+            request_headers,
+            codex_oauth,
+            codex_oauth_account_id,
+            target,
+            ..
+        } = req;
+        assert_eq!(base_url, "https://example.com");
+        assert!(!is_full_url);
+        assert_eq!(api_key.as_deref(), Some("sk-demo"));
+        assert_eq!(custom_user_agent, None);
+        assert_eq!(api_protocol.as_deref(), Some("anthropic-messages"));
+        assert!(request_headers.is_none());
+        assert!(!codex_oauth);
+        assert_eq!(codex_oauth_account_id, None);
+        assert_eq!(
+            target,
+            crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappings {
+                provider_id: "p1".to_string(),
+            }
+        );
+    }
+
+    /// An OpenAI-compatible Claude member sends no api_protocol override so
+    /// the worker falls back to Bearer, the right auth for /models.
+    #[test]
+    #[serial(home_settings)]
+    fn route_member_model_fetch_dispatches_bearer_for_openai_compatible_member() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        let (model_fetch_tx, model_fetch_rx) = std::sync::mpsc::channel();
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "p2",
+            "name": "Relay",
+            "settingsConfig": {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://relay.example",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-relay"
+                },
+                "api_format": "openai_chat"
+            }
+        }))
+        .expect("provider json valid");
+        data.providers.rows.push(ProviderRow {
+            provider,
+            ..claude_provider_row("p2")
+        });
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p2".to_string(),
+            provider_name: "Relay".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+
+        let result = run_runtime_action_with_model_fetch_tx(
+            &mut app,
+            &mut data,
+            &model_fetch_tx,
+            Action::RouteMemberModelFetch {
+                provider_id: "p2".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        let req = model_fetch_rx.try_recv().expect("fetch must be dispatched");
+        let crate::cli::tui::runtime_systems::ModelFetchReq::Fetch {
+            base_url,
+            api_key,
+            api_protocol,
+            codex_oauth,
+            ..
+        } = req;
+        assert_eq!(base_url, "https://relay.example");
+        assert_eq!(api_key.as_deref(), Some("sk-relay"));
+        assert_eq!(api_protocol, None, "None routes the worker to Bearer");
+        assert!(!codex_oauth);
+    }
+
+    /// A Codex OAuth member resolves models through the OAuth service: no
+    /// endpoint/key extraction, no api-key gate.
+    #[test]
+    #[serial(home_settings)]
+    fn route_member_model_fetch_dispatches_codex_oauth_without_endpoint_or_key() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Codex));
+        let mut data = UiData::default();
+        let (model_fetch_tx, model_fetch_rx) = std::sync::mpsc::channel();
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "co1",
+            "name": "Codex OAuth",
+            "settingsConfig": {
+                "env": {"OPENAI_BASE_URL": "https://unused.example"}
+            },
+            "meta": {"providerType": "codex_oauth"}
+        }))
+        .expect("provider json valid");
+        data.providers.rows.push(ProviderRow {
+            provider,
+            ..claude_provider_row("co1")
+        });
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "co1".to_string(),
+            provider_name: "Codex OAuth".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+
+        let result = run_runtime_action_with_model_fetch_tx(
+            &mut app,
+            &mut data,
+            &model_fetch_tx,
+            Action::RouteMemberModelFetch {
+                provider_id: "co1".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        let req = model_fetch_rx.try_recv().expect("fetch must be dispatched");
+        let crate::cli::tui::runtime_systems::ModelFetchReq::Fetch {
+            base_url,
+            api_key,
+            api_protocol,
+            codex_oauth,
+            codex_oauth_account_id,
+            ..
+        } = req;
+        assert!(codex_oauth, "OAuth members take the OAuth service path");
+        assert_eq!(base_url, String::new(), "endpoint unused on OAuth path");
+        assert_eq!(api_key, None, "no key needed on OAuth path");
+        assert_eq!(api_protocol, None);
+        assert_eq!(codex_oauth_account_id, None);
+    }
+
+    /// A Gemini member maps to the Gemini-native protocol and extracts the
+    /// key from the Gemini env block.
+    #[test]
+    #[serial(home_settings)]
+    fn route_member_model_fetch_dispatches_gemini_protocol_for_gemini_member() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Gemini));
+        let mut data = UiData::default();
+        let (model_fetch_tx, model_fetch_rx) = std::sync::mpsc::channel();
+        data.providers.rows.push(ProviderRow {
+            provider: Provider::with_id(
+                "g1".to_string(),
+                "Gem".to_string(),
+                json!({"env": {
+                    "GOOGLE_GEMINI_BASE_URL": "https://g.example",
+                    "GEMINI_API_KEY": "g-key"
+                }}),
+                None,
+            ),
+            ..claude_provider_row("g1")
+        });
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "g1".to_string(),
+            provider_name: "Gem".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+
+        let result = run_runtime_action_with_model_fetch_tx(
+            &mut app,
+            &mut data,
+            &model_fetch_tx,
+            Action::RouteMemberModelFetch {
+                provider_id: "g1".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        let req = model_fetch_rx.try_recv().expect("fetch must be dispatched");
+        let crate::cli::tui::runtime_systems::ModelFetchReq::Fetch {
+            base_url,
+            api_key,
+            api_protocol,
+            ..
+        } = req;
+        assert_eq!(base_url, "https://g.example");
+        assert_eq!(api_key.as_deref(), Some("g-key"));
+        assert_eq!(api_protocol.as_deref(), Some("google-generative-ai"));
+    }
+
+    /// A member without any extractable endpoint is gated before the editor
+    /// is parked, same as the missing-key case.
+    #[test]
+    #[serial(home_settings)]
+    fn route_member_model_fetch_requires_endpoint_before_dispatch() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        let (model_fetch_tx, model_fetch_rx) = std::sync::mpsc::channel();
+        data.providers.rows.push(ProviderRow {
+            provider: Provider::with_id(
+                "p1".to_string(),
+                "One".to_string(),
+                json!({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-demo"}}),
+                None,
+            ),
+            ..claude_provider_row("p1")
+        });
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(String::new()),
+            }),
+        });
+
+        let result = run_runtime_action_with_model_fetch_tx(
+            &mut app,
+            &mut data,
+            &model_fetch_tx,
+            Action::RouteMemberModelFetch {
+                provider_id: "p1".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => assert!(
+                editor.editing.is_some(),
+                "the draft row must survive a missing endpoint"
+            ),
+            _ => panic!("mapping editor must stay open when the endpoint is missing"),
+        }
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
+        ));
+        assert!(model_fetch_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn route_member_model_fetch_result_writes_the_picked_model() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(""),
+            }),
+        });
+        // The picker parked the editor in pending_overlay.
+        app.pending_overlay = Some(app.overlay.clone());
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappings {
+                provider_id: "p1".to_string(),
+            },
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: vec!["picked-model".to_string()],
+            filtered_indices: None,
+            filter_incomplete: false,
+            error: None,
+            selected_idx: 0,
+            selection_active: true,
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                let edit = editor.editing.as_ref().expect("editing restored");
+                assert_eq!(edit.actual.value, "picked-model");
+            }
+            _ => panic!("mapping editor must be restored after picking a model"),
+        }
+    }
+
+    #[test]
+    fn route_member_model_fetch_worker_failure_keeps_draft_and_esc_restores_editor() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(""),
+            }),
+        });
+        // The picker parked the editor in pending_overlay.
+        app.pending_overlay = Some(app.overlay.clone());
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            target: ModelFetchTarget::RouteMappings {
+                provider_id: "p1".to_string(),
+            },
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: true,
+            models: Vec::new(),
+            filtered_indices: None,
+            filter_incomplete: false,
+            error: None,
+            selected_idx: 0,
+            selection_active: true,
+        };
+
+        // The worker fails; the picker surfaces the error and stays open.
+        handle_model_fetch_msg(
+            &mut app,
+            ModelFetchMsg::Finished {
+                request_id: 1,
+                target: ModelFetchTarget::RouteMappings {
+                    provider_id: "p1".to_string(),
+                },
+                result: Err("upstream unreachable".to_string()),
+            },
+        );
+        match &app.overlay {
+            Overlay::ModelFetchPicker {
+                error, fetching, ..
+            } => {
+                assert!(error.is_some(), "the failure hint must be shown");
+                assert!(!*fetching, "the spinner must stop");
+            }
+            _ => panic!("the picker must stay open after a fetch failure"),
+        }
+
+        // Esc closes the picker and restores the parked editor with the draft.
+        let action = app.on_key(key(KeyCode::Esc), &data());
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                let edit = editor.editing.as_ref().expect("editing restored");
+                assert_eq!(edit.request.value, "req-a");
+                assert_eq!(edit.actual.value, "");
+            }
+            _ => panic!("mapping editor must be restored after Esc"),
+        }
+        assert!(app.pending_overlay.is_none(), "stash must be consumed");
+    }
+
+    #[test]
+    fn route_mode_nav_enter_and_esc_round_trip() {
+        let mut app = App::new(Some(AppType::Claude));
+        assert_eq!(app.route, Route::Main);
+
+        // Left-nav Enter on the Route Mode item enters the screen: focus the
+        // nav, land on whatever index Route Mode occupies, and press Enter
+        // through the real key path.
+        let route_mode_idx = app
+            .nav_items()
+            .iter()
+            .position(|item| *item == crate::cli::tui::route::NavItem::RouteMode)
+            .expect("Route Mode must be a nav item for Claude");
+        let data = UiData::default();
+        app.focus = Focus::Nav;
+        app.nav_idx = route_mode_idx;
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(ref route) if *route == Route::RouteMode
+        ));
+        assert_eq!(app.route, Route::RouteMode);
+        assert_eq!(app.focus, Focus::Content);
+
+        // Esc inside route mode exits back to the previous screen.
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(ref route) if *route == Route::Main
+        ));
+        assert_eq!(app.route, Route::Main);
+        assert_eq!(app.focus, Focus::Nav);
+
+        // And the round trip repeats.
+        app.nav_idx = route_mode_idx;
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(ref route) if *route == Route::RouteMode
+        ));
+        assert_eq!(app.route, Route::RouteMode);
+    }
+
+    #[test]
+    fn route_mode_screen_is_a_content_list_route() {
+        assert!(crate::cli::tui::app::helpers::route_has_content_list(
+            &Route::RouteMode
+        ));
     }
 }
