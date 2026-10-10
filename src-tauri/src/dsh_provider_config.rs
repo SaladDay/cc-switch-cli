@@ -213,15 +213,16 @@ pub fn validate_settings(settings: &Value) -> Result<(), AppError> {
             {
                 return Err(invalid("DSH text-only models cannot declare image limits"));
             }
-            if model
-                .get("imagePixelBudget")
-                .is_some_and(|v| v.as_str() != Some("low") && v.as_u64().is_none_or(|n| n == 0))
-                || model
-                    .get("imageMaxBytes")
-                    .is_some_and(|v| v.as_u64().is_none_or(|n| n == 0))
-                || model
-                    .get("systemPromptUpdate")
-                    .is_some_and(|v| v.as_str() != Some("in-history"))
+            if model.get("imagePixelBudget").is_some_and(|v| {
+                v.as_str() != Some("low")
+                    && v.as_u64()
+                        .is_none_or(|n| n == 0 || n > 9_007_199_254_740_991)
+            }) || model.get("imageMaxBytes").is_some_and(|v| {
+                v.as_u64()
+                    .is_none_or(|n| n == 0 || n > 9_007_199_254_740_991)
+            }) || model
+                .get("systemPromptUpdate")
+                .is_some_and(|v| v.as_str() != Some("in-history"))
                 || model
                     .get("toolUpdate")
                     .is_some_and(|v| !matches!(v.as_str(), Some("in-history" | "addition-only")))
@@ -292,6 +293,16 @@ pub fn validate_settings(settings: &Value) -> Result<(), AppError> {
         }
         validate_native_options(config, api == "deepseek")?;
         validate_compat(config.get("compat"), api)?;
+        if api == "deepseek"
+            && config.get("thinking").and_then(Value::as_str) == Some("disabled")
+            && settings
+                .get("reasoningEffort")
+                .is_some_and(|effort| effort.as_str() != Some("off"))
+        {
+            return Err(invalid(
+                "DSH disabled thinking only permits default reasoning effort off",
+            ));
+        }
     }
     if api != "deepseek" {
         let default_model = settings
@@ -971,6 +982,50 @@ fn yaml_node(value: &Value) -> Result<yaml_edit::Mapping, AppError> {
         .ok_or_else(|| invalid("DSH configuration must be an object"))
 }
 
+/// Update existing collections in place so comments on managed fields survive.
+fn edit_yaml_collection(current: &yaml_edit::YamlNode, desired: &yaml_edit::YamlNode) -> bool {
+    if let (Some(current), Some(desired)) = (current.as_mapping(), desired.as_mapping()) {
+        edit_yaml_mapping(current, desired);
+        return true;
+    }
+    if let (Some(current), Some(desired)) = (current.as_sequence(), desired.as_sequence()) {
+        for index in (desired.len()..current.len()).rev() {
+            current.remove(index);
+        }
+        for index in 0..desired.len() {
+            let next = desired.get(index).unwrap();
+            if let Some(previous) = current.get(index) {
+                if !yaml_edit::yaml_eq(&previous, &next) && !edit_yaml_collection(&previous, &next)
+                {
+                    current.set(index, next);
+                }
+            } else {
+                current.push(next);
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn edit_yaml_mapping(current: &yaml_edit::Mapping, desired: &yaml_edit::Mapping) {
+    let removed: Vec<_> = current
+        .keys()
+        .filter(|key| !desired.contains_key(key))
+        .collect();
+    for key in removed {
+        current.remove(key);
+    }
+    for (key, next) in desired.iter() {
+        if let Some(previous) = current.get(&key) {
+            if yaml_edit::yaml_eq(&previous, &next) || edit_yaml_collection(&previous, &next) {
+                continue;
+            }
+        }
+        current.set(key, next);
+    }
+}
+
 fn edit_patch(
     source: &str,
     settings: &Value,
@@ -1072,12 +1127,13 @@ fn edit_patch(
                 .and_then(Value::as_str)
                 .unwrap_or_else(|| settings["models"][0]["id"].as_str().unwrap());
             config.set("model", model);
-            config.remove("reasoningEffort");
             if let Some(effort) = settings.get("reasoningEffort").and_then(Value::as_str) {
                 config.set("reasoningEffort", effort);
+            } else {
+                config.remove("reasoningEffort");
             }
         } else if direct {
-            row.set("config", yaml_node(&native)?);
+            edit_yaml_mapping(&config, &yaml_node(&native)?);
         } else {
             if config.get_mapping("providers").is_none() {
                 if config.get("providers").is_some() {
@@ -1085,10 +1141,12 @@ fn edit_patch(
                 }
                 config.set("providers", yaml_edit::YamlValue::mapping());
             }
-            config
-                .get_mapping("providers")
-                .unwrap()
-                .set(PI_ROUTE, yaml_node(&native)?);
+            let providers = config.get_mapping("providers").unwrap();
+            if let Some(route) = providers.get_mapping(PI_ROUTE) {
+                edit_yaml_mapping(&route, &yaml_node(&native)?);
+            } else {
+                providers.set(PI_ROUTE, yaml_node(&native)?);
+            }
         }
     }
     let rendered = file.to_string();
@@ -1353,6 +1411,91 @@ mod tests {
             );
             assert_eq!(read_provider("web").unwrap(), settings);
         }
+    }
+
+    #[test]
+    fn dsh_managed_provider_fields_keep_nested_and_inline_comments_on_switch() {
+        let (_home, _guard) = profile();
+        let path = profile_dir("web").unwrap().join("cordis.patch.yml");
+        for api in ["deepseek", "openai-responses"] {
+            let prefix = if api == "deepseek" {
+                "- id: llm-deepseek\n  config:\n"
+            } else {
+                "- id: llm-pi-ai\n  config:\n    providers:\n      cc-switch:\n"
+            };
+            let indent = if api == "deepseek" {
+                "    "
+            } else {
+                "        "
+            };
+            let source = format!("{prefix}{indent}# preserve this operator comment\n{indent}baseURL: https://old.example/v1 # endpoint note\n{indent}models:\n{indent}  - id: old # model note\n{indent}    contextWindow: 32000 # capacity note\n{indent}retryPolicy:\n{indent}  # retry note\n{indent}  mode: normal\n{indent}  maxRetries: 1 # limit note\n");
+            fs::write(&path, source).unwrap();
+            let mut settings = default_settings("synthetic");
+            settings["api"] = json!(api);
+            settings["baseUrl"] = json!("https://new.example/v1");
+            settings["models"] = json!([{"id":"new", "contextWindow":64000}]);
+            settings["defaultModel"] = json!("new");
+            settings["providerConfig"] = json!({"retryPolicy":{"mode":"normal","maxRetries":2}});
+            write_provider(&settings).unwrap();
+            let published = fs::read_to_string(&path).unwrap();
+            for comment in [
+                "# preserve this operator comment",
+                "# endpoint note",
+                "# model note",
+                "# capacity note",
+                "# retry note",
+                "# limit note",
+            ] {
+                assert!(published.contains(comment), "Lost {comment}: {published}");
+            }
+            assert_eq!(read_provider("web").unwrap(), settings);
+        }
+    }
+
+    #[test]
+    fn dsh_image_model_capacities_respect_native_safe_integer_boundaries() {
+        for field in ["imagePixelBudget", "imageMaxBytes"] {
+            let mut settings = default_settings("synthetic");
+            settings["models"] = json!([{"id":"vision", "inputModalities":["text","image"]}]);
+            settings["defaultModel"] = json!("vision");
+            for capacity in [0, 9_007_199_254_740_992, u64::MAX] {
+                settings["models"][0][field] = json!(capacity);
+                assert!(validate_settings(&settings).is_err());
+            }
+            for capacity in [1_u64, 9_007_199_254_740_991] {
+                settings["models"][0][field] = json!(capacity);
+                validate_settings(&settings).unwrap();
+            }
+            if field == "imagePixelBudget" {
+                settings["models"][0][field] = json!("low");
+                validate_settings(&settings).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn dsh_disabled_thinking_rejects_default_effort_before_native_publication() {
+        let (_home, _guard) = profile();
+        let path = profile_dir("web").unwrap().join("cordis.patch.yml");
+        let source = "# unchanged\n- id: webserver\n  config: {port: 23080}\n";
+        fs::write(&path, source).unwrap();
+        dsh_config::write_dsh_api_key("original").unwrap();
+        let credential_path = dsh_config::get_dsh_credentials_path();
+        let credentials = fs::read(&credential_path).unwrap();
+        let mut settings = default_settings("synthetic");
+        settings["providerConfig"] = json!({"thinking":"disabled"});
+        for effort in ["low", "high", "max"] {
+            settings["reasoningEffort"] = json!(effort);
+            assert!(write_provider(&settings).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+            assert_eq!(fs::read(&credential_path).unwrap(), credentials);
+        }
+        settings["reasoningEffort"] = json!("off");
+        write_provider(&settings).unwrap();
+        assert_eq!(read_provider("web").unwrap(), settings);
+        settings.as_object_mut().unwrap().remove("reasoningEffort");
+        write_provider(&settings).unwrap();
+        assert_eq!(read_provider("web").unwrap(), settings);
     }
 
     #[test]
