@@ -5226,6 +5226,82 @@ pub mod texts {
         }
     }
 
+    pub fn tui_route_mappings_title(provider_name: &str) -> String {
+        if is_chinese() {
+            format!("模型映射 — {provider_name}")
+        } else {
+            format!("Model Mappings — {provider_name}")
+        }
+    }
+
+    pub fn tui_route_mappings_request_label() -> &'static str {
+        if is_chinese() {
+            "请求模型"
+        } else {
+            "Request Model"
+        }
+    }
+
+    pub fn tui_route_mappings_actual_label() -> &'static str {
+        if is_chinese() {
+            "实际模型"
+        } else {
+            "Actual Model"
+        }
+    }
+
+    pub fn tui_route_mappings_arrow() -> &'static str {
+        "→"
+    }
+
+    pub fn tui_route_mappings_fetch_key() -> &'static str {
+        if is_chinese() {
+            "获取上游模型"
+        } else {
+            "fetch models"
+        }
+    }
+
+    pub fn tui_route_mappings_empty_hint() -> &'static str {
+        if is_chinese() {
+            "暂无映射；按 a 新增，Enter 编辑，d 删除，Esc 应用并关闭"
+        } else {
+            "No mappings; a add, Enter edit, d delete, Esc apply and close"
+        }
+    }
+
+    pub fn tui_route_member_provider_missing() -> &'static str {
+        if is_chinese() {
+            "未找到该路由成员对应的供应商。"
+        } else {
+            "Provider not found for this route member."
+        }
+    }
+
+    pub fn tui_route_mappings_request_empty(row: usize) -> String {
+        if is_chinese() {
+            format!("第 {row} 行：请求模型名不能为空。")
+        } else {
+            format!("Row {row}: request model name cannot be empty.")
+        }
+    }
+
+    pub fn tui_route_mappings_actual_empty(row: usize) -> String {
+        if is_chinese() {
+            format!("第 {row} 行：实际模型名不能为空。")
+        } else {
+            format!("Row {row}: actual model name cannot be empty.")
+        }
+    }
+
+    pub fn tui_route_mappings_duplicate(request_model: &str, row: usize) -> String {
+        if is_chinese() {
+            format!("第 {row} 行：请求模型 {request_model} 已存在。")
+        } else {
+            format!("Row {row}: request model {request_model} already exists.")
+        }
+    }
+
     pub fn tui_settings_proxy_listen_address_label() -> &'static str {
         if is_chinese() {
             "监听地址"

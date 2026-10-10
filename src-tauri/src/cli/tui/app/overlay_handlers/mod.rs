@@ -3,6 +3,7 @@ use super::*;
 mod dialogs;
 mod mcp_key_value;
 mod pickers;
+mod route_mappings;
 mod views;
 
 impl App {
@@ -20,6 +21,10 @@ impl App {
         }
 
         if let Some(action) = self.handle_mcp_key_value_overlay_key(key) {
+            return action;
+        }
+
+        if let Some(action) = self.handle_route_mappings_editor_key(key, data) {
             return action;
         }
 

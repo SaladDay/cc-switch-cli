@@ -14,17 +14,17 @@ pub(crate) use handlers::{
 #[cfg(test)]
 pub(crate) use types::{
     build_model_fetch_candidate_urls, model_fetch_strategy_for_field,
-    parse_model_ids_from_response, ManagedAuthMsg, ManagedSessionOutcome, ProxyMsg, QuotaMsg,
-    UpdateMsg,
+    parse_model_ids_from_response, ManagedAuthMsg, ManagedSessionOutcome, ModelFetchMsg, ProxyMsg,
+    QuotaMsg, UpdateMsg,
 };
 pub(crate) use types::{
     build_stream_check_result_lines, fetch_provider_models_for_tui, ModelFetchStrategy,
 };
 pub(crate) use types::{
     next_model_fetch_request_id, AppDataLoadKind, AppDataMsg, AppDataReq, CodexHistoryReq,
-    LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq,
-    SkillsReq, StreamCheckReq, UpdateReq, UsageLogLoadError, UsagePricingLoadError,
-    UsagePricingMsg, UsagePricingReq, WebDavReq, WebDavReqKind,
+    LocalEnvReq, ManagedAuthReq, ModelFetchReq, ModelFetchTarget, ProxyReq, QuotaReq,
+    RequestTracker, SessionReq, SkillsReq, StreamCheckReq, UpdateReq, UsageLogLoadError,
+    UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, WebDavReq, WebDavReqKind,
 };
 pub(crate) use types::{SessionUsageSyncMsg, SessionUsageSyncReq};
 #[cfg(test)]

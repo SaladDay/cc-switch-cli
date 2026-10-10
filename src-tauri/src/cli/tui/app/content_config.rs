@@ -1176,7 +1176,7 @@ impl App {
                 }
             }
             Some(Intent::Weight) => self.open_route_mode_weight_input(data),
-            Some(Intent::Mappings) => self.open_route_mode_mappings_input(data),
+            Some(Intent::Mappings) => self.open_route_mode_mappings_editor(data),
             Some(Intent::AddMember) => {
                 self.overlay = Overlay::RouteMemberPicker {
                     selected_provider_id: None,
@@ -1284,28 +1284,25 @@ impl App {
         Action::None
     }
 
-    fn open_route_mode_mappings_input(&mut self, data: &UiData) -> Action {
+    /// `m` on a member row: opens the multi-row mapping editor seeded from
+    /// the member's stored request→actual table.
+    fn open_route_mode_mappings_editor(&mut self, data: &UiData) -> Action {
         let Some(member) = self.selected_route_member(data) else {
             return Action::None;
         };
-        let current =
-            serde_json::to_string(&member.model_mappings).unwrap_or_else(|_| "{}".to_string());
-        self.overlay = Overlay::TextInput(TextInputState {
-            title: texts::tui_route_mode_title().to_string(),
-            prompt: crate::t!(
-                format!(
-                    "Model mappings for {} as JSON {{\"request\": \"actual\", ...}}:",
-                    member.name
-                ),
-                format!(
-                    "{} 的模型映射（JSON {{\"请求模型\": \"实际模型\", ...}}）：",
-                    member.name
-                )
-            ),
-            input: TextInput::new(current),
-            submit: TextSubmit::RouteModeMappings {
-                provider_id: member.provider_id.clone(),
-            },
+        self.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: member.provider_id.clone(),
+            provider_name: member.name.clone(),
+            rows: member
+                .model_mappings
+                .iter()
+                // Trim on seed so the commit-time duplicate check (which
+                // compares against trimmed input) agrees with the apply-time
+                // trim for legacy rows saved with stray whitespace.
+                .map(|(request, actual)| (request.trim().to_string(), actual.trim().to_string()))
+                .collect(),
+            selected: 0,
+            editing: None,
         });
         Action::None
     }

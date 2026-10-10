@@ -136,8 +136,12 @@ pub enum Action {
         request_headers: Option<std::collections::BTreeMap<String, String>>,
         codex_oauth: bool,
         codex_oauth_account_id: Option<String>,
-        field: ProviderAddField,
-        claude_idx: Option<usize>,
+        target: crate::cli::tui::runtime_systems::ModelFetchTarget,
+    },
+    /// Fetches the upstream model list for a route-mode member from inside
+    /// the route-mapping editor (Ctrl+F on the actual-model field).
+    RouteMemberModelFetch {
+        provider_id: String,
     },
     UsageCustomRange {
         range: data::UsageCustomRange,

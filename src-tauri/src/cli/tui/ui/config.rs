@@ -4324,6 +4324,16 @@ pub(super) fn render_route_mode(
     state.select(Some(app.route_mode_idx));
     frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
 
+    // Groups written by older builds can sit enabled with every member
+    // disabled (the TUI now blocks new transitions into that state); keep a
+    // visible cue on the status screen because requests would fail.
+    let no_enabled_member = data.proxy.route_mode_enabled
+        && data
+            .proxy
+            .route_members
+            .iter()
+            .all(|member| !member.enabled);
+
     let endpoint = format!(
         "http://{}:{}",
         data.proxy.listen_address, data.proxy.listen_port
@@ -4332,10 +4342,15 @@ pub(super) fn render_route_mode(
         format!("Endpoint: {endpoint} · Press ? for help"),
         format!("端点：{endpoint} · 按 ? 查看帮助")
     );
+    let mut hint_spans = vec![Span::styled(hint, Style::default().fg(theme.dim))];
+    if no_enabled_member {
+        hint_spans.push(Span::styled(
+            format!("  ⚠ {}", crate::t!("no enabled member", "无启用的成员")),
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(hint)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.dim)),
+        Paragraph::new(Line::from(hint_spans)).alignment(Alignment::Center),
         chunks[2],
     );
 }

@@ -343,6 +343,7 @@ fn queue_proxy_snapshot_refresh(
     tracker: &mut RequestTracker,
     proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
     app_type: &AppType,
+    reload_token: data::UiDataReloadToken,
 ) {
     let Some(tx) = proxy_req_tx else {
         return;
@@ -356,6 +357,7 @@ fn queue_proxy_snapshot_refresh(
         .send(ProxyReq::RefreshSnapshot {
             request_id,
             app_type: app_type.clone(),
+            base_reload_token: reload_token,
         })
         .is_err()
     {
@@ -369,13 +371,14 @@ fn queue_proxy_snapshot_refresh_after_app_switch(
     before_app_type: &AppType,
     app_type: &AppType,
     action_succeeded: bool,
+    reload_token: data::UiDataReloadToken,
 ) {
     if !action_succeeded || before_app_type == app_type {
         return;
     }
 
     tracker.cancel();
-    queue_proxy_snapshot_refresh(tracker, proxy_req_tx, app_type);
+    queue_proxy_snapshot_refresh(tracker, proxy_req_tx, app_type, reload_token);
 }
 
 #[derive(Clone, Copy)]
@@ -419,13 +422,23 @@ fn apply_proxy_msg_effect(
                 // while another app was visible, or its result was older than
                 // a completed foreground update. Refresh the visible app rather
                 // than applying an app-scoped stale snapshot to it.
-                queue_proxy_snapshot_refresh(proxy_snapshot_refresh, workers.proxy, &app.app_type);
+                queue_proxy_snapshot_refresh(
+                    proxy_snapshot_refresh,
+                    workers.proxy,
+                    &app.app_type,
+                    data.reload_token,
+                );
             }
 
             refresh_quota_after_provider_runtime_change(app, data, workers.quota);
 
             if applied.needs_base_reload {
-                let _ = data_cache.queue_app_data_load(app, workers.app_data, &app_type);
+                let _ = data_cache.queue_app_data_load(
+                    app,
+                    workers.app_data,
+                    &app_type,
+                    data.reload_token,
+                );
             }
         }
         ProxyMsgEffect::ReloadProviderRuntime { app_type } => {
@@ -433,11 +446,17 @@ fn apply_proxy_msg_effect(
             // not be built. Keep the visible stale-while-revalidate data and
             // recover through the existing background app-data system.
             data_cache.remove_app_snapshot(&app_type);
-            let _ = data_cache.queue_app_data_load(app, workers.app_data, &app_type);
+            let _ =
+                data_cache.queue_app_data_load(app, workers.app_data, &app_type, data.reload_token);
 
             refresh_quota_after_provider_runtime_change(app, data, workers.quota);
             proxy_snapshot_refresh.cancel();
-            queue_proxy_snapshot_refresh(proxy_snapshot_refresh, workers.proxy, &app.app_type);
+            queue_proxy_snapshot_refresh(
+                proxy_snapshot_refresh,
+                workers.proxy,
+                &app.app_type,
+                data.reload_token,
+            );
         }
     }
 }
@@ -485,12 +504,28 @@ fn usage_pricing_load_key(
     (app_type.clone(), usage_pricing_logical_range(range))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 struct PendingAppDataLoad {
     kind: AppDataLoadKind,
     request_id: u64,
     generation: u64,
     app_state_epoch: u64,
+    /// UiData reload token captured when the load was queued. Key-path
+    /// mutations (e.g. route-mode member edits) refresh synchronously and
+    /// bump the token; a Full load queued before such an edit would otherwise
+    /// apply stale DB rows over the fresher in-memory table on completion.
+    /// Deliberately excluded from equality: identity is still the other four
+    /// fields, the token only feeds the staleness requeue.
+    reload_token: data::UiDataReloadToken,
+}
+
+impl PartialEq for PendingAppDataLoad {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.request_id == other.request_id
+            && self.generation == other.generation
+            && self.app_state_epoch == other.app_state_epoch
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -755,6 +790,7 @@ impl UiDataByAppCache {
         &mut self,
         app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
         app_type: &AppType,
+        reload_token: data::UiDataReloadToken,
     ) -> AppDataLoadQueued {
         if self.pending_by_app.contains_key(app_type) {
             return AppDataLoadQueued::AlreadyPending;
@@ -771,6 +807,7 @@ impl UiDataByAppCache {
             request_id,
             generation: self.data_generation,
             app_state_epoch: self.app_state_epoch,
+            reload_token,
         };
         self.pending_by_app.insert(app_type.clone(), pending);
         self.incomplete_by_app.insert(app_type.clone());
@@ -795,6 +832,7 @@ impl UiDataByAppCache {
         app: &mut App,
         app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
         app_type: &AppType,
+        reload_token: data::UiDataReloadToken,
     ) -> AppDataLoadQueued {
         if self.pending_by_app.contains_key(app_type) {
             return AppDataLoadQueued::AlreadyPending;
@@ -816,6 +854,7 @@ impl UiDataByAppCache {
             request_id,
             generation: self.data_generation,
             app_state_epoch: self.app_state_epoch,
+            reload_token,
         };
         self.pending_by_app.insert(app_type.clone(), pending);
         self.incomplete_by_app.insert(app_type.clone());
@@ -854,6 +893,7 @@ impl UiDataByAppCache {
             request_id: self.next_app_data_request_id,
             generation: self.data_generation,
             app_state_epoch: self.app_state_epoch,
+            reload_token: data::UiDataReloadToken::default(),
         };
         self.pending_by_app.insert(app_type.clone(), pending);
         self.incomplete_by_app.insert(app_type.clone());
@@ -876,6 +916,7 @@ impl UiDataByAppCache {
                     request_id: extra_request_id,
                     generation: pending.generation,
                     app_state_epoch: pending.app_state_epoch,
+                    reload_token: data::UiDataReloadToken::default(),
                 },
             );
             self.incomplete_by_app.insert(extra.clone());
@@ -917,6 +958,8 @@ impl UiDataByAppCache {
                 request_id,
                 generation,
                 app_state_epoch,
+                // Equality ignores the token; this literal only matches.
+                reload_token: data::UiDataReloadToken::default(),
             };
             if self.pending_by_app.get(app_type).copied() == Some(completed) {
                 self.pending_by_app.remove(app_type);
@@ -930,6 +973,8 @@ impl UiDataByAppCache {
                 request_id,
                 generation,
                 app_state_epoch,
+                // Equality ignores the token; this literal only matches.
+                reload_token: data::UiDataReloadToken::default(),
             })
         {
             return AppDataLoadFinish::Ignored;
@@ -1218,8 +1263,23 @@ impl UiDataByAppCache {
         let mut next_data = if let Some(cached) = self.by_app.get(&next) {
             cached.clone()
         } else {
-            self.queue_app_data_load(app, app_data_req_tx, &next);
-            data.app_switch_loading_projection(&next)
+            // Mint the projection first: it becomes `data` below, so the
+            // queued load must carry the projection's token — queueing with
+            // the outgoing token would make the stale-load guard discard the
+            // finished Snapshot and requeue a heavier Full reload.
+            let projection = data.app_switch_loading_projection(&next);
+            let queued =
+                self.queue_app_data_load(app, app_data_req_tx, &next, projection.reload_token);
+            if matches!(queued, AppDataLoadQueued::AlreadyPending) {
+                // A warm load for this app is still in flight and was queued
+                // with an older token; retarget it to the projection's token so
+                // the finished load is accepted instead of being discarded as
+                // stale and requeued as a heavier Full reload.
+                if let Some(pending) = self.pending_by_app.get_mut(&next) {
+                    pending.reload_token = projection.reload_token;
+                }
+            }
+            projection
         };
         // A selected custom window and the fixed snapshot occupy disjoint
         // fields, so this retains both while Main consumes only the fixed
@@ -2023,6 +2083,14 @@ fn handle_app_data_msg(
             app_type,
             result,
         } => {
+            // Token captured when this load was queued (None if it was already
+            // consumed); lets a completed Full or Snapshot load be recognized
+            // as stale when key-path mutations refreshed the data after it
+            // started.
+            let queued_reload_token = data_cache
+                .pending_by_app
+                .get(&app_type)
+                .map(|pending| pending.reload_token);
             match data_cache.finish_app_data_load(
                 kind,
                 &app_type,
@@ -2033,8 +2101,11 @@ fn handle_app_data_msg(
                 AppDataLoadFinish::Accepted => {}
                 AppDataLoadFinish::Stale => {
                     if app.app_type == app_type {
-                        let _ =
-                            data_cache.queue_current_app_data_refresh(app_data_req_tx, &app_type);
+                        let _ = data_cache.queue_current_app_data_refresh(
+                            app_data_req_tx,
+                            &app_type,
+                            data.reload_token,
+                        );
                     }
                     return;
                 }
@@ -2043,6 +2114,21 @@ fn handle_app_data_msg(
 
             match result {
                 Ok(mut loaded) => {
+                    // A member edit (or any CurrentAppDataChanged action) may
+                    // have refreshed the table after this load's DB read; both
+                    // Full and Snapshot loads carry the route table, so
+                    // applying either stale load would revert it. Requeue a
+                    // fresh load instead of regressing the display.
+                    if app.app_type == app_type
+                        && queued_reload_token.is_some_and(|token| token != data.reload_token)
+                    {
+                        let _ = data_cache.queue_current_app_data_refresh(
+                            app_data_req_tx,
+                            &app_type,
+                            data.reload_token,
+                        );
+                        return;
+                    }
                     if matches!(kind, AppDataLoadKind::Full) {
                         data_cache.remove_usage_pricing_for_app(&app_type);
                         data_cache.mark_app_data_loaded(&app_type);
@@ -2214,6 +2300,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ProviderStreamCheck { .. }
         | Action::ProviderQuotaRefresh { .. }
         | Action::ProviderModelFetch { .. }
+        | Action::RouteMemberModelFetch { .. }
         | Action::UsageCustomRange { .. }
         | Action::UsageRefresh
         | Action::UsageRebuildCodex
@@ -2328,15 +2415,19 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SetGlobalOutboundProxy { .. }
         | Action::SetProxyAutoFailover { .. }
         | Action::EnableProxyAndAutoFailover { .. }
+        // Route-mode enable flips proxy daemon bring-up (running/managed
+        // runtime), so it stays a full reload; member-level edits only touch
+        // the stored group and refresh in place (refresh_route_mode_data).
         | Action::SetRouteModeEnabled { .. }
         | Action::EnableProxyAndRouteMode { .. }
-        | Action::AddRouteModeMember { .. }
+        | Action::SetOpenClawConfigDir { .. }
+        | Action::SetPiConfigDir { .. } => CacheInvalidation::DataReloaded,
+
+        Action::AddRouteModeMember { .. }
         | Action::RemoveRouteModeMember { .. }
         | Action::ToggleRouteModeMember { .. }
         | Action::SetRouteModeMemberWeight { .. }
-        | Action::SetRouteModeMemberMappings { .. }
-        | Action::SetOpenClawConfigDir { .. }
-        | Action::SetPiConfigDir { .. } => CacheInvalidation::DataReloaded,
+        | Action::SetRouteModeMemberMappings { .. } => CacheInvalidation::CurrentAppDataChanged,
     }
 }
 
@@ -2400,7 +2491,7 @@ fn apply_current_app_data_changed(
     data_cache.remove_app_snapshot(&app_type);
     data_cache.remove_usage_pricing_for_app(&app_type);
 
-    match data_cache.queue_current_app_data_refresh(app_data_req_tx, &app_type) {
+    match data_cache.queue_current_app_data_refresh(app_data_req_tx, &app_type, data.reload_token) {
         AppDataLoadQueued::Queued | AppDataLoadQueued::AlreadyPending => Ok(()),
         AppDataLoadQueued::Unavailable | AppDataLoadQueued::SendFailed => {
             *data = data::UiData::load(&app_type)?;
@@ -3332,6 +3423,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         let _ = data_cache.queue_current_app_data_refresh(
                             Some(&app_data.req_tx),
                             &current_app_type,
+                            data.reload_token,
                         );
                         if drain_initial_loading_queued_events()? {
                             initial_loading_quit_requested = true;
@@ -3385,6 +3477,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             let _ = data_cache.queue_current_app_data_refresh(
                                 Some(&app_data.req_tx),
                                 &current_app_type,
+                                data.reload_token,
                             );
                             if drain_initial_loading_queued_events()? {
                                 initial_loading_quit_requested = true;
@@ -3758,6 +3851,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         &before_app_type,
                         &app.app_type,
                         action_succeeded,
+                        data.reload_token,
                     );
                 }
                 input::UiInput::Wheel {
@@ -3815,6 +3909,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         &before_app_type,
                         &app.app_type,
                         action_succeeded,
+                        data.reload_token,
                     );
                 }
                 input::UiInput::Resize { .. } => {}
@@ -3866,6 +3961,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                     &mut proxy_snapshot_refresh,
                     proxy_system.as_ref().map(|s| &s.req_tx),
                     &app.app_type,
+                    data.reload_token,
                 );
             }
             queue_current_quota_refresh_if_due(

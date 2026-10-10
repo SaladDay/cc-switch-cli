@@ -53,12 +53,15 @@ pub(crate) use types::{
 pub use types::{
     CodexHistoryConfirmMode, CodexHistoryConfirmState, CommonSnippetViewSource, ConfirmAction,
     ConfirmOverlay, FilterScope, FilterState, Focus, LoadingKind, ManagedAuthLoginState, Overlay,
-    PricingState, SessionProjectPickerState, SessionsPane, SessionsState, SkillsDiscoverSource,
-    TextInputState, TextSubmit, TextViewAction, TextViewState, Toast, ToastAction,
-    ToastActionScope, ToastKind, UsageMetric, UsagePane, UsageState,
+    PricingState, RouteMappingEntryEditingState, RouteMappingsEditorState,
+    SessionProjectPickerState, SessionsPane, SessionsState, SkillsDiscoverSource, TextInputState,
+    TextSubmit, TextViewAction, TextViewState, Toast, ToastAction, ToastActionScope, ToastKind,
+    UsageMetric, UsagePane, UsageState,
 };
 #[cfg(test)]
-pub(crate) use types::{McpKeyValueEditorField, McpKeyValueEntryEditorState};
+pub(crate) use types::{
+    McpKeyValueEditorField, McpKeyValueEntryEditorState, RouteMappingEditorField,
+};
 
 pub(crate) fn global_outbound_proxy_text_input(
     submit: TextSubmit,
