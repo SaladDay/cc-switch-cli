@@ -341,7 +341,7 @@ cc-switch --app dsh provider export <id> --output provider.json # 含凭据，Un
 cc-switch --app dsh provider add --name Imported --config-file provider.json
 ```
 
-`deepseek` 协议从配置中的模型目录发现模型，与 DSH 原生适配器一致；其他协议查询远程端点。请求头和兼容性配置适用于三个 Pi AI 协议，DeepSeek 使用自身的文件、图片、超时和重试参数。导入按已安装 bundle、profile 和 home 的顺序读取配置，不执行 JavaScript。依赖 Pi AI 内置目录的路由需先明确协议、凭据引用、Base URL 和模型；动态 provider 表达式需使用 DSH 原生编辑器。
+`deepseek` 协议使用 Bearer 认证查询兼容 OpenAI 的 `/models` 接口，获取时会移除 Base URL 末尾的 `/anthropic`。在 TUI 中选中 Models 并按 `f` 获取完整可用列表，再选择模型逐项加入目录。其他协议同样查询远程端点。请求头和兼容性配置适用于三个 Pi AI 协议，DeepSeek 使用自身的文件、图片、超时和重试参数。导入按已安装 bundle、profile 和 home 的顺序读取配置，不执行 JavaScript。依赖 Pi AI 内置目录的路由需先明确协议、凭据引用、Base URL 和模型；动态 provider 表达式需使用 DSH 原生编辑器。
 
 **功能：** 一键切换、Claude 独立 settings 导出、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 

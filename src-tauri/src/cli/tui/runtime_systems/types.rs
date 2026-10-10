@@ -837,6 +837,7 @@ pub(crate) struct ModelFetchSystem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelFetchStrategy {
     Bearer,
+    DeepSeek,
     Anthropic,
     GoogleApiKey,
 }
@@ -903,6 +904,15 @@ pub(crate) fn build_model_fetch_candidate_urls(
                 }
             } else if append_versioned_models.is_some() {
                 urls.push(append_models);
+            }
+        }
+        ModelFetchStrategy::DeepSeek => {
+            // The native DeepSeek adapter uses an Anthropic-compatible base URL,
+            // but model discovery uses the OpenAI-compatible API and Bearer auth.
+            let root = base.strip_suffix("/anthropic").unwrap_or(base);
+            urls.push(format!("{root}/models"));
+            if !root.ends_with("/v1") {
+                urls.push(format!("{root}/v1/models"));
             }
         }
         ModelFetchStrategy::Bearer | ModelFetchStrategy::GoogleApiKey => {
@@ -994,64 +1004,131 @@ pub(crate) async fn fetch_provider_models_for_tui(
     }
     let mut last_err = String::from("unknown error");
 
-    for url in candidate_urls {
-        let mut req = client.get(&url).timeout(Duration::from_secs(5));
-        if let Some(key) = key {
-            req = match strategy {
-                ModelFetchStrategy::Bearer => req.header("Authorization", format!("Bearer {key}")),
-                ModelFetchStrategy::Anthropic => req
-                    .header("Authorization", format!("Bearer {key}"))
-                    .header("x-api-key", key)
-                    .header("anthropic-version", "2023-06-01"),
-                ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
-            };
-        }
-        if let Some(user_agent) = &custom_user_agent {
-            req = req.header(reqwest::header::USER_AGENT, user_agent.clone());
-        }
-        if let Some(request_headers) = request_headers {
-            for (raw_name, raw_value) in request_headers {
-                let name = reqwest::header::HeaderName::from_bytes(raw_name.trim().as_bytes())
-                    .map_err(|error| {
-                        format!("Invalid model-fetch header name {raw_name}: {error}")
-                    })?;
-                let value = reqwest::header::HeaderValue::from_str(raw_value).map_err(|error| {
-                    format!("Invalid model-fetch header value for {name}: {error}")
-                })?;
-                req = req.header(name, value);
-            }
-        }
-
-        match req.send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    last_err = format!("HTTP {status} ({url})");
-                    if status != reqwest::StatusCode::NOT_FOUND
-                        && status != reqwest::StatusCode::METHOD_NOT_ALLOWED
-                    {
-                        return Err(last_err);
+    'candidates: for candidate in candidate_urls {
+        let mut url = candidate;
+        let mut catalog = Vec::new();
+        let mut seen_models = HashSet::new();
+        let mut seen_cursors = HashSet::new();
+        for page in 0..100 {
+            let mut req = client.get(&url).timeout(Duration::from_secs(5));
+            if let Some(key) = key {
+                req = match strategy {
+                    ModelFetchStrategy::Bearer | ModelFetchStrategy::DeepSeek => {
+                        req.header("Authorization", format!("Bearer {key}"))
                     }
-                    continue;
+                    ModelFetchStrategy::Anthropic => req
+                        .header("Authorization", format!("Bearer {key}"))
+                        .header("x-api-key", key),
+                    ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
+                };
+            }
+            if strategy == ModelFetchStrategy::Anthropic {
+                req = req.header("anthropic-version", "2023-06-01");
+            }
+            if let Some(user_agent) = &custom_user_agent {
+                req = req.header(reqwest::header::USER_AGENT, user_agent.clone());
+            }
+            if let Some(request_headers) = request_headers {
+                for (raw_name, raw_value) in request_headers {
+                    let name = reqwest::header::HeaderName::from_bytes(raw_name.trim().as_bytes())
+                        .map_err(|error| {
+                            format!("Invalid model-fetch header name {raw_name}: {error}")
+                        })?;
+                    let value =
+                        reqwest::header::HeaderValue::from_str(raw_value).map_err(|error| {
+                            format!("Invalid model-fetch header value for {name}: {error}")
+                        })?;
+                    req = req.header(name, value);
                 }
-                match resp.json::<Value>().await {
-                    Ok(payload) => {
-                        let models = parse_model_ids_from_response(&payload);
-                        if models.is_empty() {
-                            last_err = format!("No model list found in response ({url})");
-                        } else {
-                            return Ok(models);
+            }
+
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if !status.is_success() {
+                        last_err = format!("HTTP {status} ({url})");
+                        if page > 0
+                            || (status != reqwest::StatusCode::NOT_FOUND
+                                && status != reqwest::StatusCode::METHOD_NOT_ALLOWED)
+                        {
+                            return Err(last_err);
+                        }
+                        continue 'candidates;
+                    }
+                    match resp.json::<Value>().await {
+                        Ok(payload) => {
+                            let models = parse_model_ids_from_response(&payload);
+                            if models.is_empty() {
+                                last_err = format!("No model list found in response ({url})");
+                                if page > 0 {
+                                    return Err(last_err);
+                                }
+                                continue 'candidates;
+                            }
+                            catalog.extend(
+                                models
+                                    .into_iter()
+                                    .filter(|model| seen_models.insert(model.clone())),
+                            );
+                            let cursor = if strategy == ModelFetchStrategy::GoogleApiKey {
+                                payload
+                                    .get("nextPageToken")
+                                    .and_then(Value::as_str)
+                                    .filter(|token| !token.is_empty())
+                                    .map(|token| ("pageToken", token))
+                            } else if payload.get("has_more").and_then(Value::as_bool) == Some(true)
+                            {
+                                Some((
+                                    "after_id",
+                                    payload
+                                        .get("last_id")
+                                        .and_then(Value::as_str)
+                                        .filter(|id| !id.trim().is_empty())
+                                        .ok_or_else(|| {
+                                            "Model API pagination is missing last_id".to_string()
+                                        })?,
+                                ))
+                            } else {
+                                None
+                            };
+                            let Some((parameter, cursor)) = cursor else {
+                                return Ok(catalog);
+                            };
+                            if !seen_cursors.insert(cursor.to_string()) {
+                                return Err("Model API pagination repeated a cursor".to_string());
+                            }
+                            let mut next =
+                                url::Url::parse(&url).map_err(|error| error.to_string())?;
+                            let query: Vec<(String, String)> = next
+                                .query_pairs()
+                                .filter(|(name, _)| name != parameter)
+                                .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                                .collect();
+                            next.set_query(None);
+                            next.query_pairs_mut()
+                                .extend_pairs(query)
+                                .append_pair(parameter, cursor);
+                            url = next.to_string();
+                        }
+                        Err(err) => {
+                            last_err = format!("Invalid JSON response ({url}): {err}");
+                            if page > 0 {
+                                return Err(last_err);
+                            }
+                            continue 'candidates;
                         }
                     }
-                    Err(err) => {
-                        last_err = format!("Invalid JSON response ({url}): {err}");
+                }
+                Err(err) => {
+                    last_err = err.to_string();
+                    if page > 0 {
+                        return Err(last_err);
                     }
+                    continue 'candidates;
                 }
             }
-            Err(err) => {
-                last_err = err.to_string();
-            }
         }
+        return Err("Model API pagination exceeded 100 pages".to_string());
     }
 
     Err(last_err)

@@ -14,8 +14,8 @@ pub(crate) use handlers::{
 #[cfg(test)]
 pub(crate) use types::{
     build_model_fetch_candidate_urls, model_fetch_strategy_for_field,
-    parse_model_ids_from_response, ManagedAuthMsg, ManagedSessionOutcome, ProxyMsg, QuotaMsg,
-    UpdateMsg,
+    parse_model_ids_from_response, ManagedAuthMsg, ManagedSessionOutcome, ModelFetchMsg, ProxyMsg,
+    QuotaMsg, UpdateMsg,
 };
 pub(crate) use types::{
     build_stream_check_result_lines, fetch_provider_models_for_tui, ModelFetchStrategy,

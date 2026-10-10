@@ -22,6 +22,7 @@ const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderModelFetchStrategy {
     Bearer,
+    DeepSeek,
     Anthropic,
     GoogleApiKey,
 }
@@ -30,7 +31,6 @@ pub(crate) enum ProviderModelFetchStrategy {
 enum ModelFetchSource {
     Http(ModelFetchTarget),
     CodexOAuth { account_id: Option<String> },
-    DshCatalog(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,9 +392,6 @@ pub(crate) fn fetch_models_once(
 
 fn print_model_fetch_source(source: &ModelFetchSource) {
     match &source {
-        ModelFetchSource::DshCatalog(_) => {
-            println!("{}", info("Source: DSH configured DeepSeek model catalog"))
-        }
         ModelFetchSource::Http(target) => {
             println!("{}", info(&format!("Endpoint: {}", target.base_url)));
         }
@@ -416,7 +413,6 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
         .map_err(|e| AppError::Message(format!("Failed to create async runtime: {}", e)))?;
 
     match &source {
-        ModelFetchSource::DshCatalog(models) => Ok(models.clone()),
         ModelFetchSource::Http(target) => runtime.block_on(async {
             crate::cli::tui::fetch_provider_models_for_tui(
                 &target.base_url,
@@ -1100,10 +1096,10 @@ fn model_fetch_target(
                             .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
                             .collect()
                     }),
-                strategy: if matches!(api, "deepseek" | "anthropic-messages") {
-                    ProviderModelFetchStrategy::Anthropic
-                } else {
-                    ProviderModelFetchStrategy::Bearer
+                strategy: match api {
+                    "deepseek" => ProviderModelFetchStrategy::DeepSeek,
+                    "anthropic-messages" => ProviderModelFetchStrategy::Anthropic,
+                    _ => ProviderModelFetchStrategy::Bearer,
                 },
             })
         }
@@ -1286,28 +1282,6 @@ fn model_fetch_source(
     provider: &Provider,
     app_type: &AppType,
 ) -> Result<ModelFetchSource, AppError> {
-    if matches!(app_type, AppType::Dsh)
-        && provider
-            .settings_config
-            .get("api")
-            .and_then(Value::as_str)
-            .unwrap_or("deepseek")
-            == "deepseek"
-    {
-        let settings = if crate::dsh_provider_config::is_legacy(&provider.settings_config) {
-            crate::dsh_provider_config::default_settings("")
-        } else {
-            provider.settings_config.clone()
-        };
-        return Ok(ModelFetchSource::DshCatalog(
-            settings["models"]
-                .as_array()
-                .ok_or_else(|| AppError::InvalidInput("DSH model catalog is missing".into()))?
-                .iter()
-                .filter_map(|model| model["id"].as_str().map(str::to_owned))
-                .collect(),
-        ));
-    }
     if matches!(app_type, AppType::Claude) && provider.is_codex_oauth() {
         return Ok(ModelFetchSource::CodexOAuth {
             account_id: codex_oauth_account_id(provider),
@@ -1393,6 +1367,7 @@ fn parse_access_token_blob(raw: &str) -> Option<String> {
 fn to_tui_strategy(strategy: ProviderModelFetchStrategy) -> crate::cli::tui::ModelFetchStrategy {
     match strategy {
         ProviderModelFetchStrategy::Bearer => crate::cli::tui::ModelFetchStrategy::Bearer,
+        ProviderModelFetchStrategy::DeepSeek => crate::cli::tui::ModelFetchStrategy::DeepSeek,
         ProviderModelFetchStrategy::Anthropic => crate::cli::tui::ModelFetchStrategy::Anthropic,
         ProviderModelFetchStrategy::GoogleApiKey => {
             crate::cli::tui::ModelFetchStrategy::GoogleApiKey
@@ -1770,6 +1745,49 @@ base_url = "https://current.example.com/v1"
         assert_eq!(target.base_url, "https://claude.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-claude"));
         assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
+    }
+
+    #[test]
+    fn model_fetch_source_for_dsh_uses_http_and_native_protocol_auth() {
+        for (api, strategy) in [
+            ("deepseek", ProviderModelFetchStrategy::DeepSeek),
+            ("anthropic-messages", ProviderModelFetchStrategy::Anthropic),
+            ("openai-completions", ProviderModelFetchStrategy::Bearer),
+            ("openai-responses", ProviderModelFetchStrategy::Bearer),
+        ] {
+            let provider = Provider::with_id(
+                "dsh".into(),
+                "DSH".into(),
+                json!({
+                    "apiKey":"synthetic-key", "api":api, "baseUrl":"https://api.example/anthropic",
+                    "models":[{"id":"configured-model"}], "providerConfig":{"headers":{"X-Test":"retained"}}
+                }),
+                None,
+            );
+            let ModelFetchSource::Http(target) =
+                model_fetch_source(&provider, &AppType::Dsh).unwrap()
+            else {
+                panic!("DSH must query the API");
+            };
+            assert_eq!(target.strategy, strategy);
+            assert_eq!(target.auth_value.as_deref(), Some("synthetic-key"));
+            assert_eq!(target.request_headers.unwrap()["X-Test"], "retained");
+        }
+        let legacy = Provider::with_id(
+            "legacy".into(),
+            "Legacy".into(),
+            json!({"apiKey":"synthetic-key"}),
+            None,
+        );
+        let ModelFetchSource::Http(target) = model_fetch_source(&legacy, &AppType::Dsh).unwrap()
+        else {
+            panic!("legacy DSH provider must also query the API");
+        };
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::DeepSeek);
+        assert_eq!(
+            target.base_url,
+            crate::dsh_provider_config::DEFAULT_BASE_URL
+        );
     }
 
     #[test]

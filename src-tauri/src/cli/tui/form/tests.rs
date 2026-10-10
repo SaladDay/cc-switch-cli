@@ -8116,6 +8116,34 @@ fn provider_pi_models_editor_value_round_trips_through_form() {
 }
 
 #[test]
+fn provider_dsh_models_editor_preserves_valid_default_and_rejects_invalid_arrays_atomically() {
+    let provider = Provider::with_id(
+        "dsh".into(),
+        "DSH".into(),
+        json!({
+            "apiKey":"synthetic-key", "api":"deepseek", "models":[{"id":"a"},{"id":"b"}],
+            "defaultModel":"b", "providerConfig":{"streamIdleTimeoutMs":1200}
+        }),
+        None,
+    );
+    let mut form = ProviderAddFormState::from_provider(AppType::Dsh, &provider);
+    let models = json!([{"id":"c"},{"id":"b", "contextWindow":32000}]);
+    form.apply_openclaw_models_value(models.clone()).unwrap();
+    let saved = form.to_provider_json_value();
+    assert_eq!(saved["settingsConfig"]["defaultModel"], "b");
+    assert_eq!(saved["settingsConfig"]["models"], models);
+    for invalid in [
+        json!([]),
+        json!({}),
+        json!([{"id":"dup"},{"id":"dup"}]),
+        json!([{"id":""}]),
+    ] {
+        assert!(form.apply_openclaw_models_value(invalid).is_err());
+        assert_eq!(form.to_provider_json_value(), saved);
+    }
+}
+
+#[test]
 fn provider_add_form_pi_uses_native_api_default() {
     let mut form = ProviderAddFormState::new(AppType::Pi);
     form.name.set("Custom Pi");

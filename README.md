@@ -338,7 +338,7 @@ cc-switch --app dsh provider export <id> --output provider.json # Contains crede
 cc-switch --app dsh provider add --name Imported --config-file provider.json
 ```
 
-The `deepseek` protocol discovers models from its configured catalog, matching DSH's native adapter. Other protocols query the endpoint. Headers and compatibility profiles are available for the three Pi AI protocols; DeepSeek uses its own native file, image, timeout and retry options. Import resolves installed bundle, profile and home layers without evaluating JavaScript. Catalog-backed Pi AI routes need explicit protocol, credential reference, Base URL and models before import; dynamic provider expressions require DSH's native editor.
+The `deepseek` protocol queries the OpenAI-compatible `/models` endpoint using Bearer authentication, removing a trailing `/anthropic` from its Base URL for discovery. In the TUI, focus Models and press `f` to fetch the available list, then select a model to add it to the catalog. Other protocols also query the endpoint. Headers and compatibility profiles are available for the three Pi AI protocols; DeepSeek uses its own native file, image, timeout and retry options. Import resolves installed bundle, profile and home layers without evaluating JavaScript. Catalog-backed Pi AI routes need explicit protocol, credential reference, Base URL and models before import; dynamic provider expressions require DSH's native editor.
 
 **Features:** One-click switching, standalone Claude settings export, multi-endpoint support, API key management, remote model discovery, and per-app diagnostics such as speed testing or stream health checks where supported.
 

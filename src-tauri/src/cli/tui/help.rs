@@ -905,8 +905,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::OpenClawModels => HelpContent::new(
             texts::tui_label_openclaw_models(),
             help_lines(
-                "编辑 OpenClaw/Pi 模型列表。Pi 表单中可按 f 从原生端点拉取模型。",
-                "Edits OpenClaw/Pi model entries. In a Pi form, press f to fetch from the native endpoint.",
+                "编辑 OpenClaw/Pi/DSH 模型列表，Ctrl+S 应用到表单，再保存供应商。Pi/DSH 表单中可按 f 从 API 获取模型，再选择模型逐项加入目录。DSH 移除当前默认模型时会改用列表第一项。",
+                "Edits OpenClaw/Pi/DSH model entries. Ctrl+S applies to the form; save the provider afterwards. In Pi/DSH forms, press f to fetch from the API, then select models to add individually. Removing the DSH default model selects the first entry instead.",
             ),
         ),
         ProviderAddField::OpenCodeModelContextLimit => HelpContent::new(

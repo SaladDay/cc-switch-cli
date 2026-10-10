@@ -1557,29 +1557,6 @@ impl App {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
             return Action::None;
         };
-        if provider.app_type == AppType::Dsh
-            && provider.to_provider_json_value()["settingsConfig"]["api"] == "deepseek"
-        {
-            self.overlay = Overlay::ModelFetchPicker {
-                request_id: 0,
-                field: selected,
-                claude_idx: None,
-                input: TextInput::new(""),
-                query: String::new(),
-                fetching: false,
-                models: provider
-                    .openclaw_models
-                    .iter()
-                    .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
-                    .collect(),
-                filtered_indices: None,
-                filter_incomplete: false,
-                error: None,
-                selected_idx: 0,
-                selection_active: false,
-            };
-            return Action::None;
-        }
         let mut api_key = match selected {
             ProviderAddField::CodexModel => (!provider.codex_api_key.value.trim().is_empty())
                 .then(|| provider.codex_api_key.value.clone()),
@@ -1612,14 +1589,10 @@ impl App {
             && matches!(provider.app_type, AppType::Pi | AppType::Dsh)
         {
             let settings = provider.to_provider_json_value()["settingsConfig"].clone();
-            let protocol = settings.get("api").and_then(Value::as_str).map(|api| {
-                if api == "deepseek" {
-                    "anthropic-messages"
-                } else {
-                    api
-                }
-                .to_string()
-            });
+            let protocol = settings
+                .get("api")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let headers = (if provider.app_type == AppType::Dsh {
                 settings.pointer("/providerConfig/headers")
             } else {

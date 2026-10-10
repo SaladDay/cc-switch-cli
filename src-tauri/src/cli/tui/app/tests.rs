@@ -3023,7 +3023,7 @@ mod tests {
     }
 
     #[test]
-    fn dsh_model_picker_uses_native_catalog_and_protocol_headers() {
+    fn dsh_model_picker_fetches_api_catalog_and_protocol_headers() {
         let mut app = open_provider_fields_form(AppType::Dsh);
         let mut form = ProviderAddFormState::new(AppType::Dsh);
         form.opencode_api_key.set("synthetic-key");
@@ -3033,11 +3033,10 @@ mod tests {
                 select_provider_field(&mut app, ProviderAddField::OpenClawModels);
                 app.on_key(key(KeyCode::Char('f')), &data())
             },
-            Action::None
+            Action::ProviderModelFetch { api_protocol: Some(protocol), api_key: Some(key), .. }
+                if protocol == "deepseek" && key == "synthetic-key"
         ));
-        assert!(
-            matches!(&app.overlay, Overlay::ModelFetchPicker { fetching: false, models, .. } if models == &vec!["deepseek-flash".to_string(), "deepseek-v4-pro".to_string()])
-        );
+        assert!(matches!(&app.overlay, Overlay::None));
         form.opencode_npm_package.set("anthropic-messages");
         form.opencode_base_url.set("https://synthetic.example");
         form.extra["settingsConfig"]["providerConfig"] = json!({"headers":{"X-Test":"custom"}});
@@ -3049,6 +3048,71 @@ mod tests {
             matches!(action, Action::ProviderModelFetch { api_key: None, request_headers: Some(headers), .. }
             if headers.get("x-api-key").map(String::as_str) == Some("synthetic-key") && headers.get("X-Test").map(String::as_str) == Some("custom"))
         );
+    }
+
+    #[test]
+    fn dsh_model_picker_displays_api_list_and_imports_one_model_without_duplicates() {
+        let mut app = open_provider_fields_form(AppType::Dsh);
+        let mut ui_data = UiData::default();
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.opencode_api_key.set("synthetic-key");
+        }
+        for _ in 0..2 {
+            select_provider_field(&mut app, ProviderAddField::OpenClawModels);
+            let action = app.on_key(key(KeyCode::Char('f')), &ui_data);
+            let mut terminal = TuiTerminal::new_for_test().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            handle_action(
+                &mut terminal,
+                &mut app,
+                &mut ui_data,
+                None,
+                None,
+                None,
+                None,
+                &mut RequestTracker::default(),
+                None,
+                None,
+                None,
+                &mut RequestTracker::default(),
+                None,
+                &mut RequestTracker::default(),
+                Some(&tx),
+                None,
+                action,
+            )
+            .unwrap();
+            let crate::cli::tui::runtime_systems::ModelFetchReq::Fetch {
+                request_id,
+                api_protocol,
+                ..
+            } = rx.recv().unwrap();
+            assert_eq!(api_protocol.as_deref(), Some("deepseek"));
+            crate::cli::tui::runtime_systems::handle_model_fetch_msg(
+                &mut app,
+                crate::cli::tui::runtime_systems::ModelFetchMsg::Finished {
+                    request_id,
+                    field: ProviderAddField::OpenClawModels,
+                    claude_idx: None,
+                    result: Ok(vec![
+                        "remote-a".into(),
+                        "remote-b".into(),
+                        "remote-c".into(),
+                    ]),
+                },
+            );
+            assert!(
+                matches!(&app.overlay, Overlay::ModelFetchPicker { fetching:false, models, .. } if models.len() == 3)
+            );
+            app.on_key(key(KeyCode::Down), &ui_data);
+            app.on_key(key(KeyCode::Enter), &ui_data);
+            let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+                panic!("provider form");
+            };
+            assert_eq!(form.openclaw_models.len(), 3);
+            assert_eq!(form.openclaw_models[2]["id"], "remote-b");
+            assert_eq!(form.dsh_default_model.value, "deepseek-flash");
+        }
     }
 
     #[test]
@@ -5477,6 +5541,73 @@ mod tests {
         } else {
             panic!("expected ProviderAdd form");
         }
+    }
+
+    #[test]
+    fn provider_add_form_dsh_models_editor_ctrl_s_applies_models_array_back_to_form() {
+        let mut app = App::new(Some(AppType::Dsh));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        apply_current_provider_template(&mut app, &data);
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.opencode_api_key.set("synthetic-key");
+            form.extra["settingsConfig"]["providerConfig"] = json!({"streamIdleTimeoutMs":1200});
+            form.focus = super::super::form::FormFocus::Fields;
+            form.clear_text_edit();
+            form.field_idx = form
+                .fields()
+                .iter()
+                .position(|field| *field == ProviderAddField::OpenClawModels)
+                .expect("DSH models field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Enter), &data);
+        let injected = r#"[
+  {"id":"api-model-a","name":"API Model A"},
+  {"id":"api-model-b","name":"API Model B"}
+]"#;
+        if let Some(editor) = app.editor.as_mut() {
+            editor.lines = injected.lines().map(str::to_string).collect();
+            editor.cursor_row = 0;
+            editor.cursor_col = 0;
+            editor.scroll = 0;
+        } else {
+            panic!("expected JSON editor");
+        }
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(
+            &action,
+            Action::EditorSubmit {
+                submit: EditorSubmit::ProviderFormApplyOpenClawModels,
+                ..
+            }
+        ));
+        run_runtime_action(&mut app, &mut UiData::default(), action)
+            .expect("submit DSH models editor");
+        assert!(app.editor.is_none(), "successful save closes the editor");
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_ref() {
+            let settings = form.to_provider_json_value()["settingsConfig"].clone();
+            assert_eq!(settings["models"][0]["id"], "api-model-a");
+            assert_eq!(settings["models"][1]["id"], "api-model-b");
+            assert_ne!(settings["models"][0]["id"], "deepseek-flash");
+            assert_eq!(settings["api"], "deepseek");
+            assert_eq!(settings["defaultModel"], "api-model-a");
+            assert_eq!(settings["providerConfig"]["streamIdleTimeoutMs"], 1200);
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+        app.on_key(key(KeyCode::Enter), &data);
+        let reopened = app.editor.as_ref().expect("models editor should reopen");
+        let reopened_models: serde_json::Value =
+            serde_json::from_str(&reopened.lines.join("\n")).expect("valid models JSON");
+        assert_eq!(reopened_models[0]["id"], "api-model-a");
+        assert_eq!(reopened_models[1]["id"], "api-model-b");
     }
 
     #[test]

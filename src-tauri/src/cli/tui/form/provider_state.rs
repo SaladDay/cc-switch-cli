@@ -3131,7 +3131,10 @@ impl ProviderAddFormState {
     }
 
     pub fn apply_openclaw_models_value(&mut self, models_value: Value) -> Result<(), String> {
-        if !matches!(self.app_type, AppType::OpenClaw | AppType::Pi) {
+        if !matches!(
+            self.app_type,
+            AppType::OpenClaw | AppType::Pi | AppType::Dsh
+        ) {
             return Ok(());
         }
         if !models_value.is_array() {
@@ -3146,6 +3149,18 @@ impl ProviderAddFormState {
         let settings_obj = settings_value
             .as_object_mut()
             .ok_or_else(|| texts::tui_toast_json_must_be_object().to_string())?;
+        if self.app_type == AppType::Dsh {
+            let models = models_value.as_array().expect("checked array above");
+            let default_model = settings_obj.get("defaultModel").and_then(Value::as_str);
+            if !models
+                .iter()
+                .any(|model| model["id"].as_str() == default_model)
+            {
+                if let Some(id) = models.first().and_then(|model| model.get("id")) {
+                    settings_obj.insert("defaultModel".to_string(), id.clone());
+                }
+            }
+        }
         settings_obj.insert("models".to_string(), models_value);
         self.apply_provider_json_value_to_fields(provider_value)
     }

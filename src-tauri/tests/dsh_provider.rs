@@ -71,6 +71,102 @@ fn seed_dsh_profile() {
     .unwrap();
 }
 
+#[test]
+fn dsh_cli_fetch_models_queries_api_with_bearer_auth_and_v1_fallback() {
+    use std::io::{Read, Write};
+    let _lock = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    seed_dsh_profile();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        for expected_path in ["/models", "/v1/models", "/v1/models?after_id=remote-b"] {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "model fetch request timed out"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 1024];
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(
+                    count > 0 && request.len() < 16_384,
+                    "incomplete model request"
+                );
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.starts_with(&format!("get {expected_path} http/1.1\r\n")));
+            assert!(request.contains("authorization: bearer synthetic-fetch-key\r\n"));
+            assert!(!request.contains("x-api-key:"));
+            let (status, body) = if expected_path == "/models" {
+                ("404 Not Found", "{}")
+            } else if expected_path == "/v1/models" {
+                (
+                    "200 OK",
+                    r#"{"data":[{"id":"remote-a"},{"id":"remote-b"}],"has_more":true,"last_id":"remote-b"}"#,
+                )
+            } else {
+                (
+                    "200 OK",
+                    r#"{"data":[{"id":"remote-b"},{"id":"remote-c"}],"has_more":false}"#,
+                )
+            };
+            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let settings = json!({"apiKey":"synthetic-fetch-key", "api":"deepseek",
+        "baseUrl":format!("http://{address}/anthropic"), "models":[{"id":"configured-only"}]});
+    let output = run_dsh_cli(
+        home,
+        &[
+            "provider",
+            "add",
+            "--id",
+            "fetch",
+            "--name",
+            "Fetch",
+            "--config",
+            &settings.to_string(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run_dsh_cli(home, &["provider", "fetch-models", "fetch"]);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    for id in ["remote-a", "remote-b", "remote-c"] {
+        assert!(text.contains(id));
+    }
+    assert!(!text.contains("configured-only") && !text.contains("synthetic-fetch-key"));
+}
+
 fn dsh_config() -> MultiAppConfig {
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Dsh);

@@ -5342,6 +5342,170 @@ fn model_fetch_candidate_urls_strip_anthropic_compat_suffix() {
 }
 
 #[test]
+fn model_fetch_candidate_urls_for_deepseek_use_openai_compatible_endpoint() {
+    for base in [
+        "https://api.deepseek.com/anthropic",
+        "https://api.deepseek.com/",
+    ] {
+        assert_eq!(
+            build_model_fetch_candidate_urls(base, ModelFetchStrategy::DeepSeek, false),
+            vec![
+                "https://api.deepseek.com/models".to_string(),
+                "https://api.deepseek.com/v1/models".to_string()
+            ]
+        );
+    }
+    assert_eq!(
+        build_model_fetch_candidate_urls(
+            "https://api.deepseek.com/v1",
+            ModelFetchStrategy::DeepSeek,
+            false
+        ),
+        vec!["https://api.deepseek.com/v1/models".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn model_fetch_deepseek_uses_bearer_auth_and_returns_complete_catalog() {
+    use axum::{http::HeaderMap, routing::get, Router};
+    let app = Router::new().route("/models", get(|headers: HeaderMap| async move {
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer synthetic-key");
+        assert!(!headers.contains_key("x-api-key"));
+        assert_eq!(headers.get("x-test").unwrap(), "retained");
+        axum::Json(json!({"data":[{"id":"model-a"},{"id":"model-b"},{"id":"model-c"},{"id":"model-a"}]}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let headers =
+        std::collections::BTreeMap::from([("X-Test".to_string(), "retained".to_string())]);
+    let result = fetch_provider_models_for_tui(
+        &format!("http://{address}/anthropic"),
+        false,
+        Some(" synthetic-key "),
+        None,
+        ModelFetchStrategy::DeepSeek,
+        Some(&headers),
+    )
+    .await;
+    server.abort();
+    assert_eq!(result.unwrap(), vec!["model-a", "model-b", "model-c"]);
+}
+
+#[tokio::test]
+async fn model_fetch_accumulates_all_pages_and_deduplicates_models() {
+    use axum::{extract::Query, http::HeaderMap, routing::get, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    for strategy in [
+        ModelFetchStrategy::Anthropic,
+        ModelFetchStrategy::Bearer,
+        ModelFetchStrategy::GoogleApiKey,
+    ] {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let captured = requests.clone();
+        let handler = move |Query(query): Query<std::collections::HashMap<String, String>>,
+                            headers: HeaderMap| {
+            let requests = captured.clone();
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                let parameter = if strategy == ModelFetchStrategy::GoogleApiKey {
+                    "pageToken"
+                } else {
+                    "after_id"
+                };
+                if strategy == ModelFetchStrategy::Anthropic {
+                    assert_eq!(headers.get_all("anthropic-version").iter().count(), 1);
+                    assert_eq!(headers.get("x-api-key").unwrap(), "synthetic-key");
+                }
+                if query.contains_key(parameter) {
+                    assert_eq!(query[parameter], "cursor/+ with spaces");
+                    axum::Json(
+                        json!({"data":[{"id":"model-b"},{"id":"model-c"}], "has_more":false}),
+                    )
+                } else if strategy == ModelFetchStrategy::GoogleApiKey {
+                    axum::Json(
+                        json!({"data":[{"id":"model-a"},{"id":"model-b"}], "nextPageToken":"cursor/+ with spaces"}),
+                    )
+                } else {
+                    axum::Json(
+                        json!({"data":[{"id":"model-a"},{"id":"model-b"}], "has_more":true,"last_id":"cursor/+ with spaces"}),
+                    )
+                }
+            }
+        };
+        let app = Router::new().route("/v1/models", get(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let result = fetch_provider_models_for_tui(
+            &format!("http://{address}/v1"),
+            false,
+            Some("synthetic-key"),
+            None,
+            strategy,
+            None,
+        )
+        .await;
+        server.abort();
+        assert_eq!(result.unwrap(), vec!["model-a", "model-b", "model-c"]);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn model_fetch_rejects_broken_pagination_without_returning_partial_catalog() {
+    use axum::{extract::Query, http::StatusCode, routing::get, Router};
+    for scenario in ["missing-cursor", "repeated-cursor", "page-error"] {
+        let app = Router::new().route(
+            "/v1/models",
+            get(
+                move |Query(query): Query<std::collections::HashMap<String, String>>| async move {
+                    if scenario == "page-error" && query.contains_key("after_id") {
+                        return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                    }
+                    let mut payload = json!({"data":[{"id":"model-a"}], "has_more":true});
+                    if scenario != "missing-cursor" {
+                        payload["last_id"] = json!("model-a");
+                    }
+                    (StatusCode::OK, axum::Json(payload))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let result = fetch_provider_models_for_tui(
+            &format!("http://{address}/v1"),
+            false,
+            Some("synthetic-key"),
+            None,
+            ModelFetchStrategy::Anthropic,
+            None,
+        )
+        .await;
+        server.abort();
+        let error = result.unwrap_err();
+        assert!(
+            error.contains(match scenario {
+                "missing-cursor" => "missing last_id",
+                "repeated-cursor" => "repeated a cursor",
+                _ => "401",
+            }),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
     let urls = build_model_fetch_candidate_urls(
         "https://generativelanguage.googleapis.com/v1beta",
