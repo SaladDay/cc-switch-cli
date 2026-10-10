@@ -166,6 +166,15 @@ fn lock_holder_exited(record: &str) -> bool {
 }
 
 fn recover_exited_lock(path: &std::path::Path) -> Result<bool, AppError> {
+    recover_exited_lock_at_depth(path, 0)
+}
+
+fn recover_exited_lock_at_depth(path: &std::path::Path, depth: usize) -> Result<bool, AppError> {
+    // Each recovery claim uses the same protocol. Bound recursion for malformed
+    // stores while allowing recovery after crashes during claim recovery itself.
+    if depth >= 16 {
+        return Ok(false);
+    }
     let Ok(record) = fs::read_to_string(path) else {
         return Ok(false);
     };
@@ -178,17 +187,21 @@ fn recover_exited_lock(path: &std::path::Path) -> Result<bool, AppError> {
     let mut claim_name = path.as_os_str().to_os_string();
     claim_name.push(format!(".takeover-{}", &digest[..16]));
     let claim_path = PathBuf::from(claim_name);
-    let mut file = match create_lock_file(&claim_path) {
-        Ok(file) => file,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            return Ok(false)
+    let mut file = loop {
+        match create_lock_file(&claim_path) {
+            Ok(file) => break file,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                if !recover_exited_lock_at_depth(&claim_path, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            Err(error) => return Err(AppError::io(&claim_path, error)),
         }
-        Err(error) => return Err(AppError::io(&claim_path, error)),
     };
     let _claim = CredentialsWriteLock { path: claim_path };
     writeln!(file, "{}", std::process::id()).map_err(|error| AppError::io(&_claim.path, error))?;
@@ -509,6 +522,49 @@ mod tests {
             assert!(!lock_holder_exited(record));
         }
         assert!(!lock_holder_exited(&format!("{}\n", std::process::id())));
+    }
+
+    #[test]
+    fn recovers_abandoned_claims_for_native_and_provider_locks() {
+        let home = TempDir::new().unwrap();
+        let _guard = TestEnvGuard::isolated(home.path());
+        fs::create_dir_all(get_dsh_dir()).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let record = format!("{}\n", child.id());
+        child.wait().unwrap();
+        assert!(lock_holder_exited(&record));
+        let digest = format!("{:x}", Sha256::digest(record.as_bytes()));
+        for filename in [".credentials.yaml.lock", ".cc-switch-provider.lock"] {
+            let lock_path = get_dsh_dir().join(filename);
+            let claim_path = get_dsh_dir().join(format!("{filename}.takeover-{}", &digest[..16]));
+            let nested_claim = PathBuf::from(format!(
+                "{}.takeover-{}",
+                claim_path.display(),
+                &digest[..16]
+            ));
+            for path in [&lock_path, &claim_path, &nested_claim] {
+                fs::write(path, &record).unwrap();
+            }
+            let lock = CredentialsWriteLock::acquire_at(
+                lock_path.clone(),
+                Duration::ZERO,
+                "test lock timed out",
+            )
+            .expect("abandoned claims must not block acquisition");
+            assert_eq!(
+                fs::read_to_string(&lock_path).unwrap(),
+                format!("{}\n", std::process::id())
+            );
+            assert!(!claim_path.exists());
+            assert!(!nested_claim.exists());
+            drop(lock);
+            assert!(!lock_path.exists());
+        }
     }
 
     #[test]
