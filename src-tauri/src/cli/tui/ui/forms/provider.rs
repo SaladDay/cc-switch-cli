@@ -236,9 +236,12 @@ fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option
         AppType::Gemini => serde_json::from_str::<Value>(common_snippet)
             .ok()
             .map(|env| json!({ "env": env })),
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            None
-        }
+        AppType::Codex
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Dsh => None,
     }
     .filter(Value::is_object)
 }
@@ -1990,6 +1993,14 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::OpenClawApiProtocol => texts::tui_label_openclaw_api().to_string(),
         ProviderAddField::OpenClawUserAgent => texts::tui_label_openclaw_user_agent().to_string(),
         ProviderAddField::OpenClawModels => texts::tui_label_openclaw_models().to_string(),
+        ProviderAddField::DshProfile => "DSH Profile".to_string(),
+        ProviderAddField::DshDefaultModel => if crate::cli::i18n::is_chinese() {
+            "默认模型"
+        } else {
+            "Default Model"
+        }
+        .to_string(),
+        ProviderAddField::DshReasoningEffort => "Reasoning Effort".to_string(),
         ProviderAddField::OpenCodeNpmPackage => {
             if provider.app_type == AppType::OpenClaw {
                 texts::tui_label_openclaw_api().to_string()

@@ -879,6 +879,15 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Selects the protocol adapter used by OpenClaw. Different adapters affect request shape.",
             ),
         ),
+        ProviderAddField::DshProfile => HelpContent::new("DSH Profile", help_lines(
+            "目标 profile 名称，如 web、cli。必须先使用 DSH 初始化。",
+            "Target profile name, such as web or cli. Initialize it with DSH first.")),
+        ProviderAddField::DshDefaultModel => HelpContent::new(texts::model_label(), help_lines(
+            "新会话的默认模型，必须在模型目录内。已有会话保持自己的模型选择。",
+            "Default model for new agents. Must be in the catalog; existing sessions retain their selection.")),
+        ProviderAddField::DshReasoningEffort => HelpContent::new("Reasoning Effort", help_lines(
+            "留空使用原生默认值。DeepSeek 支持 off、low、high、max；其他协议须与默认模型的 reasoningEfforts 匹配，可在 JSON 编辑器中声明模型能力。",
+            "Leave blank for native defaults. DeepSeek supports off, low, high, max; other protocols must match the default model's reasoningEfforts, declared in the JSON editor.")),
         ProviderAddField::OpenCodeNpmPackage => HelpContent::new(
             texts::tui_label_provider_package(),
             help_lines(
@@ -896,8 +905,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::OpenClawModels => HelpContent::new(
             texts::tui_label_openclaw_models(),
             help_lines(
-                "编辑 OpenClaw/Pi 模型列表。Pi 表单中可按 f 从原生端点拉取模型。",
-                "Edits OpenClaw/Pi model entries. In a Pi form, press f to fetch from the native endpoint.",
+                "编辑 OpenClaw/Pi/DSH 模型列表，Ctrl+S 应用到表单，再保存供应商。Pi/DSH 表单中可按 f 从 API 获取模型，再选择模型逐项加入目录。DSH 移除当前默认模型时会改用列表第一项。",
+                "Edits OpenClaw/Pi/DSH model entries. Ctrl+S applies to the form; save the provider afterwards. In Pi/DSH forms, press f to fetch from the API, then select models to add individually. Removing the DSH default model selects the first entry instead.",
             ),
         ),
         ProviderAddField::OpenCodeModelContextLimit => HelpContent::new(

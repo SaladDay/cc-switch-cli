@@ -4100,7 +4100,8 @@ pub(super) fn render_settings_proxy(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let rows_data = LocalProxySettingsItem::ALL
+    let items = LocalProxySettingsItem::all_for_app(&app.app_type);
+    let rows_data = items
         .iter()
         .map(|item| match item {
             LocalProxySettingsItem::ListenAddress => (
@@ -4160,7 +4161,7 @@ pub(super) fn render_settings_proxy(
         ])
         .split(inner);
 
-    let key_label = match LocalProxySettingsItem::ALL.get(app.settings_proxy_idx) {
+    let key_label = match items.get(app.settings_proxy_idx) {
         Some(LocalProxySettingsItem::AutoFailover) => texts::tui_key_toggle(),
         Some(LocalProxySettingsItem::ListenAddress) if data.proxy.running => "",
         Some(LocalProxySettingsItem::ListenPort)

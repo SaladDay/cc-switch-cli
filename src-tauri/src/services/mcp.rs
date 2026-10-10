@@ -218,6 +218,7 @@ impl McpService {
             }
             AppType::OpenClaw => {}
             AppType::Pi => {}
+            AppType::Dsh => {}
         }
         Ok(())
     }
@@ -244,6 +245,7 @@ impl McpService {
             AppType::Hermes => mcp::remove_server_from_hermes(id)?,
             AppType::OpenClaw => {}
             AppType::Pi => {}
+            AppType::Dsh => {}
         }
         Ok(())
     }

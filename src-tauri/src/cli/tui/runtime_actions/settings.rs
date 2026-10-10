@@ -90,6 +90,11 @@ pub(super) fn set_proxy_listen_port(
     ctx: &mut RuntimeActionContext<'_>,
     port: u16,
 ) -> Result<(), AppError> {
+    if matches!(ctx.app.app_type, AppType::Dsh) {
+        return Err(AppError::InvalidInput(
+            "DeepSeek Harness does not support proxy route configuration".into(),
+        ));
+    }
     let state = load_state()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

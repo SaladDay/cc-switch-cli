@@ -93,6 +93,15 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::SettingsManagedAccounts => route.clone(),
             _ => super::route::Route::Main,
         },
+        AppType::Dsh => match route {
+            super::route::Route::Main
+            | super::route::Route::Providers
+            | super::route::Route::Settings
+            | super::route::Route::SettingsProxy
+            | super::route::Route::SettingsOutboundProxy
+            | super::route::Route::SettingsManagedAccounts => route.clone(),
+            _ => super::route::Route::Main,
+        },
         _ => match route {
             super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
@@ -1856,6 +1865,47 @@ mod tests {
     }
 
     #[test]
+    fn dsh_normalizes_unsupported_routes_to_main() {
+        assert_eq!(
+            normalize_route_for_app(&AppType::Dsh, &Route::Mcp),
+            Route::Main
+        );
+        assert_eq!(
+            normalize_route_for_app(&AppType::Dsh, &Route::Providers),
+            Route::Providers
+        );
+    }
+
+    #[test]
+    fn dsh_proxy_port_action_rejects_before_database_access() {
+        let home = TempDir::new().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let mut app = App::new(Some(AppType::Dsh));
+        let mut data = UiData::default();
+        let result = run_action(
+            &mut app,
+            &mut data,
+            Action::SetProxyListenPort { port: 16999 },
+        );
+        assert!(result.unwrap_err().to_string().contains("does not support"));
+        assert!(!home.path().join(".cc-switch/cc-switch.db").exists());
+
+        let db = crate::Database::init().unwrap();
+        db.set_app_proxy_preferred_port("claude", 15721).unwrap();
+        let before = db.get_setting("proxy_preferences_cli_only").unwrap();
+        assert!(run_action(
+            &mut app,
+            &mut data,
+            Action::SetProxyListenPort { port: 16999 },
+        )
+        .is_err());
+        assert_eq!(
+            db.get_setting("proxy_preferences_cli_only").unwrap(),
+            before
+        );
+    }
+
+    #[test]
     #[serial(home_settings)]
     fn set_visible_apps_forces_switch_and_normalizes_openclaw_routes() {
         let temp_home = TempDir::new().expect("create temp home");
@@ -1868,6 +1918,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save initial visible apps");
 
@@ -1879,6 +1930,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
@@ -1940,6 +1992,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
             .expect("save initial visible apps");
@@ -1963,6 +2016,7 @@ mod tests {
                     hermes: false,
                     openclaw: false,
                     pi: false,
+                    dsh: false,
                 },
             },
         )
@@ -1992,6 +2046,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save initial visible apps");
         write_invalid_legacy_config(temp_home.path());
@@ -2004,6 +2059,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
@@ -2042,6 +2098,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
             .expect("save initial visible apps");
@@ -2062,6 +2119,7 @@ mod tests {
                     hermes: false,
                     openclaw: false,
                     pi: false,
+                    dsh: false,
                 },
             },
         )
@@ -2092,6 +2150,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -2105,6 +2164,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
@@ -2152,6 +2212,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         };
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = initial_visible_apps.clone();
@@ -2179,6 +2240,7 @@ mod tests {
                     hermes: false,
                     openclaw: false,
                     pi: false,
+                    dsh: false,
                 },
                 selected: 5,
             },

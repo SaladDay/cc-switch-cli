@@ -482,6 +482,9 @@ impl ProviderService {
                 .and_then(Value::as_str)
                 .ok_or_else(|| AppError::InvalidInput("Pi provider API key is missing".to_string()))
                 .map(str::to_string),
+            AppType::Dsh => provider
+                .configured_api_key(app_type)
+                .ok_or_else(|| AppError::InvalidInput("DSH provider API key is missing".into())),
         }
     }
 
@@ -563,6 +566,12 @@ impl ProviderService {
                 .unwrap_or_default()
                 .to_string()),
             AppType::Pi => crate::pi_config::provider_base_url(&provider.settings_config),
+            AppType::Dsh => Ok(provider
+                .settings_config
+                .get("baseUrl")
+                .and_then(Value::as_str)
+                .unwrap_or(crate::dsh_provider_config::DEFAULT_BASE_URL)
+                .to_string()),
         }
     }
 

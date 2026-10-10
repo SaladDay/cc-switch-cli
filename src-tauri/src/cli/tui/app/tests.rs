@@ -971,6 +971,7 @@ mod tests {
                 hermes: false,
                 openclaw: false,
                 pi: false,
+                dsh: false,
             },
         };
 
@@ -982,6 +983,43 @@ mod tests {
             &app.overlay,
             Overlay::VisibleAppsPicker { selected, apps }
                 if *selected == 6 && apps.pi
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn visible_apps_picker_can_reach_toggle_and_save_dsh() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
+            .expect("save visible apps mode");
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::VisibleAppsPicker {
+            selected: app_type_picker_index(&AppType::Pi),
+            apps: crate::settings::VisibleApps {
+                claude: true,
+                codex: false,
+                gemini: false,
+                opencode: false,
+                hermes: false,
+                openclaw: false,
+                pi: false,
+                dsh: false,
+            },
+        };
+
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        app.on_key(key(KeyCode::Char(' ')), &UiData::default());
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { selected, apps }
+                if *selected == app_type_picker_index(&AppType::Dsh)
+                    && apps.dsh && apps.claude && !apps.pi
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::SetVisibleApps { apps } if apps.dsh && apps.claude && !apps.pi
         ));
     }
 
@@ -1166,6 +1204,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1192,6 +1231,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1226,6 +1266,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Gemini));
@@ -1268,6 +1309,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -1292,6 +1334,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -1320,6 +1363,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -1344,6 +1388,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -2975,6 +3020,147 @@ mod tests {
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
         assert_provider_copy_confirm(&app, "p1", "Provider One");
+    }
+
+    #[test]
+    fn dsh_model_picker_fetches_api_catalog_and_protocol_headers() {
+        let mut app = open_provider_fields_form(AppType::Dsh);
+        let mut form = ProviderAddFormState::new(AppType::Dsh);
+        form.opencode_api_key.set("synthetic-key");
+        app.form = Some(FormState::ProviderAdd(form.clone()));
+        assert!(matches!(
+            {
+                select_provider_field(&mut app, ProviderAddField::OpenClawModels);
+                app.on_key(key(KeyCode::Char('f')), &data())
+            },
+            Action::ProviderModelFetch { api_protocol: Some(protocol), api_key: Some(key), .. }
+                if protocol == "deepseek" && key == "synthetic-key"
+        ));
+        assert!(matches!(&app.overlay, Overlay::None));
+        form.opencode_npm_package.set("anthropic-messages");
+        form.opencode_base_url.set("https://synthetic.example");
+        form.extra["settingsConfig"]["providerConfig"] = json!({"headers":{"X-Test":"custom"}});
+        app.form = Some(FormState::ProviderAdd(form));
+        app.overlay = Overlay::None;
+        select_provider_field(&mut app, ProviderAddField::OpenClawModels);
+        let action = app.on_key(key(KeyCode::Char('f')), &data());
+        assert!(
+            matches!(action, Action::ProviderModelFetch { api_key: None, request_headers: Some(headers), .. }
+            if headers.get("x-api-key").map(String::as_str) == Some("synthetic-key") && headers.get("X-Test").map(String::as_str) == Some("custom"))
+        );
+    }
+
+    #[test]
+    fn dsh_model_picker_displays_api_list_and_imports_one_model_without_duplicates() {
+        let mut app = open_provider_fields_form(AppType::Dsh);
+        let mut ui_data = UiData::default();
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.opencode_api_key.set("synthetic-key");
+        }
+        for _ in 0..2 {
+            select_provider_field(&mut app, ProviderAddField::OpenClawModels);
+            let action = app.on_key(key(KeyCode::Char('f')), &ui_data);
+            let mut terminal = TuiTerminal::new_for_test().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            handle_action(
+                &mut terminal,
+                &mut app,
+                &mut ui_data,
+                None,
+                None,
+                None,
+                None,
+                &mut RequestTracker::default(),
+                None,
+                None,
+                None,
+                &mut RequestTracker::default(),
+                None,
+                &mut RequestTracker::default(),
+                Some(&tx),
+                None,
+                action,
+            )
+            .unwrap();
+            let crate::cli::tui::runtime_systems::ModelFetchReq::Fetch {
+                request_id,
+                api_protocol,
+                ..
+            } = rx.recv().unwrap();
+            assert_eq!(api_protocol.as_deref(), Some("deepseek"));
+            crate::cli::tui::runtime_systems::handle_model_fetch_msg(
+                &mut app,
+                crate::cli::tui::runtime_systems::ModelFetchMsg::Finished {
+                    request_id,
+                    field: ProviderAddField::OpenClawModels,
+                    claude_idx: None,
+                    result: Ok(vec![
+                        "remote-a".into(),
+                        "remote-b".into(),
+                        "remote-c".into(),
+                    ]),
+                },
+            );
+            assert!(
+                matches!(&app.overlay, Overlay::ModelFetchPicker { fetching:false, models, .. } if models.len() == 3)
+            );
+            app.on_key(key(KeyCode::Down), &ui_data);
+            app.on_key(key(KeyCode::Enter), &ui_data);
+            let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+                panic!("provider form");
+            };
+            assert_eq!(form.openclaw_models.len(), 3);
+            assert_eq!(form.openclaw_models[2]["id"], "remote-b");
+            assert_eq!(form.dsh_default_model.value, "deepseek-flash");
+        }
+    }
+
+    #[test]
+    fn dsh_provider_diagnostics_offer_endpoint_speedtest() {
+        let mut app = App::new(Some(AppType::Dsh));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let row = claude_provider_row("p1");
+        let mut data = UiData::default();
+        data.providers.rows.push(row.clone());
+
+        assert_eq!(
+            provider_test_menu_items(&app.app_type),
+            vec![
+                ProviderTestMenuItem::Speedtest,
+                ProviderTestMenuItem::StreamCheck
+            ]
+        );
+        assert!(supports_provider_stream_check(&app.app_type));
+        assert!(
+            crate::cli::tui::keymap::providers::key_bar_items(&app, &data)
+                .iter()
+                .any(|(key, _)| *key == "t")
+        );
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('t')), &data),
+            Action::None
+        ));
+        assert!(matches!(app.overlay, Overlay::ProviderTestMenu { .. }));
+        assert!(matches!(
+            app.provider_speedtest_action(&row),
+            Action::ProviderSpeedtest { .. }
+        ));
+        assert!(matches!(
+            app.provider_stream_check_action(&row),
+            Action::ProviderStreamCheck { .. }
+        ));
+        assert!(matches!(app.overlay, Overlay::StreamCheckRunning { .. }));
+
+        app.overlay = Overlay::ProviderTestMenu {
+            provider_id: "p1".to_string(),
+            selected: 0,
+        };
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::ProviderSpeedtest { .. }
+        ));
+        assert!(matches!(app.overlay, Overlay::SpeedtestRunning { .. }));
     }
 
     #[test]
@@ -5355,6 +5541,73 @@ mod tests {
         } else {
             panic!("expected ProviderAdd form");
         }
+    }
+
+    #[test]
+    fn provider_add_form_dsh_models_editor_ctrl_s_applies_models_array_back_to_form() {
+        let mut app = App::new(Some(AppType::Dsh));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        apply_current_provider_template(&mut app, &data);
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.opencode_api_key.set("synthetic-key");
+            form.extra["settingsConfig"]["providerConfig"] = json!({"streamIdleTimeoutMs":1200});
+            form.focus = super::super::form::FormFocus::Fields;
+            form.clear_text_edit();
+            form.field_idx = form
+                .fields()
+                .iter()
+                .position(|field| *field == ProviderAddField::OpenClawModels)
+                .expect("DSH models field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Enter), &data);
+        let injected = r#"[
+  {"id":"api-model-a","name":"API Model A"},
+  {"id":"api-model-b","name":"API Model B"}
+]"#;
+        if let Some(editor) = app.editor.as_mut() {
+            editor.lines = injected.lines().map(str::to_string).collect();
+            editor.cursor_row = 0;
+            editor.cursor_col = 0;
+            editor.scroll = 0;
+        } else {
+            panic!("expected JSON editor");
+        }
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(
+            &action,
+            Action::EditorSubmit {
+                submit: EditorSubmit::ProviderFormApplyOpenClawModels,
+                ..
+            }
+        ));
+        run_runtime_action(&mut app, &mut UiData::default(), action)
+            .expect("submit DSH models editor");
+        assert!(app.editor.is_none(), "successful save closes the editor");
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_ref() {
+            let settings = form.to_provider_json_value()["settingsConfig"].clone();
+            assert_eq!(settings["models"][0]["id"], "api-model-a");
+            assert_eq!(settings["models"][1]["id"], "api-model-b");
+            assert_ne!(settings["models"][0]["id"], "deepseek-flash");
+            assert_eq!(settings["api"], "deepseek");
+            assert_eq!(settings["defaultModel"], "api-model-a");
+            assert_eq!(settings["providerConfig"]["streamIdleTimeoutMs"], 1200);
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+        app.on_key(key(KeyCode::Enter), &data);
+        let reopened = app.editor.as_ref().expect("models editor should reopen");
+        let reopened_models: serde_json::Value =
+            serde_json::from_str(&reopened.lines.join("\n")).expect("valid models JSON");
+        assert_eq!(reopened_models[0]["id"], "api-model-a");
+        assert_eq!(reopened_models[1]["id"], "api-model-b");
     }
 
     #[test]
@@ -11226,6 +11479,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
         crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
@@ -11277,6 +11531,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -11315,6 +11570,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11354,6 +11610,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11392,6 +11649,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = initial.clone();
@@ -11441,6 +11699,36 @@ mod tests {
         let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(action, Action::SwitchRoute(Route::SettingsProxy)));
         assert!(matches!(app.route, Route::SettingsProxy));
+    }
+
+    #[test]
+    fn dsh_proxy_settings_cannot_select_app_port_or_failover() {
+        let mut app = App::new(Some(AppType::Dsh));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        let data = UiData::default();
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert_eq!(app.settings_proxy_idx, 0);
+        app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsProxyListenAddress,
+                ..
+            })
+        ));
+        app.overlay = Overlay::None;
+        for index in [1, 2] {
+            app.settings_proxy_idx = index;
+            assert!(matches!(
+                app.on_key(key(KeyCode::Enter), &data),
+                Action::None
+            ));
+            assert!(matches!(app.overlay, Overlay::None));
+        }
     }
 
     #[test]

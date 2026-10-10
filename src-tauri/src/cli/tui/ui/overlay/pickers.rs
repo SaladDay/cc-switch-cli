@@ -2413,6 +2413,7 @@ pub(super) fn render_visible_apps_picker_overlay(
             crate::app_config::AppType::Hermes,
             crate::app_config::AppType::OpenClaw,
             crate::app_config::AppType::Pi,
+            crate::app_config::AppType::Dsh,
         ],
     );
 }

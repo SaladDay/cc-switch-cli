@@ -647,6 +647,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             })
         } else {
             let strategy = match api_protocol.as_deref() {
+                Some("deepseek") => ModelFetchStrategy::DeepSeek,
                 Some("anthropic-messages") => ModelFetchStrategy::Anthropic,
                 Some("google-generative-ai") => ModelFetchStrategy::GoogleApiKey,
                 _ => model_fetch_strategy_for_field(field),

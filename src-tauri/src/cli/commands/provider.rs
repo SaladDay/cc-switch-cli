@@ -498,9 +498,12 @@ fn prompt_and_apply_provider_api_format(
     match app_type {
         AppType::Claude => prompt_and_apply_claude_api_format(app_type, provider),
         AppType::Codex => prompt_and_apply_codex_api_format(app_type, provider),
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            Ok(())
-        }
+        AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Dsh => Ok(()),
     }
 }
 
@@ -702,6 +705,9 @@ pub enum ProviderCommand {
         /// Default model (Claude/Codex/Gemini field mode, optional)
         #[arg(long, conflicts_with_all = ["config", "config_file"])]
         model: Option<String>,
+        /// Initialized DeepSeek Harness profile (default: web)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        dsh_profile: Option<String>,
         /// Claude Haiku role model ([1M] is ignored because Haiku does not support it)
         #[arg(long, conflicts_with_all = ["config", "config_file"])]
         haiku_model: Option<String>,
@@ -735,7 +741,7 @@ pub enum ProviderCommand {
         /// Claude API-key field, or Codex Anthropic upstream auth field
         #[arg(long, value_enum)]
         api_key_field: Option<ClaudeApiKeyFieldArg>,
-        /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: responses|chat|anthropic)
+        /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: responses|chat|anthropic; DSH: deepseek|openai-completions|openai-responses|anthropic-messages)
         #[arg(long)]
         api_format: Option<String>,
         /// Emulate the Claude Code client for a Codex Anthropic upstream
@@ -783,7 +789,7 @@ pub enum ProviderCommand {
     SetDefault {
         /// Provider ID to set as default
         id: String,
-        /// OpenClaw model ID to set as primary; defaults to the first live model
+        /// DSH/OpenClaw model ID to set as default
         #[arg(long)]
         model: Option<String>,
     },
@@ -832,7 +838,7 @@ pub enum ProviderCommand {
     /// Configure provider Usage Query
     #[command(subcommand)]
     UsageQuery(provider_usage_query::ProviderUsageQueryCommand),
-    /// Export a Claude provider to a standalone settings file
+    /// Export a Claude or DSH provider to a standalone settings file
     Export {
         /// Provider ID to export
         id: String,
@@ -845,6 +851,7 @@ pub enum ProviderCommand {
 
 pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppError> {
     let app_type = app.unwrap_or(AppType::Claude);
+    cmd.validate_app_support(&app_type)?;
 
     match cmd {
         ProviderCommand::List => provider_inspect::list_providers(app_type),
@@ -857,6 +864,7 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
             base_url,
             api_key,
             model,
+            dsh_profile,
             haiku_model,
             sonnet_model,
             opus_model,
@@ -883,6 +891,7 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                 base_url,
                 api_key,
                 model,
+                dsh_profile,
                 haiku_model,
                 sonnet_model,
                 opus_model,
@@ -940,6 +949,103 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         } => provider_inspect::quota_provider(app_type, &id, json, reset, credit_id, confirm),
         ProviderCommand::UsageQuery(cmd) => provider_usage_query::execute(cmd, app_type),
         ProviderCommand::Export { id, output } => export_provider(app_type, &id, output),
+    }
+}
+
+impl ProviderCommand {
+    pub(crate) fn validate_app_support(&self, app_type: &AppType) -> Result<(), AppError> {
+        if !matches!(app_type, AppType::Dsh) {
+            if matches!(
+                self,
+                Self::Add {
+                    dsh_profile: Some(_),
+                    ..
+                }
+            ) {
+                return Err(AppError::InvalidInput(
+                    "--dsh-profile requires --app dsh".into(),
+                ));
+            }
+            return Ok(());
+        }
+        if let Self::Add {
+            template,
+            base_url,
+            api_key,
+            model,
+            dsh_profile,
+            haiku_model,
+            sonnet_model,
+            opus_model,
+            fable_model,
+            subagent_model,
+            config,
+            config_file,
+            api_key_field,
+            api_format,
+            impersonate_claude_code,
+            max_output_tokens,
+            common_config,
+            account_id,
+            fast_mode,
+            ..
+        } = self
+        {
+            validate_provider_add_template(
+                app_type,
+                template.unwrap_or(ProviderAddTemplate::Custom),
+            )?;
+            if [
+                haiku_model,
+                sonnet_model,
+                opus_model,
+                fable_model,
+                subagent_model,
+                account_id,
+            ]
+            .into_iter()
+            .any(Option::is_some)
+                || api_key_field.is_some()
+                || max_output_tokens.is_some()
+                || *impersonate_claude_code
+                || *common_config
+                || *fast_mode
+            {
+                return Err(AppError::InvalidInput(
+                    "DeepSeek Harness does not support Claude model roles, common config, or managed auth options".into(),
+                ));
+            }
+            let settings =
+                match load_raw_settings_config(config.as_deref(), config_file.as_deref())? {
+                    Some(settings) => settings,
+                    None => {
+                        let mut settings = crate::dsh_provider_config::default_settings(
+                            api_key.as_deref().unwrap_or(""),
+                        );
+                        if let Some(profile) = dsh_profile {
+                            settings["profile"] = serde_json::json!(profile);
+                        }
+                        if let Some(url) = base_url {
+                            settings["baseUrl"] = serde_json::json!(url);
+                        }
+                        if let Some(api) = api_format {
+                            settings["api"] = serde_json::json!(api);
+                        }
+                        if let Some(model) = model {
+                            settings["models"] = serde_json::json!([{ "id": model }]);
+                            settings["defaultModel"] = serde_json::json!(model);
+                        }
+                        settings
+                    }
+                };
+            crate::dsh_config::validate_dsh_provider_settings(&settings)?;
+        }
+        if matches!(app_type, AppType::Dsh) && matches!(self, Self::RemoveFromConfig { .. }) {
+            return Err(AppError::InvalidInput(
+                "DeepSeek Harness does not support this provider command".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1102,6 +1208,7 @@ struct AddProviderArgs {
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+    dsh_profile: Option<String>,
     haiku_model: Option<String>,
     sonnet_model: Option<String>,
     opus_model: Option<String>,
@@ -1273,10 +1380,13 @@ fn common_config_unavailable_message(app_type: &AppType) -> String {
 }
 
 /// Read the raw `settings_config` JSON from `--config` or `--config-file`.
-fn load_raw_settings_config(args: &AddProviderArgs) -> Result<Option<serde_json::Value>, AppError> {
-    let raw = if let Some(text) = args.config.as_deref() {
+fn load_raw_settings_config(
+    config: Option<&str>,
+    config_file: Option<&std::path::Path>,
+) -> Result<Option<serde_json::Value>, AppError> {
+    let raw = if let Some(text) = config {
         text.to_string()
-    } else if let Some(path) = args.config_file.as_deref() {
+    } else if let Some(path) = config_file {
         std::fs::read_to_string(path).map_err(|e| {
             AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
                 format!("无法读取配置文件 {}: {e}", path.display())
@@ -1454,6 +1564,26 @@ fn build_add_settings_config(
             }
             Ok(settings)
         }
+        AppType::Dsh => {
+            let api_key = non_empty(args.api_key.clone())
+                .ok_or_else(|| add_missing_field_error("--api-key"))?;
+            let mut settings = crate::dsh_provider_config::default_settings(&api_key);
+            if let Some(profile) = non_empty(args.dsh_profile.clone()) {
+                settings["profile"] = serde_json::json!(profile);
+            }
+            if let Some(url) = non_empty(args.base_url.clone()) {
+                settings["baseUrl"] = serde_json::json!(url);
+            }
+            if let Some(api) = non_empty(args.api_format.clone()) {
+                settings["api"] = serde_json::json!(api);
+            }
+            if let Some(model) = non_empty(args.model.clone()) {
+                settings["models"] = serde_json::json!([{ "id": model }]);
+                settings["defaultModel"] = serde_json::json!(model);
+            }
+            crate::dsh_config::validate_dsh_provider_settings(&settings)?;
+            Ok(settings)
+        }
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
             let current = current.ok_or_else(|| add_additive_requires_config_error(app_type))?;
             let api_key = non_empty(args.api_key.clone());
@@ -1541,8 +1671,12 @@ fn apply_add_provider_api_format(
             };
             apply_codex_api_format(provider, format);
         }
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-        }
+        AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Dsh => {}
     }
     Ok(())
 }
@@ -1587,7 +1721,7 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
     let template = args.template.unwrap_or(ProviderAddTemplate::Custom);
     validate_provider_add_template(&app_type, template)?;
 
-    let raw_config = load_raw_settings_config(&args)?;
+    let raw_config = load_raw_settings_config(args.config.as_deref(), args.config_file.as_deref())?;
     let mut settings_prompt_result: Option<SettingsConfigPromptResult> = None;
 
     // 2. 构造供应商（自定义或基于模板）
@@ -2068,6 +2202,38 @@ fn set_default_provider(app_type: AppType, id: &str, model: Option<&str>) -> Res
 }
 
 fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Dsh) {
+        let state = get_state()?;
+        let provider = state
+            .db
+            .get_all_providers("dsh")?
+            .shift_remove(id)
+            .ok_or_else(|| AppError::InvalidInput("DSH provider not found".into()))?;
+        let path =
+            output.ok_or_else(|| AppError::InvalidInput("DSH export requires --output".into()))?;
+        let source = serde_json::to_vec_pretty(&provider.settings_config)
+            .map_err(|e| AppError::Message(e.to_string()))?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(parent).map_err(|e| AppError::io(&path, e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temporary
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| AppError::io(&path, e))?;
+        }
+        std::io::Write::write_all(&mut temporary, &source).map_err(|e| AppError::io(&path, e))?;
+        temporary
+            .persist(&path)
+            .map_err(|e| AppError::io(&path, e.error))?;
+        println!("{}", path.display());
+        return Ok(());
+    }
     if !matches!(app_type, AppType::Claude) {
         return Err(AppError::Message(format!(
             "Provider export currently supports only Claude standalone settings files. Use --app claude (current app: {}).",

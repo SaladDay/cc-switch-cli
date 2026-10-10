@@ -144,7 +144,9 @@ pub fn common_snippet_has_effective_config(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|obj| !obj.is_empty()),
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Dsh => {
+            false
+        }
     }
 }
 
@@ -209,7 +211,7 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
                 label: "Google OAuth",
             },
         ],
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Dsh => {
             vec![ProviderAddTemplateChoice {
                 template: ProviderAddTemplate::Custom,
                 label: "Custom",
@@ -657,7 +659,7 @@ fn build_sponsor_template_settings_config(
                 })
             }
         }
-        AppType::Pi => Err(unsupported_template_error(ProviderAddTemplate::Custom)),
+        AppType::Pi | AppType::Dsh => Err(unsupported_template_error(ProviderAddTemplate::Custom)),
     }
 }
 
@@ -727,6 +729,30 @@ pub fn apply_additive_template_field_overrides(
             if let Some(model) = model {
                 object.insert("models".to_string(), json!([{ "id": model }]));
             }
+            Ok(updated)
+        }
+        AppType::Dsh => {
+            let api_key = api_key
+                .or_else(|| current.get("apiKey").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    AppError::InvalidInput("DSH provider requires apiKey".to_string())
+                })?;
+            let mut updated = if crate::dsh_provider_config::is_legacy(current) {
+                crate::dsh_provider_config::default_settings(api_key)
+            } else {
+                current.clone()
+            };
+            updated["apiKey"] = json!(api_key);
+            if let Some(url) = base_url {
+                updated["baseUrl"] = json!(url);
+            }
+            if let Some(model) = model {
+                updated["models"] = models_with_primary_override(&updated, Some(model));
+                updated["defaultModel"] = json!(model);
+            }
+            crate::dsh_config::validate_dsh_provider_settings(&updated)?;
             Ok(updated)
         }
         AppType::Claude | AppType::Codex | AppType::Gemini => Err(AppError::InvalidInput(format!(
@@ -3924,7 +3950,62 @@ pub fn prompt_settings_config(
             }
             Ok(SettingsConfigPromptResult::new(config))
         }
+        AppType::Dsh => prompt_dsh_config(current).map(SettingsConfigPromptResult::new),
     }
+}
+
+fn prompt_dsh_config(current: Option<&Value>) -> Result<Value, AppError> {
+    let mut settings = current
+        .filter(|v| !crate::dsh_provider_config::is_legacy(v))
+        .cloned()
+        .unwrap_or_else(|| {
+            crate::dsh_provider_config::default_settings(
+                current
+                    .and_then(|v| v["apiKey"].as_str())
+                    .unwrap_or_default(),
+            )
+        });
+    for (key, label) in [
+        ("profile", "DSH Profile"),
+        ("baseUrl", "Base URL"),
+        ("defaultModel", "Default Model"),
+        ("reasoningEffort", "Reasoning Effort"),
+    ] {
+        let value = Text::new(label)
+            .with_initial_value(settings[key].as_str().unwrap_or_default())
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+        if value.trim().is_empty() {
+            settings.as_object_mut().unwrap().remove(key);
+        } else {
+            settings[key] = json!(value.trim());
+        }
+    }
+    let protocols = crate::dsh_provider_config::DSH_API_PROTOCOLS.to_vec();
+    let index = protocols
+        .iter()
+        .position(|api| Some(*api) == settings["api"].as_str())
+        .unwrap_or(0);
+    let api = Select::new("API Protocol", protocols)
+        .with_starting_cursor(index)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    settings["api"] = json!(api);
+    let key = inquire::Password::new(texts::api_key_label())
+        .without_confirmation()
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    if !key.trim().is_empty() {
+        settings["apiKey"] = json!(key.trim());
+    }
+    let models = Text::new("Models (JSON)")
+        .with_initial_value(&settings["models"].to_string())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    settings["models"] = serde_json::from_str(&models)
+        .map_err(|_| AppError::InvalidInput("Invalid model catalog JSON".into()))?;
+    crate::dsh_config::validate_dsh_provider_settings(&settings)?;
+    Ok(settings)
 }
 
 /// 提示用户输入单个模型字段
@@ -4658,7 +4739,7 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 println!("  {}: {}", texts::model_label(), models.len());
             }
         }
-        AppType::Pi => {
+        AppType::Pi | AppType::Dsh => {
             if provider.configured_api_key(app_type).is_some() {
                 println!(
                     "  {}: {}",

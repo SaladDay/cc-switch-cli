@@ -742,7 +742,7 @@ fn provider_comment_credentials<'a>(
                 .map(str::to_string),
             settings.get("apiKey").and_then(|value| value.as_str()),
         ),
-        AppType::Pi => (
+        AppType::Pi | AppType::Dsh => (
             settings
                 .get("baseUrl")
                 .and_then(Value::as_str)

@@ -587,6 +587,15 @@ impl LocalProxySettingsItem {
         LocalProxySettingsItem::ListenPort,
         LocalProxySettingsItem::AutoFailover,
     ];
+
+    pub fn all_for_app(app_type: &AppType) -> &'static [Self] {
+        if matches!(app_type, AppType::Dsh) {
+            // The listen address is global; port and failover are app-specific.
+            &[Self::ListenAddress]
+        } else {
+            &Self::ALL
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

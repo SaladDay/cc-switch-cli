@@ -40,6 +40,72 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+impl Cli {
+    /// Check app capabilities before startup recovery can import live credentials.
+    pub fn validate_app_support(&self) -> Result<(), crate::error::AppError> {
+        if let Some(Commands::Deeplink(command)) = self.command.as_ref() {
+            command.validated_request(self.app.as_ref())?;
+        }
+        let explicit_targets = match self.command.as_ref() {
+            Some(Commands::Mcp(
+                commands::mcp::McpCommand::Enable { apps, .. }
+                | commands::mcp::McpCommand::Disable { apps, .. }
+                | commands::mcp::McpCommand::SetApps { apps, .. },
+            )) => Some((apps, "MCP")),
+            Some(Commands::Skills(
+                commands::skills::SkillsCommand::Enable { apps, .. }
+                | commands::skills::SkillsCommand::Disable { apps, .. }
+                | commands::skills::SkillsCommand::SetApps { apps, .. }
+                | commands::skills::SkillsCommand::ImportFromApps { apps, .. },
+            )) => Some((apps, "Skills")),
+            _ => None,
+        };
+        if let Some((apps, feature)) = explicit_targets {
+            if !apps.is_empty() {
+                commands::app_targets::parse_app_targets(apps, feature)?;
+            }
+        }
+        if let Some(Commands::Proxy(commands::proxy::ProxyCommand::Serve { takeovers, .. })) =
+            self.command.as_ref()
+        {
+            if takeovers.contains(&AppType::Dsh) {
+                return Err(crate::error::AppError::InvalidInput(
+                    "DeepSeek Harness does not support proxy takeover".to_string(),
+                ));
+            }
+        }
+        let Some(AppType::Dsh) = self.app.as_ref() else {
+            return Ok(());
+        };
+        let feature = match self.command.as_ref() {
+            Some(Commands::Mcp(_)) => Some("MCP management"),
+            Some(Commands::Prompts(_)) => Some("prompt management"),
+            Some(Commands::Skills(_)) => Some("skill management"),
+            Some(Commands::Sessions(_)) => Some("session management"),
+            Some(Commands::Config(commands::config::ConfigCommand::Common(_))) => {
+                Some("common config snippets")
+            }
+            Some(Commands::Failover(_)) => Some("failover"),
+            Some(Commands::Proxy(
+                commands::proxy::ProxyCommand::Enable | commands::proxy::ProxyCommand::Disable,
+            )) => Some("proxy takeover"),
+            Some(Commands::Proxy(commands::proxy::ProxyCommand::Config { .. })) => {
+                Some("proxy route configuration")
+            }
+            Some(Commands::Provider(command)) => {
+                return command.validate_app_support(&AppType::Dsh);
+            }
+            _ => None,
+        };
+        if let Some(feature) = feature {
+            return Err(crate::error::AppError::InvalidInput(format!(
+                "DeepSeek Harness does not support {feature}"
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Manage ChatGPT Codex OAuth accounts
@@ -212,6 +278,15 @@ mod tests {
         match cli.command {
             Some(Commands::Use { id }) => assert_eq!(id, "demo"),
             _ => panic!("expected use shortcut command"),
+        }
+    }
+
+    #[test]
+    fn parses_dsh_app_aliases() {
+        for label in ["dsh", "deepseek", "deepseek-harness"] {
+            let cli = Cli::try_parse_from(["cc-switch", "--app", label, "provider", "list"])
+                .expect("parse DSH app selector");
+            assert_eq!(cli.app, Some(AppType::Dsh));
         }
     }
 

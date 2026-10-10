@@ -122,6 +122,7 @@ impl ProviderAddFormState {
         let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
             AppType::OpenClaw | AppType::Pi => OPENCLAW_DEFAULT_API_PROTOCOL,
+            AppType::Dsh => "deepseek",
             _ => "@ai-sdk/openai-compatible",
         };
 
@@ -151,6 +152,9 @@ impl ProviderAddFormState {
             codex_model_catalog_idx: 0,
             codex_model_catalog_field: CodexModelCatalogField::Model,
             extra: json!({}),
+            dsh_profile: TextInput::new("web"),
+            dsh_default_model: TextInput::new("deepseek-flash"),
+            dsh_reasoning_effort: TextInput::new(""),
             id: TextInput::new(""),
             id_is_manual: false,
             name: TextInput::new(""),
@@ -252,6 +256,14 @@ impl ProviderAddFormState {
             initial_snapshot: Value::Null,
             initial_pi_settings_config: None,
         };
+        if matches!(form.app_type, AppType::Dsh) {
+            form.opencode_base_url
+                .set(crate::dsh_provider_config::DEFAULT_BASE_URL);
+            form.openclaw_models = crate::dsh_provider_config::default_settings("")["models"]
+                .as_array()
+                .unwrap()
+                .clone();
+        }
         let _ = form.refresh_quick_config_from_common_snippet(common_snippet);
         form.capture_initial_snapshot();
         form
@@ -375,7 +387,11 @@ impl ProviderAddFormState {
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|env| !env.is_empty()),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -431,7 +447,11 @@ impl ProviderAddFormState {
                     app_type, settings, &snippet,
                 )
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -491,7 +511,7 @@ impl ProviderAddFormState {
 
         if matches!(
             self.app_type,
-            AppType::Hermes | AppType::OpenClaw | AppType::Pi
+            AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Dsh
         ) && self.copy_source_id.is_none()
         {
             fields.insert(0, ProviderAddField::Id);
@@ -578,6 +598,15 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenCodeApiKey);
                 fields.push(ProviderAddField::OpenCodeBaseUrl);
                 fields.push(ProviderAddField::OpenClawModels);
+            }
+            AppType::Dsh => {
+                fields.push(ProviderAddField::DshProfile);
+                fields.push(ProviderAddField::OpenClawApiProtocol);
+                fields.push(ProviderAddField::OpenCodeApiKey);
+                fields.push(ProviderAddField::OpenCodeBaseUrl);
+                fields.push(ProviderAddField::OpenClawModels);
+                fields.push(ProviderAddField::DshDefaultModel);
+                fields.push(ProviderAddField::DshReasoningEffort);
             }
         }
 
@@ -735,6 +764,9 @@ impl ProviderAddFormState {
             ProviderAddField::OpenCodeNpmPackage => Some(&self.opencode_npm_package),
             ProviderAddField::OpenCodeApiKey => Some(&self.opencode_api_key),
             ProviderAddField::OpenCodeBaseUrl => Some(&self.opencode_base_url),
+            ProviderAddField::DshProfile => Some(&self.dsh_profile),
+            ProviderAddField::DshDefaultModel => Some(&self.dsh_default_model),
+            ProviderAddField::DshReasoningEffort => Some(&self.dsh_reasoning_effort),
             ProviderAddField::OpenCodeModelId => Some(&self.opencode_model_id),
             ProviderAddField::OpenCodeModelName => Some(&self.opencode_model_name),
             ProviderAddField::OpenCodeModelContextLimit => Some(&self.opencode_model_context_limit),
@@ -801,6 +833,9 @@ impl ProviderAddFormState {
             ProviderAddField::OpenCodeNpmPackage => Some(&mut self.opencode_npm_package),
             ProviderAddField::OpenCodeApiKey => Some(&mut self.opencode_api_key),
             ProviderAddField::OpenCodeBaseUrl => Some(&mut self.opencode_base_url),
+            ProviderAddField::DshProfile => Some(&mut self.dsh_profile),
+            ProviderAddField::DshDefaultModel => Some(&mut self.dsh_default_model),
+            ProviderAddField::DshReasoningEffort => Some(&mut self.dsh_reasoning_effort),
             ProviderAddField::OpenCodeModelId => Some(&mut self.opencode_model_id),
             ProviderAddField::OpenCodeModelName => Some(&mut self.opencode_model_name),
             ProviderAddField::OpenCodeModelContextLimit => {
@@ -1193,7 +1228,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => {}
+            | AppType::Pi
+            | AppType::Dsh => {}
         }
         Ok(())
     }
@@ -1425,7 +1461,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => false,
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -2237,6 +2274,7 @@ impl ProviderAddFormState {
                 let provider = self.to_provider_json_value();
                 crate::pi_config::provider_base_url(&provider["settingsConfig"]).unwrap_or_default()
             }
+            AppType::Dsh => self.opencode_base_url.value.clone(),
         }
     }
 
@@ -2261,7 +2299,7 @@ impl ProviderAddFormState {
             AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
             AppType::Gemini => (&self.gemini_api_key.value, &self.gemini_base_url.value),
             AppType::Hermes => (&self.hermes_api_key.value, &self.hermes_base_url.value),
-            AppType::OpenCode | AppType::OpenClaw => {
+            AppType::OpenCode | AppType::OpenClaw | AppType::Dsh => {
                 (&self.opencode_api_key.value, &self.opencode_base_url.value)
             }
             AppType::Pi => unreachable!("Pi credentials are resolved above"),
@@ -2518,7 +2556,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => false,
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -2771,6 +2810,11 @@ impl ProviderAddFormState {
 
         let provider: Provider = serde_json::from_value(provider_value.clone())
             .map_err(|e| crate::cli::i18n::texts::tui_toast_invalid_json(&e.to_string()))?;
+
+        if matches!(self.app_type, AppType::Dsh) {
+            crate::dsh_config::validate_dsh_provider_settings(&provider.settings_config)
+                .map_err(|error| error.to_string())?;
+        }
 
         let mut next = Self::from_provider(self.app_type.clone(), &provider);
         next.extra = provider_value;
@@ -3032,6 +3076,17 @@ impl ProviderAddFormState {
     }
 
     pub(crate) fn openclaw_models_summary(&self) -> String {
+        if self.app_type == AppType::Dsh {
+            return format!(
+                "{} {}",
+                self.openclaw_models.len(),
+                if crate::cli::i18n::is_chinese() {
+                    "个模型"
+                } else {
+                    "models"
+                }
+            );
+        }
         let total = self.openclaw_models.len();
         texts::tui_openclaw_models_summary(total)
     }
@@ -3076,7 +3131,10 @@ impl ProviderAddFormState {
     }
 
     pub fn apply_openclaw_models_value(&mut self, models_value: Value) -> Result<(), String> {
-        if !matches!(self.app_type, AppType::OpenClaw | AppType::Pi) {
+        if !matches!(
+            self.app_type,
+            AppType::OpenClaw | AppType::Pi | AppType::Dsh
+        ) {
             return Ok(());
         }
         if !models_value.is_array() {
@@ -3091,6 +3149,18 @@ impl ProviderAddFormState {
         let settings_obj = settings_value
             .as_object_mut()
             .ok_or_else(|| texts::tui_toast_json_must_be_object().to_string())?;
+        if self.app_type == AppType::Dsh {
+            let models = models_value.as_array().expect("checked array above");
+            let default_model = settings_obj.get("defaultModel").and_then(Value::as_str);
+            if !models
+                .iter()
+                .any(|model| model["id"].as_str() == default_model)
+            {
+                if let Some(id) = models.first().and_then(|model| model.get("id")) {
+                    settings_obj.insert("defaultModel".to_string(), id.clone());
+                }
+            }
+        }
         settings_obj.insert("models".to_string(), models_value);
         self.apply_provider_json_value_to_fields(provider_value)
     }

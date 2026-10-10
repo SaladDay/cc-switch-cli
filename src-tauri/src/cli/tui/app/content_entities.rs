@@ -162,6 +162,9 @@ impl App {
     }
 
     pub(crate) fn provider_speedtest_action(&mut self, row: &super::data::ProviderRow) -> Action {
+        if provider_test_menu_items(&self.app_type).is_empty() {
+            return Action::None;
+        }
         let Some(url) = row.api_url.clone() else {
             self.push_toast(texts::tui_toast_provider_no_api_url(), ToastKind::Warning);
             return Action::None;
@@ -185,6 +188,9 @@ impl App {
     }
 
     pub(crate) fn open_provider_test_menu(&mut self, row: &super::data::ProviderRow) {
+        if provider_test_menu_items(&self.app_type).is_empty() {
+            return;
+        }
         self.overlay = Overlay::ProviderTestMenu {
             provider_id: row.id.clone(),
             selected: 0,

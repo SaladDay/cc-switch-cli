@@ -73,6 +73,11 @@ pub fn execute(cmd: McpCommand, app: Option<AppType>) -> Result<(), AppError> {
             "Pi does not support MCP management".to_string(),
         ));
     }
+    if matches!(app_type, AppType::Dsh) {
+        return Err(AppError::InvalidInput(
+            "DeepSeek Harness does not support MCP management".to_string(),
+        ));
+    }
 
     match cmd {
         McpCommand::List => list_servers(app_type),

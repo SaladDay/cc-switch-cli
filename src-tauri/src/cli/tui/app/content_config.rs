@@ -1103,7 +1103,8 @@ impl App {
     }
 
     pub(crate) fn on_settings_proxy_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        let items_len = LocalProxySettingsItem::ALL.len();
+        let items = LocalProxySettingsItem::all_for_app(&self.app_type);
+        let items_len = items.len();
         match key.code {
             KeyCode::Up => {
                 self.settings_proxy_idx = self.settings_proxy_idx.saturating_sub(1);
@@ -1113,7 +1114,7 @@ impl App {
                 self.settings_proxy_idx = (self.settings_proxy_idx + 1).min(items_len - 1);
                 Action::None
             }
-            KeyCode::Enter => match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
+            KeyCode::Enter => match items.get(self.settings_proxy_idx) {
                 Some(LocalProxySettingsItem::AutoFailover) => {
                     self.request_auto_failover_toggle(data)
                 }

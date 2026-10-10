@@ -58,7 +58,12 @@ pub(crate) fn parse_app_targets(
 }
 
 fn parse_app_target(value: &str, feature: &str) -> Result<AppType, AppError> {
-    let normalized = value.trim().to_lowercase().replace('-', "");
+    let value_lower = value.trim().to_lowercase();
+    let normalized = if value_lower == "deepseek-harness" {
+        "dsh".to_string()
+    } else {
+        value_lower.replace('-', "")
+    };
     let app = AppType::from_str(&normalized).map_err(|_| {
         AppError::InvalidInput(format!(
             "Unsupported app id: '{value}'. Supported apps: {}",
@@ -69,6 +74,13 @@ fn parse_app_target(value: &str, feature: &str) -> Result<AppType, AppError> {
     if matches!(app, AppType::OpenClaw) {
         return Err(AppError::InvalidInput(format!(
             "{feature} does not support openclaw yet. Supported apps: {}",
+            supported_app_target_labels_for(feature)
+        )));
+    }
+
+    if matches!(app, AppType::Dsh) {
+        return Err(AppError::InvalidInput(format!(
+            "{feature} does not support dsh yet. Supported apps: {}",
             supported_app_target_labels_for(feature)
         )));
     }
@@ -136,5 +148,17 @@ mod tests {
         let error = parse_app_targets(&["pi".to_string()], "MCP")
             .expect_err("Pi must not be an MCP target");
         assert!(error.to_string().contains("does not support pi"));
+    }
+
+    #[test]
+    fn parse_app_targets_recognizes_dsh_aliases_as_unsupported() {
+        for alias in ["dsh", "deepseek", "deepseek-harness"] {
+            let error = parse_app_targets(&[alias.to_string()], "Skills")
+                .expect_err("DSH skills targets are not supported");
+            assert!(
+                error.to_string().contains("does not support dsh"),
+                "{error}"
+            );
+        }
     }
 }

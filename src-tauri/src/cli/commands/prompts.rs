@@ -130,6 +130,11 @@ pub enum PiPromptTemplatesCommand {
 
 pub fn execute(cmd: PromptsCommand, app: Option<AppType>) -> Result<(), AppError> {
     let app_type = app.unwrap_or(AppType::Claude);
+    if matches!(app_type, AppType::Dsh) {
+        return Err(AppError::InvalidInput(
+            "DeepSeek Harness does not support prompt management".to_string(),
+        ));
+    }
 
     match cmd {
         PromptsCommand::List => list_prompts(app_type),

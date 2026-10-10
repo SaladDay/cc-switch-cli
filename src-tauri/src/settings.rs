@@ -24,6 +24,8 @@ pub struct VisibleApps {
     pub openclaw: bool,
     #[serde(default = "default_visible_app_pi")]
     pub pi: bool,
+    #[serde(default)]
+    pub dsh: bool,
 }
 
 fn default_visible_app_claude() -> bool {
@@ -63,6 +65,7 @@ pub fn default_visible_apps() -> VisibleApps {
         hermes: true,
         openclaw: true,
         pi: true,
+        dsh: false,
     }
 }
 
@@ -130,6 +133,7 @@ impl VisibleApps {
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => self.openclaw,
             AppType::Pi => self.pi,
+            AppType::Dsh => self.dsh,
         }
     }
 
@@ -142,6 +146,7 @@ impl VisibleApps {
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => self.openclaw = enabled,
             AppType::Pi => self.pi = enabled,
+            AppType::Dsh => self.dsh = enabled,
         }
     }
 
@@ -162,7 +167,7 @@ impl VisibleApps {
     }
 }
 
-fn app_order() -> [AppType; 7] {
+fn app_order() -> [AppType; 8] {
     [
         AppType::Claude,
         AppType::Codex,
@@ -171,6 +176,7 @@ fn app_order() -> [AppType; 7] {
         AppType::Hermes,
         AppType::OpenClaw,
         AppType::Pi,
+        AppType::Dsh,
     ]
 }
 
@@ -554,6 +560,8 @@ pub struct AppSettings {
     pub current_provider_hermes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_openclaw: Option<String>,
+    #[serde(default)]
+    pub current_provider_dsh: Option<String>,
     #[serde(default = "default_visible_apps")]
     pub visible_apps: VisibleApps,
     #[serde(default = "migrated_visible_apps_settings")]
@@ -651,6 +659,7 @@ impl Default for AppSettings {
             current_provider_opencode: None,
             current_provider_hermes: None,
             current_provider_openclaw: None,
+            current_provider_dsh: None,
             visible_apps: default_visible_apps(),
             visible_apps_settings: VisibleAppsSettings::default(),
             language: None,
@@ -1142,6 +1151,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
         AppType::Hermes => settings.current_provider_hermes.clone(),
         AppType::OpenClaw => settings.current_provider_openclaw.clone(),
         AppType::Pi => None,
+        AppType::Dsh => settings.current_provider_dsh.clone(),
     }
 }
 
@@ -1156,6 +1166,7 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
         AppType::Hermes => settings.current_provider_hermes = id.map(|value| value.to_string()),
         AppType::OpenClaw => settings.current_provider_openclaw = id.map(|value| value.to_string()),
         AppType::Pi => {}
+        AppType::Dsh => settings.current_provider_dsh = id.map(|value| value.to_string()),
     }
 
     update_settings(settings)

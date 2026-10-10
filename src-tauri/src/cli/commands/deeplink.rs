@@ -11,15 +11,23 @@ pub struct DeeplinkCommand {
     pub url: String,
 }
 
-pub fn execute(cmd: DeeplinkCommand, app: Option<AppType>) -> Result<(), AppError> {
-    if app.is_some() {
-        return Err(AppError::InvalidInput(
-            "`--app` cannot be used with `deeplink`; target app(s) must be encoded in the URL via `app` or `apps`."
-                .to_string(),
-        ));
+impl DeeplinkCommand {
+    pub(crate) fn validated_request(
+        &self,
+        app: Option<&AppType>,
+    ) -> Result<crate::DeepLinkImportRequest, AppError> {
+        if app.is_some() {
+            return Err(AppError::InvalidInput(
+                "`--app` cannot be used with `deeplink`; target app(s) must be encoded in the URL via `app` or `apps`."
+                    .to_string(),
+            ));
+        }
+        crate::parse_deeplink_url(&self.url)
     }
+}
 
-    let request = crate::parse_deeplink_url(&cmd.url)?;
+pub fn execute(cmd: DeeplinkCommand, app: Option<AppType>) -> Result<(), AppError> {
+    let request = cmd.validated_request(app.as_ref())?;
     let state = AppState::try_new()?;
 
     match request.resource.as_str() {

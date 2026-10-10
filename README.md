@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**Manage Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, and Pi from one interactive TUI or scriptable CLI.**
+**Manage Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, Pi, and DeepSeek Harness from one interactive TUI or scriptable CLI.**
 
 [![Version](https://img.shields.io/badge/version-5.11.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -186,7 +186,7 @@ cc-switch --app hermes provider list    # Manage Hermes providers
 cc-switch --app openclaw provider list  # Manage OpenClaw providers
 cc-switch --app pi provider list        # Manage Pi providers
 
-# Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `hermes`, `openclaw`, `pi`
+# Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `hermes`, `openclaw`, `pi`, `dsh`
 ```
 
 Use `cc-switch start` when you want different providers in multiple terminals. It only affects the Claude or Codex session launched by that command; `provider switch` and `use` still change the global provider. In the TUI, select a provider on the Providers page and press `o` for the same behavior.
@@ -318,10 +318,27 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 Provider Management
 
-Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, **Hermes**, **OpenClaw**, and **Pi**.
+Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, **Hermes**, **OpenClaw**, **Pi**, and **DeepSeek Harness**.
 
 Pi provider management follows Pi's native additive model: membership comes from `models.json.providers`. CC-Switch does not modify Pi login credentials or its global default provider/model.
 The Pi TUI keeps the same table/form/shortcut conventions as the other apps and exposes Presets, System Prompts, and Prompt Templates as separate pages.
+
+DeepSeek Harness (`--app dsh`, aliases `deepseek` and `deepseek-harness`) supports provider add/edit/copy/delete, import, switch, model discovery, endpoint checks, usage scripts, and private JSON export in the CLI and TUI. Providers bind to an initialized DSH profile (`web` by default; `--dsh-profile` selects another). The form edits API key, Base URL, protocol, model catalog, default model, and reasoning effort; `providerConfig` in the JSON editor retains native advanced options such as headers, compatibility and retry policy. Supported protocols are `deepseek`, `openai-completions`, `openai-responses`, and `anthropic-messages`.
+
+Switching publishes `profiles/<profile>/cordis.patch.yml` with an independent credential reference in `$DSH_HOME/.credentials.yaml` (default `~/.dsh`), preserving other plugins, comments, JavaScript expressions, and authorization records. DSH HMR applies changes to subsequent requests; existing sessions retain their own model selections. A higher-priority home patch is rejected; remove conflicting launch `--patch` overrides before managing that profile. Older API-key-only entries remain compatible. Proxy takeover, failover, MCP, prompts, skills, sessions, and common config snippets remain outside DSH provider management. In manual app visibility mode, enable DSH in Settings to show its TUI tab.
+
+```bash
+cc-switch --app dsh provider add --name DeepSeek --api-key <key>
+cc-switch --app dsh                      # Use the TUI for interactive provider management
+cc-switch --app dsh provider list
+cc-switch --app dsh provider switch <id>
+cc-switch --app dsh provider current
+cc-switch --app dsh provider add --name Gateway --dsh-profile web --api-key <key> --base-url https://gateway.example/v1 --api-format openai-completions --model custom-model
+cc-switch --app dsh provider export <id> --output provider.json # Contains credentials; mode 0600 on Unix
+cc-switch --app dsh provider add --name Imported --config-file provider.json
+```
+
+The `deepseek` protocol queries the OpenAI-compatible `/models` endpoint using Bearer authentication, removing a trailing `/anthropic` from its Base URL for discovery. In the TUI, focus Models and press `f` to fetch the available list, then select a model to add it to the catalog. Other protocols also query the endpoint. Headers and compatibility profiles are available for the three Pi AI protocols; DeepSeek uses its own native file, image, timeout and retry options. Import resolves installed bundle, profile and home layers without evaluating JavaScript. Catalog-backed Pi AI routes need explicit protocol, credential reference, Base URL and models before import; dynamic provider expressions require DSH's native editor.
 
 **Features:** One-click switching, standalone Claude settings export, multi-endpoint support, API key management, remote model discovery, and per-app diagnostics such as speed testing or stream health checks where supported.
 
@@ -584,6 +601,7 @@ When `CC_SWITCH_CONFIG_DIR` is set, CC-Switch uses that directory as its config 
 - Hermes: `<Hermes home>/config.yaml` (providers + MCP + memory settings), `AGENTS.md` (prompts), `skills/`, and `memories/`. Directory priority: `hermesConfigDir` in CC-Switch settings, then nonblank `HERMES_HOME`, then the platform default (`~/.hermes` on macOS/Linux; `%LOCALAPPDATA%\hermes` on Windows). Launch CC-Switch from an environment that exports the same `HERMES_HOME` as Hermes.
 - OpenClaw: `~/.openclaw/openclaw.json` (providers + env/tools/agents defaults), `~/.openclaw/AGENTS.md` (prompts)
 - Pi: `~/.pi/agent/models.json` (additive providers), `~/.pi/agent/settings.json` (read-only defaults/session location), `~/.pi/agent/AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `prompts/`, `skills/`, and `sessions/`
+- DeepSeek Harness: `$DSH_HOME/.credentials.yaml` and `$DSH_HOME/profiles/<profile>/cordis.patch.yml` (default home: `~/.dsh`)
 
 ---
 
@@ -674,7 +692,7 @@ cc-switch
 
 <br>
 
-CC-Switch currently supports seven AI coding assistants:
+CC-Switch currently supports eight AI coding assistants:
 - **Claude Code** (`--app claude`, default)
 - **Codex** (`--app codex`)
 - **Gemini** (`--app gemini`)
@@ -682,6 +700,7 @@ CC-Switch currently supports seven AI coding assistants:
 - **Hermes** (`--app hermes`)
 - **OpenClaw** (`--app openclaw`)
 - **Pi** (`--app pi`)
+- **DeepSeek Harness** (`--app dsh`)
 
 Use the global `--app` flag to specify which app to manage:
 ```bash

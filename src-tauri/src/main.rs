@@ -41,6 +41,7 @@ fn command_uses_own_logger(command: &Option<Commands>) -> bool {
 }
 
 fn run(cli: Cli) -> Result<(), AppError> {
+    cli.validate_app_support()?;
     if database_access_required(&cli.command) {
         // Reject dangerous config roots before any command can initialize state.
         cc_switch_lib::validate_config_dir()?;

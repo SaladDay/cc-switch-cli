@@ -149,6 +149,7 @@ impl ProviderType {
             AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
                 ProviderType::Codex
             }
+            AppType::Dsh => ProviderType::Codex,
         }
     }
 
@@ -201,6 +202,7 @@ pub fn get_adapter(app_type: &AppType) -> Option<Box<dyn ProviderAdapter>> {
         AppType::Hermes => Box::new(CodexAdapter::new()),
         AppType::OpenClaw => Box::new(CodexAdapter::new()),
         AppType::Pi => return None,
+        AppType::Dsh => return None,
     })
 }
 

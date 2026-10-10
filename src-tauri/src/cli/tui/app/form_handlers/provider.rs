@@ -206,7 +206,6 @@ impl App {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
             return Action::None;
         };
-
         let provider_json = provider.to_provider_json_value();
         let content =
             serde_json::to_string_pretty(&provider_json).unwrap_or_else(|_| "{}".to_string());
@@ -325,7 +324,7 @@ impl App {
             }
             KeyCode::Char('f') if selected == ProviderAddField::OpenClawModels => {
                 let is_pi = self.form.as_ref().is_some_and(|form| {
-                    matches!(form, FormState::ProviderAdd(provider) if provider.app_type == AppType::Pi)
+                    matches!(form, FormState::ProviderAdd(provider) if matches!(provider.app_type, AppType::Pi | AppType::Dsh))
                 });
                 is_pi.then(|| self.handle_provider_model_fetch(selected))
             }
@@ -491,9 +490,16 @@ impl App {
                 };
                 provider
                     .opencode_npm_package
-                    .set(next_openclaw_api_protocol(
-                        &provider.opencode_npm_package.value,
-                    ));
+                    .set(if provider.app_type == AppType::Dsh {
+                        let protocols = crate::dsh_provider_config::DSH_API_PROTOCOLS;
+                        let index = protocols
+                            .iter()
+                            .position(|api| *api == provider.opencode_npm_package.value)
+                            .unwrap_or(0);
+                        protocols[(index + 1) % protocols.len()]
+                    } else {
+                        next_openclaw_api_protocol(&provider.opencode_npm_package.value)
+                    });
                 Action::None
             }
             ProviderAddField::OpenClawUserAgent => {
@@ -1579,31 +1585,35 @@ impl App {
             ProviderAddField::OpenClawModels => provider.opencode_base_url.value.clone(),
             _ => String::new(),
         };
-        let (api_protocol, mut request_headers) =
-            if selected == ProviderAddField::OpenClawModels && provider.app_type == AppType::Pi {
-                let settings = provider.to_provider_json_value()["settingsConfig"].clone();
-                let protocol = settings
-                    .get("api")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let headers = settings
-                    .get("headers")
-                    .and_then(Value::as_object)
-                    .map(|headers| {
-                        headers
-                            .iter()
-                            .filter_map(|(name, value)| {
-                                value
-                                    .as_str()
-                                    .map(|value| (name.clone(), value.to_string()))
-                            })
-                            .collect::<std::collections::BTreeMap<_, _>>()
-                    })
-                    .filter(|headers| !headers.is_empty());
-                (protocol, headers)
+        let (api_protocol, mut request_headers) = if selected == ProviderAddField::OpenClawModels
+            && matches!(provider.app_type, AppType::Pi | AppType::Dsh)
+        {
+            let settings = provider.to_provider_json_value()["settingsConfig"].clone();
+            let protocol = settings
+                .get("api")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let headers = (if provider.app_type == AppType::Dsh {
+                settings.pointer("/providerConfig/headers")
             } else {
-                (None, None)
-            };
+                settings.get("headers")
+            })
+            .and_then(Value::as_object)
+            .map(|headers| {
+                headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        value
+                            .as_str()
+                            .map(|value| (name.clone(), value.to_string()))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            })
+            .filter(|headers| !headers.is_empty());
+            (protocol, headers)
+        } else {
+            (None, None)
+        };
         if api_protocol.as_deref() == Some("anthropic-messages") {
             if let Some(key) = api_key.take() {
                 request_headers

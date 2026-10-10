@@ -136,6 +136,10 @@ pub(crate) fn quota_target_for_provider(
         }
     }
 
+    if matches!(app_type, AppType::Dsh) {
+        return None;
+    }
+
     if is_codex_oauth_provider(provider) {
         return Some(QuotaTarget {
             app_type: app_type.clone(),
@@ -402,6 +406,40 @@ mod tests {
             target.kind,
             QuotaTargetKind::CodexOAuth { account_id } if account_id.as_deref() == Some("acct-1")
         ));
+    }
+
+    #[test]
+    fn dsh_quota_uses_scripts_but_ignores_foreign_oauth_metadata() {
+        let mut provider = test_provider("dsh", "DSH", json!({"apiKey": "synthetic-key"}));
+        for template in ["general", "official_subscription"] {
+            set_usage_script(&mut provider, true, template);
+            provider
+                .meta
+                .as_mut()
+                .unwrap()
+                .usage_script
+                .as_mut()
+                .unwrap()
+                .auto_query_interval = Some(1);
+            assert_eq!(
+                quota_target_for_provider(&AppType::Dsh, "dsh", &provider).is_some(),
+                template == "general"
+            );
+        }
+        let imported_script = provider.meta.as_ref().unwrap().usage_script.clone();
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".into()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".into()),
+                account_id: Some("synthetic-account".into()),
+            }),
+            ..ProviderMeta::default()
+        });
+        assert!(quota_target_for_provider(&AppType::Dsh, "dsh", &provider).is_none());
+        // Imported scripts must not override the app gate even on an OAuth profile.
+        provider.meta.as_mut().unwrap().usage_script = imported_script;
+        assert!(quota_target_for_provider(&AppType::Dsh, "dsh", &provider).is_none());
     }
 
     #[test]

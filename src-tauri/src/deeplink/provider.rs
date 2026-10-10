@@ -147,6 +147,12 @@ fn build_provider_from_request(
                 "Pi providers must be added from the Pi provider page".to_string(),
             ));
         }
+        AppType::Dsh => {
+            return Err(AppError::InvalidInput(
+                "DeepSeek Harness providers must be added through the DSH provider flow"
+                    .to_string(),
+            ));
+        }
     };
 
     let meta = build_provider_meta(request)?;

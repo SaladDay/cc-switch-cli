@@ -22,6 +22,7 @@ const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderModelFetchStrategy {
     Bearer,
+    DeepSeek,
     Anthropic,
     GoogleApiKey,
 }
@@ -209,6 +210,34 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
             config
                 .subagent_model
                 .unwrap_or_else(|| "default".to_string())
+        );
+    } else if matches!(app_type, AppType::Dsh) {
+        println!("\n{}", highlight("API 配置 / API Configuration"));
+        for field in [
+            "profile",
+            "baseUrl",
+            "api",
+            "defaultModel",
+            "reasoningEffort",
+        ] {
+            if let Some(value) = provider
+                .settings_config
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+            {
+                println!("  {field}: {value}");
+            }
+        }
+        if let Some(models) = provider.settings_config.get("models") {
+            println!("  models: {models}");
+        }
+        println!(
+            "  API Key:  {}",
+            if provider.configured_api_key(&app_type).is_some() {
+                "********"
+            } else {
+                "N/A"
+            }
         );
     } else {
         println!("\n{}", highlight("API 配置 / API Configuration"));
@@ -1046,6 +1075,34 @@ fn model_fetch_target(
                 strategy,
             })
         }
+        AppType::Dsh => {
+            let api = provider
+                .settings_config
+                .get("api")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("deepseek");
+            Ok(ModelFetchTarget {
+                base_url,
+                is_full_url: false,
+                auth_value: provider.configured_api_key(app_type),
+                custom_user_agent,
+                request_headers: provider
+                    .settings_config
+                    .pointer("/providerConfig/headers")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|headers| {
+                        headers
+                            .iter()
+                            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                            .collect()
+                    }),
+                strategy: match api {
+                    "deepseek" => ProviderModelFetchStrategy::DeepSeek,
+                    "anthropic-messages" => ProviderModelFetchStrategy::Anthropic,
+                    _ => ProviderModelFetchStrategy::Bearer,
+                },
+            })
+        }
         AppType::Codex => {
             Ok(ModelFetchTarget {
                 base_url,
@@ -1212,9 +1269,12 @@ fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetc
     match app_type {
         AppType::Claude => ProviderModelFetchStrategy::Anthropic,
         AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            ProviderModelFetchStrategy::Bearer
-        }
+        AppType::Codex
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Dsh => ProviderModelFetchStrategy::Bearer,
     }
 }
 
@@ -1307,6 +1367,7 @@ fn parse_access_token_blob(raw: &str) -> Option<String> {
 fn to_tui_strategy(strategy: ProviderModelFetchStrategy) -> crate::cli::tui::ModelFetchStrategy {
     match strategy {
         ProviderModelFetchStrategy::Bearer => crate::cli::tui::ModelFetchStrategy::Bearer,
+        ProviderModelFetchStrategy::DeepSeek => crate::cli::tui::ModelFetchStrategy::DeepSeek,
         ProviderModelFetchStrategy::Anthropic => crate::cli::tui::ModelFetchStrategy::Anthropic,
         ProviderModelFetchStrategy::GoogleApiKey => {
             crate::cli::tui::ModelFetchStrategy::GoogleApiKey
@@ -1684,6 +1745,49 @@ base_url = "https://current.example.com/v1"
         assert_eq!(target.base_url, "https://claude.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-claude"));
         assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
+    }
+
+    #[test]
+    fn model_fetch_source_for_dsh_uses_http_and_native_protocol_auth() {
+        for (api, strategy) in [
+            ("deepseek", ProviderModelFetchStrategy::DeepSeek),
+            ("anthropic-messages", ProviderModelFetchStrategy::Anthropic),
+            ("openai-completions", ProviderModelFetchStrategy::Bearer),
+            ("openai-responses", ProviderModelFetchStrategy::Bearer),
+        ] {
+            let provider = Provider::with_id(
+                "dsh".into(),
+                "DSH".into(),
+                json!({
+                    "apiKey":"synthetic-key", "api":api, "baseUrl":"https://api.example/anthropic",
+                    "models":[{"id":"configured-model"}], "providerConfig":{"headers":{"X-Test":"retained"}}
+                }),
+                None,
+            );
+            let ModelFetchSource::Http(target) =
+                model_fetch_source(&provider, &AppType::Dsh).unwrap()
+            else {
+                panic!("DSH must query the API");
+            };
+            assert_eq!(target.strategy, strategy);
+            assert_eq!(target.auth_value.as_deref(), Some("synthetic-key"));
+            assert_eq!(target.request_headers.unwrap()["X-Test"], "retained");
+        }
+        let legacy = Provider::with_id(
+            "legacy".into(),
+            "Legacy".into(),
+            json!({"apiKey":"synthetic-key"}),
+            None,
+        );
+        let ModelFetchSource::Http(target) = model_fetch_source(&legacy, &AppType::Dsh).unwrap()
+        else {
+            panic!("legacy DSH provider must also query the API");
+        };
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::DeepSeek);
+        assert_eq!(
+            target.base_url,
+            crate::dsh_provider_config::DEFAULT_BASE_URL
+        );
     }
 
     #[test]

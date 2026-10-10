@@ -108,11 +108,19 @@ impl NavItem {
         NavItem::Exit,
     ];
 
+    pub const DSH_ALL: [NavItem; 4] = [
+        NavItem::Main,
+        NavItem::Providers,
+        NavItem::Settings,
+        NavItem::Exit,
+    ];
+
     pub fn all_for_app(app_type: &AppType) -> &'static [NavItem] {
         match app_type {
             AppType::OpenClaw => &Self::OPENCLAW_ALL,
             AppType::Hermes => &Self::HERMES_ALL,
             AppType::Pi => &Self::PI_ALL,
+            AppType::Dsh => &Self::DSH_ALL,
             _ => &Self::ALL,
         }
     }
@@ -143,6 +151,7 @@ impl NavItem {
 #[cfg(test)]
 mod tests {
     use super::{NavItem, Route};
+    use crate::app_config::AppType;
 
     #[test]
     fn skills_appears_before_prompts_in_nav() {
@@ -246,5 +255,18 @@ mod tests {
         assert!(NavItem::OPENCLAW_ALL
             .iter()
             .any(|item| matches!(item, NavItem::Config)));
+    }
+
+    #[test]
+    fn dsh_nav_contains_only_supported_surfaces() {
+        assert_eq!(
+            NavItem::all_for_app(&AppType::Dsh),
+            &[
+                NavItem::Main,
+                NavItem::Providers,
+                NavItem::Settings,
+                NavItem::Exit,
+            ]
+        );
     }
 }

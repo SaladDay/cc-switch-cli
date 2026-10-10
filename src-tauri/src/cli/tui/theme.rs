@@ -11,6 +11,7 @@ const DRACULA_ORANGE: (u8, u8, u8) = (255, 184, 108);
 const DRACULA_YELLOW: (u8, u8, u8) = (241, 250, 140);
 const DRACULA_RED: (u8, u8, u8) = (255, 85, 85);
 const OPENCLAW_CORAL: (u8, u8, u8) = (255, 79, 64);
+const DSH_BLUE: (u8, u8, u8) = (96, 165, 250);
 const DRACULA_COMMENT: (u8, u8, u8) = (98, 114, 164);
 const DRACULA_SURFACE: (u8, u8, u8) = (68, 71, 90);
 const DRACULA_FG: (u8, u8, u8) = (248, 248, 242);
@@ -24,6 +25,7 @@ const LIGHT_ORANGE: (u8, u8, u8) = (182, 98, 16);
 const LIGHT_YELLOW: (u8, u8, u8) = (146, 124, 8);
 const LIGHT_RED: (u8, u8, u8) = (190, 36, 36);
 const LIGHT_CORAL: (u8, u8, u8) = (196, 54, 40);
+const LIGHT_BLUE: (u8, u8, u8) = (29, 78, 216);
 const LIGHT_COMMENT: (u8, u8, u8) = (92, 102, 140);
 const LIGHT_DIM: (u8, u8, u8) = (164, 170, 190);
 const LIGHT_SURFACE: (u8, u8, u8) = (222, 225, 236);
@@ -253,6 +255,7 @@ fn accent_rgb(app: &AppType, light: bool) -> (u8, u8, u8) {
             AppType::Hermes => LIGHT_YELLOW,
             AppType::OpenClaw => LIGHT_CORAL,
             AppType::Pi => LIGHT_CYAN,
+            AppType::Dsh => LIGHT_BLUE,
         };
     }
 
@@ -264,6 +267,7 @@ fn accent_rgb(app: &AppType, light: bool) -> (u8, u8, u8) {
         AppType::Hermes => DRACULA_YELLOW,
         AppType::OpenClaw => OPENCLAW_CORAL,
         AppType::Pi => DRACULA_CYAN,
+        AppType::Dsh => DSH_BLUE,
     }
 }
 
@@ -447,6 +451,27 @@ mod tests {
         assert_eq!(openclaw.accent, Color::Rgb(255, 79, 64));
         assert_ne!(openclaw.accent, opencode.accent);
         assert_ne!(openclaw.accent, codex.accent);
+    }
+
+    #[test]
+    fn dsh_accent_stays_distinct_in_light_dark_and_ansi256_modes() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _no_color = EnvGuard::remove("NO_COLOR");
+
+        for color_mode in ["truecolor", "ansi256"] {
+            let _color_mode = EnvGuard::set(COLOR_MODE_ENV, color_mode);
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                let dsh = theme_for_mode(&AppType::Dsh, mode);
+                assert_ne!(dsh.accent, dsh.on_accent);
+                for other in AppType::all().filter(|app| *app != AppType::Dsh) {
+                    assert_ne!(
+                        dsh.accent,
+                        theme_for_mode(&other, mode).accent,
+                        "DSH shares an accent with {other:?} in {mode:?}/{color_mode}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

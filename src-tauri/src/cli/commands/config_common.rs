@@ -72,6 +72,11 @@ pub enum CommonConfigCommand {
 }
 
 pub fn execute(cmd: CommonConfigCommand, app_type: AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Dsh) {
+        return Err(AppError::InvalidInput(
+            "DeepSeek Harness does not support common config snippets".to_string(),
+        ));
+    }
     match cmd {
         CommonConfigCommand::Show => show(app_type),
         CommonConfigCommand::Format { snippet, file } => {
@@ -174,6 +179,11 @@ fn read_required_text(
 }
 
 fn ensure_common_config_mutation_supported(app_type: &AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Dsh) {
+        return Err(AppError::InvalidInput(
+            "DeepSeek Harness does not support common config snippets".to_string(),
+        ));
+    }
     if matches!(app_type, AppType::Pi) {
         return Err(AppError::InvalidInput(
             "Pi does not support common config snippets".to_string(),
@@ -207,6 +217,11 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
             serde_json::to_string_pretty(&value)
                 .map(Some)
                 .map_err(|e| AppError::Message(texts::failed_to_serialize_json(&e.to_string())))
+        }
+        AppType::Dsh => {
+            return Err(AppError::InvalidInput(
+                "DeepSeek Harness does not support common config".to_string(),
+            ))
         }
         AppType::Codex => {
             let doc = trimmed.parse::<toml_edit::DocumentMut>().map_err(|e| {
