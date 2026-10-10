@@ -619,7 +619,13 @@ pub mod texts {
     /// because it carries app-scope annotations ("(OpenClaw)" etc.) that the
     /// keymap labels do not, and its keys are app-conditional.
     pub fn tui_help_line_providers(app_type: &crate::app_config::AppType) -> &'static str {
-        if matches!(app_type, crate::app_config::AppType::Hermes) {
+        if matches!(app_type, crate::app_config::AppType::Dsh) {
+            if is_chinese() {
+                "供应商：Space 切换，Enter/e 编辑，a 新增，c 复制，d 删除"
+            } else {
+                "Providers: Space switch, Enter/e edit, a add, c copy, d delete"
+            }
+        } else if matches!(app_type, crate::app_config::AppType::Hermes) {
             if is_chinese() {
                 "供应商：Space 添加/移除，Enter/e 编辑，a 新增，c 复制，d 删除，t 测试，r 刷新，x 启用"
             } else {

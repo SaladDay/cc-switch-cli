@@ -125,6 +125,11 @@ struct SessionMessagesOutput<'a> {
 }
 
 pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppError> {
+    if matches!(app, Some(AppType::Dsh)) {
+        return Err(AppError::InvalidInput(
+            "DeepSeek Harness does not support session management".into(),
+        ));
+    }
     match cmd {
         SessionsCommand::List {
             provider,
@@ -776,7 +781,9 @@ fn parse_session_provider(value: &str) -> Result<AppType, String> {
 
 fn app_type_from_provider_id(provider_id: &str) -> Option<AppType> {
     let normalized = provider_id.trim().to_lowercase().replace('-', "");
-    AppType::from_str(&normalized).ok()
+    AppType::from_str(&normalized)
+        .ok()
+        .filter(|app| !matches!(app, AppType::Dsh))
 }
 
 fn load_session_messages(session: &SessionMeta) -> (Option<SessionMessageBatch>, Option<String>) {

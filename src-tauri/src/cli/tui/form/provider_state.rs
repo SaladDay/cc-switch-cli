@@ -121,7 +121,7 @@ impl ProviderAddFormState {
         let is_codex = matches!(app_type, AppType::Codex);
         let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
-            AppType::OpenClaw | AppType::Pi => OPENCLAW_DEFAULT_API_PROTOCOL,
+            AppType::OpenClaw | AppType::Pi | AppType::Dsh => OPENCLAW_DEFAULT_API_PROTOCOL,
             _ => "@ai-sdk/openai-compatible",
         };
 
@@ -375,7 +375,11 @@ impl ProviderAddFormState {
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|env| !env.is_empty()),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -431,7 +435,11 @@ impl ProviderAddFormState {
                     app_type, settings, &snippet,
                 )
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -491,7 +499,7 @@ impl ProviderAddFormState {
 
         if matches!(
             self.app_type,
-            AppType::Hermes | AppType::OpenClaw | AppType::Pi
+            AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Dsh
         ) && self.copy_source_id.is_none()
         {
             fields.insert(0, ProviderAddField::Id);
@@ -579,6 +587,9 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenCodeBaseUrl);
                 fields.push(ProviderAddField::OpenClawModels);
             }
+            AppType::Dsh => {
+                fields.push(ProviderAddField::OpenCodeApiKey);
+            }
         }
 
         if Self::supports_common_config(&self.app_type) {
@@ -595,8 +606,10 @@ impl ProviderAddFormState {
             AppType::Codex => fields.push(ProviderAddField::CodexQuickConfig),
             _ => {}
         }
-        fields.push(ProviderAddField::UsageQueryDivider);
-        fields.push(ProviderAddField::UsageQuery);
+        if !matches!(self.app_type, AppType::Dsh) {
+            fields.push(ProviderAddField::UsageQueryDivider);
+            fields.push(ProviderAddField::UsageQuery);
+        }
 
         // Add mode leads with the template picker row plus its divider, so the
         // template reads as its own group above the real fields. Inserted last
@@ -1193,7 +1206,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => {}
+            | AppType::Pi
+            | AppType::Dsh => {}
         }
         Ok(())
     }
@@ -1425,7 +1439,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => false,
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -2237,6 +2252,7 @@ impl ProviderAddFormState {
                 let provider = self.to_provider_json_value();
                 crate::pi_config::provider_base_url(&provider["settingsConfig"]).unwrap_or_default()
             }
+            AppType::Dsh => String::new(),
         }
     }
 
@@ -2256,6 +2272,10 @@ impl ProviderAddFormState {
             );
         }
 
+        if matches!(self.app_type, AppType::Dsh) {
+            return (String::new(), String::new());
+        }
+
         let (api_key, base_url) = match self.app_type {
             AppType::Claude => (&self.claude_api_key.value, &self.claude_base_url.value),
             AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
@@ -2265,6 +2285,7 @@ impl ProviderAddFormState {
                 (&self.opencode_api_key.value, &self.opencode_base_url.value)
             }
             AppType::Pi => unreachable!("Pi credentials are resolved above"),
+            AppType::Dsh => unreachable!("DSH credentials are resolved above"),
         };
         (
             Self::usage_query_comment_value(api_key),
@@ -2518,7 +2539,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => false,
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -2771,6 +2793,11 @@ impl ProviderAddFormState {
 
         let provider: Provider = serde_json::from_value(provider_value.clone())
             .map_err(|e| crate::cli::i18n::texts::tui_toast_invalid_json(&e.to_string()))?;
+
+        if matches!(self.app_type, AppType::Dsh) {
+            crate::dsh_config::validate_dsh_provider_settings(&provider.settings_config)
+                .map_err(|error| error.to_string())?;
+        }
 
         let mut next = Self::from_provider(self.app_type.clone(), &provider);
         next.extra = provider_value;

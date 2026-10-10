@@ -329,6 +329,9 @@ enum PreparedLiveWrite {
     OpenClaw {
         models: Value,
     },
+    Dsh {
+        api_key: String,
+    },
 }
 
 impl ProviderService {
@@ -506,12 +509,28 @@ impl ProviderService {
         }
     }
 
+    fn lock_dsh_provider_operation(
+        state: &AppState,
+        app_type: &AppType,
+    ) -> Result<Option<crate::dsh_config::DshProviderLock>, AppError> {
+        if !matches!(app_type, AppType::Dsh) {
+            return Ok(None);
+        }
+        let guard = crate::dsh_config::acquire_provider_lock()?;
+        // A competing process may have committed while this process waited.
+        // Re-read both stores before choosing the candidate or rollback state.
+        crate::settings::reload_settings()?;
+        state.reload_config_snapshot_from_db()?;
+        Ok(Some(guard))
+    }
+
     pub fn duplicate(
         state: &AppState,
         app_type: AppType,
         source_id: &str,
         provider_override: Option<Provider>,
     ) -> Result<Provider, AppError> {
+        let _dsh_guard = Self::lock_dsh_provider_operation(state, &app_type)?;
         if matches!(app_type, AppType::Pi) {
             let providers = pi::list(state)?;
             let source = providers.get(source_id).ok_or_else(|| {
@@ -1070,7 +1089,9 @@ impl ProviderService {
         let mut action = action;
         if matches!(
             effect,
-            PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
+            PreparedPostCommitEffect::Live(
+                PreparedLiveWrite::Codex { .. } | PreparedLiveWrite::Dsh { .. }
+            )
         ) {
             action.refresh_snapshot = false;
             action.sync_mcp = false;
@@ -1243,9 +1264,14 @@ impl ProviderService {
         if let Err(err) = housekeeping() {
             if matches!(
                 prepared.effect,
-                PreparedPostCommitEffect::Live(PreparedLiveWrite::Codex { .. })
+                PreparedPostCommitEffect::Live(
+                    PreparedLiveWrite::Codex { .. } | PreparedLiveWrite::Dsh { .. }
+                )
             ) {
-                log::warn!("Codex switch committed; CLI post-switch synchronization failed: {err}");
+                log::warn!(
+                    "{} switch committed; CLI post-switch synchronization failed: {err}",
+                    prepared.action.app_type.as_str()
+                );
             } else {
                 return Err(err);
             }
@@ -1568,6 +1594,23 @@ impl ProviderService {
                 }
                 state.save()?;
             }
+            AppType::Dsh => {
+                let api_key = crate::dsh_config::read_dsh_api_key()?.ok_or_else(|| {
+                    AppError::localized(
+                        "dsh.live.missing",
+                        "DeepSeek Harness 凭据文件中没有 DEEPSEEK_API_KEY",
+                        "DeepSeek Harness credentials do not contain DEEPSEEK_API_KEY",
+                    )
+                })?;
+                let mut guard = state.config.write().map_err(AppError::from)?;
+                if let Some(manager) = guard.get_manager_mut(app_type) {
+                    if let Some(target) = manager.providers.get_mut(provider_id) {
+                        target.settings_config = crate::dsh_config::dsh_api_key_settings(&api_key);
+                    }
+                }
+                drop(guard);
+                state.save()?;
+            }
             AppType::Pi => {}
         }
         Ok(())
@@ -1624,7 +1667,11 @@ impl ProviderService {
                 strict_current_provider_id,
                 old_snippet,
             ),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => Ok(()),
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Dsh => Ok(()),
         };
 
         match result {
@@ -1759,7 +1806,11 @@ impl ProviderService {
             }
             AppType::Gemini => live_settings.get("env") != provider_settings.get("env"),
             AppType::Claude => live_settings != provider_settings,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Dsh => false,
         }
     }
 
@@ -1918,6 +1969,9 @@ impl ProviderService {
             AppType::Hermes => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
             AppType::Pi => Ok(String::new()),
+            AppType::Dsh => Err(AppError::InvalidInput(
+                "DeepSeek Harness does not support common config snippets".to_string(),
+            )),
         }
     }
 
@@ -2098,6 +2152,11 @@ impl ProviderService {
         app_type: AppType,
         snippet: Option<String>,
     ) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Dsh) {
+            return Err(AppError::InvalidInput(
+                "DeepSeek Harness does not support common config snippets".to_string(),
+            ));
+        }
         let normalized_snippet = snippet.and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -2290,6 +2349,7 @@ impl ProviderService {
 
     /// 新增供应商
     pub fn add(state: &AppState, app_type: AppType, provider: Provider) -> Result<bool, AppError> {
+        let _dsh_guard = Self::lock_dsh_provider_operation(state, &app_type)?;
         if matches!(app_type, AppType::Pi) {
             return pi::add(state, provider, true);
         }
@@ -2408,6 +2468,7 @@ impl ProviderService {
                 state.proxy_service.lock_switch_for_app(app_type.as_str()),
             ))
         };
+        let _dsh_guard = Self::lock_dsh_provider_operation(state, &app_type)?;
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
@@ -2563,6 +2624,21 @@ impl ProviderService {
     ///
     /// 返回 `Ok(true)` 表示实际导入，`Ok(false)` 表示该 app 已有非官方 seed provider 而跳过。
     pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
+        if matches!(app_type, AppType::Dsh) {
+            // Startup checks every app. Do not create a DSH store or wait for a
+            // provider operation when there is no native configuration to import.
+            if state.db.has_non_official_seed_provider(app_type.as_str())? {
+                return Ok(false);
+            }
+            if !crate::dsh_config::get_dsh_credentials_path().exists() {
+                return Err(AppError::localized(
+                    "dsh.live.missing",
+                    "DeepSeek Harness 凭据文件中没有 DEEPSEEK_API_KEY",
+                    "DeepSeek Harness credentials do not contain DEEPSEEK_API_KEY",
+                ));
+            }
+        }
+        let _dsh_guard = Self::lock_dsh_provider_operation(state, &app_type)?;
         if app_type.is_additive_mode() {
             return Ok(false);
         }
@@ -2623,6 +2699,16 @@ impl ProviderService {
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
             AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
             AppType::Pi => unreachable!("Pi uses native provider import"),
+            AppType::Dsh => {
+                let api_key = crate::dsh_config::read_dsh_api_key()?.ok_or_else(|| {
+                    AppError::localized(
+                        "dsh.live.missing",
+                        "DeepSeek Harness 凭据文件中没有 DEEPSEEK_API_KEY",
+                        "DeepSeek Harness credentials do not contain DEEPSEEK_API_KEY",
+                    )
+                })?;
+                crate::dsh_config::dsh_api_key_settings(&api_key)
+            }
         };
 
         let mut provider = Provider::with_id(
@@ -2765,6 +2851,16 @@ impl ProviderService {
             AppType::Pi => Err(AppError::InvalidInput(
                 "Pi providers are read from models.json".to_string(),
             )),
+            AppType::Dsh => {
+                let api_key = crate::dsh_config::read_dsh_api_key()?.ok_or_else(|| {
+                    AppError::localized(
+                        "dsh.live.missing",
+                        "DeepSeek Harness 凭据文件中没有 DEEPSEEK_API_KEY",
+                        "DeepSeek Harness credentials do not contain DEEPSEEK_API_KEY",
+                    )
+                })?;
+                Ok(crate::dsh_config::dsh_api_key_settings(&api_key))
+            }
         }
     }
 
@@ -2774,6 +2870,7 @@ impl ProviderService {
         app_type: AppType,
         updates: Vec<ProviderSortUpdate>,
     ) -> Result<bool, AppError> {
+        let _dsh_guard = Self::lock_dsh_provider_operation(state, &app_type)?;
         {
             let mut cfg = state.config.write().map_err(AppError::from)?;
             let manager = cfg
@@ -3029,6 +3126,12 @@ impl ProviderService {
         )
         .map_err(AppError::Message)?;
 
+        let _dsh_guard = if state.db.get_all_providers("dsh")?.is_empty() {
+            None
+        } else {
+            Self::lock_dsh_provider_operation(state, &AppType::Dsh)?
+        };
+
         // 在读锁下收集所有需要的数据，避免持锁写文件
         let snapshots: Vec<(AppType, Provider, Option<String>)> = {
             let guard = state.config.read().map_err(AppError::from)?;
@@ -3182,6 +3285,18 @@ impl ProviderService {
             AppType::Hermes => unreachable!("additive mode handled above"),
             AppType::OpenClaw => unreachable!("additive mode handled above"),
             AppType::Pi => unreachable!("Pi switch is handled by the native provider service"),
+            AppType::Dsh => {
+                let manager = config
+                    .get_manager_mut(app_type)
+                    .ok_or_else(|| Self::app_not_found(app_type))?;
+                manager.current = provider_id.to_string();
+                let provider = config
+                    .get_manager(app_type)
+                    .and_then(|manager| manager.providers.get(provider_id))
+                    .cloned()
+                    .ok_or_else(|| Self::app_not_found(app_type))?;
+                provider
+            }
         };
 
         Ok(PostCommitAction {
@@ -3190,7 +3305,7 @@ impl ProviderService {
             previous_provider,
             backup,
             edit_common_config: false,
-            sync_mcp: true,
+            sync_mcp: !matches!(app_type, AppType::Dsh),
             refresh_snapshot: true,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
             previous_common_config_snippet,
@@ -3203,6 +3318,7 @@ impl ProviderService {
 
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        let _dsh_guard = Self::lock_dsh_provider_operation(state, &app_type)?;
         if matches!(app_type, AppType::Codex)
             && crate::mode::operation::settle(&state.db, "codex")?.is_some()
         {
@@ -3264,7 +3380,8 @@ impl ProviderService {
             state.db.get_config_snippet(app_type.as_str())?
         };
 
-        Self::run_transaction(state, move |config| {
+        let previous_dsh_selection = crate::settings::get_current_provider(&app_type);
+        let switch_result = Self::run_transaction(state, move |config| {
             let action = Self::prepare_switch_post_commit_action(
                 config,
                 &app_type_clone,
@@ -3272,10 +3389,30 @@ impl ProviderService {
                 effective_current_provider.as_deref(),
                 previous_common_config_snippet,
             )?;
+            // DSH publishes its native credentials atomically. Persist the local
+            // selection first so no fallible settings write follows publication.
+            if matches!(app_type_clone, AppType::Dsh) {
+                crate::settings::set_current_provider(&app_type_clone, Some(&provider_id_owned))?;
+            }
             Ok(((), Some(action)))
-        })?;
+        });
+        if let Err(error) = switch_result {
+            if matches!(app_type, AppType::Dsh)
+                && crate::settings::get_current_provider(&app_type) != previous_dsh_selection
+            {
+                if let Err(rollback_error) = crate::settings::set_current_provider(
+                    &app_type,
+                    previous_dsh_selection.as_deref(),
+                ) {
+                    return Err(AppError::Config(format!(
+                        "{error}; failed to restore DSH provider selection: {rollback_error}"
+                    )));
+                }
+            }
+            return Err(error);
+        }
 
-        if !app_type.is_additive_mode() {
+        if !app_type.is_additive_mode() && !matches!(app_type, AppType::Dsh) {
             crate::settings::set_current_provider(&app_type, Some(provider_id))?;
         }
 
@@ -3410,6 +3547,20 @@ impl ProviderService {
                     .map_err(Self::normalize_openclaw_live_write_error)?;
                 Ok(PreparedLiveWrite::OpenClaw { models })
             }
+            AppType::Dsh => {
+                crate::dsh_config::validate_dsh_provider_settings(&provider.settings_config)?;
+                let api_key = provider
+                    .settings_config
+                    .get("apiKey")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| AppError::InvalidInput("DSH provider requires apiKey".into()))?
+                    .to_string();
+                let source = crate::dsh_config::read_dsh_credentials_source()?;
+                crate::dsh_config::validate_dsh_credentials_source(source.as_deref())?;
+                Ok(PreparedLiveWrite::Dsh { api_key })
+            }
             AppType::Pi => Ok(PreparedLiveWrite::Noop),
         }
     }
@@ -3433,6 +3584,7 @@ impl ProviderService {
                     .map(|_| ())
                     .map_err(Self::normalize_openclaw_live_write_error)
             }
+            PreparedLiveWrite::Dsh { api_key } => crate::dsh_config::write_dsh_api_key(api_key),
         }
     }
 
@@ -3652,6 +3804,9 @@ impl ProviderService {
             AppType::Pi => Err(AppError::Config(
                 "Pi does not support proxy takeover backups".into(),
             )),
+            AppType::Dsh => Err(AppError::Config(
+                "DeepSeek Harness does not support proxy takeover backups".into(),
+            )),
         }
     }
 
@@ -3746,6 +3901,9 @@ impl ProviderService {
                 let config = Self::parse_openclaw_provider_settings(&provider.settings_config)?;
                 Self::validate_openclaw_provider_models(&provider.id, &config)?;
             }
+            AppType::Dsh => {
+                crate::dsh_config::validate_dsh_provider_settings(&provider.settings_config)?;
+            }
             AppType::Pi => {
                 crate::pi_config::validate_provider_node(&provider.id, &provider.settings_config)?
             }
@@ -3839,6 +3997,7 @@ impl ProviderService {
     }
 
     pub fn delete(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
+        let _dsh_guard = Self::lock_dsh_provider_operation(state, &app_type)?;
         if matches!(app_type, AppType::Pi) {
             return pi::delete(state, provider_id);
         }
@@ -3950,6 +4109,9 @@ impl ProviderService {
                 let _ = provider_snapshot;
             }
             AppType::Pi => unreachable!("Pi deletion is handled by the native provider service"),
+            AppType::Dsh => {
+                let _ = provider_snapshot;
+            }
         }
 
         {

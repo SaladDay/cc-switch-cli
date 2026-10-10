@@ -409,6 +409,7 @@ impl ProxySnapshot {
             AppType::Hermes => None,
             AppType::OpenClaw => None,
             AppType::Pi => None,
+            AppType::Dsh => None,
         }
     }
 
@@ -1648,6 +1649,7 @@ fn load_providers_with_mode(
         AppType::Hermes => hermes_live_ids,
         AppType::OpenClaw => openclaw_live_providers.keys().cloned().collect(),
         AppType::Pi => pi_live_ids,
+        AppType::Dsh => HashSet::new(),
         _ => HashSet::new(),
     };
 
@@ -1742,6 +1744,7 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .as_str()
             .map(|s| s.to_string()),
         AppType::Pi => crate::pi_config::provider_base_url(settings_config).ok(),
+        AppType::Dsh => None,
     }
 }
 

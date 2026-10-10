@@ -29,10 +29,11 @@ pub enum LocalTool {
     Hermes,
     OpenClaw,
     Pi,
+    Dsh,
 }
 
 impl LocalTool {
-    pub const ALL: [LocalTool; 7] = [
+    pub const ALL: [LocalTool; 8] = [
         LocalTool::Claude,
         LocalTool::Codex,
         LocalTool::Gemini,
@@ -40,6 +41,7 @@ impl LocalTool {
         LocalTool::Hermes,
         LocalTool::OpenClaw,
         LocalTool::Pi,
+        LocalTool::Dsh,
     ];
 
     pub fn all() -> &'static [LocalTool] {
@@ -55,6 +57,7 @@ impl LocalTool {
             LocalTool::Hermes => "Hermes",
             LocalTool::OpenClaw => "OpenClaw",
             LocalTool::Pi => "Pi",
+            LocalTool::Dsh => "DeepSeek Harness",
         }
     }
 
@@ -67,6 +70,7 @@ impl LocalTool {
             LocalTool::Hermes => "hermes",
             LocalTool::OpenClaw => "openclaw",
             LocalTool::Pi => "pi",
+            LocalTool::Dsh => "dsh",
         }
     }
 
@@ -79,6 +83,7 @@ impl LocalTool {
             LocalTool::Hermes => &["--version", "version"],
             LocalTool::OpenClaw => &["--version", "version"],
             LocalTool::Pi => &["--version"],
+            LocalTool::Dsh => &["--version"],
         }
     }
 
@@ -106,6 +111,7 @@ impl LocalTool {
             AppType::Hermes => LocalTool::Hermes,
             AppType::OpenClaw => LocalTool::OpenClaw,
             AppType::Pi => LocalTool::Pi,
+            AppType::Dsh => LocalTool::Dsh,
         }
     }
 }
@@ -859,7 +865,16 @@ mod tests {
 
         assert_eq!(
             display_names,
-            vec!["Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw", "Pi"]
+            vec![
+                "Claude",
+                "Codex",
+                "Gemini",
+                "OpenCode",
+                "Hermes",
+                "OpenClaw",
+                "Pi",
+                "DeepSeek Harness"
+            ]
         );
         assert_eq!(LocalTool::Hermes.binary_name(), "hermes");
         assert_eq!(LocalTool::OpenClaw.binary_name(), "openclaw");

@@ -163,7 +163,10 @@ pub(crate) mod providers {
             keys: &[KeyCode::Char('t')],
             intent: Intent::Test,
             label: |_, _| texts::tui_key_test(),
-            shown: any_visible,
+            shown: |app, data| {
+                !crate::cli::tui::app::provider_test_menu_items(&app.app_type).is_empty()
+                    && any_visible(app, data)
+            },
         },
         Binding {
             display: "r",

@@ -1518,7 +1518,7 @@ pub(crate) fn failover_queue_position(data: &UiData, provider_id: &str) -> Optio
 }
 
 pub(crate) fn supports_provider_stream_check(app_type: &AppType) -> bool {
-    !matches!(app_type, AppType::OpenClaw)
+    !matches!(app_type, AppType::OpenClaw | AppType::Dsh)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1528,6 +1528,9 @@ pub(crate) enum ProviderTestMenuItem {
 }
 
 pub(crate) fn provider_test_menu_items(app_type: &AppType) -> Vec<ProviderTestMenuItem> {
+    if matches!(app_type, AppType::Dsh) {
+        return Vec::new();
+    }
     let mut items = vec![ProviderTestMenuItem::Speedtest];
     if supports_provider_stream_check(app_type) {
         items.push(ProviderTestMenuItem::StreamCheck);
@@ -1761,6 +1764,7 @@ pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
         AppType::Hermes => 4,
         AppType::OpenClaw => 5,
         AppType::Pi => 6,
+        AppType::Dsh => 7,
     }
 }
 
@@ -1770,7 +1774,7 @@ pub(crate) fn four_app_picker_index(app_type: &AppType) -> usize {
 
 pub(crate) fn skills_app_picker_index(app_type: &AppType) -> usize {
     match app_type {
-        AppType::Pi | AppType::OpenClaw => 5,
+        AppType::Pi | AppType::OpenClaw | AppType::Dsh => 5,
         _ => app_type_picker_index(app_type),
     }
 }
@@ -1791,6 +1795,7 @@ pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
         4 => AppType::Hermes,
         5 => AppType::OpenClaw,
         6 => AppType::Pi,
+        7 => AppType::Dsh,
         _ => AppType::Claude,
     }
 }

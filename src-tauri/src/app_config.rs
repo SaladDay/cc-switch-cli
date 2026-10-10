@@ -30,6 +30,7 @@ impl McpApps {
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false,
             AppType::Pi => false,
+            AppType::Dsh => false,
         }
     }
 
@@ -43,6 +44,7 @@ impl McpApps {
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {}
             AppType::Pi => {}
+            AppType::Dsh => {}
         }
     }
 
@@ -100,6 +102,7 @@ impl SkillApps {
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false,
             AppType::Pi => self.pi,
+            AppType::Dsh => false,
         }
     }
 
@@ -112,6 +115,7 @@ impl SkillApps {
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {}
             AppType::Pi => self.pi = enabled,
+            AppType::Dsh => {}
         }
     }
 
@@ -254,6 +258,8 @@ pub struct McpRoot {
     pub openclaw: McpConfig,
     #[serde(skip)]
     pub pi: McpConfig,
+    #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
+    pub dsh: McpConfig,
 }
 
 impl Default for McpRoot {
@@ -269,6 +275,7 @@ impl Default for McpRoot {
             hermes: McpConfig::default(),
             openclaw: McpConfig::default(),
             pi: McpConfig::default(),
+            dsh: McpConfig::default(),
         }
     }
 }
@@ -315,6 +322,8 @@ pub enum AppType {
     Hermes,
     OpenClaw,
     Pi,
+    #[cfg_attr(feature = "cli", value(alias = "deepseek", alias = "deepseek-harness"))]
+    Dsh,
 }
 
 impl AppType {
@@ -327,6 +336,7 @@ impl AppType {
             AppType::Hermes => "hermes",
             AppType::OpenClaw => "openclaw",
             AppType::Pi => "pi",
+            AppType::Dsh => "dsh",
         }
     }
 
@@ -350,6 +360,7 @@ impl AppType {
             AppType::Hermes,
             AppType::OpenClaw,
             AppType::Pi,
+            AppType::Dsh,
         ]
         .into_iter()
     }
@@ -374,13 +385,14 @@ impl FromStr for AppType {
             "hermes" => Ok(AppType::Hermes),
             "openclaw" => Ok(AppType::OpenClaw),
             "pi" => Ok(AppType::Pi),
+            "dsh" | "deepseek" | "deepseek-harness" => Ok(AppType::Dsh),
             other => Err(AppError::localized(
                 "unsupported_app",
                 format!(
-                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw, pi。"
+                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, dsh, opencode, hermes, openclaw, pi。"
                 ),
                 format!(
-                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw, pi."
+                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, dsh, opencode, hermes, openclaw, pi."
                 ),
             )),
         }
@@ -420,6 +432,7 @@ impl CommonConfigSnippets {
             AppType::Hermes => self.hermes.as_ref(),
             AppType::OpenClaw => self.openclaw.as_ref(),
             AppType::Pi => None,
+            AppType::Dsh => None,
         }
     }
 
@@ -433,6 +446,7 @@ impl CommonConfigSnippets {
             AppType::Hermes => self.hermes = snippet,
             AppType::OpenClaw => self.openclaw = snippet,
             AppType::Pi => {}
+            AppType::Dsh => {}
         }
     }
 }
@@ -657,6 +671,7 @@ impl MultiAppConfig {
             AppType::Hermes => &self.mcp.hermes,
             AppType::OpenClaw => &self.mcp.openclaw,
             AppType::Pi => &self.mcp.pi,
+            AppType::Dsh => &self.mcp.dsh,
         }
     }
 
@@ -670,6 +685,7 @@ impl MultiAppConfig {
             AppType::Hermes => &mut self.mcp.hermes,
             AppType::OpenClaw => &mut self.mcp.openclaw,
             AppType::Pi => &mut self.mcp.pi,
+            AppType::Dsh => &mut self.mcp.dsh,
         }
     }
 
@@ -708,6 +724,7 @@ impl MultiAppConfig {
                 AppType::Hermes => &self.mcp.hermes.servers,
                 AppType::OpenClaw => continue,
                 AppType::Pi => continue,
+                AppType::Dsh => continue,
             };
 
             for (id, entry) in old_servers {

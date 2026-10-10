@@ -971,6 +971,7 @@ mod tests {
                 hermes: false,
                 openclaw: false,
                 pi: false,
+                dsh: false,
             },
         };
 
@@ -982,6 +983,43 @@ mod tests {
             &app.overlay,
             Overlay::VisibleAppsPicker { selected, apps }
                 if *selected == 6 && apps.pi
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn visible_apps_picker_can_reach_toggle_and_save_dsh() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
+            .expect("save visible apps mode");
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::VisibleAppsPicker {
+            selected: app_type_picker_index(&AppType::Pi),
+            apps: crate::settings::VisibleApps {
+                claude: true,
+                codex: false,
+                gemini: false,
+                opencode: false,
+                hermes: false,
+                openclaw: false,
+                pi: false,
+                dsh: false,
+            },
+        };
+
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        app.on_key(key(KeyCode::Char(' ')), &UiData::default());
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { selected, apps }
+                if *selected == app_type_picker_index(&AppType::Dsh)
+                    && apps.dsh && apps.claude && !apps.pi
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::SetVisibleApps { apps } if apps.dsh && apps.claude && !apps.pi
         ));
     }
 
@@ -1166,6 +1204,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1192,6 +1231,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1226,6 +1266,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Gemini));
@@ -1268,6 +1309,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -1292,6 +1334,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -1320,6 +1363,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -1344,6 +1388,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -2975,6 +3020,47 @@ mod tests {
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
         assert_provider_copy_confirm(&app, "p1", "Provider One");
+    }
+
+    #[test]
+    fn dsh_provider_diagnostics_are_hidden_and_do_not_dispatch() {
+        let mut app = App::new(Some(AppType::Dsh));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let row = claude_provider_row("p1");
+        let mut data = UiData::default();
+        data.providers.rows.push(row.clone());
+
+        assert!(provider_test_menu_items(&app.app_type).is_empty());
+        assert!(!supports_provider_stream_check(&app.app_type));
+        assert!(
+            crate::cli::tui::keymap::providers::key_bar_items(&app, &data)
+                .iter()
+                .all(|(key, _)| *key != "t")
+        );
+        assert!(!texts::tui_help_line_providers(&app.app_type).contains("t test"));
+        assert!(!texts::tui_help_line_providers(&app.app_type).contains("t 测试"));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('t')), &data),
+            Action::None
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(app.provider_speedtest_action(&row), Action::None));
+        assert!(matches!(
+            app.provider_stream_check_action(&row),
+            Action::None
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+
+        app.overlay = Overlay::ProviderTestMenu {
+            provider_id: "p1".to_string(),
+            selected: 0,
+        };
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]
@@ -11226,6 +11312,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
         crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
@@ -11277,6 +11364,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         })
         .expect("save visible apps");
 
@@ -11315,6 +11403,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11354,6 +11443,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11392,6 +11482,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = initial.clone();
@@ -11441,6 +11532,36 @@ mod tests {
         let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(action, Action::SwitchRoute(Route::SettingsProxy)));
         assert!(matches!(app.route, Route::SettingsProxy));
+    }
+
+    #[test]
+    fn dsh_proxy_settings_cannot_select_app_port_or_failover() {
+        let mut app = App::new(Some(AppType::Dsh));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        let data = UiData::default();
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert_eq!(app.settings_proxy_idx, 0);
+        app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsProxyListenAddress,
+                ..
+            })
+        ));
+        app.overlay = Overlay::None;
+        for index in [1, 2] {
+            app.settings_proxy_idx = index;
+            assert!(matches!(
+                app.on_key(key(KeyCode::Enter), &data),
+                Action::None
+            ));
+            assert!(matches!(app.overlay, Overlay::None));
+        }
     }
 
     #[test]

@@ -210,6 +210,16 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
                 .subagent_model
                 .unwrap_or_else(|| "default".to_string())
         );
+    } else if matches!(app_type, AppType::Dsh) {
+        println!("\n{}", highlight("API 配置 / API Configuration"));
+        println!(
+            "  API Key:  {}",
+            if provider.configured_api_key(&app_type).is_some() {
+                "********"
+            } else {
+                "N/A"
+            }
+        );
     } else {
         println!("\n{}", highlight("API 配置 / API Configuration"));
         let api_url = extract_api_url(provider, &app_type).unwrap_or_else(|| "N/A".to_string());
@@ -1046,6 +1056,11 @@ fn model_fetch_target(
                 strategy,
             })
         }
+        AppType::Dsh => {
+            return Err(AppError::InvalidInput(
+                "DeepSeek Harness model inspection is unsupported".to_string(),
+            ));
+        }
         AppType::Codex => {
             Ok(ModelFetchTarget {
                 base_url,
@@ -1212,9 +1227,12 @@ fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetc
     match app_type {
         AppType::Claude => ProviderModelFetchStrategy::Anthropic,
         AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            ProviderModelFetchStrategy::Bearer
-        }
+        AppType::Codex
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Dsh => ProviderModelFetchStrategy::Bearer,
     }
 }
 

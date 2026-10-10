@@ -14,6 +14,7 @@ mod app_config {
         OpenClaw,
         Hermes,
         Pi,
+        Dsh,
     }
 
     impl AppType {
@@ -26,6 +27,7 @@ mod app_config {
                 AppType::OpenClaw => "openclaw",
                 AppType::Hermes => "hermes",
                 AppType::Pi => "pi",
+                AppType::Dsh => "dsh",
             }
         }
     }

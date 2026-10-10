@@ -251,6 +251,7 @@ pub(crate) fn sponsor_provider_presets_for_app(
         AppType::Gemini => &GEMINI_SPONSOR_PRESETS,
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => &ADDITIVE_SPONSOR_PRESETS,
         AppType::Pi => &[],
+        AppType::Dsh => &[],
     }
 }
 

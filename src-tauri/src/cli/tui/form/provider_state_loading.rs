@@ -29,6 +29,7 @@ pub(super) fn populate_form_from_provider(
         AppType::Hermes => populate_hermes_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
         AppType::Pi => populate_openclaw_form(form, provider),
+        AppType::Dsh => populate_dsh_form(form, provider),
     }
     form.is_full_url = form.supports_full_url_mode()
         && provider
@@ -491,6 +492,16 @@ fn populate_openclaw_form(form: &mut ProviderAddFormState, provider: &Provider) 
             form.opencode_model_context_limit
                 .set(context_window.to_string());
         }
+    }
+}
+
+fn populate_dsh_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    if let Some(api_key) = provider
+        .settings_config
+        .get("apiKey")
+        .and_then(Value::as_str)
+    {
+        form.opencode_api_key.set(api_key);
     }
 }
 

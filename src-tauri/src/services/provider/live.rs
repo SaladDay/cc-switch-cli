@@ -34,6 +34,7 @@ pub(super) enum LiveSnapshot {
     OpenClaw {
         config_source: Option<String>,
     },
+    Dsh,
 }
 
 impl LiveSnapshot {
@@ -117,6 +118,10 @@ impl LiveSnapshot {
                     delete_file(&path)?;
                 }
             }
+            // DSH publishes a single atomic credential update. A failed write
+            // leaves it intact; restoring an old document would clobber grants
+            // refreshed by a native writer while we waited for its lock.
+            LiveSnapshot::Dsh => {}
         }
         Ok(())
     }
@@ -189,6 +194,7 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
             let config_source = crate::openclaw_config::read_openclaw_config_source()?;
             Ok(LiveSnapshot::OpenClaw { config_source })
         }
+        AppType::Dsh => Ok(LiveSnapshot::Dsh),
         AppType::Pi => Err(AppError::Config(
             "Pi providers use the Pi provider service".to_string(),
         )),

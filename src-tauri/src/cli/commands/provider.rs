@@ -498,9 +498,12 @@ fn prompt_and_apply_provider_api_format(
     match app_type {
         AppType::Claude => prompt_and_apply_claude_api_format(app_type, provider),
         AppType::Codex => prompt_and_apply_codex_api_format(app_type, provider),
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            Ok(())
-        }
+        AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Dsh => Ok(()),
     }
 }
 
@@ -845,6 +848,7 @@ pub enum ProviderCommand {
 
 pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppError> {
     let app_type = app.unwrap_or(AppType::Claude);
+    cmd.validate_app_support(&app_type)?;
 
     match cmd {
         ProviderCommand::List => provider_inspect::list_providers(app_type),
@@ -940,6 +944,87 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         } => provider_inspect::quota_provider(app_type, &id, json, reset, credit_id, confirm),
         ProviderCommand::UsageQuery(cmd) => provider_usage_query::execute(cmd, app_type),
         ProviderCommand::Export { id, output } => export_provider(app_type, &id, output),
+    }
+}
+
+impl ProviderCommand {
+    pub(crate) fn validate_app_support(&self, app_type: &AppType) -> Result<(), AppError> {
+        if !matches!(app_type, AppType::Dsh) {
+            return Ok(());
+        }
+        if let Self::Add {
+            template,
+            base_url,
+            api_key,
+            model,
+            haiku_model,
+            sonnet_model,
+            opus_model,
+            fable_model,
+            subagent_model,
+            config,
+            config_file,
+            api_key_field,
+            api_format,
+            impersonate_claude_code,
+            max_output_tokens,
+            common_config,
+            account_id,
+            fast_mode,
+            ..
+        } = self
+        {
+            validate_provider_add_template(
+                app_type,
+                template.unwrap_or(ProviderAddTemplate::Custom),
+            )?;
+            if [
+                base_url,
+                model,
+                haiku_model,
+                sonnet_model,
+                opus_model,
+                fable_model,
+                subagent_model,
+                api_format,
+                account_id,
+            ]
+            .into_iter()
+            .any(Option::is_some)
+                || api_key_field.is_some()
+                || max_output_tokens.is_some()
+                || *impersonate_claude_code
+                || *common_config
+                || *fast_mode
+            {
+                return Err(AppError::InvalidInput(
+                    "DeepSeek Harness does not support URL, model, protocol, common config, or managed auth options; use --api-key or raw apiKey config".into(),
+                ));
+            }
+            let settings = load_raw_settings_config(config.as_deref(), config_file.as_deref())?
+                .unwrap_or_else(|| {
+                    crate::dsh_config::dsh_api_key_settings(api_key.as_deref().unwrap_or(""))
+                });
+            crate::dsh_config::validate_dsh_provider_settings(&settings)?;
+        }
+        if matches!(app_type, AppType::Dsh)
+            && matches!(
+                self,
+                Self::Speedtest { .. }
+                    | Self::StreamCheck { .. }
+                    | Self::FetchModels { .. }
+                    | Self::Quota { .. }
+                    | Self::UsageQuery(_)
+                    | Self::Export { .. }
+                    | Self::SetDefault { .. }
+                    | Self::RemoveFromConfig { .. }
+            )
+        {
+            return Err(AppError::InvalidInput(
+                "DeepSeek Harness does not support this provider command".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1273,10 +1358,13 @@ fn common_config_unavailable_message(app_type: &AppType) -> String {
 }
 
 /// Read the raw `settings_config` JSON from `--config` or `--config-file`.
-fn load_raw_settings_config(args: &AddProviderArgs) -> Result<Option<serde_json::Value>, AppError> {
-    let raw = if let Some(text) = args.config.as_deref() {
+fn load_raw_settings_config(
+    config: Option<&str>,
+    config_file: Option<&std::path::Path>,
+) -> Result<Option<serde_json::Value>, AppError> {
+    let raw = if let Some(text) = config {
         text.to_string()
-    } else if let Some(path) = args.config_file.as_deref() {
+    } else if let Some(path) = config_file {
         std::fs::read_to_string(path).map_err(|e| {
             AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
                 format!("无法读取配置文件 {}: {e}", path.display())
@@ -1454,6 +1542,16 @@ fn build_add_settings_config(
             }
             Ok(settings)
         }
+        AppType::Dsh => {
+            let api_key = non_empty(args.api_key.clone())
+                .ok_or_else(|| add_missing_field_error("--api-key"))?;
+            if args.base_url.is_some() || args.model.is_some() {
+                return Err(AppError::InvalidInput(
+                    "DSH supports only --api-key; base URL and model are managed by DeepSeek Harness".into(),
+                ));
+            }
+            Ok(crate::dsh_config::dsh_api_key_settings(&api_key))
+        }
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
             let current = current.ok_or_else(|| add_additive_requires_config_error(app_type))?;
             let api_key = non_empty(args.api_key.clone());
@@ -1541,8 +1639,12 @@ fn apply_add_provider_api_format(
             };
             apply_codex_api_format(provider, format);
         }
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-        }
+        AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi
+        | AppType::Dsh => {}
     }
     Ok(())
 }
@@ -1587,7 +1689,7 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
     let template = args.template.unwrap_or(ProviderAddTemplate::Custom);
     validate_provider_add_template(&app_type, template)?;
 
-    let raw_config = load_raw_settings_config(&args)?;
+    let raw_config = load_raw_settings_config(args.config.as_deref(), args.config_file.as_deref())?;
     let mut settings_prompt_result: Option<SettingsConfigPromptResult> = None;
 
     // 2. 构造供应商（自定义或基于模板）

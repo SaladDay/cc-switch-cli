@@ -681,6 +681,9 @@ impl ProviderAddFormState {
                     &self.hermes_rate_limit_delay.value,
                 );
             }
+            AppType::Dsh => {
+                set_or_remove_trimmed(settings_obj, "apiKey", &self.opencode_api_key.value);
+            }
             AppType::OpenClaw | AppType::Pi => {
                 let is_pi = matches!(self.app_type, AppType::Pi);
                 let original_pi_settings = is_pi
@@ -1503,7 +1506,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {}
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Dsh => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

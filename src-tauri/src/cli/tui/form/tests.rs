@@ -6453,6 +6453,87 @@ fn provider_add_form_opencode_builds_settings_from_dedicated_fields() {
 }
 
 #[test]
+fn provider_add_form_dsh_only_serializes_api_key_and_preserves_it_on_edit() {
+    let mut form = ProviderAddFormState::new(AppType::Dsh);
+    form.id.set("dsh1");
+    form.name.set("DeepSeek Harness");
+    form.opencode_api_key.set("dsh-key");
+
+    let created = form.to_provider_json_value();
+    assert_eq!(created["settingsConfig"], json!({ "apiKey": "dsh-key" }));
+    assert!(form.fields().contains(&ProviderAddField::OpenCodeApiKey));
+    assert!(!form.fields().contains(&ProviderAddField::OpenCodeBaseUrl));
+
+    let provider = Provider::with_id(
+        "dsh1".to_string(),
+        "DeepSeek Harness".to_string(),
+        json!({ "apiKey": "existing-key" }),
+        None,
+    );
+    let edited = ProviderAddFormState::from_provider(AppType::Dsh, &provider);
+    assert_eq!(edited.opencode_api_key.value, "existing-key");
+    assert_eq!(
+        edited.to_provider_json_value()["settingsConfig"],
+        json!({
+            "apiKey": "existing-key"
+        })
+    );
+}
+
+#[test]
+fn provider_add_form_dsh_raw_json_rejects_extra_fields_without_changing_form() {
+    let mut form = ProviderAddFormState::new(AppType::Dsh);
+    form.id.set("dsh");
+    form.name.set("DeepSeek Harness");
+    form.opencode_api_key.set("original-key");
+    let original = form.to_provider_json_value();
+
+    for field in ["baseUrl", "model", "unknown"] {
+        let mut edited = original.clone();
+        edited["settingsConfig"]["apiKey"] = json!("edited-key");
+        edited["settingsConfig"][field] = json!("unsupported");
+        let error = form
+            .apply_provider_json_value_to_fields(edited)
+            .unwrap_err();
+        assert!(error.contains("only apiKey"));
+        assert_eq!(form.to_provider_json_value(), original);
+    }
+
+    let mut valid = original.clone();
+    valid["settingsConfig"]["apiKey"] = json!("edited-key");
+    form.apply_provider_json_value_to_fields(valid.clone())
+        .unwrap();
+    assert_eq!(form.to_provider_json_value(), valid);
+}
+
+#[test]
+fn provider_add_form_dsh_preserves_imported_fields_for_validation() {
+    let provider = Provider::with_id(
+        "dsh".into(),
+        "DeepSeek Harness".into(),
+        json!({"apiKey": "original-key", "baseUrl": "https://example.invalid", "model": "custom"}),
+        None,
+    );
+    let mut form = ProviderAddFormState::from_provider(AppType::Dsh, &provider);
+    form.opencode_api_key.set("edited-key");
+    let value = form.to_provider_json_value();
+    assert_eq!(
+        value["settingsConfig"]["baseUrl"],
+        "https://example.invalid"
+    );
+    assert_eq!(value["settingsConfig"]["model"], "custom");
+    assert!(crate::dsh_config::validate_dsh_provider_settings(&value["settingsConfig"]).is_err());
+
+    let mut repaired = value;
+    repaired["settingsConfig"] = json!({"apiKey": "edited-key"});
+    form.apply_provider_json_value_to_fields(repaired).unwrap();
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"],
+        json!({"apiKey": "edited-key"})
+    );
+}
+
+#[test]
 fn provider_add_form_opencode_from_provider_backfills_and_preserves_extra_settings() {
     let provider = Provider::with_id(
         "oc1".to_string(),

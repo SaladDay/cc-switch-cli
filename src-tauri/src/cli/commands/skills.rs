@@ -150,6 +150,11 @@ pub enum SkillReposCommand {
 
 pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError> {
     let app_type = app.clone().unwrap_or(AppType::Claude);
+    if matches!(app_type, AppType::Dsh) {
+        return Err(AppError::InvalidInput(
+            "DeepSeek Harness does not support skill management".to_string(),
+        ));
+    }
 
     match cmd {
         SkillsCommand::List => list_installed(),

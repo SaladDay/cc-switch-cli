@@ -106,6 +106,10 @@ fn run_app_doctor(app_type: &AppType) -> Result<(), AppError> {
             );
             Ok(())
         }
+        AppType::Dsh => {
+            println!("{}", info("DeepSeek Harness uses its credentials YAML and has no environment doctor checks."));
+            Ok(())
+        }
     }
 }
 

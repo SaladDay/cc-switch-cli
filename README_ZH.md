@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw 和 Pi。**
+**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw、Pi 和 DeepSeek Harness。**
 
 [![Version](https://img.shields.io/badge/version-5.11.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -185,7 +185,7 @@ cc-switch --app hermes provider list    # 管理 Hermes 供应商
 cc-switch --app openclaw provider list  # 管理 OpenClaw 供应商
 cc-switch --app pi provider list        # 管理 Pi 供应商
 
-# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`、`pi`
+# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`、`pi`、`dsh`
 ```
 
 需要在多个终端同时使用不同供应商时，请使用 `cc-switch start`。它只影响由该命令启动的 Claude 或 Codex 会话；`provider switch` 和 `use` 仍会切换全局供应商。在 TUI 的供应商页选中供应商后按 `o`，效果相同。
@@ -321,10 +321,20 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 供应商管理
 
-管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes**、**OpenClaw** 与 **Pi** 的 API 配置。
+管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes**、**OpenClaw**、**Pi** 与 **DeepSeek Harness** 的 API 配置。
 
 Pi 供应商遵循原生的增量管理模型：是否启用完全取决于 `models.json.providers` 中的成员关系。CC-Switch 不会修改 Pi 的登录凭据或全局默认供应商/模型。
 Pi TUI 延续其他应用的表格、表单与快捷键交互，并将预设、系统提示词和 Prompt Templates 分为独立页面。
+
+DeepSeek Harness（`--app dsh`，别名 `deepseek` 和 `deepseek-harness`）支持在 CLI 和 TUI 中管理 API key 配置。切换仅更新 `$DSH_HOME/.credentials.yaml`（默认 `~/.dsh/.credentials.yaml`）中的 `refs.DEEPSEEK_API_KEY`，保留浏览器授权及其他 YAML 字段。Base URL 和模型仍由 DSH 管理。DSH 暂不支持代理接管、故障转移、MCP、提示词、技能、会话、通用配置片段、用量查询及模型/流式诊断。使用手动应用可见性模式时，可在设置中启用 DSH 标签页。
+
+```bash
+cc-switch --app dsh provider add --name DeepSeek --api-key <key>
+cc-switch --app dsh                      # 在 TUI 中交互管理供应商
+cc-switch --app dsh provider list
+cc-switch --app dsh provider switch <id>
+cc-switch --app dsh provider current
+```
 
 **功能：** 一键切换、Claude 独立 settings 导出、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 
@@ -586,6 +596,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 - Hermes: `~/.hermes/config.yaml`（供应商 + MCP + 记忆设置）, `~/.hermes/AGENTS.md`（提示词）, `~/.hermes/skills/`（技能）, `~/.hermes/memories/`（记忆）
 - OpenClaw: `~/.openclaw/openclaw.json`（供应商 + Env/Tools/Agents Defaults）, `~/.openclaw/AGENTS.md`（提示词）
 - Pi: `~/.pi/agent/models.json`（增量供应商）, `~/.pi/agent/settings.json`（只读默认项 / 会话位置）, `~/.pi/agent/AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`prompts/`、`skills/` 与 `sessions/`
+- DeepSeek Harness: `$DSH_HOME/.credentials.yaml`（默认 `~/.dsh/.credentials.yaml`），仅管理 `refs.DEEPSEEK_API_KEY`
 
 ---
 
@@ -676,7 +687,7 @@ cc-switch
 
 <br>
 
-CC-Switch 目前支持七个 AI 编程助手：
+CC-Switch 目前支持八个 AI 编程助手：
 - **Claude Code** (`--app claude`，默认)
 - **Codex** (`--app codex`)
 - **Gemini** (`--app gemini`)
@@ -684,6 +695,7 @@ CC-Switch 目前支持七个 AI 编程助手：
 - **Hermes** (`--app hermes`)
 - **OpenClaw** (`--app openclaw`)
 - **Pi** (`--app pi`)
+- **DeepSeek Harness** (`--app dsh`)
 
 使用全局 `--app` 参数指定要管理的应用：
 ```bash

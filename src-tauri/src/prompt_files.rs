@@ -18,6 +18,11 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::Hermes => crate::hermes_config::get_hermes_dir(),
         AppType::OpenClaw => get_openclaw_override_dir().unwrap_or_else(default_openclaw_dir),
         AppType::Pi => crate::pi_config::get_pi_agent_dir()?,
+        AppType::Dsh => {
+            return Err(AppError::InvalidInput(
+                "DeepSeek Harness does not support prompt files".to_string(),
+            ));
+        }
     };
 
     let filename = match app {
@@ -28,6 +33,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::Hermes => "AGENTS.md",
         AppType::OpenClaw => "AGENTS.md",
         AppType::Pi => "AGENTS.md",
+        AppType::Dsh => unreachable!(),
     };
 
     Ok(base_dir.join(filename))

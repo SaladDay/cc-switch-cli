@@ -34,12 +34,13 @@ pub struct VisibleAppsStartupOutcome {
     pub should_prompt: bool,
 }
 
-const CONTROLLED_APPS: [AppType; 5] = [
+const CONTROLLED_APPS: [AppType; 6] = [
     AppType::Gemini,
     AppType::OpenCode,
     AppType::Hermes,
     AppType::OpenClaw,
     AppType::Pi,
+    AppType::Dsh,
 ];
 
 pub fn detect_visible_app_installation() -> VisibleAppsDetection {
@@ -191,6 +192,7 @@ pub fn app_display_name(app: &AppType) -> &'static str {
         AppType::Hermes => "Hermes",
         AppType::OpenClaw => "OpenClaw",
         AppType::Pi => "Pi",
+        AppType::Dsh => "DeepSeek Harness",
     }
 }
 
@@ -258,6 +260,13 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    #[test]
+    fn dsh_is_included_in_visible_app_detection() {
+        assert!(VisibleAppsDetection::default()
+            .installed
+            .contains_key(&AppType::Dsh));
+    }
+
     struct EnvGuard {
         _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
@@ -322,6 +331,7 @@ mod tests {
             hermes: true,
             openclaw: false,
             pi: false,
+            dsh: false,
         };
         settings.visible_apps_settings = VisibleAppsSettings {
             mode: VisibleAppsMode::Auto,
@@ -365,6 +375,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            dsh: false,
         };
         settings.visible_apps_settings = VisibleAppsSettings {
             mode: VisibleAppsMode::Manual,
@@ -433,6 +444,7 @@ mod tests {
             hermes: true,
             openclaw: true,
             pi: false,
+            dsh: false,
         };
         settings.visible_apps_settings = VisibleAppsSettings {
             mode: VisibleAppsMode::Auto,

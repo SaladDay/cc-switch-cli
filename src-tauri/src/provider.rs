@@ -147,6 +147,7 @@ impl Provider {
                 .or_else(|| self.settings_config.get("api_key")),
             AppType::OpenClaw => self.settings_config.get("apiKey"),
             AppType::Pi => self.settings_config.get("apiKey"),
+            AppType::Dsh => self.settings_config.get("apiKey"),
         };
 
         value
@@ -253,7 +254,11 @@ impl Provider {
             AppType::Claude => "claude",
             AppType::Codex => "codex",
             AppType::Gemini => "gemini",
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => return None,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Dsh => return None,
         };
 
         if self.category.as_deref() == Some("official") {
@@ -299,7 +304,11 @@ impl Provider {
                     .is_none_or(|value| value.trim().is_empty());
                 api_key_missing && base_url_missing
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Dsh => false,
         };
 
         is_official.then_some(tool)

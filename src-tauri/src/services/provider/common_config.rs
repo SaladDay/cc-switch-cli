@@ -510,6 +510,9 @@ fn parse_json_object_snippet(app_type: &AppType, snippet: &str) -> Result<Value,
             )
         }
         AppType::Codex => AppError::Config(format!("Unexpected JSON common config parse: {e}")),
+        AppType::Dsh => {
+            AppError::InvalidInput("DeepSeek Harness does not support common config".to_string())
+        }
     })?;
 
     if !value.is_object() {
@@ -532,6 +535,9 @@ fn parse_json_object_snippet(app_type: &AppType, snippet: &str) -> Result<Value,
                 )
             }
             AppType::Codex => AppError::Config("Unexpected JSON common config type".into()),
+            AppType::Dsh => AppError::InvalidInput(
+                "DeepSeek Harness does not support common config".to_string(),
+            ),
         });
     }
 
@@ -566,6 +572,11 @@ pub(super) fn validate_common_config_snippet(
         }
         AppType::Codex => {
             parse_codex_snippet(snippet)?;
+        }
+        AppType::Dsh => {
+            return Err(AppError::InvalidInput(
+                "DeepSeek Harness does not support common config".to_string(),
+            ))
         }
     }
 
@@ -617,7 +628,9 @@ pub(super) fn settings_contain_common_config(
             }
             _ => false,
         },
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Dsh => {
+            false
+        }
     }
 }
 
@@ -682,7 +695,7 @@ pub(super) fn apply_common_config_to_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Dsh => {
             Ok(settings.clone())
         }
     }
@@ -733,7 +746,7 @@ pub(super) fn remove_common_config_from_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Dsh => {
             Ok(settings.clone())
         }
     }

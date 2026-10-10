@@ -31,6 +31,7 @@ pub fn ensure_test_home() -> &'static Path {
     std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
     std::env::set_var("CODEX_HOME", home.join(".codex"));
     std::env::set_var("HERMES_HOME", home.join(".hermes"));
+    std::env::set_var("DSH_HOME", home.join(".dsh"));
     std::env::set_var("LOCALAPPDATA", home.join("AppData").join("Local"));
     home.as_path()
 }
@@ -43,6 +44,7 @@ pub fn reset_test_fs() {
         ".claude",
         ".codex",
         ".hermes",
+        ".dsh",
         ".cc-switch",
         ".agents",
         ".gemini",
