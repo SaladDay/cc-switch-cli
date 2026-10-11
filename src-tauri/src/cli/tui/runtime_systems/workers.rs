@@ -657,6 +657,9 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
                     // members map to None above and use Bearer, which is
                     // the right auth for their /models endpoint.
                     ModelFetchTarget::RouteMappings { .. } => ModelFetchStrategy::Bearer,
+                    // Env-sourced request models never reach the worker (no
+                    // Fetch request is sent); Bearer keeps the match total.
+                    ModelFetchTarget::RouteMappingsRequest => ModelFetchStrategy::Bearer,
                 },
             };
             rt.block_on(async {

@@ -15,7 +15,8 @@ use crate::services::StreamCheckService;
 
 use super::super::app::{App, Overlay, RouteMappingsEditorState, ToastKind};
 use super::super::data::{load_state, UiData};
-use super::super::runtime_systems::ModelFetchTarget;
+use super::super::runtime_systems::{next_model_fetch_request_id, ModelFetchTarget};
+use super::super::text_edit::TextInput;
 use super::RuntimeActionContext;
 
 fn runtime() -> Result<tokio::runtime::Runtime, AppError> {
@@ -94,6 +95,10 @@ pub(super) fn add_route_mode_member(
     app_type: AppType,
     provider_id: String,
 ) -> Result<(), AppError> {
+    // Seed the new member with passthrough mappings for the models this
+    // app's agent may request (read from the active provider config).
+    // Computed before the mutation so the DB closure stays key-latency cheap.
+    let seed = active_provider_request_models(ctx, &app_type);
     // Capture the new member's index inside the closure so the cursor can
     // land on the added row (screen rows are index+1; row 0 is the status
     // toggle). Only set when the push actually happened.
@@ -107,7 +112,16 @@ pub(super) fn add_route_mode_member(
             return Ok(false);
         }
         new_idx = Some(group.members.len());
-        group.members.push(RouteModeMember::new(provider_id, 1));
+        let mut member = RouteModeMember::new(provider_id, 1);
+        for model in &seed {
+            // Insert-if-absent: existing mappings are never clobbered (new
+            // members start empty, so this only seeds passthrough defaults).
+            member
+                .model_mappings
+                .entry(model.clone())
+                .or_insert(model.clone());
+        }
+        group.members.push(member);
         Ok(true)
     })?;
     if let Some(idx) = new_idx {
@@ -345,6 +359,70 @@ pub(super) fn route_member_model_fetch(
         codex_oauth_account_id,
         ModelFetchTarget::RouteMappings { provider_id },
     )
+}
+
+/// Request models from this app's active provider (`ProviderRow.is_current`);
+/// empty when no provider is currently active.
+fn active_provider_request_models(
+    ctx: &RuntimeActionContext<'_>,
+    app_type: &AppType,
+) -> Vec<String> {
+    ctx.data
+        .providers
+        .rows
+        .iter()
+        .find(|row| row.is_current)
+        .map(|row| {
+            crate::services::request_models::request_model_candidates(&row.provider, app_type)
+        })
+        .unwrap_or_default()
+}
+
+/// Ctrl+R on the mapping editor's request field: open the model picker
+/// pre-filled with this app's env-sourced request models. Purely local — no
+/// worker channel, no network — but the editor still parks in
+/// `pending_overlay` and every early-return below restores it.
+pub(super) fn route_member_request_models_fetch(
+    ctx: &mut RuntimeActionContext<'_>,
+) -> Result<(), AppError> {
+    if !matches!(ctx.app.overlay, Overlay::RouteMappingsEditor(_)) {
+        // Stale trigger: the editor is no longer open, nothing to pick for.
+        // Match before taking so an unrelated overlay is never discarded.
+        return Ok(());
+    }
+    let Overlay::RouteMappingsEditor(editor) =
+        std::mem::replace(&mut ctx.app.overlay, Overlay::None)
+    else {
+        return Ok(());
+    };
+
+    let candidates = active_provider_request_models(ctx, &ctx.app.app_type);
+    if candidates.is_empty() {
+        ctx.app.overlay = Overlay::RouteMappingsEditor(editor);
+        ctx.app.push_toast(
+            texts::tui_route_member_no_request_models(),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    }
+
+    ctx.app.pending_overlay = Some(Overlay::RouteMappingsEditor(editor));
+    ctx.app.overlay = Overlay::ModelFetchPicker {
+        request_id: next_model_fetch_request_id(),
+        target: ModelFetchTarget::RouteMappingsRequest,
+        input: TextInput::new(""),
+        query: String::new(),
+        // Local candidate list: the picker renders instantly and Enter
+        // writes back synchronously.
+        fetching: false,
+        models: candidates,
+        filtered_indices: None,
+        filter_incomplete: false,
+        error: None,
+        selected_idx: 0,
+        selection_active: false,
+    };
+    Ok(())
 }
 
 fn extract_route_member_api_key(app_type: &AppType, provider: &Provider) -> Option<String> {

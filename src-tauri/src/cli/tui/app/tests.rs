@@ -21986,6 +21986,66 @@ mod tests {
         }
     }
 
+    /// Ctrl+R picks request models on the request field; a plain `r` must
+    /// stay a letter because the row editor is live-typing.
+    #[test]
+    fn route_request_models_ctrl_r_only_on_request_field() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Request,
+                request: TextInput::new("req"),
+                actual: TextInput::new("act"),
+            }),
+        });
+        let data = UiData::default();
+
+        // A plain `r` lands in the field so model names stay typeable.
+        let action = app.on_key(key(KeyCode::Char('r')), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                let edit = editor.editing.as_ref().expect("still editing");
+                assert_eq!(edit.request.value, "reqr");
+            }
+            _ => panic!("mapping editor must stay open"),
+        }
+
+        // Ctrl+R on the request field dispatches the picker action.
+        let action = app.on_key(ctrl(KeyCode::Char('r')), &data);
+        assert!(matches!(action, Action::RouteRequestModelsFetch));
+
+        // On the actual-model field Ctrl+R is not pick; it moves the text
+        // cursor like every other field.
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Actual,
+                request: TextInput::new("req"),
+                actual: TextInput::new("act"),
+            }),
+        });
+        let action = app.on_key(ctrl(KeyCode::Char('r')), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                let edit = editor.editing.as_ref().expect("still editing");
+                assert_eq!(edit.actual.cursor, 3);
+            }
+            _ => panic!("mapping editor must stay open"),
+        }
+    }
+
     #[test]
     #[serial(home_settings)]
     fn route_member_model_fetch_restores_editor_when_provider_is_missing() {
@@ -22566,6 +22626,304 @@ mod tests {
             _ => panic!("mapping editor must be restored after Esc"),
         }
         assert!(app.pending_overlay.is_none(), "stash must be consumed");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_request_models_pick_opens_env_sourced_picker() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        // The active provider advertises the models the agent will request.
+        data.providers.rows.push(ProviderRow {
+            provider: Provider::with_id(
+                "cur".to_string(),
+                "Current".to_string(),
+                json!({"env":{
+                    "ANTHROPIC_MODEL": "claude-opus-4-8[1m]",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
+                }}),
+                None,
+            ),
+            is_current: true,
+            ..claude_provider_row("cur")
+        });
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Request,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(""),
+            }),
+        });
+
+        let result = run_runtime_action(&mut app, &mut data, Action::RouteRequestModelsFetch);
+        assert!(result.is_ok());
+        match &app.overlay {
+            Overlay::ModelFetchPicker {
+                target,
+                fetching,
+                models,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappingsRequest
+                );
+                assert!(!*fetching, "env candidates are local; nothing is fetched");
+                assert_eq!(
+                    models,
+                    &[
+                        "claude-opus-4-8".to_string(),
+                        "claude-sonnet-4-6".to_string()
+                    ],
+                    "candidates come from the active provider, [1m] stripped"
+                );
+            }
+            _ => panic!("the request-model picker must open over the editor"),
+        }
+        match &app.pending_overlay {
+            Some(Overlay::RouteMappingsEditor(editor)) => {
+                assert!(editor.editing.is_some(), "the draft row must be parked");
+            }
+            _ => panic!("mapping editor must be parked in pending_overlay"),
+        }
+    }
+
+    #[test]
+    fn route_request_models_pick_enter_writes_request_field_and_restores_editor() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Request,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new("act-b"),
+            }),
+        });
+        // The picker parked the editor in pending_overlay.
+        app.pending_overlay = Some(app.overlay.clone());
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappingsRequest,
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: vec!["claude-opus-4-8".to_string()],
+            filtered_indices: None,
+            filter_incomplete: false,
+            error: None,
+            selected_idx: 0,
+            // Production opens the picker with no active selection (see
+            // route_member_request_models_fetch); blank-input Enter must
+            // select index 0 through the picker's fallback.
+            selection_active: false,
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                let edit = editor.editing.as_ref().expect("editing restored");
+                assert_eq!(edit.request.value, "claude-opus-4-8");
+                assert_eq!(edit.actual.value, "act-b", "the other field is untouched");
+            }
+            _ => panic!("mapping editor must be restored after picking a request model"),
+        }
+        assert!(app.pending_overlay.is_none(), "stash must be consumed");
+    }
+
+    #[test]
+    fn route_request_models_pick_esc_restores_editor_with_draft() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Request,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new("act-b"),
+            }),
+        });
+        app.pending_overlay = Some(app.overlay.clone());
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            target: crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappingsRequest,
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: vec!["claude-opus-4-8".to_string()],
+            filtered_indices: None,
+            filter_incomplete: false,
+            error: None,
+            selected_idx: 0,
+            selection_active: true,
+        };
+
+        let action = app.on_key(key(KeyCode::Esc), &data());
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => {
+                let edit = editor.editing.as_ref().expect("editing restored");
+                assert_eq!(edit.request.value, "req-a", "Esc keeps the draft");
+            }
+            _ => panic!("mapping editor must be restored after Esc"),
+        }
+        assert!(app.pending_overlay.is_none(), "stash must be consumed");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn route_request_models_empty_candidates_keeps_editor_and_toasts() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        // Active provider but no model env keys: nothing to pick.
+        data.providers.rows.push(ProviderRow {
+            provider: Provider::with_id(
+                "cur".to_string(),
+                "Current".to_string(),
+                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+                None,
+            ),
+            is_current: true,
+            ..claude_provider_row("cur")
+        });
+
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: Some(RouteMappingEntryEditingState {
+                row: None,
+                field: RouteMappingEditorField::Request,
+                request: TextInput::new("req-a"),
+                actual: TextInput::new(""),
+            }),
+        });
+
+        let result = run_runtime_action(&mut app, &mut data, Action::RouteRequestModelsFetch);
+        assert!(result.is_ok());
+        match &app.overlay {
+            Overlay::RouteMappingsEditor(editor) => assert!(
+                editor.editing.is_some(),
+                "an empty candidate list must not open the picker"
+            ),
+            _ => panic!("mapping editor must stay open when there is nothing to pick"),
+        }
+        assert!(
+            app.pending_overlay.is_none(),
+            "empty candidates must not park the editor"
+        );
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.kind == ToastKind::Warning
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn add_route_mode_member_seeds_passthrough_mappings_and_keeps_others() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.providers.rows.push(ProviderRow {
+            provider: Provider::with_id(
+                "cur".to_string(),
+                "Current".to_string(),
+                json!({"env":{
+                    "ANTHROPIC_MODEL": "claude-opus-4-8",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
+                }}),
+                None,
+            ),
+            is_current: true,
+            ..claude_provider_row("cur")
+        });
+        data.providers.rows.push(claude_provider_row("p1"));
+        data.providers.rows.push(claude_provider_row("p2"));
+        // Member add persists through the DAO, which validates that each
+        // member provider exists in the database — seed p1/p2 there first.
+        {
+            let state = crate::cli::tui::data::load_state().expect("load state");
+            for id in ["p1", "p2"] {
+                let provider = Provider::with_id(id.to_string(), id.to_string(), json!({}), None);
+                state
+                    .db
+                    .save_provider("claude", &provider)
+                    .expect("save provider");
+            }
+        }
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::AddRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+            },
+        )
+        .expect("add first route member");
+        // The first member replaces its seeded mappings with a custom one, so
+        // the later add must leave those keys untouched.
+        let mut custom = std::collections::BTreeMap::new();
+        custom.insert("claude-opus-4-8".to_string(), "custom-actual".to_string());
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::SetRouteModeMemberMappings {
+                app_type: AppType::Claude,
+                provider_id: "p1".to_string(),
+                mappings: custom,
+            },
+        )
+        .expect("customize first member mappings");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::AddRouteModeMember {
+                app_type: AppType::Claude,
+                provider_id: "p2".to_string(),
+            },
+        )
+        .expect("add second route member");
+
+        let state = crate::cli::tui::data::load_state().expect("reload state");
+        let group = state.db.get_route_mode_group("claude").expect("read group");
+        assert_eq!(group.members.len(), 2);
+        let mut expected_seed = std::collections::BTreeMap::new();
+        expected_seed.insert("claude-opus-4-8".to_string(), "claude-opus-4-8".to_string());
+        expected_seed.insert(
+            "claude-sonnet-4-6".to_string(),
+            "claude-sonnet-4-6".to_string(),
+        );
+        assert_eq!(
+            group.members[1].model_mappings, expected_seed,
+            "the new member must be seeded with passthrough mappings"
+        );
+        let mut expected_first = std::collections::BTreeMap::new();
+        expected_first.insert("claude-opus-4-8".to_string(), "custom-actual".to_string());
+        assert_eq!(
+            group.members[0].model_mappings, expected_first,
+            "an existing member's mappings must never be clobbered"
+        );
     }
 
     #[test]

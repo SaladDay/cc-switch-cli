@@ -84,6 +84,19 @@ impl App {
             };
         }
 
+        // Ctrl+R opens the env-sourced request-model picker on the request
+        // field. Same modifier rationale as Ctrl+F above: the row editor is
+        // live-typing, so a plain `r` must stay a letter.
+        let pick_request = matches!(key.code, KeyCode::Char('r' | 'R'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && editor
+                .editing
+                .as_ref()
+                .is_some_and(|edit| edit.request_active());
+        if pick_request {
+            return Action::RouteRequestModelsFetch;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 if let Some(editor) = self.route_mappings_editor_mut() {

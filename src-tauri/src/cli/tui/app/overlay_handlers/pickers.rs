@@ -1147,6 +1147,7 @@ impl App {
                 claude_idx, ..
             } => claude_idx.unwrap_or(0),
             crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappings { .. } => 0,
+            crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappingsRequest => 0,
         };
 
         Some(match key.code {
@@ -1257,6 +1258,16 @@ impl App {
                         if let Overlay::RouteMappingsEditor(editor) = &mut self.overlay {
                             if let Some(edit) = editor.editing.as_mut() {
                                 edit.actual.set(selected_model);
+                            }
+                        }
+                    }
+                    crate::cli::tui::runtime_systems::ModelFetchTarget::RouteMappingsRequest => {
+                        // Same restore path as RouteMappings: the mapping
+                        // editor was parked in pending_overlay when the
+                        // picker opened; close_overlay() above restored it.
+                        if let Overlay::RouteMappingsEditor(editor) = &mut self.overlay {
+                            if let Some(edit) = editor.editing.as_mut() {
+                                edit.request.set(selected_model);
                             }
                         }
                     }

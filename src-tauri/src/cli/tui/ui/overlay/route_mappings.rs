@@ -86,11 +86,15 @@ fn render_entry_editor(
     );
 
     // Ctrl+F only fetches while the actual-model field is active; a plain
-    // `f` must stay a letter because the row editor is live-typing.
+    // `f` must stay a letter because the row editor is live-typing. Ctrl+R
+    // likewise only picks request models while the request field is active.
     let mut keys = vec![
         ("Tab", texts::tui_key_select()),
         ("Enter", texts::tui_key_apply()),
     ];
+    if editing.request_active() {
+        keys.push(("Ctrl+R", texts::tui_route_mappings_request_pick_key()));
+    }
     if editing.actual_active() {
         keys.push(("Ctrl+F", texts::tui_route_mappings_fetch_key()));
     }

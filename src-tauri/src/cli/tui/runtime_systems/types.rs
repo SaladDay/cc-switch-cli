@@ -822,7 +822,8 @@ pub(crate) enum ModelFetchReq {
 
 /// Where a fetched model list is written back. The provider form fills one
 /// of its own fields; the route-mode mapping editor fills the "actual model"
-/// row field of the member being edited.
+/// row field of the member being edited, or its "request model" field when
+/// the list came from the active provider's env config (no fetch at all).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelFetchTarget {
     FormField {
@@ -832,6 +833,7 @@ pub(crate) enum ModelFetchTarget {
     RouteMappings {
         provider_id: String,
     },
+    RouteMappingsRequest,
 }
 
 pub(crate) enum ModelFetchMsg {

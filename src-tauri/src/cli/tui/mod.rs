@@ -2301,6 +2301,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ProviderQuotaRefresh { .. }
         | Action::ProviderModelFetch { .. }
         | Action::RouteMemberModelFetch { .. }
+        | Action::RouteRequestModelsFetch
         | Action::UsageCustomRange { .. }
         | Action::UsageRefresh
         | Action::UsageRebuildCodex

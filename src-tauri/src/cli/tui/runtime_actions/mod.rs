@@ -956,6 +956,7 @@ pub(crate) fn handle_action(
         Action::RouteMemberModelFetch { provider_id } => {
             route_mode::route_member_model_fetch(&mut ctx, provider_id)
         }
+        Action::RouteRequestModelsFetch => route_mode::route_member_request_models_fetch(&mut ctx),
         Action::UsageCustomRange { .. } => Ok(()),
         Action::PricingDelete { model_id } => pricing::delete(&mut ctx, model_id),
         Action::McpToggle { id, enabled } => mcp::toggle(&mut ctx, id, enabled),
