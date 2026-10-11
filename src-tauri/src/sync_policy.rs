@@ -26,6 +26,11 @@ pub(crate) fn should_sync_live(app_type: &AppType) -> bool {
         AppType::OpenClaw => get_openclaw_dir().exists(),
         // Pi live provider writes are owned by the revision-aware native service.
         AppType::Pi => false,
+        // Kimi is considered initialized if ~/.kimi-code (or override dir) exists or config.toml exists.
+        AppType::Kimi => {
+            crate::kimi_config::get_kimi_config_dir().exists()
+                || crate::kimi_config::get_kimi_config_path().exists()
+        }
     }
 }
 

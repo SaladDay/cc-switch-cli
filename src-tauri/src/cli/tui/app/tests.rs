@@ -971,6 +971,7 @@ mod tests {
                 hermes: false,
                 openclaw: false,
                 pi: false,
+                kimi: false,
             },
         };
 
@@ -1166,6 +1167,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1192,6 +1194,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
@@ -1226,6 +1229,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
         let mut app = App::new(Some(AppType::Gemini));
@@ -1268,6 +1272,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
 
@@ -1292,6 +1297,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
 
@@ -1320,6 +1326,7 @@ mod tests {
             hermes: false,
             openclaw: true,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
 
@@ -1344,6 +1351,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
 
@@ -11226,6 +11234,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
         crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
@@ -11277,6 +11286,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         })
         .expect("save visible apps");
 
@@ -11315,6 +11325,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11354,6 +11365,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         };
         settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
         settings.visible_apps_settings.auto_prompt_decided = true;
@@ -11392,6 +11404,7 @@ mod tests {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         };
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = initial.clone();

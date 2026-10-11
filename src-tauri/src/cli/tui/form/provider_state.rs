@@ -375,7 +375,7 @@ impl ProviderAddFormState {
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|env| !env.is_empty()),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => false,
         }
     }
 
@@ -431,7 +431,7 @@ impl ProviderAddFormState {
                     app_type, settings, &snippet,
                 )
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi | AppType::Kimi => false,
         }
     }
 
@@ -578,6 +578,11 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenCodeApiKey);
                 fields.push(ProviderAddField::OpenCodeBaseUrl);
                 fields.push(ProviderAddField::OpenClawModels);
+            }
+            AppType::Kimi => {
+                fields.push(ProviderAddField::HermesBaseUrl);
+                fields.push(ProviderAddField::HermesApiKey);
+                fields.push(ProviderAddField::ClaudeModelConfig);
             }
         }
 
@@ -1193,7 +1198,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => {}
+            | AppType::Pi
+            | AppType::Kimi => {}
         }
         Ok(())
     }
@@ -1425,7 +1431,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => false,
+            | AppType::Pi
+            | AppType::Kimi => false,
         }
     }
 
@@ -2231,7 +2238,7 @@ impl ProviderAddFormState {
             AppType::Claude => self.claude_base_url.value.clone(),
             AppType::Codex => self.codex_base_url.value.clone(),
             AppType::Gemini => self.gemini_base_url.value.clone(),
-            AppType::Hermes => self.hermes_base_url.value.clone(),
+            AppType::Hermes | AppType::Kimi => self.hermes_base_url.value.clone(),
             AppType::OpenCode | AppType::OpenClaw => self.opencode_base_url.value.clone(),
             AppType::Pi => {
                 let provider = self.to_provider_json_value();
@@ -2260,7 +2267,7 @@ impl ProviderAddFormState {
             AppType::Claude => (&self.claude_api_key.value, &self.claude_base_url.value),
             AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
             AppType::Gemini => (&self.gemini_api_key.value, &self.gemini_base_url.value),
-            AppType::Hermes => (&self.hermes_api_key.value, &self.hermes_base_url.value),
+            AppType::Hermes | AppType::Kimi => (&self.hermes_api_key.value, &self.hermes_base_url.value),
             AppType::OpenCode | AppType::OpenClaw => {
                 (&self.opencode_api_key.value, &self.opencode_base_url.value)
             }
@@ -2518,7 +2525,8 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
-            | AppType::Pi => false,
+            | AppType::Pi
+            | AppType::Kimi => false,
         }
     }
 

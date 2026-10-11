@@ -21,6 +21,7 @@ impl StreamCheckService {
             }
             AppType::Hermes => Self::extract_hermes_base_url(provider),
             AppType::OpenClaw => Self::extract_openclaw_base_url(provider),
+            AppType::Kimi => Self::extract_kimi_base_url(provider),
             AppType::Pi => crate::pi_config::provider_base_url(&provider.settings_config),
             AppType::Claude | AppType::Codex | AppType::Gemini => get_adapter(app_type)
                 .expect("proxy-capable app must have an adapter")
@@ -93,6 +94,25 @@ impl StreamCheckService {
                     "hermes_base_url_missing",
                     "Hermes 供应商缺少 base_url",
                     "Hermes provider is missing `base_url`",
+                )
+            })
+    }
+
+    fn extract_kimi_base_url(provider: &Provider) -> Result<String, AppError> {
+        provider
+            .settings_config
+            .get("base_url")
+            .or_else(|| provider.settings_config.get("baseUrl"))
+            .or_else(|| provider.settings_config.get("baseURL"))
+            .or_else(|| provider.settings_config.get("endpoint"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::localized(
+                    "kimi_base_url_missing",
+                    "Kimi 供应商缺少 base_url",
+                    "Kimi provider is missing `base_url`",
                 )
             })
     }

@@ -4155,6 +4155,7 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             opencode: false,
             hermes: false,
             pi: false,
+            kimi: false,
         },
         installed_at: 1,
         content_hash: None,
@@ -4654,6 +4655,7 @@ fn header_only_renders_selected_visible_apps() {
         hermes: false,
         openclaw: true,
         pi: false,
+        kimi: false,
     })
     .expect("save visible apps");
 
@@ -4684,6 +4686,7 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
         hermes: false,
         openclaw: true,
         pi: false,
+        kimi: false,
     })
     .expect("save visible apps");
 
@@ -4714,6 +4717,7 @@ fn settings_page_shows_visible_apps_row_value() {
         hermes: false,
         openclaw: true,
         pi: false,
+        kimi: false,
     })
     .expect("save visible apps");
 
@@ -5388,6 +5392,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         },
     };
     app.push_toast(
@@ -5428,6 +5433,7 @@ fn visible_apps_picker_uses_space_toggle_key() {
             hermes: false,
             openclaw: false,
             pi: false,
+            kimi: false,
         },
     };
 
@@ -5460,6 +5466,7 @@ fn visible_apps_picker_auto_mode_does_not_append_auto_suffix_to_apps() {
             hermes: true,
             openclaw: true,
             pi: false,
+            kimi: false,
         },
     };
 
@@ -5618,6 +5625,7 @@ fn header_centers_tabs_when_room_allows() {
         hermes: true,
         openclaw: true,
         pi: false,
+        kimi: false,
     })
     .expect("save visible apps");
 
@@ -5664,6 +5672,7 @@ fn header_keeps_title_and_right_badges_visible_without_large_gap_in_chinese() {
         hermes: true,
         openclaw: true,
         pi: false,
+        kimi: false,
     })
     .expect("save visible apps");
 
@@ -6183,6 +6192,7 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 opencode: false,
                 hermes: false,
                 pi: false,
+                kimi: false,
             },
             installed_at: 0,
             content_hash: None,
@@ -7224,6 +7234,7 @@ fn skills_page_shows_opencode_summary() {
         opencode: true,
         hermes: false,
         pi: false,
+        kimi: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7251,6 +7262,7 @@ fn skills_page_shows_hermes_column_and_summary() {
         opencode: false,
         hermes: true,
         pi: false,
+        kimi: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7281,6 +7293,7 @@ fn skill_detail_page_shows_opencode_enabled_state() {
         opencode: true,
         hermes: false,
         pi: false,
+        kimi: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7312,6 +7325,7 @@ fn skill_detail_page_shows_hermes_enabled_state() {
         opencode: false,
         hermes: true,
         pi: false,
+        kimi: false,
     };
     data.skills.installed = vec![skill];
 
@@ -7375,6 +7389,7 @@ fn mcp_page_renders_opencode_column() {
                 gemini: false,
                 opencode: true,
                 hermes: false,
+                kimi: false,
             },
             description: None,
             homepage: None,
@@ -7412,6 +7427,7 @@ fn mcp_page_renders_hermes_column() {
                 gemini: false,
                 opencode: false,
                 hermes: true,
+                kimi: true,
             },
             description: None,
             homepage: None,
@@ -7468,6 +7484,7 @@ fn mcp_page_uses_space_toggle_key() {
                 gemini: false,
                 opencode: false,
                 hermes: false,
+                kimi: false,
             },
             description: None,
             homepage: None,
@@ -7765,6 +7782,7 @@ fn mcp_page_shows_summary_bar() {
                     gemini: false,
                     opencode: true,
                     hermes: false,
+                    kimi: false,
                 },
                 description: None,
                 homepage: None,
@@ -7785,6 +7803,7 @@ fn mcp_page_shows_summary_bar() {
                     gemini: false,
                     opencode: false,
                     hermes: false,
+                    kimi: false,
                 },
                 description: None,
                 homepage: None,

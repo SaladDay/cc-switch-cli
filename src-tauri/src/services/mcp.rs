@@ -16,6 +16,7 @@ impl McpService {
             AppType::Gemini,
             AppType::OpenCode,
             AppType::Hermes,
+            AppType::Kimi,
         ]
         .into_iter()
     }
@@ -216,6 +217,9 @@ impl McpService {
             AppType::Hermes => {
                 mcp::sync_single_server_to_hermes(cfg, &server.id, &server.server)?;
             }
+            AppType::Kimi => {
+                crate::kimi_config::sync_single_server_to_kimi(cfg, &server.id, &server.server)?;
+            }
             AppType::OpenClaw => {}
             AppType::Pi => {}
         }
@@ -242,6 +246,7 @@ impl McpService {
             AppType::Gemini => mcp::remove_server_from_gemini(id)?,
             AppType::OpenCode => mcp::remove_server_from_opencode(id)?,
             AppType::Hermes => mcp::remove_server_from_hermes(id)?,
+            AppType::Kimi => crate::kimi_config::remove_server_from_kimi(id)?,
             AppType::OpenClaw => {}
             AppType::Pi => {}
         }
