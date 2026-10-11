@@ -143,6 +143,9 @@ pub enum Action {
     RouteMemberModelFetch {
         provider_id: String,
     },
+    /// Opens the model picker on the mapping editor's request field,
+    /// pre-filled with this app's env-sourced request models (no network).
+    RouteRequestModelsFetch,
     UsageCustomRange {
         range: data::UsageCustomRange,
     },

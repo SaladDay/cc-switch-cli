@@ -51,7 +51,7 @@ impl CodexCatalogToolProfile {
 const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &["xiaomimimo.com", "minimaxi.com"];
 const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] = &["mimo", "minimax"];
 
-fn codex_top_level_model(config_text: &str) -> Option<String> {
+pub(crate) fn codex_top_level_model(config_text: &str) -> Option<String> {
     let doc = config_text.parse::<toml::Value>().ok()?;
     doc.get("model")
         .and_then(toml::Value::as_str)

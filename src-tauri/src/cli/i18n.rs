@@ -5262,6 +5262,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_route_mappings_request_pick_key() -> &'static str {
+        if is_chinese() {
+            "选择请求模型"
+        } else {
+            "pick request model"
+        }
+    }
+
+    pub fn tui_route_member_no_request_models() -> &'static str {
+        if is_chinese() {
+            "当前启用的供应商配置中没有请求模型。"
+        } else {
+            "No request models found in the active provider config."
+        }
+    }
+
     pub fn tui_route_mappings_empty_hint() -> &'static str {
         if is_chinese() {
             "暂无映射；按 a 新增，Enter 编辑，d 删除，Esc 应用并关闭"
