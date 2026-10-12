@@ -31,23 +31,15 @@
 
 ## ❤️ スポンサー
 
-[![AICodeMirror](assets/partners/banners/aicodemirror.png)](https://www.aicodemirror.ai/register?invitecode=77V9EA)
-
-本プロジェクトをご支援いただいている **AICodeMirror** に感謝します！AICodeMirror は、Claude、Codex、Gemini の公式チャネルを利用した安定性の高い API 中継サービスを提供しています。企業向けの高い同時処理能力、迅速な請求書発行、24 時間・年中無休の専任技術サポートに対応しています。Codex の公式チャネルは **通常料金の 7% から**利用でき、チャージ時には追加割引もあります。
-
-CC-Switch CLI ユーザー向けの特典として、[こちらのリンク](https://www.aicodemirror.ai/register?invitecode=77V9EA)から登録すると、**初回チャージが 20% オフ**になります。
-
----
-
 <table>
   <tr>
     <td width="180">
-      <a href="https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii">
-        <img src="assets/partners/logos/claudeapi.png" alt="ClaudeAPI" width="150">
+      <a href="https://88api.ai/sign-up?aff=TeNl">
+        <img src="assets/partners/logos/88api-banner-en.jpg" alt="88API" width="150">
       </a>
     </td>
     <td>
-      本プロジェクトをご支援いただいている <b>ClaudeAPI</b> に感謝します！<b>ClaudeAPI</b> は、公式チャネルと AWS チャネルを利用する Claude 向け API 接続サービスです。高い安定性と低遅延を実現し、Claude Code、Codex、エージェントのワークフロー、企業での利用に幅広く対応しています。法人導入、チームの利用管理、請求書発行にも対応しています。CC-Switch CLI ユーザー向けの特典として、<a href="https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii">専用リンク</a>から登録すると無料の試用クレジットを受け取り、すぐに Claude Code を使い始められます。
+      本プロジェクトをご支援いただいているトークン集約プラットフォーム 88API に感謝します！88API は、香港の企業が運営する、開発者、クリエイター、AI アプリのユーザーを主な対象としたワンストップのマルチモデル API プラットフォームです。統一されたインターフェースからテキスト、画像、音声、動画のモデルを利用でき、AI コーディング、機械翻訳、コンテンツ制作、ナレーション、画像生成、動画生成などの幅広いワークフローに対応しています。CC-Switch CLI から直接プロバイダーとして追加し、切り替えることができます。国際的な主要決済方法、請求書発行に対応し、企業向けの安定したサービスを提供しています。<a href="https://88api.ai/sign-up?aff=TeNl">こちらのリンク</a>から登録すると、限定のボーナスクレジットを受け取れます！
     </td>
   </tr>
   <tr>
@@ -80,28 +72,6 @@ CC-Switch CLI ユーザー向けの特典として、[こちらのリンク](htt
     </td>
     <td>
       1 つの API で、主要モデルをまとめて利用！<a href="https://www.openmodel.ai/?ref=JGDNqZl8"><b>OpenModel</b></a> は、本番運用向けの高可用性 AI API ゲートウェイです。自動フェイルオーバー、最適なチャネルへのインテリジェントなルーティング、本番運用向け SLA により、アプリケーションの速度と安定性を支えます。単一プロバイダーを大きく上回る SLA で、安定性を競争力に変えます。Claude Code、Codex、Gemini CLI にそのまま接続できます。<a href="https://www.openmodel.ai/?ref=JGDNqZl8">こちらのリンク</a>から登録してご利用ください。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://s.qiniu.com/FVfiEb">
-        <img src="assets/partners/logos/qiniuyun.png" alt="Qiniu Cloud AI" width="150">
-      </a>
-    </td>
-    <td>
-      本プロジェクトをご支援いただいている <b>Qiniu Cloud AI</b> に感謝します！<b>Qiniu Cloud（香港証券取引所：02567）</b>が提供する企業向け大規模モデル MaaS プラットフォームです。世界の主要モデル 150 種類以上を一括で利用でき、主要なモデルプロバイダーのプロトコルに対応しています。テキスト、画像、音声、動画、ファイル処理を含むマルチモーダル機能を提供し、<b>169 万以上</b>の企業・開発者ユーザーに利用されています。<br/>
-      特典として、法人ユーザーは <b>1,200 万トークンを無料</b>で受け取れます。友人紹介では最大で<b>数百億トークン</b>を獲得できます。<a href="https://s.qiniu.com/FVfiEb">こちらのリンク</a>から登録してください。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">
-        <img src="assets/partners/logos/fennoai.png" alt="Fenno.ai" width="150">
-      </a>
-    </td>
-    <td>
-      本プロジェクトをご支援いただいている <b>Fenno.ai</b> に感謝します！Fenno.ai は、現在 Codex を中心に提供している、安定性と効率性に優れた API 中継サービスです。OpenAI と Anthropic の両プロトコルに対応し、Codex、Claude Code、OpenCode などの主要な開発ツールとスムーズに連携できます。1 日あたり数千億トークン規模の企業利用を安定して処理し、中国国内外の法人間決済と請求書発行に対応しています。<br/>
-      CC-Switch CLI ユーザー向けの特典として、<a href="https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y">こちらのリンク</a>から、<b>9.9 人民元で 150 米ドル分のクレジット</b>を利用できる Coding Plan に申し込めます。友人紹介では最大 <b>20% の報酬</b>を受け取れます。紹介するほど特典が増えます！
     </td>
   </tr>
   <tr>
@@ -359,10 +329,13 @@ ChatGPT/Codex の OAuth アカウントをローカルで管理し、複数の�
 ```bash
 cc-switch auth status                # 管理中のアカウントの状態を表示
 cc-switch auth login                 # ChatGPT/Codex OAuth でログイン
+cc-switch auth login --account-id <id> # 既存のアカウントを再認証し、プロバイダーの紐付けを維持
 cc-switch auth list                  # ログイン済みアカウントを一覧表示
 cc-switch auth default <account-id>  # デフォルトアカウントを設定
 cc-switch auth remove <account-id>   # アカウントを削除
 ```
+
+同じ ChatGPT ワークスペースのメンバーにも、それぞれ独立したローカルアカウント ID が割り当てられます。旧バージョンで保存された管理対象アカウントは再認証が必要です。`cc-switch auth list` で ID を確認し、`cc-switch auth login --account-id <id>` を実行するか、TUI のアカウントメニューで **Reauthenticate（再認証）** を選択してください。既存のプロバイダーの紐付けを維持するには、元のユーザーとして同じワークスペースにサインインしてください。
 
 ### 🛠️ MCP サーバー管理
 
