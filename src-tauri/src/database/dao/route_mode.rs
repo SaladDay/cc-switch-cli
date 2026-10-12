@@ -238,10 +238,41 @@ impl Database {
     /// Flip only the enabled flag (members preserved; precondition guards
     /// live in the service layer). Provider existence is not re-checked so a
     /// dangling member can never wedge the mode in the on state.
+    ///
+    /// The stored doc is mutated as raw JSON on purpose: a structurally
+    /// invalid doc (e.g. one member with weight 0) would otherwise be
+    /// collapsed to the default by `get_route_mode_group` and this write
+    /// would erase members that are still recoverable.
     pub fn set_route_mode_enabled(&self, app_type: &str, enabled: bool) -> Result<(), AppError> {
-        let mut group = self.get_route_mode_group(app_type)?;
-        group.enabled = enabled;
-        self.write_route_mode_group(app_type, &group, false)
+        let conn = lock_conn!(self.conn);
+        let key = route_mode_key(app_type);
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                rusqlite::params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut doc: serde_json::Value = match stored {
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(doc @ serde_json::Value::Object(_)) => doc,
+                Ok(_) | Err(_) => serde_json::json!({ "enabled": false, "members": [] }),
+            },
+            None => serde_json::json!({ "enabled": false, "members": [] }),
+        };
+        doc["enabled"] = serde_json::json!(enabled);
+
+        let json = serde_json::to_string(&doc).map_err(|e| {
+            AppError::Database(format!("failed to serialize route mode config: {e}"))
+        })?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, json],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -384,6 +415,31 @@ mod tests {
 
         assert!(!group.enabled);
         assert!(group.members.is_empty());
+    }
+
+    #[test]
+    fn set_route_mode_enabled_preserves_structurally_invalid_members() {
+        // The flag flip mutates the stored doc raw: a structurally invalid
+        // member must survive it instead of being erased by a
+        // default-collapse rewrite through the read path.
+        let db = Database::memory().expect("create memory db");
+        let raw = r#"{"enabled":false,"members":[{"providerId":"p1","weight":0,"enabled":true,"modelMappings":{}}]}"#;
+        db.set_setting(&route_mode_key("claude"), raw)
+            .expect("write structurally invalid json");
+
+        db.set_route_mode_enabled("claude", true).expect("enable");
+
+        let stored = db
+            .get_setting(&route_mode_key("claude"))
+            .expect("read raw doc")
+            .expect("doc exists");
+        let doc: serde_json::Value = serde_json::from_str(&stored).expect("parse stored doc");
+        assert_eq!(doc["enabled"], serde_json::json!(true));
+        assert_eq!(
+            doc["members"],
+            serde_json::json!([{"providerId":"p1","weight":0,"enabled":true,"modelMappings":{}}]),
+            "invalid member must be preserved verbatim"
+        );
     }
 
     #[test]

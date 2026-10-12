@@ -123,13 +123,22 @@ pub fn apply_model_mapping(
 /// Called before the existing role-keyword mapping (`apply_model_mapping`);
 /// the mapped result then flows through normal `[1m]` handling and upstream
 /// override logic
+///
+/// When the raw request model misses the table, the lookup retries on the
+/// `[1m]`-stripped name: mapping keys are seeded bare by the TUI picker, and
+/// a `name[1m]` request should still hit the bare `name` entry instead of
+/// silently no-oping. Exact hits (including keys that carry the marker
+/// themselves) keep priority.
 pub fn apply_route_model_mapping(mut body: Value, mappings: &BTreeMap<String, String>) -> Value {
     if mappings.is_empty() {
         return body;
     }
 
     if let Some(model) = body.get("model").and_then(Value::as_str) {
-        if let Some(actual) = mappings.get(model) {
+        let actual = mappings
+            .get(model)
+            .or_else(|| mappings.get(strip_one_m_suffix_for_upstream(model)));
+        if let Some(actual) = actual {
             body["model"] = serde_json::json!(actual);
         }
     }
@@ -316,6 +325,28 @@ mod tests {
         let result = apply_route_model_mapping(body, &mappings);
 
         assert_eq!(result["model"], "m-a");
+    }
+
+    #[test]
+    fn route_mapping_hits_bare_key_for_one_m_suffixed_request() {
+        // Picker-seeded keys are bare; a `name[1m]` request must still hit
+        // the bare entry instead of silently no-oping
+        let mut mappings = BTreeMap::new();
+        mappings.insert("m-a".to_string(), "m-b".to_string());
+
+        let hit = apply_route_model_mapping(json!({"model": "m-a[1m]"}), &mappings);
+        assert_eq!(hit["model"], "m-b");
+
+        // Exact keys that carry the marker themselves keep priority
+        let mut marker_key = BTreeMap::new();
+        marker_key.insert("m-a[1m]".to_string(), "m-marker".to_string());
+        marker_key.insert("m-a".to_string(), "m-bare".to_string());
+        let exact = apply_route_model_mapping(json!({"model": "m-a[1m]"}), &marker_key);
+        assert_eq!(exact["model"], "m-marker");
+
+        // Unrelated models stay untouched
+        let miss = apply_route_model_mapping(json!({"model": "m-x[1m]"}), &mappings);
+        assert_eq!(miss["model"], "m-x[1m]");
     }
 
     #[test]
