@@ -10489,6 +10489,133 @@ mod tests {
     }
 
     #[test]
+    fn route_mode_help_covers_member_keys_and_rules() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+
+        {
+            let _lang = use_test_language(Language::English);
+            let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
+            let body = help.lines.join("\n");
+
+            assert_eq!(help.title, "Route Mode");
+            assert!(body.contains("a,a,b,a"), "{body}");
+            assert!(body.contains("add member"), "{body}");
+            assert!(body.contains("passthrough"), "{body}");
+            assert!(body.contains("weight (1-1000)"), "{body}");
+            assert!(body.contains("automatic failover"), "{body}");
+            assert!(body.contains("Proxy takeover"), "{body}");
+            assert!(body.contains("re-converges"), "{body}");
+            assert!(body.contains("model mappings"), "{body}");
+            assert!(!body.contains("nginx"), "{body}");
+        }
+
+        {
+            let _lang = use_test_language(Language::Chinese);
+            let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
+            let body = help.lines.join("\n");
+
+            assert_eq!(help.title, "路由模式");
+            assert!(body.contains("平滑加权轮询"), "{body}");
+            assert!(body.contains("权重（1-1000）"), "{body}");
+            assert!(body.contains("模型映射"), "{body}");
+            assert!(body.contains("新增成员"), "{body}");
+            assert!(body.contains("代理接管"), "{body}");
+        }
+    }
+
+    #[test]
+    fn route_mappings_help_is_distinct_and_covers_editor_semantics() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: None,
+        });
+
+        {
+            let _lang = use_test_language(Language::English);
+            let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
+            let body = help.lines.join("\n");
+
+            assert_eq!(help.title, "Model Mappings — One");
+            assert!(body.contains("exact-matched"), "{body}");
+            assert!(body.contains("URL path"), "{body}");
+            assert!(body.contains("Ctrl+R"), "{body}");
+            assert!(body.contains("Ctrl+F"), "{body}");
+            assert!(body.contains("stays open"), "{body}");
+            assert!(body.contains("unique across rows"), "{body}");
+            assert!(body.contains("Tab"), "{body}");
+            assert!(!body.contains("round-robin"), "{body}");
+            assert!(!body.contains("weight"), "{body}");
+        }
+
+        {
+            let _lang = use_test_language(Language::Chinese);
+            let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
+            let body = help.lines.join("\n");
+
+            assert_eq!(help.title, "模型映射 — One");
+            assert!(body.contains("精确匹配"), "{body}");
+            assert!(body.contains("URL 路径"), "{body}");
+            assert!(body.contains("选择请求模型"), "{body}");
+            assert!(body.contains("上游模型"), "{body}");
+        }
+    }
+
+    #[test]
+    fn route_member_picker_help_keeps_screen_context() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMemberPicker {
+            selected_provider_id: None,
+        };
+
+        let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
+        assert_eq!(help.title, "Route Mode");
+    }
+
+    #[test]
+    fn help_key_over_route_mappings_editor_restores_editor_on_close() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::RouteMode;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: "p1".to_string(),
+            provider_name: "One".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            editing: None,
+        });
+        let data = UiData::default();
+
+        let action = app.on_key(key(KeyCode::Char('?')), &data);
+        assert!(matches!(action, Action::None));
+        match &app.overlay {
+            Overlay::Help(state) => {
+                assert_eq!(state.content.title, "Model Mappings — One");
+                assert!(state.content.lines.join("\n").contains("Ctrl+R"));
+            }
+            other => panic!("expected help overlay, got {other:?}"),
+        }
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        assert!(matches!(action, Action::None));
+        assert!(
+            matches!(app.overlay, Overlay::RouteMappingsEditor(_)),
+            "editor overlay should be restored after closing help"
+        );
+    }
+
+    #[test]
     fn settings_menu_places_preferred_editor_after_icons() {
         let editor_index = SettingsItem::ALL
             .iter()
