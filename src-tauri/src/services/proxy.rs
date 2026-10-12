@@ -9897,6 +9897,33 @@ base_url = "https://api.example/v1"
 
     #[tokio::test]
     #[serial]
+    async fn route_mode_enable_succeeds_with_live_managed_worker() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_route_group(&db, "claude", &["p1"]).await;
+        // Attempt the enable from a disabled group so the assertion proves
+        // the successful enable itself flipped the flag
+        db.set_route_mode_enabled("claude", false)
+            .expect("disable route group");
+        let (_server, port) = spawn_status_server_for_test("claude-test-token").await;
+        seed_managed_worker_for_app(db.as_ref(), "claude", port);
+
+        service
+            .enable_route_mode_for_app("claude")
+            .await
+            .expect("enable route mode with live managed worker");
+
+        assert!(
+            db.route_mode_enabled_for_app("claude").expect("read flag"),
+            "flag must be on after a successful enable"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn route_mode_enable_conflicts_with_auto_failover() {
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());

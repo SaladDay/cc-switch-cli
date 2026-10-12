@@ -320,10 +320,6 @@ pub(crate) mod route_mode {
         super::key_bar_items(BINDINGS, app, data)
     }
 
-    pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
-        super::help_items(BINDINGS, app, data)
-    }
-
     pub(crate) const BINDINGS: &[Binding<Intent>] = &[
         Binding {
             display: "↑↓",
