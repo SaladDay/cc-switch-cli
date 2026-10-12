@@ -54,6 +54,9 @@ enum HelpTarget {
     PiPromptTemplates,
     FailoverQueue,
     RouteMode,
+    RouteMappings {
+        provider_name: String,
+    },
     PreferredEditor,
     SkillStorageLocation,
     SkillSyncMethod,
@@ -135,9 +138,10 @@ fn current_help_target(app: &App) -> HelpTarget {
                 provider_field_overlay_target(app, ProviderAddField::CodexOAuthAccount)
             }
             Overlay::FailoverQueueManager { .. } => HelpTarget::FailoverQueue,
-            Overlay::RouteMemberPicker { .. } | Overlay::RouteMappingsEditor(_) => {
-                HelpTarget::RouteMode
-            }
+            Overlay::RouteMemberPicker { .. } => HelpTarget::RouteMode,
+            Overlay::RouteMappingsEditor(editor) => HelpTarget::RouteMappings {
+                provider_name: editor.provider_name.clone(),
+            },
             Overlay::SessionProjectPicker(_) => HelpTarget::Sessions,
             Overlay::McpKeyValuePicker { kind, .. } => HelpTarget::McpField {
                 field: match kind {
@@ -376,8 +380,15 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         HelpTarget::RouteMode => HelpContent::new(
             texts::tui_route_mode_title(),
             help_lines(
-                "路由模式把同一个端点暴露给多个已启用供应商，按权重分配请求（平滑加权轮询，同 nginx）：权重 3:1 时请求序列为 a,a,b,a 循环。Enter 在第 0 行开关整个路由模式，在其他行切换成员启用状态；w 设置权重（1-1000），m 打开多行模型映射编辑器，a 添加成员，d 移除成员。\n映射编辑器内：a 新增一行，Enter 编辑当前行，d 删除；行编辑时 Tab 切换请求/实际模型，Enter 保存行，Esc 取消（其余按键直接输入文本）；在\"实际模型\"框按 Ctrl+F 拉取该成员供应商的上游模型列表并从中选择。Esc 关闭编辑器时一次性应用全部改动；请求模型名不能重复或为空。\n路由模式开启时不能停用（或移除）最后一个启用的成员：请先启用其他成员或关闭路由模式。\n模型映射是精确匹配的请求模型到实际模型改写：请求模型命中后才改写，未命中的保持现有行为。改写结果仍走正常的 [1m] 后缀处理与角色关键词映射。映射改写的是请求 Body 中的 model 字段，因此对 Claude 与 Codex 流量生效；Gemini 透传的模型名在 URL 路径中，Gemini 成员的映射会保存但不会生效（与现有角色关键词映射的作用范围一致）。\n路由模式与自动故障转移互斥：开启路由模式会忽略故障转移队列；开启路由模式前必须先关闭自动故障转移。同请求内首个成员失败时，会按成员存储顺序跳到下一个健康成员（受 max_retries 限制，极端情况下队列尾部可能轮不到）。\n开启路由模式要求代理接管已开启（会自动拉起守护会话，CLI 退出后端点仍可用）；代理关闭前需先关闭路由模式。路由模式的配置在代理禁用期间保留（休眠，与自动故障转移标志一致）。轮询状态按代理进程内存保存，代理重启后立即按权重重新收敛。",
-                "Route mode exposes one endpoint across multiple enabled providers, distributing requests by weight (smooth weighted round-robin, like nginx): with weights 3:1 the picks cycle a,a,b,a. Enter toggles route mode on row 0 or the focused member's enabled flag on other rows; w sets the weight (1-1000), m opens the multi-row model mapping editor, a adds a member, d removes one.\nInside the mapping editor: a adds a row, Enter edits the selected row, d removes it; while editing a row, Tab switches between request and actual model, Enter saves the row, Esc cancels (other keys type directly into the fields); with the actual-model field focused, press Ctrl+F to fetch the member provider's upstream model list and pick from it. Esc closes the editor and applies all changes at once; request model names must be unique and non-empty.\nWhile route mode is on, the last enabled member cannot be disabled or removed: enable another member or turn route mode off first.\nModel mappings rewrite an exact-matched request model to an actual model: the rewrite happens only on an exact hit and unmatched models keep their existing behavior. The mapped name still flows through normal [1m] suffix handling and role-keyword mapping. Mappings rewrite the request body's model field, so they apply to Claude and Codex traffic; Gemini passthrough carries the model in the URL path, so a Gemini member's mappings are stored but not applied (same scope as the existing role-keyword mapping).\nRoute mode is mutually exclusive with automatic failover: the failover queue is ignored while route mode is on, and automatic failover must be off before enabling route mode. When the winning member fails mid-request, the next healthy member in stored order serves it (bounded by max_retries, so tail members may never be reached in cascading failures).\nEnabling route mode requires proxy takeover (it brings up the daemon-backed session so the endpoint survives CLI exit); the proxy cannot be disabled while route mode is on. Route mode config persists while the proxy is disabled (dormant, same as the automatic failover flag). The round-robin state lives in the proxy process and re-converges immediately after a restart.",
+                "路由模式把同一个端点暴露给多个已启用供应商，按平滑加权轮询分配请求：权重 3:1 时请求序列为 a,a,b,a 循环。\n按键：\n· ↑↓ —— 选择行\n· Enter —— 启用/禁用（第 0 行为路由模式，其余行为成员启用）\n· w —— 权重（1-1000）\n· m —— 模型映射编辑器\n· a —— 新增成员（按当前启用供应商配置播种透传映射）\n· d —— 删除成员\n规则：\n· 最后一个启用成员：路由模式开启时不能停用或删除它——请先启用其他成员或关闭路由模式。\n· 与自动故障转移互斥：开启路由模式前必须先关闭自动故障转移，开启后故障转移队列被忽略。成员请求失败时按存储顺序交给下一个健康成员（受 max_retries 限制）。\n· 需要代理接管：开启路由模式会拉起守护代理会话，CLI 退出后端点仍可用；路由模式开启期间不能关闭代理。\n· 休眠保留：代理关闭期间路由模式配置保留；轮询状态保存在代理进程内存中，代理重启后立即按权重重新收敛。",
+                "Route mode exposes one endpoint across multiple enabled providers and distributes requests by smooth weighted round-robin: with weights 3:1 the picks cycle a,a,b,a.\nKeys:\n· ↑↓ — select row\n· Enter — toggle route mode (row 0) or member enabled (other rows)\n· w — weight (1-1000)\n· m — model mappings editor\n· a — add member (seeds passthrough mappings from the active provider config)\n· d — delete member\nRules:\n· Last enabled member: while route mode is on it cannot be disabled or removed — enable another member or turn route mode off first.\n· Mutual exclusion with automatic failover: automatic failover must be off before enabling route mode, and the failover queue is ignored while route mode is on. A failing member hands the request to the next healthy member in stored order (bounded by max_retries).\n· Proxy takeover required: enabling route mode starts the daemon-backed proxy session so the endpoint survives CLI exit; the proxy cannot be stopped while route mode is on.\n· Dormant persistence: route mode config is kept while the proxy is disabled; round-robin state lives in the proxy process and re-converges by weight right after a restart.",
+            ),
+        ),
+        HelpTarget::RouteMappings { provider_name } => HelpContent::new(
+            texts::tui_route_mappings_title(&provider_name),
+            help_lines(
+                "每行把精确匹配的请求模型改写为实际模型；未命中的模型保持现有行为。改写结果仍走正常的 [1m] 后缀处理与角色关键词映射。映射改写请求 Body 的 model 字段，因此只对 Claude 与 Codex 流量生效；Gemini 透传的模型名在 URL 路径中，Gemini 成员的映射会保存但不会生效。\n编辑器按键：\n· a —— 新增行\n· Enter —— 编辑行\n· d —— 删除行\n· Esc —— 一次性应用全部行；有问题的行会被报告，编辑器保持打开\n请求模型名不能为空，且不能重复。\n编辑行时：\n  · Tab —— 切换请求/实际字段\n  · Ctrl+R —— 从路由应用当前启用的供应商配置中选择请求模型（请求字段）\n  · Ctrl+F —— 拉取该成员供应商的上游模型列表（实际模型字段）\n  · Enter —— 保存行\n  · Esc —— 取消行编辑",
+                "Each row rewrites an exact-matched request model to an actual model; unmatched models keep their existing behavior. The rewritten name still flows through normal [1m] suffix handling and role-keyword mapping. Mappings rewrite the request body's model field, so they apply to Claude and Codex traffic only; Gemini passthrough carries the model in the URL path, so a Gemini member's mappings are stored but not applied.\nEditor keys:\n· a — add row\n· Enter — edit row\n· d — delete row\n· Esc — apply all rows at once; invalid rows are reported and the editor stays open\nRequest model names must be non-empty and unique across rows.\nWhile editing a row:\n  · Tab — switch between the request and actual fields\n  · Ctrl+R — pick a request model from the route app's active provider config (request field)\n  · Ctrl+F — fetch the member provider's upstream model list (actual field)\n  · Enter — save the row\n  · Esc — cancel row editing",
             ),
         ),
         HelpTarget::PreferredEditor => HelpContent::new(
