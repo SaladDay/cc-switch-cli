@@ -38,17 +38,9 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 <td>Thanks to 88API Token Aggregation Platform for sponsoring this project! 88API is a one-stop multi-model API platform operated by a Hong Kong company, built mainly for developers, creators and AI application users. A unified interface gives access to text, image, speech and video models, covering common workflows such as AI coding, smart translation, content creation, voice-over, image generation and video generation. You can add it as a provider and switch to it right inside CC-Switch CLI. 88API supports major international payment methods, can issue invoices, and provides enterprise-grade stable service. Register via <a href="https://88api.ai/sign-up?aff=TeNl">this link</a> to receive exclusive bonus credits!</td>
 </tr>
   <tr>
-    <td width="180">
-      <a href="https://pateway.ai/?ch=18fxbjo">
-        <img src="assets/partners/logos/pateway.png" alt="PatewayAI" width="150">
-      </a>
-    </td>
-    <td>
-      PatewayAI is an API relay service tailored for seasoned AI developers. It offers full‑fledged support for Claude and Codex model families. All models are sourced from high‑quality official channels with no diluted or counterfeit outputs. Transparent billing details are available for full traceability.<br/>
-      Enjoy rates as low as 95% off official pricing. Sign up via <a href="https://pateway.ai/?ch=18fxbjo">this link</a> to receive trial credits, and stay tuned for periodic promotional campaigns to earn free credits.<br/>
-      The platform also delivers enterprise‑grade concurrency capacity, a dedicated admin dashboard, formal contracts and invoicing support. Earn up to $150 in mutual referral bonuses.
-    </td>
-  </tr>
+<td width="180"><a href="https://go.apimart.ai/gh-cc-switch-cli"><img src="assets/partners/logos/apimart.png" alt="APIMart" width="150"></a></td>
+<td>Thanks to APIMart for sponsoring this project! APIMart is a low-cost API platform for AI image &amp; video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-cc-switch-cli">sign up here</a> to get started.</td>
+</tr>
   <tr>
     <td width="180">
       <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">

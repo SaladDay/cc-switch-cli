@@ -119,7 +119,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Claude Official",
             "Codex",
             "88API",
-            "PatewayAI",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -128,6 +128,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "AICodeMirror",
             "ClaudeAPI",
             "Qiniu",
+            "PatewayAI",
             "FennoAI",
             "DeepSeek",
             "Zhipu GLM",
@@ -148,7 +149,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "OpenAI Official",
             "88API",
-            "PatewayAI",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -156,6 +157,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "RunAPI",
             "AICodeMirror",
             "Qiniu",
+            "PatewayAI",
             "FennoAI",
             "DeepSeek",
             "Zhipu GLM",
@@ -176,6 +178,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Google OAuth",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -190,6 +193,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -210,6 +214,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -226,6 +231,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -258,6 +264,7 @@ fn provider_add_form_pi_exposes_only_the_selected_template_scope() {
             "OpenCode Go",
             "OpenRouter",
             "88API",
+            "APIMart",
             "Cubence",
             "PackyCode",
             "RunAPI",
@@ -295,7 +302,7 @@ fn provider_add_form_pi_picker_uses_family_sections() {
             ProviderTemplateRow::Header(_) => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(items.len(), 17);
+    assert_eq!(items.len(), 18);
     assert_eq!(items[0], (0, "Custom", ProviderTemplateSection::BuiltIn));
     assert_eq!(
         items[9],
@@ -303,8 +310,8 @@ fn provider_add_form_pi_picker_uses_family_sections() {
     );
     assert_eq!(items[10], (10, "88API", ProviderTemplateSection::Sponsors));
     assert_eq!(
-        items[16],
-        (16, "FennoAI", ProviderTemplateSection::Sponsors)
+        items[17],
+        (17, "FennoAI", ProviderTemplateSection::Sponsors)
     );
 }
 
@@ -620,6 +627,12 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
 #[test]
 fn cli_provider_templates_match_tui_serializer_output() {
     for (app_type, template, label) in [
+        (AppType::Claude, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::Codex, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::Gemini, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::OpenCode, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::Hermes, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::OpenClaw, ProviderAddTemplate::Apimart, "APIMart"),
         (
             AppType::Claude,
             ProviderAddTemplate::ClaudeOfficial,
@@ -6116,6 +6129,7 @@ fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -6140,6 +6154,7 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",

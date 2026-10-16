@@ -33,6 +33,24 @@ pub(crate) const API88: SponsorProviderPreset = SponsorProviderPreset {
     hermes_base_url: "https://api.88api.ai",
 };
 
+// Protocol endpoints: https://docs.apimart.ai/cn
+pub(crate) const APIMART: SponsorProviderPreset = SponsorProviderPreset {
+    id: "apimart",
+    provider_name: "APIMart",
+    chip_label: "* APIMart",
+    website_url: "https://apimart.ai",
+    register_url: "https://go.apimart.ai/gh-cc-switch-cli",
+    promo_code: "",
+    partner_promotion_key: "apimart",
+    claude_api_key_field: ClaudeApiKeyField::ApiKey,
+    claude_base_url: "https://api.apimart.ai",
+    codex_base_url: "https://api.apimart.ai/v1",
+    gemini_base_url: "https://api.apimart.ai",
+    opencode_base_url: "https://api.apimart.ai/v1",
+    openclaw_base_url: "https://api.apimart.ai/v1",
+    hermes_base_url: "https://api.apimart.ai/v1",
+};
+
 pub(crate) const CLAUDE_API: SponsorProviderPreset = SponsorProviderPreset {
     id: "claudeapi",
     provider_name: "ClaudeAPI",
@@ -204,9 +222,9 @@ pub(crate) const FENNO: SponsorProviderPreset = SponsorProviderPreset {
     hermes_base_url: "https://api.fenno.ai/v1",
 };
 
-pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 11] = [
+pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 12] = [
     API88,
-    PATEWAY_AI,
+    APIMART,
     CUBENCE,
     OPENMODEL,
     PACKY_CODE,
@@ -215,12 +233,13 @@ pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 11] = [
     AI_CODE_MIRROR,
     CLAUDE_API,
     QINIU,
+    PATEWAY_AI,
     FENNO,
 ];
 
-const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 11] = [
+const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 12] = [
     API88,
-    PATEWAY_AI,
+    APIMART,
     CUBENCE,
     OPENMODEL,
     PACKY_CODE,
@@ -229,11 +248,12 @@ const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 11] = [
     AI_CODE_MIRROR,
     CLAUDE_API,
     QINIU,
+    PATEWAY_AI,
     FENNO,
 ];
-const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 10] = [
+const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 11] = [
     API88,
-    PATEWAY_AI,
+    APIMART,
     CUBENCE,
     OPENMODEL,
     PACKY_CODE,
@@ -241,12 +261,21 @@ const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 10] = [
     RUN_API,
     AI_CODE_MIRROR,
     QINIU,
+    PATEWAY_AI,
     FENNO,
 ];
-const GEMINI_SPONSOR_PRESETS: [SponsorProviderPreset; 6] =
-    [API88, CUBENCE, OPENMODEL, PACKY_CODE, AI_CODE_MIRROR, QINIU];
-const ADDITIVE_SPONSOR_PRESETS: [SponsorProviderPreset; 8] = [
+const GEMINI_SPONSOR_PRESETS: [SponsorProviderPreset; 7] = [
     API88,
+    APIMART,
+    CUBENCE,
+    OPENMODEL,
+    PACKY_CODE,
+    AI_CODE_MIRROR,
+    QINIU,
+];
+const ADDITIVE_SPONSOR_PRESETS: [SponsorProviderPreset; 9] = [
+    API88,
+    APIMART,
     CUBENCE,
     OPENMODEL,
     PACKY_CODE,
@@ -359,6 +388,7 @@ mod tests {
     fn additive_apps_share_one_sponsor_support_matrix() {
         let expected = [
             "88api",
+            "apimart",
             "cubence",
             "openmodel",
             "packycode",

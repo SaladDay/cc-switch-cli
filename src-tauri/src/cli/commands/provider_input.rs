@@ -35,6 +35,7 @@ pub enum ProviderAddTemplate {
     GoogleOauth,
     #[value(name = "88api")]
     Api88,
+    Apimart,
     Patewayai,
     Cubence,
     Openmodel,
@@ -61,6 +62,7 @@ impl ProviderAddTemplate {
             Self::Runapi => "runapi",
             Self::Aicodemirror => "aicodemirror",
             Self::Patewayai => "patewayai",
+            Self::Apimart => "apimart",
             Self::Api88 => "88api",
             Self::Cubence => "cubence",
             Self::Openmodel => "openmodel",
@@ -83,6 +85,7 @@ impl ProviderAddTemplate {
                 | Self::Runapi
                 | Self::Aicodemirror
                 | Self::Api88
+                | Self::Apimart
                 | Self::Patewayai
                 | Self::Cubence
                 | Self::Openmodel
@@ -245,6 +248,7 @@ fn sponsor_template_from_id(id: &str) -> ProviderAddTemplate {
         "packycode" => ProviderAddTemplate::Packycode,
         "runapi" => ProviderAddTemplate::Runapi,
         "aicodemirror" => ProviderAddTemplate::Aicodemirror,
+        "apimart" => ProviderAddTemplate::Apimart,
         "patewayai" => ProviderAddTemplate::Patewayai,
         "88api" => ProviderAddTemplate::Api88,
         "cubence" => ProviderAddTemplate::Cubence,
@@ -355,6 +359,7 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -379,6 +384,7 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -405,6 +411,7 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Dds => None,
@@ -444,6 +451,7 @@ fn template_default_meta(
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -484,6 +492,7 @@ fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> 
         | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -504,6 +513,7 @@ fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -534,6 +544,7 @@ fn build_provider_template_settings_config(
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -1182,7 +1193,7 @@ requires_openai_auth = true
                 "Claude Official",
                 "Codex",
                 "* 88API",
-                "* PatewayAI",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1191,6 +1202,7 @@ requires_openai_auth = true
                 "* AICodeMirror",
                 "* ClaudeAPI",
                 "* Qiniu",
+                "* PatewayAI",
                 "* FennoAI",
             ]
         );
@@ -1200,7 +1212,7 @@ requires_openai_auth = true
                 "Custom",
                 "OpenAI Official",
                 "* 88API",
-                "* PatewayAI",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1208,6 +1220,7 @@ requires_openai_auth = true
                 "* RunAPI",
                 "* AICodeMirror",
                 "* Qiniu",
+                "* PatewayAI",
                 "* FennoAI",
                 "DeepSeek",
             ]
@@ -1218,6 +1231,7 @@ requires_openai_auth = true
                 "Custom",
                 "Google OAuth",
                 "* 88API",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1230,6 +1244,7 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* 88API",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1244,6 +1259,7 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* 88API",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1258,6 +1274,7 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* 88API",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",

@@ -121,7 +121,7 @@ pub(crate) static PI_BUILTIN_PROVIDER_PRESETS: [PiProviderPreset; 9] = [
     },
 ];
 
-pub(crate) static PI_SPONSOR_PROVIDER_PRESETS: [PiProviderPreset; 7] = [
+pub(crate) static PI_SPONSOR_PROVIDER_PRESETS: [PiProviderPreset; 8] = [
     PiProviderPreset {
         label: "88API",
         provider_key: "cc-switch-88api",
@@ -132,6 +132,17 @@ pub(crate) static PI_SPONSOR_PROVIDER_PRESETS: [PiProviderPreset; 7] = [
         partner_promotion_key: Some("88api"),
         sponsor_id: Some("88api"),
         settings: api88_settings,
+    },
+    PiProviderPreset {
+        label: "APIMart",
+        provider_key: "cc-switch-apimart",
+        website_url: "https://apimart.ai",
+        category: "aggregator",
+        icon: "apimart",
+        icon_color: None,
+        partner_promotion_key: Some("apimart"),
+        sponsor_id: Some("apimart"),
+        settings: apimart_settings,
     },
     PiProviderPreset {
         label: "Cubence",
@@ -581,6 +592,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "88api",
+                "apimart",
                 "cubence",
                 "packycode",
                 "runapi",
@@ -613,4 +625,15 @@ mod tests {
 
 fn api88_settings() -> Value {
     crate::provider_preset_sponsors::api88_settings(&crate::app_config::AppType::Pi)
+}
+
+// OpenAI-compatible endpoint and model from APIMart's Responses examples.
+fn apimart_settings() -> Value {
+    json!({
+        "name": "APIMart",
+        "baseUrl": "https://api.apimart.ai/v1",
+        "api": "openai-responses",
+        "apiKey": "",
+        "models": [{ "id": "gpt-5.2-pro", "name": "GPT-5.2 Pro" }],
+    })
 }
