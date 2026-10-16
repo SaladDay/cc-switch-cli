@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.11.2] - 2026-10-16
+
+### Added
+
+- **Presets / APIMart**: Add APIMart as the second sponsor preset with protocol-specific endpoints for supported applications. Update the English, Chinese and Japanese README sponsor sections with the supplied banner and registration link. Includes [#518](https://github.com/SaladDay/cc-switch-cli/pull/518).
+
+### Changed
+
+- **Presets / Ordering**: Keep PatewayAI available for Claude and Codex in the penultimate sponsor position, while removing its README sponsorship entry. Existing provider records remain unchanged. Includes [#518](https://github.com/SaladDay/cc-switch-cli/pull/518).
+- **Documentation / Japanese**: Synchronize the Japanese README with current project documentation. Includes [#511](https://github.com/SaladDay/cc-switch-cli/pull/511).
+
+### Fixed
+
+- **Claude / Default Model Context**: Add an independent **Default model 1M** toggle immediately after the default-model field in the TUI. `ANTHROPIC_MODEL` takes precedence over role aliases in direct sessions, so enabling 1M only on role rows could leave the active default model at a smaller context window. The new control preserves its declaration when renaming, disables it when clearing the model, and keeps role settings independent. Contextual help explains the priority. Includes [#519](https://github.com/SaladDay/cc-switch-cli/pull/519), fixing [#507](https://github.com/SaladDay/cc-switch-cli/issues/507).
+
+### Upgrade notes
+
+- If your default Claude model supports 1M context, enable **Default model 1M** in the provider form, save, and restart Claude Code. Role-model 1M toggles do not automatically enable it for the default model. The declaration does not verify provider capability.
+- Existing provider settings are not automatically rewritten. The APIMart presets configure supported text protocols; this release does not add image/video task APIs to the CLI.
+- For Homebrew installations, use `brew upgrade cc-switch-cli` once the formula is updated.
+
+### Thanks
+
+Thank you to everyone who reported problems, proposed changes, shared diagnostics, reviewed code, or joined the discussions. The list below covers issues and pull requests active since v5.11.1, including earlier participants in those discussions and contributions that have not been merged. Being listed here does not mean a proposed feature is included in this release.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@AtaraxiaEpiphany](https://github.com/AtaraxiaEpiphany) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517) |
+| [@claude](https://github.com/claude) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517) |
+| [@denghongcai](https://github.com/denghongcai) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507) |
+| [@feicai922](https://github.com/feicai922) | [#516](https://github.com/SaladDay/cc-switch-cli/issues/516) |
+| [@GalaxyKW](https://github.com/GalaxyKW) | [#514](https://github.com/SaladDay/cc-switch-cli/pull/514) |
+| [@jellyjelly814](https://github.com/jellyjelly814) | [#511](https://github.com/SaladDay/cc-switch-cli/pull/511) |
+| [@lijiawei0305-pixel](https://github.com/lijiawei0305-pixel) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507) |
+| [@RGB-loop](https://github.com/RGB-loop) | [#512](https://github.com/SaladDay/cc-switch-cli/pull/512) |
+| [@SaladDay](https://github.com/SaladDay) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507), [#511](https://github.com/SaladDay/cc-switch-cli/pull/511), [#513](https://github.com/SaladDay/cc-switch-cli/issues/513), [#516](https://github.com/SaladDay/cc-switch-cli/issues/516), [#518](https://github.com/SaladDay/cc-switch-cli/pull/518), [#519](https://github.com/SaladDay/cc-switch-cli/pull/519) |
+| [@TaichiLi](https://github.com/TaichiLi) | [#515](https://github.com/SaladDay/cc-switch-cli/issues/515) |
+| [@xiaojueshi](https://github.com/xiaojueshi) | [#513](https://github.com/SaladDay/cc-switch-cli/issues/513) |
+
+Thanks also to APIMart and our other sponsors, everyone supporting and using the project, and the CC-Switch maintainers and contributors whose shared implementations underpin these improvements.
+
 ## [5.11.1] - 2026-10-12
 
 ### Added
