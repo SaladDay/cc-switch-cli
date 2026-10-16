@@ -294,6 +294,7 @@ impl ProviderAddFormState {
         self.claude_base_url.set("");
         self.claude_api_format = ClaudeApiFormat::Anthropic;
         self.claude_model.set("");
+        self.claude_fallback_one_m = false;
         self.claude_haiku_model.set("");
         self.claude_sonnet_model.set("");
         self.claude_opus_model.set("");
@@ -535,6 +536,7 @@ impl ProviderAddFormState {
                     self.claude_base_url = defaults.claude_base_url;
                     self.claude_api_format = defaults.claude_api_format;
                     self.claude_model = defaults.claude_model;
+                    self.claude_fallback_one_m = defaults.claude_fallback_one_m;
                     self.claude_haiku_model = defaults.claude_haiku_model;
                     self.claude_sonnet_model = defaults.claude_sonnet_model;
                     self.claude_opus_model = defaults.claude_opus_model;

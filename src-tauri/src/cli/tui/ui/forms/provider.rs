@@ -1938,6 +1938,9 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::ClaudeFallbackModel => {
             texts::tui_label_claude_fallback_model().to_string()
         }
+        ProviderAddField::ClaudeFallbackOneM => {
+            texts::tui_label_claude_fallback_one_m().to_string()
+        }
         ProviderAddField::ClaudeQuickConfig => texts::tui_label_claude_quick_config().to_string(),
         ProviderAddField::CodexQuickConfig => texts::tui_label_codex_quick_config().to_string(),
         ProviderAddField::CodexGoalMode => texts::tui_label_codex_goal_mode().to_string(),
@@ -2084,6 +2087,13 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeToolSearch => {
             if provider.claude_tool_search {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::ClaudeFallbackOneM => {
+            if provider.claude_fallback_one_m {
                 format!("[{}]", texts::tui_marker_active())
             } else {
                 "[ ]".to_string()

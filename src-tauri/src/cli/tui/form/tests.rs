@@ -8237,3 +8237,69 @@ fn api88_selection_clears_previous_additive_template_options() {
             .is_none()
     );
 }
+
+#[test]
+fn claude_fallback_one_m_roundtrip_is_independent_of_roles() {
+    let provider = Provider::with_id(
+        "p1".into(),
+        "Provider".into(),
+        json!({"env": {
+            "ANTHROPIC_MODEL": "deepseek-flash[1m]",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet[1M]",
+            "CUSTOM_SETTING": "keep"
+        }}),
+        None,
+    );
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_model.value, "deepseek-flash");
+    assert!(form.claude_fallback_one_m);
+    // Untouched records retain their original spelling.
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["env"],
+        provider.settings_config["env"]
+    );
+    form.claude_model.set("new-model");
+    form.mark_claude_fallback_model_touched();
+    let saved = form.to_provider_json_value();
+    assert_eq!(
+        saved["settingsConfig"]["env"]["ANTHROPIC_MODEL"],
+        "new-model[1M]"
+    );
+    assert!(form.toggle_claude_fallback_one_m());
+    let saved = form.to_provider_json_value();
+    assert_eq!(
+        saved["settingsConfig"]["env"]["ANTHROPIC_MODEL"],
+        "new-model"
+    );
+    assert_eq!(
+        saved["settingsConfig"]["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+        "sonnet[1M]"
+    );
+    assert_eq!(saved["settingsConfig"]["env"]["CUSTOM_SETTING"], "keep");
+    form.claude_model.set("manual[1m]");
+    form.mark_claude_fallback_model_touched();
+    assert!(form.claude_fallback_one_m);
+    assert_eq!(form.claude_fallback_model_value_for_config(), "manual[1M]");
+    form.claude_model.set("");
+    form.mark_claude_fallback_model_touched();
+    assert!(!form.claude_fallback_one_m);
+    assert!(!form.toggle_claude_fallback_one_m());
+    assert!(form.to_provider_json_value()["settingsConfig"]["env"]
+        .get("ANTHROPIC_MODEL")
+        .is_none());
+}
+
+#[test]
+fn claude_fallback_one_m_is_adjacent_and_resets_with_template() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    let fields = form.fields();
+    let idx = fields
+        .iter()
+        .position(|f| *f == ProviderAddField::ClaudeFallbackModel)
+        .unwrap();
+    assert_eq!(fields[idx + 1], ProviderAddField::ClaudeFallbackOneM);
+    form.set_claude_fallback_model_from_config("custom[1M]");
+    form.apply_template(template_index_by_label(AppType::Claude, "PatewayAI"), &[]);
+    assert!(!form.claude_fallback_one_m);
+    assert!(form.claude_model.value.is_empty());
+}

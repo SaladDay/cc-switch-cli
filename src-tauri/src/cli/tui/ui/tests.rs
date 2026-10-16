@@ -14977,3 +14977,46 @@ fn home_usage_card_rail_falls_back_to_the_glyph_when_the_label_will_not_fit() {
     let wide_rail = line_at(&wide, wide_row);
     assert!(wide_rail.contains("⠸ Refreshing"), "{wide_rail}");
 }
+
+#[test]
+fn claude_fallback_one_m_uses_standard_toggle_row_and_key_hint() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.set_claude_fallback_model_from_config("deepseek-flash[1m]");
+    form.focus = FormFocus::Fields;
+    form.field_idx = form
+        .fields()
+        .iter()
+        .position(|field| *field == ProviderAddField::ClaudeFallbackOneM)
+        .unwrap();
+    let (label, value) =
+        super::forms::provider_field_label_and_value(&form, ProviderAddField::ClaudeFallbackOneM);
+    assert_eq!(label, "Default model 1M");
+    let keys = super::forms::add_form_key_items(
+        FormFocus::Fields,
+        false,
+        Some(ProviderAddField::ClaudeFallbackOneM),
+    );
+    assert!(keys.contains(&("Enter", texts::tui_key_toggle())));
+    assert_eq!(value, format!("[{}]", texts::tui_marker_active()));
+    app.form = Some(FormState::ProviderAdd(form));
+    for (width, height) in [(80, 24), (120, 32)] {
+        let rendered = all_text(&render_with_size(
+            &app,
+            &minimal_data(&app.app_type),
+            width,
+            height,
+        ));
+        assert!(rendered.contains("Default model 1M"), "{rendered}");
+
+        assert!(
+            !rendered.contains("takes precedence"),
+            "help belongs in the contextual overlay"
+        );
+    }
+}

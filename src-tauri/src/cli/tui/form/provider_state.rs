@@ -173,6 +173,7 @@ impl ProviderAddFormState {
                 ClaudeApiFormat::Anthropic
             },
             claude_model: TextInput::new(""),
+            claude_fallback_one_m: false,
             claude_haiku_model: TextInput::new(""),
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
@@ -505,6 +506,7 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeAdvancedDivider);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
+                    fields.push(ProviderAddField::ClaudeFallbackOneM);
                     fields.push(ProviderAddField::LocalProxySettings);
                 } else if !self.is_claude_official_provider() {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
@@ -513,6 +515,7 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeApiFormat);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
+                    fields.push(ProviderAddField::ClaudeFallbackOneM);
                     if self.supports_local_proxy_settings() {
                         fields.push(ProviderAddField::LocalProxySettings);
                     }
@@ -762,6 +765,7 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::ClaudeTeammates
             | ProviderAddField::ClaudeToolSearch
+            | ProviderAddField::ClaudeFallbackOneM
             | ProviderAddField::ClaudeEffortMax
             | ProviderAddField::ClaudeDisableAutoUpgrade
             | ProviderAddField::GeminiAuthType
@@ -832,6 +836,7 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::ClaudeTeammates
             | ProviderAddField::ClaudeToolSearch
+            | ProviderAddField::ClaudeFallbackOneM
             | ProviderAddField::ClaudeEffortMax
             | ProviderAddField::ClaudeDisableAutoUpgrade
             | ProviderAddField::GeminiAuthType
@@ -2456,7 +2461,40 @@ impl ProviderAddFormState {
             .count()
     }
 
+    pub fn set_claude_fallback_model_from_config(&mut self, value: &str) {
+        let (model, one_m) = split_claude_one_m_marker(value);
+        self.claude_model.set(&model);
+        self.claude_fallback_one_m = one_m && !model.trim().is_empty();
+    }
+
+    pub fn claude_fallback_model_value_for_config(&self) -> String {
+        let (model, explicit_one_m) = split_claude_one_m_marker(&self.claude_model.value);
+        let model = model.trim();
+        if model.is_empty() {
+            String::new()
+        } else if self.claude_fallback_one_m || explicit_one_m {
+            format!("{model}[1M]")
+        } else {
+            model.to_string()
+        }
+    }
+
+    pub fn toggle_claude_fallback_one_m(&mut self) -> bool {
+        let (model, explicit_one_m) = split_claude_one_m_marker(&self.claude_model.value);
+        if model.trim().is_empty() {
+            return false;
+        }
+        self.claude_model.set(&model);
+        self.claude_fallback_one_m = !(self.claude_fallback_one_m || explicit_one_m);
+        self.claude_fallback_model_touched = true;
+        true
+    }
+
     pub fn mark_claude_fallback_model_touched(&mut self) {
+        let (model, explicit_one_m) = split_claude_one_m_marker(&self.claude_model.value);
+        self.claude_fallback_one_m =
+            !model.trim().is_empty() && (self.claude_fallback_one_m || explicit_one_m);
+        self.claude_model.set(&model);
         self.claude_fallback_model_touched = true;
     }
 

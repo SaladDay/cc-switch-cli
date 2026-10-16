@@ -193,7 +193,7 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
             .get(CLAUDE_DEFAULT_MODEL_ENV_KEY)
             .and_then(|value| value.as_str())
         {
-            form.claude_model.set(model);
+            form.set_claude_fallback_model_from_config(model);
         }
         let model = env
             .get(CLAUDE_DEFAULT_MODEL_ENV_KEY)

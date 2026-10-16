@@ -1989,6 +1989,36 @@ mod tests {
     }
 
     #[test]
+    fn claude_fallback_one_m_keyboard_toggle_and_cancel() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        form.set_claude_fallback_model_from_config("deepseek-flash");
+        form.focus = FormFocus::Fields;
+        app.form = Some(FormState::ProviderAdd(form));
+        select_provider_field(&mut app, ProviderAddField::ClaudeFallbackOneM);
+        app.on_key(key(KeyCode::Enter), &data());
+        select_provider_field(&mut app, ProviderAddField::ClaudeFallbackModel);
+        app.on_key(key(KeyCode::Enter), &data());
+        app.on_key(ctrl(KeyCode::Char('a')), &data());
+        app.on_key(ctrl(KeyCode::Char('k')), &data());
+        app.on_key(key(KeyCode::Esc), &data());
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("form missing")
+        };
+        assert_eq!(form.claude_model.value, "deepseek-flash");
+        assert_eq!(
+            form.to_provider_json_value()["settingsConfig"]["env"]["ANTHROPIC_MODEL"],
+            "deepseek-flash[1M]"
+        );
+        select_provider_field(&mut app, ProviderAddField::ClaudeFallbackOneM);
+        app.on_key(key(KeyCode::Char(' ')), &data());
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("form missing")
+        };
+        assert!(!form.claude_fallback_one_m);
+    }
+
+    #[test]
     fn claude_fallback_model_edit_persists_anthropic_model() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;

@@ -426,7 +426,7 @@ impl ProviderAddFormState {
                     set_or_remove_trimmed(
                         env_obj,
                         CLAUDE_DEFAULT_MODEL_ENV_KEY,
-                        &self.claude_model.value,
+                        &self.claude_fallback_model_value_for_config(),
                     );
                 }
                 for role in ClaudeModelRole::ALL {

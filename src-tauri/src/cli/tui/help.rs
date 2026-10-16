@@ -754,8 +754,15 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::ClaudeFallbackModel => HelpContent::new(
             texts::tui_label_claude_fallback_model(),
             help_lines(
-                "用于未明确落到具体角色模型（Haiku、Sonnet、Opus 等）的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。可在模型名末尾追加 [1M] 声明百万上下文支持；此标记不会验证上游能力。",
-                "A fallback for requests that don't clearly map to a specific role model (Haiku, Sonnet, Opus, etc.). Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints. Append [1M] to declare million-token context support; this marker does not verify upstream capability.",
+                "直连时写入 ANTHROPIC_MODEL，是 Claude Code 启动时使用的主模型，会优先于角色模型。角色的 1M 开关不会自动作用于它；请使用下方的默认模型 1M 开关。后台任务另用 Haiku 档。经过本地路由时，它还用于未匹配到具体角色的请求。",
+                "Writes ANTHROPIC_MODEL: in direct mode this is Claude Code's startup model and takes precedence over role models. Role 1M toggles do not enable 1M for it; use Default model 1M below. Background tasks use Haiku separately. With local routing, it also handles requests that don't clearly map to a specific role model.",
+            ),
+        ),
+        ProviderAddField::ClaudeFallbackOneM => HelpContent::new(
+            texts::tui_label_claude_fallback_one_m(),
+            help_lines(
+                "按 Enter 切换默认模型的 1M 声明，将 [1M] 标记写入 ANTHROPIC_MODEL。请先填写模型；此开关独立于角色模型，不验证供应商是否支持百万上下文。修改模型名时保留声明，清空模型后关闭。",
+                "Press Enter to toggle the 1M declaration for ANTHROPIC_MODEL. Enter a model first. This adds [1M] independently of role models and does not verify provider capability. Renaming preserves the declaration; clearing the model disables it.",
             ),
         ),
         ProviderAddField::ClaudeQuickConfig => HelpContent::new(

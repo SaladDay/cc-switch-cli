@@ -578,6 +578,12 @@ impl App {
                 provider.toggle_claude_tool_search();
                 Action::None
             }
+            ProviderAddField::ClaudeFallbackOneM => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.toggle_claude_fallback_one_m();
+                }
+                Action::None
+            }
             ProviderAddField::ClaudeEffortMax => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
