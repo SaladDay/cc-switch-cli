@@ -123,11 +123,22 @@ pub(super) fn edit_common(
             patch.set.extend(set);
             let mut old = Vec::new();
             entries(&previous, KeyPath::root(), &mut old);
-            patch.remove_if.extend(
-                old.into_iter()
-                    .filter(|(path, _)| global_claude(path))
-                    .map(|(path, value)| (path, vec![value])),
-            );
+            old.retain(|(path, _)| global_claude(path));
+            // Objects that only held removed common keys would otherwise stay
+            // behind as `{}`; objects the new snippet still declares are kept.
+            for (path, _) in &old {
+                for depth in 1..path.0.len() {
+                    let parent = KeyPath(path.0[..depth].to_vec());
+                    if crate::live::patch::json::value_at(&current, &parent).is_none()
+                        && !patch.prune_emptied.contains(&parent)
+                    {
+                        patch.prune_emptied.push(parent);
+                    }
+                }
+            }
+            patch
+                .remove_if
+                .extend(old.into_iter().map(|(path, value)| (path, vec![value])));
         }
         PreparedLiveWrite::Gemini { env, .. } => {
             for (key, value) in current.as_object().unwrap() {
