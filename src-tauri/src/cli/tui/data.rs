@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -346,6 +346,18 @@ pub struct ProviderHealthSnapshot {
     pub consecutive_failures: u32,
 }
 
+/// One route-mode member as shown on the Route Mode screen
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteMemberSnapshot {
+    pub provider_id: String,
+    pub name: String,
+    pub weight: u32,
+    pub enabled: bool,
+    pub mapping_count: usize,
+    /// Full request-model → actual-model table, kept for the mapping editor
+    pub model_mappings: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProxySnapshot {
     pub enabled: bool,
@@ -354,6 +366,8 @@ pub struct ProxySnapshot {
     #[allow(dead_code)]
     pub active_worker_apps: HashSet<String>,
     pub auto_failover_enabled: bool,
+    pub route_mode_enabled: bool,
+    pub route_members: Vec<RouteMemberSnapshot>,
     pub claude_takeover: bool,
     pub codex_takeover: bool,
     pub gemini_takeover: bool,
@@ -1222,6 +1236,35 @@ impl UiData {
     ) -> Result<(), AppError> {
         self.providers = load_providers_with_mode(state, app_type, ProviderLoadMode::SyncLive)?;
         self.proxy = load_proxy_snapshot_from_state(state, app_type)?;
+        Ok(())
+    }
+
+    /// Refreshes only the route-mode fields (enabled flag + member table)
+    /// from the database. Member weight/enable/mapping edits are frequent
+    /// small mutations, so they use this instead of the full `UiData::load`
+    /// (usage aggregation, skills, live sync) to keep key latency low.
+    /// Note: unlike `load_proxy_snapshot_from_state`, daemon/runtime probing
+    /// is skipped — member edits do not change proxy runtime status.
+    pub(crate) fn refresh_route_mode_data(&mut self, app_type: &AppType) -> Result<(), AppError> {
+        let db = crate::Database::open_readonly_current_schema()?;
+        let route_group = db.get_route_mode_group(app_type.as_str())?;
+        let provider_names = db.get_all_providers(app_type.as_str())?;
+        self.proxy.route_mode_enabled = route_group.enabled;
+        self.proxy.route_members = route_group
+            .members
+            .iter()
+            .map(|member| RouteMemberSnapshot {
+                name: provider_names
+                    .get(&member.provider_id)
+                    .map(|provider| provider.name.clone())
+                    .unwrap_or_else(|| member.provider_id.clone()),
+                provider_id: member.provider_id.clone(),
+                weight: member.weight,
+                enabled: member.enabled,
+                mapping_count: member.model_mappings.len(),
+                model_mappings: member.model_mappings.clone(),
+            })
+            .collect();
         Ok(())
     }
 
@@ -3634,6 +3677,29 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
+    // Route mode group: stored member order doubles as the fallback order
+    // on the screen; dangling members keep their raw id as the name
+    let route_group = state
+        .db
+        .get_route_mode_group(app_type.as_str())
+        .unwrap_or_default();
+    let route_provider_names = state.db.get_all_providers(app_type.as_str())?;
+    let route_members = route_group
+        .members
+        .iter()
+        .map(|member| RouteMemberSnapshot {
+            name: route_provider_names
+                .get(&member.provider_id)
+                .map(|provider| provider.name.clone())
+                .unwrap_or_else(|| member.provider_id.clone()),
+            provider_id: member.provider_id.clone(),
+            weight: member.weight,
+            enabled: member.enabled,
+            mapping_count: member.model_mappings.len(),
+            model_mappings: member.model_mappings.clone(),
+        })
+        .collect();
+
     Ok(ProxySnapshot {
         enabled: config.proxy_enabled,
         running: runtime_status.running,
@@ -3641,6 +3707,8 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
             || !runtime_status.active_workers.is_empty(),
         active_worker_apps,
         auto_failover_enabled: app_proxy_config.auto_failover_enabled,
+        route_mode_enabled: route_group.enabled,
+        route_members,
         claude_takeover,
         codex_takeover,
         gemini_takeover,

@@ -39,3 +39,4 @@ docs/superpowers/
 .superpowers/
 skills-lock.json
 /skills/
+.codegraph/

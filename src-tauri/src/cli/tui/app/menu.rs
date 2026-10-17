@@ -131,6 +131,7 @@ impl App {
             language_idx: 0,
             settings_idx: 0,
             settings_proxy_idx: 0,
+            route_mode_idx: 0,
             settings_outbound_proxy_idx: 0,
             global_outbound_proxy_draft: None,
             settings_managed_accounts_idx: 0,
@@ -229,6 +230,7 @@ impl App {
             | Route::SettingsProxy
             | Route::SettingsOutboundProxy
             | Route::SettingsManagedAccounts => NavItem::Settings,
+            Route::RouteMode => NavItem::RouteMode,
         }
     }
 
@@ -1130,6 +1132,7 @@ impl App {
             Route::SkillDetail { directory } => self.on_skill_detail_key(key, data, &directory),
             Route::Settings => self.on_settings_key(key, data),
             Route::SettingsProxy => self.on_settings_proxy_key(key, data),
+            Route::RouteMode => self.on_route_mode_key(key, data),
             Route::SettingsOutboundProxy => self.on_settings_outbound_proxy_key(key, data),
             Route::SettingsManagedAccounts => self.on_settings_managed_accounts_key(key, data),
             Route::Main => match key.code {
@@ -1322,6 +1325,9 @@ impl App {
         } else {
             self.daily_memory_idx = self.daily_memory_idx.min(daily_memory_len - 1);
         }
+
+        // Route-mode rows: 0 is the status toggle, 1..=members are members.
+        self.route_mode_idx = self.route_mode_idx.min(data.proxy.route_members.len());
 
         let hermes_memory_len = crate::cli::tui::app::HERMES_MEMORY_ROW_COUNT;
         if hermes_memory_len == 0 {

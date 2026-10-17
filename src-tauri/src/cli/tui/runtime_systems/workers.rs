@@ -22,8 +22,8 @@ use super::types::{
     AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem,
     LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
     ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchStrategy,
-    ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem,
-    RefreshedMessagePages, SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg,
+    ModelFetchSystem, ModelFetchTarget, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq,
+    QuotaSystem, RefreshedMessagePages, SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg,
     SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg,
     SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq,
     UpdateSystem, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq,
@@ -202,10 +202,12 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                     ProxyReq::RefreshSnapshot {
                         request_id,
                         app_type,
+                        base_reload_token,
                     } => {
                         let _ = tx.send(ProxyMsg::SnapshotRefreshed {
                             request_id,
                             app_type,
+                            base_reload_token,
                             result: Err(err.clone()),
                         });
                     }
@@ -253,6 +255,7 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
             ProxyReq::RefreshSnapshot {
                 request_id,
                 app_type,
+                base_reload_token,
             } => {
                 let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
                     rt.block_on(load_proxy_snapshot_from_state_async(&state, &app_type))
@@ -262,6 +265,7 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                 let _ = tx.send(ProxyMsg::SnapshotRefreshed {
                     request_id,
                     app_type,
+                    base_reload_token,
                     result,
                 });
             }
@@ -609,15 +613,11 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             let err = e.to_string();
             while let Ok(req) = rx.recv() {
                 let ModelFetchReq::Fetch {
-                    request_id,
-                    field,
-                    claude_idx,
-                    ..
+                    request_id, target, ..
                 } = req;
                 let _ = tx.send(ModelFetchMsg::Finished {
                     request_id,
-                    field,
-                    claude_idx,
+                    target,
                     result: Err(err.clone()),
                 });
             }
@@ -636,8 +636,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             request_headers,
             codex_oauth,
             codex_oauth_account_id,
-            field,
-            claude_idx,
+            target,
         } = req;
         let result = if codex_oauth {
             rt.block_on(async {
@@ -649,7 +648,19 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             let strategy = match api_protocol.as_deref() {
                 Some("anthropic-messages") => ModelFetchStrategy::Anthropic,
                 Some("google-generative-ai") => ModelFetchStrategy::GoogleApiKey,
-                _ => model_fetch_strategy_for_field(field),
+                _ => match &target {
+                    ModelFetchTarget::FormField { field, .. } => {
+                        model_fetch_strategy_for_field(*field)
+                    }
+                    // Route-mapping fetches carry an explicit api_protocol
+                    // for anthropic/gemini api formats; OpenAI-compatible
+                    // members map to None above and use Bearer, which is
+                    // the right auth for their /models endpoint.
+                    ModelFetchTarget::RouteMappings { .. } => ModelFetchStrategy::Bearer,
+                    // Env-sourced request models never reach the worker (no
+                    // Fetch request is sent); Bearer keeps the match total.
+                    ModelFetchTarget::RouteMappingsRequest => ModelFetchStrategy::Bearer,
+                },
             };
             rt.block_on(async {
                 fetch_provider_models_for_tui(
@@ -667,8 +678,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
 
         let _ = tx.send(ModelFetchMsg::Finished {
             request_id,
-            field,
-            claude_idx,
+            target,
             result,
         });
     }

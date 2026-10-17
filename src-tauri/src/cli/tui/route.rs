@@ -31,12 +31,14 @@ pub enum Route {
     SettingsProxy,
     SettingsOutboundProxy,
     SettingsManagedAccounts,
+    RouteMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavItem {
     Main,
     Providers,
+    RouteMode,
     Usage,
     Sessions,
     Mcp,
@@ -58,6 +60,22 @@ impl NavItem {
     pub const ALL: [NavItem; 10] = [
         NavItem::Main,
         NavItem::Providers,
+        NavItem::Mcp,
+        NavItem::Skills,
+        NavItem::Sessions,
+        NavItem::Prompts,
+        NavItem::Usage,
+        NavItem::Config,
+        NavItem::Settings,
+        NavItem::Exit,
+    ];
+
+    /// Proxy-capable apps (Claude/Codex/Gemini) additionally expose the
+    /// Route Mode screen right after Providers
+    pub const PROXY_ALL: [NavItem; 11] = [
+        NavItem::Main,
+        NavItem::Providers,
+        NavItem::RouteMode,
         NavItem::Mcp,
         NavItem::Skills,
         NavItem::Sessions,
@@ -110,6 +128,7 @@ impl NavItem {
 
     pub fn all_for_app(app_type: &AppType) -> &'static [NavItem] {
         match app_type {
+            AppType::Claude | AppType::Codex | AppType::Gemini => &Self::PROXY_ALL,
             AppType::OpenClaw => &Self::OPENCLAW_ALL,
             AppType::Hermes => &Self::HERMES_ALL,
             AppType::Pi => &Self::PI_ALL,
@@ -121,6 +140,7 @@ impl NavItem {
         match self {
             NavItem::Main => Some(Route::Main),
             NavItem::Providers => Some(Route::Providers),
+            NavItem::RouteMode => Some(Route::RouteMode),
             NavItem::Usage => Some(Route::Usage),
             NavItem::Sessions => Some(Route::Sessions),
             NavItem::Mcp => Some(Route::Mcp),
@@ -143,6 +163,7 @@ impl NavItem {
 #[cfg(test)]
 mod tests {
     use super::{NavItem, Route};
+    use crate::app_config::AppType;
 
     #[test]
     fn skills_appears_before_prompts_in_nav() {
@@ -213,6 +234,35 @@ mod tests {
                 .iter()
                 .all(|item| item.to_route() != Some(Route::Pricing)));
         }
+    }
+
+    #[test]
+    fn route_mode_appears_after_providers_only_for_proxy_apps() {
+        let providers = NavItem::PROXY_ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Providers))
+            .expect("providers nav item should exist");
+        let route_mode = NavItem::PROXY_ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::RouteMode))
+            .expect("route mode nav item should exist");
+        assert!(providers < route_mode, "route mode should follow providers");
+
+        assert_eq!(
+            NavItem::all_for_app(&AppType::Claude),
+            NavItem::PROXY_ALL.as_slice()
+        );
+        assert_eq!(
+            NavItem::all_for_app(&AppType::Codex),
+            NavItem::PROXY_ALL.as_slice()
+        );
+        assert_eq!(
+            NavItem::all_for_app(&AppType::Gemini),
+            NavItem::PROXY_ALL.as_slice()
+        );
+        assert!(NavItem::all_for_app(&AppType::OpenCode)
+            .iter()
+            .all(|item| !matches!(item, NavItem::RouteMode)));
     }
 
     #[test]

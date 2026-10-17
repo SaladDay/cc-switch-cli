@@ -4419,6 +4419,9 @@ pub enum ConfirmAction {
     ProxyEnableAndAutoFailover {
         app_type: AppType,
     },
+    ProxyEnableAndRouteMode {
+        app_type: AppType,
+    },
     PromptOpenImportCandidate {
         filename: String,
         content: String,
@@ -4499,6 +4502,9 @@ pub enum TextSubmit {
     ConfigBackupName,
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
+    RouteModeWeight {
+        provider_id: String,
+    },
     SettingsOutboundProxyUrl,
     SettingsOutboundProxyUsername,
     SettingsOutboundProxyPassword,
@@ -4657,6 +4663,46 @@ impl McpKeyValueEntryEditorState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteMappingEditorField {
+    Request,
+    Actual,
+}
+
+/// One row of the route-mode mapping editor while its request/actual fields
+/// are being edited inline.
+#[derive(Debug, Clone)]
+pub struct RouteMappingEntryEditingState {
+    /// `Some(index)` when editing an existing row, `None` when adding one.
+    pub row: Option<usize>,
+    pub field: RouteMappingEditorField,
+    pub request: crate::cli::tui::form::TextInput,
+    pub actual: crate::cli::tui::form::TextInput,
+}
+
+impl RouteMappingEntryEditingState {
+    pub fn request_active(&self) -> bool {
+        matches!(self.field, RouteMappingEditorField::Request)
+    }
+
+    pub fn actual_active(&self) -> bool {
+        matches!(self.field, RouteMappingEditorField::Actual)
+    }
+}
+
+/// Multi-row editor for one route-mode member's request-model → actual-model
+/// table. Rows are local until Esc applies them as one
+/// `Action::SetRouteModeMemberMappings`.
+#[derive(Debug, Clone)]
+pub struct RouteMappingsEditorState {
+    pub provider_id: String,
+    pub provider_name: String,
+    /// (request, actual) pairs; kept sorted by request model on apply.
+    pub rows: Vec<(String, String)>,
+    pub selected: usize,
+    pub editing: Option<RouteMappingEntryEditingState>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Overlay {
     None,
@@ -4679,6 +4725,10 @@ pub enum Overlay {
     FailoverQueueManager {
         selected_provider_id: Option<String>,
     },
+    RouteMemberPicker {
+        selected_provider_id: Option<String>,
+    },
+    RouteMappingsEditor(RouteMappingsEditorState),
     ClaudeModelPicker {
         selected: usize,
         column: ClaudeModelPickerColumn,
@@ -4732,8 +4782,7 @@ pub enum Overlay {
     },
     ModelFetchPicker {
         request_id: u64,
-        field: ProviderAddField,
-        claude_idx: Option<usize>,
+        target: crate::cli::tui::runtime_systems::ModelFetchTarget,
         input: TextInput,
         query: String,
         fetching: bool,
@@ -4941,6 +4990,8 @@ impl Overlay {
                 | Overlay::CommonSnippetPicker { .. }
                 | Overlay::ProviderTestMenu { .. }
                 | Overlay::FailoverQueueManager { .. }
+                | Overlay::RouteMemberPicker { .. }
+                | Overlay::RouteMappingsEditor(_)
                 | Overlay::ClaudeApiFormatPicker { .. }
                 | Overlay::CodexReasoningLevelsPicker { .. }
                 | Overlay::CodexDefaultReasoningPicker { .. }
@@ -4981,6 +5032,7 @@ impl Overlay {
             Overlay::ModelFetchPicker { .. } => true,
             Overlay::SessionProjectPicker(_) => true,
             Overlay::McpKeyValueEntryEditor(editor) => editor.is_editing(),
+            Overlay::RouteMappingsEditor(editor) => editor.editing.is_some(),
             Overlay::None
             | Overlay::Help(_)
             | Overlay::Confirm(_)
@@ -4990,6 +5042,7 @@ impl Overlay {
             | Overlay::CommonSnippetPicker { .. }
             | Overlay::ProviderTestMenu { .. }
             | Overlay::FailoverQueueManager { .. }
+            | Overlay::RouteMemberPicker { .. }
             | Overlay::ClaudeApiFormatPicker { .. }
             | Overlay::CodexReasoningLevelsPicker { .. }
             | Overlay::CodexDefaultReasoningPicker { .. }

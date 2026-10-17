@@ -605,6 +605,12 @@ impl Supervisor {
     }
 
     async fn handle_drop_takeover(&self, app_type: &str) -> Response {
+        // Exclusivity note: the route-mode guard lives in the foreground
+        // caller (`ProxyService::set_managed_session_for_app_unlocked`), which
+        // is the only production sender of this request. Do not add a
+        // route-mode check here — shutdown/restart paths call this handler
+        // and must never be blocked by it (startup recovery likewise bypasses
+        // the foreground guard by design).
         let app = match parse_app_type(app_type) {
             Some(a) => a,
             None => {

@@ -21,6 +21,7 @@ pub(crate) mod pi_state;
 pub mod prompt;
 pub mod provider;
 pub mod proxy;
+pub(crate) mod request_models;
 pub(crate) mod s3;
 pub mod s3_sync;
 pub(crate) mod session_cost;

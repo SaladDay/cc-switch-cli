@@ -21,6 +21,7 @@ mod mcp;
 mod pricing;
 mod prompts;
 mod providers;
+mod route_mode;
 mod settings;
 mod skills;
 mod updates;
@@ -103,6 +104,8 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::PiSystemPrompts | super::route::Route::PiPromptTemplates => {
                 super::route::Route::Main
             }
+            // Route mode is proxy-app-only; other apps fall back to providers
+            super::route::Route::RouteMode => super::route::Route::Providers,
             _ => route.clone(),
         },
     }
@@ -937,8 +940,7 @@ pub(crate) fn handle_action(
             request_headers,
             codex_oauth,
             codex_oauth_account_id,
-            field,
-            claude_idx,
+            target,
         } => providers::model_fetch(
             &mut ctx,
             base_url,
@@ -949,9 +951,12 @@ pub(crate) fn handle_action(
             request_headers,
             codex_oauth,
             codex_oauth_account_id,
-            field,
-            claude_idx,
+            target,
         ),
+        Action::RouteMemberModelFetch { provider_id } => {
+            route_mode::route_member_model_fetch(&mut ctx, provider_id)
+        }
+        Action::RouteRequestModelsFetch => route_mode::route_member_request_models_fetch(&mut ctx),
         Action::UsageCustomRange { .. } => Ok(()),
         Action::PricingDelete { model_id } => pricing::delete(&mut ctx, model_id),
         Action::McpToggle { id, enabled } => mcp::toggle(&mut ctx, id, enabled),
@@ -1097,6 +1102,34 @@ pub(crate) fn handle_action(
         Action::EnableProxyAndAutoFailover { app_type } => {
             settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
+        Action::SetRouteModeEnabled { app_type, enabled } => {
+            route_mode::set_route_mode_enabled(&mut ctx, app_type, enabled)
+        }
+        Action::EnableProxyAndRouteMode { app_type } => {
+            route_mode::enable_proxy_and_route_mode(&mut ctx, app_type)
+        }
+        Action::AddRouteModeMember {
+            app_type,
+            provider_id,
+        } => route_mode::add_route_mode_member(&mut ctx, app_type, provider_id),
+        Action::RemoveRouteModeMember {
+            app_type,
+            provider_id,
+        } => route_mode::remove_route_mode_member(&mut ctx, app_type, provider_id),
+        Action::ToggleRouteModeMember {
+            app_type,
+            provider_id,
+        } => route_mode::toggle_route_mode_member(&mut ctx, app_type, provider_id),
+        Action::SetRouteModeMemberWeight {
+            app_type,
+            provider_id,
+            weight,
+        } => route_mode::set_route_mode_member_weight(&mut ctx, app_type, provider_id, weight),
+        Action::SetRouteModeMemberMappings {
+            app_type,
+            provider_id,
+            mappings,
+        } => route_mode::set_route_mode_member_mappings(&mut ctx, app_type, provider_id, mappings),
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
         Action::SetPiConfigDir { path } => settings::set_pi_config_dir(&mut ctx, path),
         Action::SetPreferredEditor { command } => settings::set_preferred_editor(&mut ctx, command),

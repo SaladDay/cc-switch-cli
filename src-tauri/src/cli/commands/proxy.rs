@@ -595,7 +595,7 @@ fn build_proxy_overview_lines(
     lines.extend(route_lines);
     lines.extend([
         String::new(),
-        crate::t!("Auto failover:", "自动故障转移：").to_string(),
+        crate::t!("Auto failover / route mode:", "自动故障转移 / 路由模式：").to_string(),
     ]);
     lines.extend(build_auto_failover_status_lines(state));
     lines.extend([
@@ -649,6 +649,7 @@ fn build_proxy_overview_lines(
 }
 
 fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
+    let proxy_running = state.proxy_service.is_running_blocking().unwrap_or(false);
     [
         (AppType::Claude, "Claude"),
         (AppType::Codex, "Codex"),
@@ -657,15 +658,35 @@ fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
     .into_iter()
     .map(|(app, label)| {
         let (_, auto_failover_enabled) = state.db.get_proxy_flags_sync(app.as_str());
-        format!(
-            "- {}: {}",
-            label,
-            if auto_failover_enabled {
+        if auto_failover_enabled {
+            return format!(
+                "- {}: {}",
+                label,
                 crate::t!("auto failover on", "自动故障转移开启")
-            } else {
-                crate::t!("auto failover off", "自动故障转移关闭")
+            );
+        }
+
+        let route_mode = match state.db.get_route_mode_group(app.as_str()) {
+            Ok(group) if group.enabled => {
+                let enabled_members = group.members.iter().filter(|member| member.enabled).count();
+                let plural = if enabled_members == 1 { "" } else { "s" };
+                let dormant = !proxy_running;
+                let (en, zh) = if dormant {
+                    (
+                        format!("route mode on ({enabled_members} member{plural}; proxy stopped)"),
+                        format!("路由模式开启（{enabled_members} 个成员；代理未运行）"),
+                    )
+                } else {
+                    (
+                        format!("route mode on ({enabled_members} member{plural})"),
+                        format!("路由模式开启（{enabled_members} 个成员）"),
+                    )
+                };
+                crate::t!(&en, &zh).to_string()
             }
-        )
+            _ => crate::t!("auto failover off", "自动故障转移关闭").to_string(),
+        };
+        format!("- {}: {}", label, route_mode)
     })
     .collect()
 }

@@ -640,6 +640,19 @@ impl ProxyService {
 
         // Disable: route through the daemon when one is running so it stays
         // the sole writer of `proxy_runtime_session`.
+        // Refuse to disable the proxy while route mode is active (route
+        // mode must be disabled first); startup recovery does not go
+        // through this path and stays unaffected
+        if self
+            .db
+            .route_mode_enabled_for_app(app_type_enum.as_str())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "route mode is active for {}; disable route mode first",
+                app_type_enum.as_str()
+            ));
+        }
         if self.should_drop_takeover_via_daemon(&app_type_enum).await? {
             self.daemon_drop_takeover(app_type_enum.as_str()).await
         } else {
@@ -1704,12 +1717,23 @@ impl ProxyService {
     }
 
     async fn ensure_proxy_routing_active_for_app(&self, app_type: &str) -> Result<(), String> {
+        self.ensure_proxy_routing_active_for_feature(app_type, "automatic failover")
+            .await
+    }
+
+    /// Shared routing precondition; `feature` names the caller so the error
+    /// text matches what the user actually asked for
+    async fn ensure_proxy_routing_active_for_feature(
+        &self,
+        app_type: &str,
+        feature: &str,
+    ) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
         let has_managed_worker = self.has_managed_worker_for_app(&app_type).await;
         if !has_managed_worker {
-            return Err(
-                "automatic failover requires daemon-managed proxy routing for this app".to_string(),
-            );
+            return Err(format!(
+                "{feature} requires daemon-managed proxy routing for this app"
+            ));
         }
 
         let app_key = app_type.as_str();
@@ -1719,12 +1743,89 @@ impl ProxyService {
             .await
             .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
         if !config.enabled {
-            return Err(
-                "automatic failover requires proxy takeover for this app to be enabled".to_string(),
-            );
+            return Err(format!(
+                "{feature} requires proxy takeover for this app to be enabled"
+            ));
         }
 
         Ok(())
+    }
+
+    /// Route mode precondition guard: mutually exclusive with automatic
+    /// failover, and requires at least one enabled member
+    async fn ensure_route_mode_prerequisites(&self, app_key: &str) -> Result<(), String> {
+        let config = self
+            .db
+            .get_proxy_config_for_app(app_key)
+            .await
+            .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
+        if config.auto_failover_enabled {
+            return Err(format!(
+                "route mode conflicts with automatic failover on {app_key}; disable automatic failover first"
+            ));
+        }
+
+        let group = self
+            .db
+            .get_route_mode_group(app_key)
+            .map_err(|error| format!("load route mode config for {app_key} failed: {error}"))?;
+        if !group.members.iter().any(|member| member.enabled) {
+            return Err(format!(
+                "route mode on {app_key} requires at least one enabled member"
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_route_mode_inactive(&self, app_type: &str) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        if self
+            .db
+            .route_mode_enabled_for_app(app_type.as_str())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "route mode is active on {}; disable route mode before enabling automatic failover",
+                app_type.as_str()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Enable route mode on an app that already has proxy routing
+    /// (daemon-backed session already running)
+    pub async fn enable_route_mode_for_app(&self, app_type: &str) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let app_key = app_type.as_str();
+        self.ensure_route_mode_prerequisites(app_key).await?;
+        self.ensure_proxy_routing_active_for_feature(app_key, "route mode")
+            .await?;
+        // Flip the flag last: activation failure leaves no half-open state
+        self.db
+            .set_route_mode_enabled(app_key, true)
+            .map_err(|error| format!("enable route mode for {app_key} failed: {error}"))
+    }
+
+    /// Enable proxy takeover (daemon-backed session) and turn route mode on
+    pub async fn enable_proxy_and_route_mode_for_app(&self, app_type: &str) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let app_key = app_type.as_str();
+        self.ensure_route_mode_prerequisites(app_key).await?;
+        self.set_managed_session_for_app(app_key, true).await?;
+        self.db
+            .set_route_mode_enabled(app_key, true)
+            .map_err(|error| format!("enable route mode for {app_key} failed: {error}"))
+    }
+
+    /// Disable route mode (member config preserved; proxy takeover untouched)
+    pub async fn disable_route_mode_for_app(&self, app_type: &str) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let app_key = app_type.as_str();
+        self.db
+            .set_route_mode_enabled(app_key, false)
+            .map_err(|error| format!("disable route mode for {app_key} failed: {error}"))
     }
 
     async fn has_managed_worker_for_app(&self, app_type: &AppType) -> bool {
@@ -1746,6 +1847,7 @@ impl ProxyService {
     }
 
     pub async fn enable_auto_failover_for_app(&self, app_type: &str) -> Result<(), String> {
+        self.ensure_route_mode_inactive(app_type).await?;
         let first_provider_id = self.first_failover_provider_id(app_type)?;
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
@@ -1761,6 +1863,7 @@ impl ProxyService {
         &self,
         app_type: &str,
     ) -> Result<AutoFailoverActivation, String> {
+        self.ensure_route_mode_inactive(app_type).await?;
         let first_provider_id = self.first_failover_provider_id(app_type)?;
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
@@ -9679,6 +9782,28 @@ base_url = "https://api.example/v1"
         }
     }
 
+    fn route_test_provider(id: &str) -> Provider {
+        Provider::with_id(id.to_string(), id.to_string(), json!({}), None)
+    }
+
+    async fn seed_route_group(db: &Database, app_type: &str, provider_ids: &[&str]) {
+        for id in provider_ids {
+            db.save_provider(app_type, &route_test_provider(id))
+                .expect("save route provider");
+        }
+        let group = crate::database::RouteModeGroup {
+            enabled: false,
+            members: provider_ids
+                .iter()
+                .map(|id| crate::database::RouteModeMember::new(*id, 1))
+                .collect(),
+        };
+        db.save_route_mode_group(app_type, &group)
+            .expect("save route group");
+        db.set_route_mode_enabled(app_type, true)
+            .expect("enable route mode");
+    }
+
     #[tokio::test]
     #[serial]
     async fn claude_stale_recovery_without_provider_clears_key_fields_only() {
@@ -9715,5 +9840,213 @@ base_url = "https://api.example/v1"
             .unwrap();
         let after: Value = read_json_file(&get_claude_settings_path()).unwrap();
         assert_eq!(after, live);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn route_mode_enable_requires_enabled_member() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        let error = service
+            .enable_route_mode_for_app("claude")
+            .await
+            .expect_err("empty route group must be rejected");
+
+        assert!(
+            error.contains("at least one enabled member"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !db.route_mode_enabled_for_app("claude").expect("read flag"),
+            "flag must stay off after a failed enable"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn route_mode_enable_without_daemon_routing_reports_route_mode_wording() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_route_group(&db, "claude", &["p1"]).await;
+        // Attempt the enable from a disabled group so the assertion proves
+        // the failed enable leaves the flag untouched
+        db.set_route_mode_enabled("claude", false)
+            .expect("disable route group");
+
+        // The isolated runtime dir has no daemon, so the routing
+        // precondition fails; the error must name route mode, not
+        // automatic failover.
+        let error = service
+            .enable_route_mode_for_app("claude")
+            .await
+            .expect_err("no daemon routing must be refused");
+
+        assert!(
+            error.contains("route mode requires daemon-managed proxy routing"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !db.route_mode_enabled_for_app("claude").expect("read flag"),
+            "flag must stay off after a failed enable"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn route_mode_enable_succeeds_with_live_managed_worker() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_route_group(&db, "claude", &["p1"]).await;
+        // Attempt the enable from a disabled group so the assertion proves
+        // the successful enable itself flipped the flag
+        db.set_route_mode_enabled("claude", false)
+            .expect("disable route group");
+        let (_server, port) = spawn_status_server_for_test("claude-test-token").await;
+        seed_managed_worker_for_app(db.as_ref(), "claude", port);
+
+        service
+            .enable_route_mode_for_app("claude")
+            .await
+            .expect("enable route mode with live managed worker");
+
+        assert!(
+            db.route_mode_enabled_for_app("claude").expect("read flag"),
+            "flag must be on after a successful enable"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn route_mode_enable_conflicts_with_auto_failover() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_route_group(&db, "claude", &["p1"]).await;
+        // auto_failover_enabled only persists when the proxy is enabled and a
+        // queued provider exists (should_persist_auto_failover rule)
+        db.add_to_failover_queue("claude", "p1")
+            .expect("queue route provider");
+        // Attempt the enable from a disabled group so the assertion proves
+        // the failed enable leaves the flag untouched
+        db.set_route_mode_enabled("claude", false)
+            .expect("disable route group");
+        let mut config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read proxy config");
+        config.enabled = true;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("enable auto failover");
+
+        let error = service
+            .enable_route_mode_for_app("claude")
+            .await
+            .expect_err("auto failover conflict must be rejected");
+
+        assert!(
+            error.contains("conflicts with automatic failover"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !db.route_mode_enabled_for_app("claude").is_ok_and(|on| on),
+            "flag must stay off after a failed enable"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn route_mode_enable_rejects_unsupported_app() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db);
+
+        let error = service
+            .enable_route_mode_for_app("opencode")
+            .await
+            .expect_err("unsupported app must be rejected");
+
+        assert!(error.contains("not supported"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enable_auto_failover_is_refused_while_route_mode_is_active() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_route_group(&db, "claude", &["p1"]).await;
+
+        // The exclusivity guard runs before any daemon or live-config
+        // mutation, so the refusal is assertable without a daemon
+        let error = service
+            .enable_auto_failover_for_app("claude")
+            .await
+            .expect_err("auto failover must be refused while route mode is active");
+
+        assert!(
+            db.route_mode_enabled_for_app("claude").expect("read flag"),
+            "seed must leave route mode enabled"
+        );
+        assert!(
+            error.contains("route mode is active"),
+            "unexpected error: {error}"
+        );
+        let config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read proxy config");
+        assert!(
+            !config.auto_failover_enabled,
+            "auto failover flag must stay untouched"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn managed_session_disable_is_refused_while_route_mode_is_active() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_route_group(&db, "claude", &["p1"]).await;
+
+        let error = service
+            .set_managed_session_for_app("claude", false)
+            .await
+            .expect_err("proxy disable must be refused while route mode is active");
+
+        assert!(
+            error.contains("route mode is active"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disable_route_mode_flips_flag_only() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_route_group(&db, "claude", &["p1"]).await;
+
+        service
+            .disable_route_mode_for_app("claude")
+            .await
+            .expect("disable route mode");
+
+        assert!(
+            !db.route_mode_enabled_for_app("claude").expect("read flag"),
+            "flag must be off"
+        );
+        let group = db.get_route_mode_group("claude").expect("read group");
+        assert_eq!(group.members.len(), 1, "member config must be preserved");
+        let config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read proxy config");
+        assert!(!config.enabled, "proxy config must stay untouched");
     }
 }

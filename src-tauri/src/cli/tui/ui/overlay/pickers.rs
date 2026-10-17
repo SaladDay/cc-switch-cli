@@ -2323,6 +2323,117 @@ pub(super) fn render_failover_queue_manager_overlay(
     }
 }
 
+pub(super) fn render_route_member_picker_overlay(
+    frame: &mut Frame<'_>,
+    data: &UiData,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected_provider_id: Option<&str>,
+) {
+    let rows = app::route_member_picker_rows(data);
+    let member_count = rows
+        .iter()
+        .filter(|row| {
+            data.proxy
+                .route_members
+                .iter()
+                .any(|member| member.provider_id == row.id)
+        })
+        .count();
+    let visible_rows = rows.len().min(10) as u16;
+    let body = overlay_frame_at(
+        frame,
+        centered_rect_fixed(
+            78,
+            visible_rows.saturating_add(7).clamp(10, 18),
+            content_area,
+        ),
+        theme,
+        crate::t!("Route Mode Members", "路由模式成员"),
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_add_remove()),
+            ("Esc", texts::tui_key_close()),
+        ],
+        overlay_border_style(theme, false),
+    );
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(body);
+
+    let status = crate::t!(
+        format!("{member_count} members in route group"),
+        format!("路由组共 {member_count} 个成员")
+    );
+    frame.render_widget(
+        Paragraph::new(status)
+            .style(Style::default().fg(theme.dim))
+            .alignment(Alignment::Center),
+        chunks[0],
+    );
+
+    let body_area = chunks[1];
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(crate::t!("No providers configured.", "暂无提供商配置。"))
+                .style(Style::default().fg(theme.dim))
+                .alignment(Alignment::Center),
+            body_area,
+        );
+    } else {
+        let header = Row::new(vec![
+            Cell::from(""),
+            Cell::from(texts::header_name()),
+            Cell::from(crate::t!("Weight", "权重")),
+        ])
+        .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+        let table_rows = rows.iter().map(|row| {
+            let member = data
+                .proxy
+                .route_members
+                .iter()
+                .find(|member| member.provider_id == row.id);
+            let marker = if member.is_some() {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            };
+            let weight = member
+                .map(|member| member.weight.to_string())
+                .unwrap_or_else(|| "-".to_string());
+
+            Row::new(vec![
+                Cell::from(marker),
+                Cell::from(row.provider.name.as_str()),
+                Cell::from(weight),
+            ])
+        });
+
+        let table = Table::new(
+            table_rows,
+            [
+                Constraint::Length(2),
+                Constraint::Min(8),
+                Constraint::Length(10),
+            ],
+        )
+        .header(header)
+        .block(Block::default().borders(Borders::NONE))
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+        let mut state = TableState::default();
+        state.select(app::route_member_picker_selected_index(
+            data,
+            selected_provider_id,
+        ));
+        frame.render_stateful_widget(table, body_area, &mut state);
+    }
+}
+
 pub(super) fn render_mcp_apps_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,

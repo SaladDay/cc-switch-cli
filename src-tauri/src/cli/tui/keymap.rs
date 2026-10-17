@@ -287,6 +287,92 @@ pub(crate) mod providers {
     }
 }
 
+pub(crate) mod route_mode {
+    use crossterm::event::KeyCode;
+
+    use super::Binding;
+    use crate::cli::i18n::texts;
+    use crate::cli::tui::app::App;
+    use crate::cli::tui::data::UiData;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Intent {
+        CursorUp,
+        CursorDown,
+        /// Enter: toggles route mode on the status row (row 0) or the
+        /// selected member's enabled flag below it
+        Enter,
+        Weight,
+        Mappings,
+        AddMember,
+        RemoveMember,
+    }
+
+    fn member_selected(app: &App, data: &UiData) -> bool {
+        !data.proxy.route_members.is_empty() && app.route_mode_idx > 0
+    }
+
+    pub(crate) fn intent_for(key: KeyCode) -> Option<Intent> {
+        super::intent_for(BINDINGS, key)
+    }
+
+    pub(crate) fn key_bar_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::key_bar_items(BINDINGS, app, data)
+    }
+
+    pub(crate) const BINDINGS: &[Binding<Intent>] = &[
+        Binding {
+            display: "↑↓",
+            keys: &[KeyCode::Up],
+            intent: Intent::CursorUp,
+            label: |_, _| texts::tui_key_select(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "↓",
+            keys: &[KeyCode::Down],
+            intent: Intent::CursorDown,
+            label: |_, _| texts::tui_key_select(),
+            shown: super::never,
+        },
+        Binding {
+            display: "Enter",
+            keys: &[KeyCode::Enter],
+            intent: Intent::Enter,
+            label: |_, _| texts::tui_key_toggle(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "w",
+            keys: &[KeyCode::Char('w')],
+            intent: Intent::Weight,
+            label: |_, _| crate::t!("weight", "权重"),
+            shown: member_selected,
+        },
+        Binding {
+            display: "m",
+            keys: &[KeyCode::Char('m')],
+            intent: Intent::Mappings,
+            label: |_, _| crate::t!("mappings", "模型映射"),
+            shown: member_selected,
+        },
+        Binding {
+            display: "a",
+            keys: &[KeyCode::Char('a')],
+            intent: Intent::AddMember,
+            label: |_, _| texts::tui_key_add(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "d",
+            keys: &[KeyCode::Char('d'), KeyCode::Delete],
+            intent: Intent::RemoveMember,
+            label: |_, _| texts::tui_key_delete(),
+            shown: member_selected,
+        },
+    ];
+}
+
 pub(crate) mod mcp {
     use crossterm::event::KeyCode;
 

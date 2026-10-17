@@ -183,6 +183,11 @@ impl App {
                             app_type: app_type.clone(),
                         }
                     }
+                    ConfirmAction::ProxyEnableAndRouteMode { app_type } => {
+                        Action::EnableProxyAndRouteMode {
+                            app_type: app_type.clone(),
+                        }
+                    }
                     ConfirmAction::PromptOpenImportCandidate { filename, content } => {
                         Action::PromptOpenImportCandidate {
                             filename: filename.clone(),
@@ -386,6 +391,28 @@ impl App {
             }
             TextSubmit::SettingsProxyListenPort => {
                 self.handle_settings_proxy_listen_port_submit(data, raw)
+            }
+            TextSubmit::RouteModeWeight { provider_id } => {
+                let trimmed = raw.trim().to_string();
+                let weight = trimmed
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|weight| (1..=crate::database::ROUTE_MODE_MAX_WEIGHT).contains(weight));
+                let Some(weight) = weight else {
+                    self.push_toast(
+                        crate::t!(
+                            "Weight must be a whole number between 1 and 1000.",
+                            "权重必须是 1 到 1000 之间的整数。"
+                        ),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                };
+                Action::SetRouteModeMemberWeight {
+                    app_type: self.app_type.clone(),
+                    provider_id: provider_id.clone(),
+                    weight,
+                }
             }
             TextSubmit::SettingsOutboundProxyUrl => {
                 let trimmed = raw.trim().to_string();

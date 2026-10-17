@@ -1155,6 +1155,158 @@ impl App {
         }
     }
 
+    pub(crate) fn on_route_mode_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        use crate::cli::tui::keymap::route_mode::{intent_for, Intent};
+
+        let rows_len = data.proxy.route_members.len().saturating_add(1);
+        match intent_for(key.code) {
+            Some(Intent::CursorUp) => {
+                self.route_mode_idx = self.route_mode_idx.saturating_sub(1);
+                Action::None
+            }
+            Some(Intent::CursorDown) => {
+                self.route_mode_idx = (self.route_mode_idx + 1).min(rows_len.saturating_sub(1));
+                Action::None
+            }
+            Some(Intent::Enter) => {
+                if self.route_mode_idx == 0 {
+                    self.request_route_mode_toggle(data)
+                } else {
+                    self.request_route_mode_member_toggle(data)
+                }
+            }
+            Some(Intent::Weight) => self.open_route_mode_weight_input(data),
+            Some(Intent::Mappings) => self.open_route_mode_mappings_editor(data),
+            Some(Intent::AddMember) => {
+                self.overlay = Overlay::RouteMemberPicker {
+                    selected_provider_id: None,
+                };
+                Action::None
+            }
+            Some(Intent::RemoveMember) => {
+                if let Some(member) = self.selected_route_member(data) {
+                    Action::RemoveRouteModeMember {
+                        app_type: self.app_type.clone(),
+                        provider_id: member.provider_id.clone(),
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            None => Action::None,
+        }
+    }
+
+    fn selected_route_member<'a>(
+        &self,
+        data: &'a UiData,
+    ) -> Option<&'a super::super::data::RouteMemberSnapshot> {
+        if self.route_mode_idx == 0 {
+            return None;
+        }
+        data.proxy.route_members.get(self.route_mode_idx - 1)
+    }
+
+    pub(crate) fn request_route_mode_toggle(&mut self, data: &UiData) -> Action {
+        if !supports_failover_controls(&self.app_type) {
+            return Action::None;
+        }
+
+        let enabled = !data.proxy.route_mode_enabled;
+        if !enabled {
+            return Action::SetRouteModeEnabled {
+                app_type: self.app_type.clone(),
+                enabled: false,
+            };
+        }
+
+        if !data.proxy.route_members.iter().any(|member| member.enabled) {
+            self.push_toast(
+                crate::t!(
+                    "Route mode needs at least one enabled member.",
+                    "路由模式至少需要一个启用的成员。"
+                ),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        }
+
+        if data
+            .proxy
+            .routes_current_app_through_proxy(&self.app_type)
+            .is_some_and(|active| !active)
+        {
+            self.overlay = Overlay::Confirm(ConfirmOverlay {
+                title: texts::tui_confirm_title().to_string(),
+                message: crate::t!(
+                    "Route mode requires proxy routing for this app. Enable proxy takeover for the app first?",
+                    "路由模式需要当前应用走代理才能生效。是否同时开启当前应用代理并启用路由模式？"
+                )
+                .to_string(),
+                action: ConfirmAction::ProxyEnableAndRouteMode {
+                    app_type: self.app_type.clone(),
+                },
+            });
+            return Action::None;
+        }
+
+        Action::SetRouteModeEnabled {
+            app_type: self.app_type.clone(),
+            enabled: true,
+        }
+    }
+
+    fn request_route_mode_member_toggle(&mut self, data: &UiData) -> Action {
+        let Some(member) = self.selected_route_member(data) else {
+            return Action::None;
+        };
+        Action::ToggleRouteModeMember {
+            app_type: self.app_type.clone(),
+            provider_id: member.provider_id.clone(),
+        }
+    }
+
+    fn open_route_mode_weight_input(&mut self, data: &UiData) -> Action {
+        let Some(member) = self.selected_route_member(data) else {
+            return Action::None;
+        };
+        self.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_route_mode_title().to_string(),
+            prompt: crate::t!(
+                format!("Weight for {} (1-1000):", member.name),
+                format!("{} 的权重（1-1000）：", member.name)
+            ),
+            input: TextInput::new(member.weight.to_string()),
+            submit: TextSubmit::RouteModeWeight {
+                provider_id: member.provider_id.clone(),
+            },
+        });
+        Action::None
+    }
+
+    /// `m` on a member row: opens the multi-row mapping editor seeded from
+    /// the member's stored request→actual table.
+    fn open_route_mode_mappings_editor(&mut self, data: &UiData) -> Action {
+        let Some(member) = self.selected_route_member(data) else {
+            return Action::None;
+        };
+        self.overlay = Overlay::RouteMappingsEditor(RouteMappingsEditorState {
+            provider_id: member.provider_id.clone(),
+            provider_name: member.name.clone(),
+            rows: member
+                .model_mappings
+                .iter()
+                // Trim on seed so the commit-time duplicate check (which
+                // compares against trimmed input) agrees with the apply-time
+                // trim for legacy rows saved with stray whitespace.
+                .map(|(request, actual)| (request.trim().to_string(), actual.trim().to_string()))
+                .collect(),
+            selected: 0,
+            editing: None,
+        });
+        Action::None
+    }
+
     pub(crate) fn on_settings_outbound_proxy_key(
         &mut self,
         key: KeyEvent,

@@ -66,7 +66,7 @@ pub use config::{
     get_app_config_dir, get_claude_mcp_path, get_claude_settings_path, read_json_file,
     validate_config_dir,
 };
-pub use database::{Database, FailoverQueueItem};
+pub use database::{Database, FailoverQueueItem, RouteModeGroup, RouteModeMember};
 pub use deeplink::{
     import_mcp_from_deeplink, import_prompt_from_deeplink, import_provider_from_deeplink,
     import_skill_from_deeplink, parse_deeplink_url, DeepLinkImportRequest, McpImportResult,

@@ -707,6 +707,7 @@ pub(crate) enum ProxyReq {
     RefreshSnapshot {
         request_id: u64,
         app_type: AppType,
+        base_reload_token: UiDataReloadToken,
     },
 }
 
@@ -728,6 +729,7 @@ pub(crate) enum ProxyMsg {
     SnapshotRefreshed {
         request_id: u64,
         app_type: AppType,
+        base_reload_token: UiDataReloadToken,
         result: Result<ProxySnapshot, String>,
     },
 }
@@ -815,16 +817,30 @@ pub(crate) enum ModelFetchReq {
         request_headers: Option<BTreeMap<String, String>>,
         codex_oauth: bool,
         codex_oauth_account_id: Option<String>,
+        target: ModelFetchTarget,
+    },
+}
+
+/// Where a fetched model list is written back. The provider form fills one
+/// of its own fields; the route-mode mapping editor fills the "actual model"
+/// row field of the member being edited, or its "request model" field when
+/// the list came from the active provider's env config (no fetch at all).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModelFetchTarget {
+    FormField {
         field: ProviderAddField,
         claude_idx: Option<usize>,
     },
+    RouteMappings {
+        provider_id: String,
+    },
+    RouteMappingsRequest,
 }
 
 pub(crate) enum ModelFetchMsg {
     Finished {
         request_id: u64,
-        field: ProviderAddField,
-        claude_idx: Option<usize>,
+        target: ModelFetchTarget,
         result: Result<Vec<String>, String>,
     },
 }
