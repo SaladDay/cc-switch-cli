@@ -483,6 +483,29 @@ impl Database {
         Self::init_impl(true)
     }
 
+    /// Skill publication must not normalize unrelated state in a current-schema DB.
+    /// New and older databases still follow the upstream initialization/migration path.
+    pub fn open_for_skill_publication() -> Result<Self, AppError> {
+        crate::config::validate_config_dir()?;
+        let db_path = database_path()?;
+        if db_path.exists() {
+            #[cfg(unix)]
+            validate_existing_database_file(&db_path)?;
+            let conn = Connection::open_with_flags(&db_path, readonly_database_open_flags())
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            conn.busy_timeout(Duration::from_secs(5))
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let version = Self::get_user_version(&conn)?;
+            if version > SCHEMA_VERSION {
+                return Err(Self::future_schema_error(version));
+            }
+            if version == SCHEMA_VERSION {
+                return Self::open_existing_current_schema();
+            }
+        }
+        Self::init()
+    }
+
     /// Daemon startup already owns `daemon.pid`; the type-level lease proves
     /// there cannot be an older daemon to quiesce before this initialization.
     #[cfg(unix)]
@@ -725,6 +748,42 @@ impl Database {
             return Ok(false);
         }
         Self::has_user_tables(&conn)
+    }
+
+    /// Open an existing current-schema database for narrowly scoped maintenance.
+    /// Unlike init(), this never creates, migrates, seeds, vacuums, or runs startup maintenance.
+    pub fn open_existing_current_schema() -> Result<Self, AppError> {
+        crate::config::validate_config_dir()?;
+        let db_path = database_path()?;
+        if !db_path.exists() {
+            return Err(AppError::Database(format!(
+                "database is not initialized: {}",
+                db_path.display()
+            )));
+        }
+        #[cfg(unix)]
+        validate_existing_database_file(&db_path)?;
+
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let conn = Connection::open_with_flags(&db_path, flags)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::configure_connection(&conn)?;
+        let version = Self::get_user_version(&conn)?;
+        if version > SCHEMA_VERSION {
+            return Err(Self::future_schema_error(version));
+        }
+        if version != SCHEMA_VERSION {
+            return Err(AppError::Database(format!(
+                "database schema version {version} requires initialization before maintenance; current schema version is {SCHEMA_VERSION}"
+            )));
+        }
+        Ok(Self {
+            conn: Mutex::new(conn),
+            runtime_key: format!("file:{}", db_path.display()),
+            db_path: Some(db_path),
+        })
     }
 
     /// 打开当前 schema 的只读快照连接。

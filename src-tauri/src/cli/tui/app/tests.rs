@@ -6176,6 +6176,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial(home_settings)]
     fn openclaw_workspace_open_failure_is_localized() {
         let temp_home = TempDir::new().expect("create temp home");
@@ -6299,6 +6300,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial(home_settings)]
     fn openclaw_daily_memory_save_failure_is_localized() {
         let temp_home = TempDir::new().expect("create temp home");

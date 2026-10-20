@@ -45,6 +45,7 @@ cli = [
 test-hooks = []
 
 [dependencies]
+sha1 = "0.10"
 # Core dependencies
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }

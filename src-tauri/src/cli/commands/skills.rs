@@ -13,6 +13,31 @@ use crate::services::SkillService;
 
 #[derive(Subcommand)]
 pub enum SkillsCommand {
+    /// Install/update a provenance-bound local directory (offline, managed only).
+    InstallLocal {
+        /// Exact skill-relative local file to preserve without reading (repeatable).
+        #[arg(long = "runtime-file", value_name = "RELATIVE_FILE")]
+        runtime_files: Vec<String>,
+        #[arg(long)]
+        source_dir: std::path::PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        source_repo: String,
+        #[arg(long)]
+        source_path: String,
+        #[arg(long)]
+        source_commit: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one installed record without migrating or creating the database.
+    LocalInfo {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// List installed skills (from SSOT + database state)
     List,
     /// Discover available skills (from enabled repos)
@@ -37,11 +62,22 @@ pub enum SkillsCommand {
     Install {
         /// Skill directory name or full key (owner/name:directory)
         spec: String,
+        /// Fetch only this exact GitHub commit and skill directory.
+        #[arg(long, value_name = "40_HEX_SHA")]
+        source_commit: Option<String>,
     },
     /// Manually check installed repository-backed skills for updates
     CheckUpdates,
     /// Manually update one repository-backed skill or every detected update
     Update {
+        /// Exact local file to preserve; requires a single commit-pinned update.
+        #[arg(
+            long = "runtime-file",
+            value_name = "RELATIVE_FILE",
+            requires = "source_commit",
+            conflicts_with = "all"
+        )]
+        runtime_files: Vec<String>,
         /// Installed skill directory or id
         #[arg(
             value_name = "SPEC",
@@ -52,6 +88,9 @@ pub enum SkillsCommand {
         /// Update every skill reported by a fresh manual check
         #[arg(long)]
         all: bool,
+        /// Fetch only this exact GitHub commit and registered source directory.
+        #[arg(long, value_name = "40_HEX_SHA", conflicts_with = "all")]
+        source_commit: Option<String>,
     },
     /// Uninstall a skill (remove from SSOT and app dirs)
     Uninstall {
@@ -152,6 +191,31 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
     let app_type = app.clone().unwrap_or(AppType::Claude);
 
     match cmd {
+        SkillsCommand::InstallLocal {
+            runtime_files,
+            source_dir,
+            name,
+            source_repo,
+            source_path,
+            source_commit,
+            json: _,
+        } => {
+            let result = SkillService::install_local_with_runtime_files(
+                &source_dir,
+                &name,
+                &source_repo,
+                &source_path,
+                &source_commit,
+                &app.clone().unwrap_or(AppType::Codex),
+                &runtime_files,
+            )?;
+            println!("{}", result);
+            Ok(())
+        }
+        SkillsCommand::LocalInfo { name, json: _ } => {
+            println!("{}", SkillService::local_info(&name)?);
+            Ok(())
+        }
         SkillsCommand::List => list_installed(),
         SkillsCommand::Discover { query } => discover_skills(query.as_deref()),
         SkillsCommand::Market {
@@ -159,9 +223,22 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
             limit,
             offset,
         } => search_market(&query, limit, offset),
-        SkillsCommand::Install { spec } => install_skill(&app_type, &spec),
+        SkillsCommand::Install {
+            spec,
+            source_commit,
+        } => install_skill(&app_type, &spec, source_commit.as_deref()),
         SkillsCommand::CheckUpdates => check_skill_updates(),
-        SkillsCommand::Update { spec, all } => update_skills(spec.as_deref(), all),
+        SkillsCommand::Update {
+            runtime_files,
+            spec,
+            all,
+            source_commit,
+        } => update_skills(
+            spec.as_deref(),
+            all,
+            source_commit.as_deref(),
+            &runtime_files,
+        ),
         SkillsCommand::Uninstall { spec } => uninstall_skill(&spec),
         SkillsCommand::Enable { spec, apps } => toggle_skill(&app_type, &spec, &apps, true),
         SkillsCommand::Disable { spec, apps } => toggle_skill(&app_type, &spec, &apps, false),
@@ -290,10 +367,14 @@ fn discover_skills(query: Option<&str>) -> Result<(), AppError> {
     Ok(())
 }
 
-fn install_skill(app_type: &AppType, spec: &str) -> Result<(), AppError> {
+fn install_skill(
+    app_type: &AppType,
+    spec: &str,
+    source_commit: Option<&str>,
+) -> Result<(), AppError> {
     ensure_supported_skills_app(app_type, "install")?;
     let service = SkillService::new()?;
-    let installed = run_async(service.install(spec, app_type))?;
+    let installed = run_async(service.install_at_commit(spec, app_type, source_commit))?;
     println!(
         "{}",
         success(&format!(
@@ -332,7 +413,12 @@ fn check_skill_updates() -> Result<(), AppError> {
     }
 }
 
-fn update_skills(spec: Option<&str>, all: bool) -> Result<(), AppError> {
+fn update_skills(
+    spec: Option<&str>,
+    all: bool,
+    source_commit: Option<&str>,
+    runtime_files: &[String],
+) -> Result<(), AppError> {
     let service = SkillService::new()?;
     let mut check_failures = Vec::new();
     let ids = if all {
@@ -368,7 +454,11 @@ fn update_skills(spec: Option<&str>, all: bool) -> Result<(), AppError> {
         )));
     }
 
-    let batch = run_async(async { Ok(service.update_skills(&ids).await) })?;
+    let batch = run_async(async {
+        Ok(service
+            .update_skills_at_commit_with_runtime_files(&ids, source_commit, runtime_files)
+            .await)
+    })?;
     if !batch.updated.is_empty() {
         println!(
             "{}",

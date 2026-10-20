@@ -229,6 +229,42 @@ fn decode_url_component(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn saved_proxy_without_database_writes() {
+        let temp = tempfile::tempdir().expect("create fixture");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        std::fs::create_dir_all(crate::config::get_app_config_dir()).unwrap();
+        let config_dir = crate::config::get_app_config_dir();
+        let path = config_dir.join("cc-switch.db");
+        let saved = "http://127.0.0.1:19876";
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT); PRAGMA user_version=20;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO settings VALUES ('global_proxy_url', ?1)",
+                [saved],
+            )
+            .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let previous = http_client::get_current_proxy_url();
+        initialize_http_client_from_disk_best_effort();
+        let active = http_client::get_current_proxy_url();
+        http_client::init(previous.as_deref()).unwrap();
+        assert_eq!(active.as_deref(), Some(saved));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+        assert_eq!(std::fs::read_dir(config_dir).unwrap().count(), 1);
+    }
+
     use super::*;
 
     #[test]

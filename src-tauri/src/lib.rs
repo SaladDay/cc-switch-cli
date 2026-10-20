@@ -81,6 +81,7 @@ pub use mcp::{
 };
 pub use provider::{Provider, ProviderMeta, UsageScript};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
+pub use services::global_proxy::initialize_http_client_from_disk_best_effort;
 pub use services::{
     reapply_current_codex_official_live, AuthService, ConfigService, CredentialStatus,
     EndpointLatency, ExtraUsage, GlobalOutboundProxyConfig, HealthStatus, ImportSkillSelection,
