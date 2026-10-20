@@ -84,6 +84,30 @@ pub(super) fn local_tree_hash_with_runtime(
     root: &Path,
     runtime: &runtime_files::RuntimeFiles,
 ) -> Result<String, AppError> {
+    tree_hash(root, runtime, true)
+}
+
+pub(super) fn hash_path_name(root: &Path, path: &Path) -> Result<Vec<u8>, AppError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| invalid("Hash path escaped root"))?;
+    let mut name = Vec::new();
+    // Normalize only actual separators. Preserve literal Unix backslashes
+    // and non-Unicode names without changing ordinary UTF-8 baselines.
+    for component in relative.components() {
+        if !name.is_empty() {
+            name.push(b'/');
+        }
+        name.extend_from_slice(component.as_os_str().as_encoded_bytes());
+    }
+    Ok(name)
+}
+
+fn tree_hash(
+    root: &Path,
+    runtime: &runtime_files::RuntimeFiles,
+    include_directories: bool,
+) -> Result<String, AppError> {
     use sha2::{Digest, Sha256};
     let root = in_place::managed_path(root)?;
     let root = root.as_path();
@@ -91,9 +115,13 @@ pub(super) fn local_tree_hash_with_runtime(
         root: &Path,
         base: &Path,
         files: &mut Vec<PathBuf>,
+        directories: &mut Vec<PathBuf>,
         runtime: &runtime_files::RuntimeFiles,
-    ) -> Result<(), AppError> {
+    ) -> Result<bool, AppError> {
+        let mut had_children = false;
+        let mut managed_children = false;
         for entry in fs::read_dir(root).map_err(|e| AppError::io(root, e))? {
+            had_children = true;
             let path = entry.map_err(|e| AppError::io(root, e))?.path();
             if runtime.contains(path.strip_prefix(base).expect("descendant")) {
                 if !fs::symlink_metadata(&path)
@@ -105,27 +133,28 @@ pub(super) fn local_tree_hash_with_runtime(
                 continue;
             }
             if path.is_dir() {
-                collect(&path, base, files, runtime)?;
+                if !collect(&path, base, files, directories, runtime)? {
+                    continue;
+                }
+                directories.push(path);
             } else {
                 files.push(path);
             }
+            managed_children = true;
         }
-        Ok(())
+        Ok(managed_children || !had_children)
     }
     reject_links(root)?;
     let mut files = Vec::new();
-    collect(root, root, &mut files, runtime)?;
+    let mut directories = Vec::new();
+    collect(root, root, &mut files, &mut directories, runtime)?;
     files.sort();
     let mut digest = Sha256::new();
     for file in files {
-        let name = file
-            .strip_prefix(root)
-            .map_err(|_| invalid("Hash path escaped root"))?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let name = hash_path_name(root, &file)?;
         let bytes = fs::read(&file).map_err(|e| AppError::io(&file, e))?;
         digest.update((name.len() as u64).to_le_bytes());
-        digest.update(name.as_bytes());
+        digest.update(name);
         digest.update((bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
         #[cfg(unix)]
@@ -139,7 +168,84 @@ pub(super) fn local_tree_hash_with_runtime(
             digest.update(mode.to_le_bytes());
         }
     }
-    Ok(format!("local-sha256:{:x}", digest.finalize()))
+    let file_hash = format!("local-sha256:{:x}", digest.finalize());
+    if !include_directories {
+        return Ok(file_hash);
+    }
+    directories.sort();
+    let mut digest = Sha256::new();
+    for directory in directories {
+        let name = hash_path_name(root, &directory)?;
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name);
+    }
+    Ok(format!("{file_hash}:{:x}", digest.finalize()))
+}
+
+pub(super) fn has_directory_baseline(expected: &str) -> bool {
+    expected
+        .strip_prefix("local-sha256:")
+        .is_some_and(|hash| hash.contains(':'))
+}
+
+pub(super) fn publication_hash(
+    root: &Path,
+    runtime: &runtime_files::RuntimeFiles,
+    previous: Option<&str>,
+) -> Result<String, AppError> {
+    // Legacy records cannot prove ownership of existing empty directories.
+    // Keep their file-only baseline and the conservative replacement guard.
+    tree_hash(root, runtime, previous.is_none_or(has_directory_baseline))
+}
+
+pub(super) fn file_tree_hash_with_runtime(
+    root: &Path,
+    runtime: &runtime_files::RuntimeFiles,
+) -> Result<String, AppError> {
+    tree_hash(root, runtime, false)
+}
+
+// File-only records and unmanaged trees do not identify owned directories.
+// Preserve them rather than guessing that a replacement is safe.
+pub(super) fn require_legacy_directory_safety(
+    root: &Path,
+    expected: &str,
+    source: &in_place::SourceSnapshot,
+) -> Result<(), AppError> {
+    if has_directory_baseline(expected) {
+        return Ok(());
+    }
+    match fs::symlink_metadata(root) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(AppError::io(root, e)),
+        Ok(_) => {}
+    }
+    fn check(
+        current: &Path,
+        root: &Path,
+        source: &in_place::SourceSnapshot,
+    ) -> Result<(), AppError> {
+        for entry in fs::read_dir(current).map_err(|e| AppError::io(current, e))? {
+            let path = entry.map_err(|e| AppError::io(current, e))?.path();
+            if fs::symlink_metadata(&path)
+                .map_err(|e| AppError::io(&path, e))?
+                .is_dir()
+            {
+                if source
+                    .file(path.strip_prefix(root).expect("descendant"))
+                    .is_some()
+                {
+                    return Err(invalid(format!(
+                        "Legacy skill directory has no topology baseline; refusing replacement: {}",
+                        path.display()
+                    )));
+                }
+                check(&path, root, source)?;
+            }
+        }
+        Ok(())
+    }
+    check(root, root, source)
 }
 
 pub(super) fn matches_baseline(
@@ -147,19 +253,21 @@ pub(super) fn matches_baseline(
     expected: &str,
     runtime: &runtime_files::RuntimeFiles,
 ) -> Result<bool, AppError> {
-    if local_tree_hash_with_runtime(root, runtime)? == expected {
+    let directories = has_directory_baseline(expected);
+    if tree_hash(root, runtime, directories)? == expected {
         return Ok(true);
     }
     // Older installations hashed generated Python caches. Accept that exact
     // legacy baseline without ever opening explicitly declared runtime files.
     if runtime.has_automatic() {
-        return Ok(local_tree_hash_with_runtime(root, &runtime.legacy_baseline())? == expected);
+        return Ok(tree_hash(root, &runtime.legacy_baseline(), directories)? == expected);
     }
     Ok(false)
 }
 
 // Rollback preserves directories. A failed first install may therefore leave
-// an unmanaged tree containing only directories, which is safe to reuse.
+// an unmanaged tree containing only directories, which is safe to reuse as
+// long as publication does not replace any of those directories with a file.
 fn require_file_empty_target(path: &Path, conflict: &str) -> Result<(), AppError> {
     let path = in_place::managed_path(path)?;
     match fs::symlink_metadata(&path) {
@@ -308,8 +416,13 @@ impl SkillService {
             return Err(invalid("Source must be an absolute directory"));
         }
         reject_links(source)?;
-        runtime.validate_source(source)?;
-        let metadata = Self::parse_skill_metadata_static(&source.join("SKILL.md"))?;
+        let mut snapshot = in_place::SourceSnapshot::capture(source, runtime)?;
+        let skill_bytes = snapshot
+            .file(Path::new("SKILL.md"))
+            .ok_or_else(|| invalid("Source requires SKILL.md"))?;
+        let skill_content =
+            std::str::from_utf8(skill_bytes).map_err(|_| invalid("SKILL.md must be UTF-8"))?;
+        let metadata = Self::parse_skill_metadata_content(skill_content);
         if metadata.name.as_deref() != Some(name)
             || metadata
                 .description
@@ -323,6 +436,7 @@ impl SkillService {
             ));
         }
         let _guard = skill_state_write_guard();
+        let _publication_guard = super::publication_lock::acquire()?;
         let db = Database::open_for_skill_publication()?;
         let baseline = db.capture_local_skill_baseline(name)?;
         let mut existing = baseline.skill.clone();
@@ -344,7 +458,7 @@ impl SkillService {
             }
         }
         let ssot = Self::get_ssot_dir()?.join(name);
-        let source_canonical = fs::canonicalize(source).map_err(|e| AppError::io(source, e))?;
+        let source_canonical = snapshot.source();
         // Runtime content is never an acceptable authoritative source, even for a new name.
         for root in std::iter::once(Self::get_ssot_dir()?)
             .chain(Self::supported_skill_apps().filter_map(|a| Self::get_app_skills_dir(&a).ok()))
@@ -358,6 +472,7 @@ impl SkillService {
         }
         if existing.is_none() {
             require_file_empty_target(&ssot, "Unmanaged SSOT directory conflict")?;
+            require_legacy_directory_safety(&ssot, "", &snapshot)?;
         }
         if let Some(old) = &existing {
             if !matches_baseline(
@@ -367,6 +482,11 @@ impl SkillService {
             )? {
                 return Err(invalid("Installed SSOT has local edits; refusing update"));
             }
+            require_legacy_directory_safety(
+                &ssot,
+                old.content_hash.as_deref().unwrap_or_default(),
+                &snapshot,
+            )?;
         }
         let apps = existing
             .as_ref()
@@ -391,20 +511,9 @@ impl SkillService {
             {
                 return Err(invalid("Local skill deployment targets cannot overlap"));
             }
-            if let Some(old) = &existing {
-                if dest.exists() {
-                    if !matches_baseline(
-                        &dest,
-                        old.content_hash.as_deref().unwrap_or_default(),
-                        runtime,
-                    )? {
-                        return Err(invalid(
-                            "Application skill has local edits; refusing update",
-                        ));
-                    }
-                }
-            } else {
+            if existing.is_none() {
                 require_file_empty_target(&dest, "Unmanaged application directory conflict")?;
+                require_legacy_directory_safety(&dest, "", &snapshot)?;
             }
             // Compare physical paths, while retaining managed-path/link checks
             // for every app. Shared app directories need only one transaction.
@@ -415,11 +524,29 @@ impl SkillService {
                 destinations.push(dest);
             }
         }
+        if existing.is_some() {
+            // Check the complete topology first, then compare each projection
+            // to the verified SSOT, including ordinary empty directories.
+            let ssot_hash = Self::compute_pi_deployment_hash_with_runtime(&ssot, runtime)?;
+            for dest in destinations.iter().skip(1).filter(|dest| dest.exists()) {
+                if Self::compute_pi_deployment_hash_with_runtime(dest, runtime)? != ssot_hash {
+                    return Err(invalid(
+                        "Application skill has local edits; refusing update",
+                    ));
+                }
+            }
+        }
+        if existing.is_none() {
+            for dest in destinations.iter().skip(1) {
+                snapshot.retain_directories_from(dest)?;
+            }
+        }
+        snapshot.retain_directories_from(&ssot)?;
         // Prepare every file tree before any deployment mutation. Copies for new
         // projections avoid needing symlink privileges; existing SSOT links survive.
         let mut prepared = Vec::new();
         for dest in &destinations {
-            match in_place::Update::prepare_with_runtime(source, dest, runtime) {
+            match snapshot.prepare(dest) {
                 Ok(update) => prepared.push(update),
                 Err(error) => {
                     for update in prepared {
@@ -436,7 +563,16 @@ impl SkillService {
             }
             applied.push(update);
         }
-        let content_hash = match local_tree_hash_with_runtime(&ssot, runtime) {
+        if let Err(error) = Self::verify_publication_projections(&destinations, runtime) {
+            return Err(abort_updates(applied, error));
+        }
+        let content_hash = match publication_hash(
+            &ssot,
+            runtime,
+            existing
+                .as_ref()
+                .and_then(|old| old.content_hash.as_deref()),
+        ) {
             Ok(hash) => hash,
             Err(error) => return Err(abort_updates(applied, error)),
         };
@@ -491,6 +627,338 @@ impl SkillService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_updates_keep_retained_and_runtime_only_topology_consistent() {
+        for missing in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let input = source(home.path(), "first");
+            fs::create_dir_all(input.join("retained/empty")).unwrap();
+            for directory in ["private-dir", "generated/deep"] {
+                fs::create_dir_all(input.join(directory)).unwrap();
+                fs::write(input.join(directory).join("code.py"), "old code").unwrap();
+            }
+            install(&input, 'a').unwrap();
+            let ssot = SkillService::get_ssot_dir().unwrap().join("demo");
+            let app = SkillService::get_app_skills_dir(&AppType::Codex)
+                .unwrap()
+                .join("demo");
+            fs::write(ssot.join("private-dir/local.json"), "private").unwrap();
+            fs::create_dir_all(ssot.join("generated/deep/__pycache__")).unwrap();
+            fs::write(ssot.join("generated/deep/__pycache__/code.pyc"), "cache").unwrap();
+            if missing {
+                fs::rename(&app, home.path().join("preserved-app")).unwrap();
+            }
+            let next = source(&home.path().join("next"), "second");
+            for commit in ['b', 'c'] {
+                let outcome = SkillService::install_local_with_runtime_files(
+                    &next,
+                    "demo",
+                    "owner/private",
+                    "private-skills/demo",
+                    &commit.to_string().repeat(40),
+                    &AppType::Codex,
+                    &["private-dir/local.json".into()],
+                )
+                .unwrap();
+                let runtime =
+                    runtime_files::RuntimeFiles::new(&["private-dir/local.json".into()]).unwrap();
+                for dest in [&ssot, &app] {
+                    assert!(dest.join("retained/empty").is_dir());
+                    assert_eq!(
+                        local_tree_hash_with_runtime(dest, &runtime).unwrap(),
+                        outcome["skill"]["contentHash"].as_str().unwrap()
+                    );
+                    assert_eq!(
+                        fs::read(dest.join("SKILL.md")).unwrap(),
+                        fs::read(next.join("SKILL.md")).unwrap()
+                    );
+                }
+                assert!(!app.join("private-dir").exists());
+                assert!(!app.join("generated").exists());
+                assert_eq!(
+                    fs::read(ssot.join("private-dir/local.json")).unwrap(),
+                    b"private"
+                );
+                assert_eq!(
+                    fs::read(ssot.join("generated/deep/__pycache__/code.pyc")).unwrap(),
+                    b"cache"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_first_install_preserves_distinct_empty_trees_in_all_copies() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let input = source(home.path(), "first");
+        let ssot = SkillService::get_ssot_dir().unwrap().join("demo");
+        let app = SkillService::get_app_skills_dir(&AppType::Codex)
+            .unwrap()
+            .join("demo");
+        fs::create_dir_all(ssot.join("ssot-only/empty")).unwrap();
+        fs::create_dir_all(app.join("app-only/empty")).unwrap();
+        let outcome = install(&input, 'a').unwrap();
+        for dest in [&ssot, &app] {
+            assert!(dest.join("ssot-only/empty").is_dir());
+            assert!(dest.join("app-only/empty").is_dir());
+            assert_eq!(
+                local_tree_hash(dest).unwrap(),
+                outcome["skill"]["contentHash"].as_str().unwrap()
+            );
+        }
+        assert!(install(&input, 'b').is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_republish_rejects_backslash_file_renames() {
+        for (from, to, app_only) in [
+            (r"a\b", "a/b", false),
+            ("a/b", r"a\b", false),
+            (r"a\b", "a/b", true),
+            ("a/b", r"a\b", true),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let input = source(home.path(), "first");
+            fs::create_dir_all(input.join("a")).unwrap();
+            // Keep the directory topology and file ordering unchanged by rename.
+            fs::write(input.join("a/0"), "anchor").unwrap();
+            fs::write(input.join(from), "original").unwrap();
+            install(&input, 'a').unwrap();
+            let targets = [
+                SkillService::get_ssot_dir().unwrap().join("demo"),
+                SkillService::get_app_skills_dir(&AppType::Codex)
+                    .unwrap()
+                    .join("demo"),
+            ];
+            let info = SkillService::local_info("demo").unwrap();
+            let ssot_before = local_tree_hash(&targets[0]).unwrap();
+            let changed = usize::from(app_only);
+            let before = local_tree_hash(&targets[changed]).unwrap();
+            for target in targets.iter().skip(changed) {
+                fs::rename(target.join(from), target.join(to)).unwrap();
+            }
+            let after = local_tree_hash(&targets[changed]).unwrap();
+            assert_eq!(before.rsplit(':').next(), after.rsplit(':').next());
+            assert_ne!(before, after);
+            let error = install(&input, 'b').unwrap_err();
+            assert!(error.to_string().contains("local edits"), "{error}");
+            assert_eq!(SkillService::local_info("demo").unwrap(), info);
+            if app_only {
+                assert_eq!(local_tree_hash(&targets[0]).unwrap(), ssot_before);
+            }
+            for (i, target) in targets.iter().enumerate() {
+                let (present, absent) = if app_only && i == 0 {
+                    (from, to)
+                } else {
+                    (to, from)
+                };
+                assert!(!target.join(absent).exists());
+                assert_eq!(fs::read(target.join(present)).unwrap(), b"original");
+                assert_eq!(fs::read(target.join("a/0")).unwrap(), b"anchor");
+                assert_eq!(
+                    fs::read(target.join("SKILL.md")).unwrap(),
+                    fs::read(input.join("SKILL.md")).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_tree_hash_distinguishes_non_utf8_file_and_directory_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let from = std::ffi::OsStr::from_bytes(b"name-\x80");
+        let to = std::ffi::OsStr::from_bytes(b"name-\x81");
+        assert_eq!(from.to_string_lossy(), to.to_string_lossy());
+        for directory in [false, true] {
+            let root = tempfile::tempdir_in(home.path()).unwrap();
+            if directory {
+                fs::create_dir(root.path().join(from)).unwrap();
+            } else {
+                fs::write(root.path().join(from), "original").unwrap();
+            }
+            let before = local_tree_hash(root.path()).unwrap();
+            fs::rename(root.path().join(from), root.path().join(to)).unwrap();
+            assert_ne!(local_tree_hash(root.path()).unwrap(), before);
+            assert!(
+                !matches_baseline(root.path(), &before, &runtime_files::RuntimeFiles::none())
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn local_update_protects_added_ssot_directories_even_when_all_copies_match() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let input = source(home.path(), "first");
+        install(&input, 'a').unwrap();
+        let targets = [
+            SkillService::get_ssot_dir().unwrap().join("demo"),
+            SkillService::get_app_skills_dir(&AppType::Codex)
+                .unwrap()
+                .join("demo"),
+        ];
+        let before = SkillService::local_info("demo").unwrap()["skill"].clone();
+        for target in &targets {
+            fs::create_dir_all(target.join("notes/nested")).unwrap();
+        }
+        source(home.path(), "second");
+        fs::write(input.join("notes"), "must not replace user directory").unwrap();
+        let error = install(&input, 'b').unwrap_err();
+        assert!(error.to_string().contains("local edits"), "{error}");
+        assert_eq!(SkillService::local_info("demo").unwrap()["skill"], before);
+        for target in targets {
+            assert!(target.join("notes/nested").is_dir());
+            assert!(fs::read_to_string(target.join("SKILL.md"))
+                .unwrap()
+                .contains("first"));
+        }
+    }
+
+    #[test]
+    fn local_legacy_directory_protection_survives_an_intermediate_update() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let input = source(home.path(), "first");
+        install(&input, 'a').unwrap();
+        let targets = [
+            SkillService::get_ssot_dir().unwrap().join("demo"),
+            SkillService::get_app_skills_dir(&AppType::Codex)
+                .unwrap()
+                .join("demo"),
+        ];
+        let db = Database::init().unwrap();
+        let mut row = db.get_installed_skill("local:demo").unwrap().unwrap();
+        row.content_hash = Some(
+            file_tree_hash_with_runtime(&targets[0], &runtime_files::RuntimeFiles::none()).unwrap(),
+        );
+        db.save_skill(&row).unwrap();
+        for target in &targets {
+            fs::create_dir_all(target.join("notes")).unwrap();
+        }
+        source(home.path(), "second");
+        assert_eq!(install(&input, 'b').unwrap()["action"], "updated");
+        let before = db.get_installed_skill("local:demo").unwrap().unwrap();
+        assert!(!has_directory_baseline(
+            before.content_hash.as_deref().unwrap()
+        ));
+        source(home.path(), "third");
+        fs::write(input.join("notes"), "must not adopt user directory").unwrap();
+        let error = install(&input, 'c').unwrap_err();
+        assert!(
+            error.to_string().contains("no topology baseline"),
+            "{error}"
+        );
+        assert_eq!(
+            db.get_installed_skill("local:demo")
+                .unwrap()
+                .unwrap()
+                .content_hash,
+            before.content_hash
+        );
+        for target in targets {
+            assert!(target.join("notes").is_dir());
+            assert!(fs::read_to_string(target.join("SKILL.md"))
+                .unwrap()
+                .contains("second"));
+        }
+    }
+
+    #[test]
+    fn local_update_still_protects_nonruntime_empty_app_directories() {
+        for explicit in [false, true] {
+            for relative in ["notes", "notes/nested", "__pycache__"] {
+                let home = tempfile::tempdir().unwrap();
+                let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+                let input = source(home.path(), "first");
+                install(&input, 'a').unwrap();
+                let targets = [
+                    SkillService::get_ssot_dir().unwrap().join("demo"),
+                    SkillService::get_app_skills_dir(&AppType::Codex)
+                        .unwrap()
+                        .join("demo"),
+                ];
+                let before = SkillService::local_info("demo").unwrap()["skill"].clone();
+                fs::create_dir_all(targets[1].join(relative)).unwrap();
+                if explicit {
+                    for (i, target) in targets.iter().enumerate() {
+                        fs::write(target.join("local.json"), format!("private-{i}")).unwrap();
+                    }
+                }
+                source(home.path(), "second");
+                fs::write(
+                    input.join(relative.split('/').next().unwrap()),
+                    "cannot replace user directory",
+                )
+                .unwrap();
+                let paths = if explicit {
+                    vec!["local.json".into()]
+                } else {
+                    Vec::new()
+                };
+                let error = SkillService::install_local_with_runtime_files(
+                    &input,
+                    "demo",
+                    "owner/private",
+                    "private-skills/demo",
+                    &"b".repeat(40),
+                    &AppType::Codex,
+                    &paths,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("local edits"), "{error}");
+                assert!(targets[1].join(relative).is_dir());
+                assert_eq!(SkillService::local_info("demo").unwrap()["skill"], before);
+                for (i, target) in targets.iter().enumerate() {
+                    assert!(fs::read_to_string(target.join("SKILL.md"))
+                        .unwrap()
+                        .contains("first"));
+                    if explicit {
+                        assert_eq!(
+                            fs::read_to_string(target.join("local.json")).unwrap(),
+                            format!("private-{i}")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn local_update_allows_baselined_empty_directory_conversion() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let input = source(home.path(), "first");
+        fs::create_dir_all(input.join("notes/nested")).unwrap();
+        install(&input, 'a').unwrap();
+        let targets = [
+            SkillService::get_ssot_dir().unwrap().join("demo"),
+            SkillService::get_app_skills_dir(&AppType::Codex)
+                .unwrap()
+                .join("demo"),
+        ];
+        let cache = targets[1].join("scripts/__pycache__/module.pyc");
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(&cache, "private cache").unwrap();
+        let next = source(&home.path().join("next"), "second");
+        fs::write(next.join("notes"), "published file").unwrap();
+        assert_eq!(install(&next, 'b').unwrap()["action"], "updated");
+        for target in targets {
+            assert_eq!(fs::read(target.join("notes")).unwrap(), b"published file");
+            assert!(fs::read_to_string(target.join("SKILL.md"))
+                .unwrap()
+                .contains("second"));
+        }
+        assert_eq!(fs::read(cache).unwrap(), b"private cache");
+    }
 
     #[test]
     fn local_update_keeps_runtime_files_per_copy_and_rejects_source_conflicts() {
@@ -643,7 +1111,9 @@ mod tests {
         }
         let db = Database::init().unwrap();
         let mut row = db.get_installed_skill("local:demo").unwrap().unwrap();
-        row.content_hash = Some(local_tree_hash(&targets[0]).unwrap());
+        row.content_hash = Some(
+            file_tree_hash_with_runtime(&targets[0], &runtime_files::RuntimeFiles::none()).unwrap(),
+        );
         db.save_skill(&row).unwrap();
         source(home.path(), "second");
         assert_eq!(
@@ -865,6 +1335,53 @@ mod tests {
             );
             assert_eq!(fs::read(target.join("nested/data.bin")).unwrap(), [0, 255]);
         }
+    }
+
+    fn first_install_rejects_unbaselined_directory_replacement(app_copy: bool) {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let input = source(home.path(), "first");
+        fs::write(input.join("notes"), "must not replace user directory").unwrap();
+        fs::create_dir_all(input.join("published/nested")).unwrap();
+        let targets = [
+            SkillService::get_ssot_dir().unwrap().join("demo"),
+            SkillService::get_app_skills_dir(&AppType::Codex)
+                .unwrap()
+                .join("demo"),
+        ];
+        for target in &targets {
+            fs::create_dir_all(target.join("retained/nested")).unwrap();
+        }
+        let protected = &targets[usize::from(app_copy)];
+        fs::create_dir_all(protected.join("notes/nested")).unwrap();
+        let before: Vec<_> = targets
+            .iter()
+            .map(|target| local_tree_hash(target).unwrap())
+            .collect();
+        assert_eq!(SkillService::local_info("demo").unwrap()["found"], false);
+
+        let error = install(&input, 'a').unwrap_err();
+        assert!(
+            error.to_string().contains("no topology baseline"),
+            "{error}"
+        );
+        assert!(protected.join("notes/nested").is_dir());
+        for (target, hash) in targets.iter().zip(before) {
+            assert_eq!(local_tree_hash(target).unwrap(), hash);
+            assert!(!target.join("SKILL.md").exists());
+            assert!(!target.join("published").exists());
+        }
+        assert_eq!(SkillService::local_info("demo").unwrap()["found"], false);
+    }
+
+    #[test]
+    fn local_first_install_rejects_unbaselined_ssot_directory_replacement() {
+        first_install_rejects_unbaselined_directory_replacement(false);
+    }
+
+    #[test]
+    fn local_first_install_rejects_unbaselined_app_directory_replacement() {
+        first_install_rejects_unbaselined_directory_replacement(true);
     }
 
     #[test]

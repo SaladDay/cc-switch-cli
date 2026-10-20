@@ -32,13 +32,6 @@ fn failure(message: impl Into<String>) -> AppError {
     AppError::Message(message.into())
 }
 
-// Only call for a freshly created, still-empty download TempDir. Its trusted
-// system temp parent may be an alias (e.g. /var on macOS); resolve it before
-// adding skill paths, whose links must still be rejected by publication checks.
-fn targeted_temp_root(temp: &tempfile::TempDir) -> Result<PathBuf, AppError> {
-    fs::canonicalize(temp.path()).map_err(|e| AppError::io(temp.path(), e))
-}
-
 // As with local publication, rollback leftovers may contain directories only.
 // Inspect metadata without following links, including Windows reparse points.
 fn require_pinned_empty_tree(path: &Path) -> Result<(), AppError> {
@@ -331,7 +324,7 @@ impl SkillService {
         }
         Self::validate_targeted_tree(&tree, source)?;
         let temp = tempfile::tempdir().map_err(|e| failure(e.to_string()))?;
-        let temp_root = targeted_temp_root(&temp)?;
+        let temp_root = discovery::download_temp_root(&temp)?;
         let target = temp_root.join(source);
         fs::create_dir_all(&target).map_err(|e| AppError::io(&target, e))?;
         // Every directory/path was validated before any file is written.
@@ -393,7 +386,7 @@ mod targeted_download_tests {
         assert!(temp.path().starts_with(&alias));
         assert!(require_pinned_empty_tree(temp.path()).is_err());
 
-        let root = targeted_temp_root(&temp).unwrap();
+        let root = discovery::download_temp_root(&temp).unwrap();
         assert_eq!(root.parent(), Some(parent.as_path()));
         assert!(require_pinned_empty_tree(&root).is_ok());
         let source = root.join("second/shared");
@@ -725,6 +718,8 @@ mod targeted_http_tests {
                             Err(e) => panic!("accept publication request: {e}"),
                         }
                     };
+                    // Windows inherits the listener's nonblocking mode.
+                    socket.set_nonblocking(false).unwrap();
                     socket
                         .set_read_timeout(Some(std::time::Duration::from_secs(10)))
                         .unwrap();
@@ -767,8 +762,9 @@ mod targeted_http_tests {
         let first = "a".repeat(40);
         let second = "b".repeat(40);
         let third = "c".repeat(40);
+        let first_content = b"---\nname: shared display name\ndescription: Published source description\n---\n# first pinned version\n";
         let (spec, server) = publication_server(vec![
-            (first.clone(), b"# first pinned version\n".to_vec()),
+            (first.clone(), first_content.to_vec()),
             (second.clone(), b"# second pinned version\n".to_vec()),
             (third.clone(), b"# second pinned version\n".to_vec()),
         ]);
@@ -781,22 +777,50 @@ mod targeted_http_tests {
         let first_url = format!("https://github.com/{repo}/blob/{first}/second/shared/SKILL.md");
         assert_eq!(installed.readme_url.as_deref(), Some(first_url.as_str()));
         assert_eq!(installed.repo_branch.as_deref(), Some("main"));
+        assert_eq!(installed.name, "shared display name");
         assert_eq!(
-            fs::read(dest.join("SKILL.md")).unwrap(),
-            b"# first pinned version\n"
+            installed.description.as_deref(),
+            Some("Published source description")
         );
+        assert_eq!(fs::read(dest.join("SKILL.md")).unwrap(), first_content);
         assert!(dest.join("leftover/empty").is_dir());
         let db = Database::open_for_skill_publication().unwrap();
         let mut stored = db.get_installed_skill(&installed.id).unwrap().unwrap();
         assert_eq!(stored.readme_url, installed.readme_url);
         assert_eq!(stored.repo_branch.as_deref(), Some("main"));
+        assert_eq!(stored.name, installed.name);
+        assert_eq!(stored.description, installed.description);
         // An explicit branch containing '/' must remain a branch for later
         // unpinned updates and GitHub's branch validation.
         stored.repo_branch = Some("release/skills".into());
         db.save_skill(&stored).unwrap();
 
+        let runtime_files = ["local.json".to_string()];
+        let mut runtime_before = Vec::new();
+        for (index, target) in [
+            dest.clone(),
+            SkillService::get_app_skills_dir(&AppType::Claude)
+                .unwrap()
+                .join("shared"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            for relative in ["local.json", "scripts/__pycache__/module.pyc"] {
+                let path = target.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let bytes = format!("private-{index}-{relative}").into_bytes();
+                fs::write(&path, &bytes).unwrap();
+                let modified = fs::metadata(&path).unwrap().modified().unwrap();
+                runtime_before.push((path, bytes, modified));
+            }
+        }
         let mut outcome = service
-            .update_skills_at_commit(&[installed.id.clone()], Some(&second))
+            .update_skills_at_commit_with_runtime_files(
+                &[installed.id.clone()],
+                Some(&second),
+                &runtime_files,
+            )
             .await;
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
         assert_eq!(outcome.updated.len(), 1);
@@ -813,7 +837,14 @@ mod targeted_http_tests {
         );
         assert_eq!(
             stored.content_hash.as_deref(),
-            Some(local::local_tree_hash(&dest).unwrap().as_str())
+            Some(
+                local::local_tree_hash_with_runtime(
+                    &dest,
+                    &runtime_files::RuntimeFiles::new(&runtime_files).unwrap(),
+                )
+                .unwrap()
+                .as_str()
+            )
         );
         assert_eq!(
             SkillService::source_path_from_readme(&stored, None),
@@ -826,7 +857,11 @@ mod targeted_http_tests {
             .modified()
             .unwrap();
         let same_content = service
-            .update_skills_at_commit(&[installed.id.clone()], Some(&third))
+            .update_skills_at_commit_with_runtime_files(
+                &[installed.id.clone()],
+                Some(&third),
+                &runtime_files,
+            )
             .await;
         server.join().unwrap();
         assert!(
@@ -848,6 +883,10 @@ mod targeted_http_tests {
                 .unwrap(),
             modified
         );
+        for (path, bytes, modified) in runtime_before {
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+        }
 
         // A later branch download still uses the exact path from the SHA URL,
         // even when another skill has the same directory name.
@@ -877,8 +916,13 @@ mod targeted_http_tests {
             socket
                 .set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .unwrap();
-            let mut request = [0u8; 4096];
-            socket.read(&mut request).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).unwrap();
+                assert!(count > 0 && request.len() < 16384);
+                request.extend_from_slice(&buffer[..count]);
+            }
             write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

@@ -1,5 +1,11 @@
 use super::*;
 
+// Resolve trusted system temp aliases while the new download directory is
+// still empty. Links within downloaded skill trees remain publication errors.
+pub(super) fn download_temp_root(temp: &tempfile::TempDir) -> Result<PathBuf, AppError> {
+    fs::canonicalize(temp.path()).map_err(|e| AppError::io(temp.path(), e))
+}
+
 impl SkillService {
     fn validate_github_repo_ref(owner: &str, repo: &str, branch: &str) -> Result<(), AppError> {
         let owner_valid = !owner.is_empty()
@@ -293,20 +299,23 @@ impl SkillService {
 
     pub(super) fn parse_skill_metadata_static(path: &Path) -> Result<SkillMetadata, AppError> {
         let content = fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
+        Ok(Self::parse_skill_metadata_content(&content))
+    }
+
+    pub(super) fn parse_skill_metadata_content(content: &str) -> SkillMetadata {
         let content = content.trim_start_matches('\u{feff}');
         let parts: Vec<&str> = content.splitn(3, "---").collect();
         if parts.len() < 3 {
-            return Ok(SkillMetadata {
+            return SkillMetadata {
                 name: None,
                 description: None,
-            });
+            };
         }
         let front_matter = parts[1].trim();
-        let meta: SkillMetadata = serde_yaml::from_str(front_matter).unwrap_or(SkillMetadata {
+        serde_yaml::from_str(front_matter).unwrap_or(SkillMetadata {
             name: None,
             description: None,
-        });
-        Ok(meta)
+        })
     }
 
     pub(super) async fn download_repo(
@@ -363,7 +372,7 @@ impl SkillService {
                 format!("Failed to create temp dir: {e}"),
             )
         })?;
-        let temp_path = temp_dir.path().to_path_buf();
+        let temp_path = download_temp_root(&temp_dir)?;
 
         let mut default_branch_error = None;
         let resolved_default = if requested_branch.eq_ignore_ascii_case("HEAD") {
@@ -392,7 +401,10 @@ impl SkillService {
             };
 
             match self.download_and_extract(&url, &temp_path).await {
-                Ok(()) => return Ok((temp_dir.keep(), branch)),
+                Ok(()) => {
+                    let _ = temp_dir.keep();
+                    return Ok((temp_path, branch));
+                }
                 Err(e) => {
                     let _ = fs::remove_dir_all(&temp_path);
                     let _ = fs::create_dir_all(&temp_path);
@@ -820,6 +832,20 @@ mod archive_capacity_tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn download_temp_root_is_safe_for_publication_and_keeps_owner_cleanup() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let temp = tempfile::tempdir().unwrap();
+        let root = download_temp_root(&temp).unwrap();
+        assert_eq!(root, fs::canonicalize(temp.path()).unwrap());
+        fs::write(root.join("SKILL.md"), b"# Downloaded skill").unwrap();
+        assert!(local::local_tree_hash(&root).is_ok());
+        drop(temp);
+        assert!(!root.exists());
+    }
 
     fn read_request(stream: &mut std::net::TcpStream) {
         stream

@@ -7,6 +7,7 @@
 mod discovery;
 mod in_place;
 mod local;
+pub(crate) mod publication_lock;
 mod runtime_files;
 mod targeted;
 
@@ -40,7 +41,9 @@ const SKILL_ARCHIVE_ENTRY_COST: u64 = 4096;
 const STORAGE_MIGRATION_JOURNAL_FILE: &str = "skill-storage-migration.json";
 
 // Coordinates the Skills database rows with the filesystem SSOT and app projections.
-// Lock order: process-wide sync coordination (when present) -> this lock -> database mutex.
+// Lock order: process-wide sync coordination (when present) -> this lock
+// -> publication file lock (for writers) -> database mutex.
+// Mutation entry points acquire the file lock; their helpers must not reacquire it.
 fn skill_state_lock() -> &'static RwLock<()> {
     static LOCK: OnceLock<RwLock<()>> = OnceLock::new();
     LOCK.get_or_init(|| RwLock::new(()))
@@ -822,6 +825,7 @@ impl SkillService {
         // Default repository initialization is a write, so keep it and the
         // following multi-query snapshot in one exclusive state window.
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let db = Database::open_for_skill_publication()?;
         let _ = db.init_default_skill_repos();
         Self::load_index_from_db(&db)
@@ -872,10 +876,11 @@ impl SkillService {
 
     pub fn save_index(index: &SkillsIndex) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         Self::save_index_unlocked(index)
     }
 
-    /// Caller must hold the Skills state write guard.
+    /// Caller must hold the Skills state write and publication file guards.
     fn save_index_unlocked(index: &SkillsIndex) -> Result<(), AppError> {
         let db = Database::open_for_skill_publication()?;
 
@@ -898,6 +903,7 @@ impl SkillService {
 
     pub fn migrate_ssot_if_pending(index: &mut SkillsIndex) -> Result<usize, AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         *index = Self::load_index_unlocked()?;
         if !index.ssot_migration_pending {
             return Ok(0);
@@ -1170,8 +1176,7 @@ impl SkillService {
 
         let mut hasher = Sha256::new();
         for path in entries {
-            let relative = path.strip_prefix(dir).unwrap_or(&path);
-            hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+            hasher.update(local::hash_path_name(dir, &path)?);
             hasher.update(b"\0");
             let metadata =
                 fs::symlink_metadata(&path).map_err(|error| AppError::io(&path, error))?;
@@ -1651,11 +1656,12 @@ impl SkillService {
     }
 
     pub fn sync_to_app(index: &SkillsIndex, app: &AppType) -> Result<(), AppError> {
-        let _state_guard = skill_state_read_guard();
+        let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         Self::sync_to_app_unlocked(index, app)
     }
 
-    /// Caller must hold either the Skills state read or write guard.
+    /// Caller must hold the Skills state write and publication file guards.
     fn sync_to_app_unlocked(index: &SkillsIndex, app: &AppType) -> Result<(), AppError> {
         if !Self::app_supports_skills(app) {
             return Ok(());
@@ -1710,7 +1716,8 @@ impl SkillService {
     pub fn sync_all_enabled_best_effort() -> Result<(), AppError> {
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index);
-        let _state_guard = skill_state_read_guard();
+        let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let index = Self::load_index_unlocked()?;
         for app in Self::supported_skill_apps() {
             if let Err(e) = Self::sync_to_app_unlocked(&index, &app) {
@@ -1723,7 +1730,8 @@ impl SkillService {
     pub fn sync_all_enabled(app: Option<&AppType>) -> Result<(), AppError> {
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index)?;
-        let _state_guard = skill_state_read_guard();
+        let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let index = Self::load_index_unlocked()?;
 
         match app {
@@ -2099,6 +2107,7 @@ impl SkillService {
     /// available until every enabled app deployment has been refreshed.
     pub fn migrate_storage(target: SkillStorageLocation) -> Result<MigrationResult, AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let current = crate::settings::get_skill_storage_location();
         let mut journal = Self::load_storage_migration_journal()?;
         if current == target && journal.is_none() {
@@ -2687,7 +2696,8 @@ impl SkillService {
 
             // Remote I/O is complete; keep the local DB and SSOT stable while
             // hashes are read and missing hash metadata is backfilled.
-            let _state_guard = skill_state_read_guard();
+            let _state_guard = skill_state_write_guard();
+            let _publication_guard = publication_lock::acquire()?;
 
             for skill in skills {
                 let directory = match Self::require_valid_directory(&skill.directory) {
@@ -2713,7 +2723,10 @@ impl SkillService {
                     .as_deref()
                     .is_some_and(|hash| hash.starts_with("local-sha256:"))
                 {
-                    local::local_tree_hash(&remote_dir)
+                    local::file_tree_hash_with_runtime(
+                        &remote_dir,
+                        &runtime_files::RuntimeFiles::default(),
+                    )
                 } else {
                     Self::compute_dir_hash(&remote_dir)
                 } {
@@ -2748,7 +2761,14 @@ impl SkillService {
                     None
                 };
 
-                if current_hash.as_deref() != Some(remote_hash.as_str()) {
+                let comparable_hash = current_hash.as_deref().map(|hash| {
+                    if local::has_directory_baseline(hash) {
+                        hash.rsplit_once(':').expect("directory baseline").0
+                    } else {
+                        hash
+                    }
+                });
+                if comparable_hash != Some(remote_hash.as_str()) {
                     result.updates.push(SkillUpdateInfo {
                         id: skill.id,
                         name: skill.name,
@@ -2848,6 +2868,7 @@ impl SkillService {
         // Remote I/O and inspection are complete. Serialize SSOT staging, the
         // final replacement, metadata write, and app refresh as one mutation.
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let mut current = db.get_installed_skill(skill_id)?.ok_or_else(|| {
             AppError::Message(format!("Skill was removed during update: {skill_id}"))
         })?;
@@ -2990,14 +3011,18 @@ impl SkillService {
         )
     }
 
+    /// Production callers hold the Skills state write and publication file guards.
     fn publish_pinned_update_with_runtime(
         db: &Database,
         source: &Path,
         current: &InstalledSkill,
-        updated: InstalledSkill,
+        mut updated: InstalledSkill,
         runtime: &runtime_files::RuntimeFiles,
     ) -> Result<SkillUpdateOutcome, AppError> {
-        runtime.validate_source(source)?;
+        let mut snapshot = in_place::SourceSnapshot::capture(source, runtime)?;
+        let (name, description) = Self::snapshot_skill_name_desc(&snapshot, &current.directory);
+        updated.name = name;
+        updated.description = description;
         fn abort(mut updates: Vec<in_place::Update>, cause: AppError) -> AppError {
             let mut failures = Vec::new();
             while let Some(mut update) = updates.pop() {
@@ -3033,7 +3058,13 @@ impl SkillService {
                 // Old marketplace hashes omitted dotfiles. Upgrade only when
                 // existing hidden content is unchanged by this publication.
                 Self::require_legacy_hidden_unchanged_with_runtime(&ssot, source, runtime)?;
-                if Self::compute_dir_hash_with_runtime(&ssot, runtime)? != *expected {
+                if Self::compute_dir_hash_with_runtime(&ssot, runtime)? != *expected
+                    // Match the exact old marketplace baseline, which included
+                    // Python caches, but still never open declared runtime files.
+                    && !(runtime.has_automatic()
+                        && Self::compute_dir_hash_with_runtime(&ssot, &runtime.legacy_baseline())?
+                            == *expected)
+                {
                     return Err(AppError::InvalidInput(
                         "Installed SSOT has local edits; refusing update".into(),
                     ));
@@ -3044,6 +3075,11 @@ impl SkillService {
                 "Installed SSOT has no content baseline; refusing update".into(),
             ));
         }
+        local::require_legacy_directory_safety(
+            &ssot,
+            current.content_hash.as_deref().unwrap_or_default(),
+            &snapshot,
+        )?;
         let mut destinations = vec![ssot.clone()];
         for app in Self::supported_skill_apps().filter(|a| current.apps.is_enabled_for(a)) {
             let dest = Self::get_distinct_app_skills_dir(&ssot_dir, &app)?.join(&current.directory);
@@ -3080,9 +3116,10 @@ impl SkillService {
             }
             destinations.push(dest);
         }
+        snapshot.retain_directories_from(&ssot)?;
         let mut prepared = Vec::new();
         for dest in &destinations {
-            match in_place::Update::prepare_with_runtime(source, dest, runtime) {
+            match snapshot.prepare(dest) {
                 Ok(update) => prepared.push(update),
                 Err(error) => return Err(abort(prepared, error)),
             }
@@ -3092,6 +3129,14 @@ impl SkillService {
                 return Err(abort(prepared, error));
             }
         }
+        if let Err(error) = Self::verify_publication_projections(&destinations, runtime) {
+            return Err(abort(prepared, error));
+        }
+        updated.content_hash =
+            match local::publication_hash(&ssot, runtime, current.content_hash.as_deref()) {
+                Ok(hash) => Some(hash),
+                Err(error) => return Err(abort(prepared, error)),
+            };
         if let Err(error) = db.save_pinned_skill_if_unchanged(&baseline, &updated) {
             return Err(abort(prepared, error));
         }
@@ -3106,6 +3151,38 @@ impl SkillService {
             skill: updated,
             deployment_failures,
         })
+    }
+
+    fn snapshot_skill_name_desc(
+        snapshot: &in_place::SourceSnapshot,
+        fallback_name: &str,
+    ) -> (String, Option<String>) {
+        snapshot
+            .file(Path::new("SKILL.md"))
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(Self::parse_skill_metadata_content)
+            .map(|meta| {
+                (
+                    meta.name.unwrap_or_else(|| fallback_name.to_string()),
+                    meta.description,
+                )
+            })
+            .unwrap_or_else(|| (fallback_name.to_string(), None))
+    }
+
+    fn verify_publication_projections(
+        destinations: &[PathBuf],
+        runtime: &runtime_files::RuntimeFiles,
+    ) -> Result<(), AppError> {
+        let expected = Self::compute_pi_deployment_hash_with_runtime(&destinations[0], runtime)?;
+        for dest in destinations.iter().skip(1) {
+            if Self::compute_pi_deployment_hash_with_runtime(dest, runtime)? != expected {
+                return Err(AppError::InvalidInput(
+                    "Published application topology differs from SSOT; refusing commit".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn require_legacy_hidden_unchanged_with_runtime(
@@ -3141,7 +3218,7 @@ impl SkillService {
                     )?
                 } else if kind.is_dir() && !next.exists() {
                     // Directories containing only excluded files are not source content.
-                    local::local_tree_hash_with_runtime(
+                    local::file_tree_hash_with_runtime(
                         &path,
                         &runtime.scoped(path.strip_prefix(root).expect("descendant")),
                     )? == "local-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -3242,22 +3319,26 @@ impl SkillService {
 
     pub fn set_sync_method(method: SyncMethod) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         crate::settings::set_skill_sync_method(method)
     }
 
     pub fn upsert_repo(repo: SkillRepo) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         Database::open_for_skill_publication()?.save_skill_repo(&repo)
     }
 
     pub fn remove_repo(owner: &str, name: &str) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let db = Database::open_for_skill_publication()?;
         db.delete_skill_repo(owner, name)
     }
 
     pub fn set_repo_enabled(owner: &str, name: &str, enabled: bool) -> Result<bool, AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         Database::open_for_skill_publication()?.set_skill_repo_enabled(owner, name, enabled)
     }
 
@@ -3301,7 +3382,7 @@ impl SkillService {
         None
     }
 
-    /// Caller must hold the Skills state write guard.
+    /// Caller must hold the Skills state write and publication file guards.
     fn reuse_existing_install(
         discoverable: &DiscoverableSkill,
         install_name: &str,
@@ -3344,7 +3425,7 @@ impl SkillService {
         Ok(None)
     }
 
-    /// Caller must hold the Skills state write guard.
+    /// Caller must hold the Skills state write and publication file guards.
     fn persist_and_sync_new_skill(
         db: &Database,
         installed: &InstalledSkill,
@@ -3366,8 +3447,9 @@ impl SkillService {
         Ok(())
     }
 
-    /// Pinned first installs only. Caller holds the write guard through rollback
-    /// and cleanup; only an unregistered, file-empty directory tree may be reused.
+    /// Pinned first installs only. Caller holds the state write and publication
+    /// file guards through rollback and cleanup; only an unregistered, file-empty
+    /// directory tree may be reused.
     fn install_pinned_source(
         source: &Path,
         mut installed: InstalledSkill,
@@ -3383,6 +3465,13 @@ impl SkillService {
         }
         let sync_method = Self::get_sync_method()?;
         let dest = in_place::managed_path(&Self::get_ssot_dir()?.join(&installed.directory))?;
+        let runtime = runtime_files::RuntimeFiles::default();
+        let mut snapshot = in_place::SourceSnapshot::capture(source, &runtime)?;
+        (installed.name, installed.description) =
+            Self::snapshot_skill_name_desc(&snapshot, &installed.directory);
+        if dest.exists() {
+            local::require_legacy_directory_safety(&dest, "", &snapshot)?;
+        }
         // No row exists yet, so even an identical app copy is not ours to adopt.
         // Only file-empty rollback leftovers may be reused. Check before writing
         // SSOT or registering the row; managed updates retain their usual paths.
@@ -3394,40 +3483,30 @@ impl SkillService {
                     "Pinned install refuses an unmanaged Skill deployment: {error}"
                 ))
             })?;
-        }
-        let mut update = in_place::Update::prepare(source, &dest)?;
-
-        // The transaction removes new files but deliberately preserves directories.
-        // Record only newly created source directories, deepest first, for
-        // empty-only cleanup. Preserve any directories reused from a prior attempt.
-        fn directories(
-            source: &Path,
-            dest: &Path,
-            dirs: &mut Vec<PathBuf>,
-        ) -> Result<(), AppError> {
-            for entry in fs::read_dir(source).map_err(|e| AppError::io(source, e))? {
-                let entry = entry.map_err(|e| AppError::io(source, e))?;
-                if entry
-                    .file_type()
-                    .map_err(|e| AppError::io(entry.path(), e))?
-                    .is_dir()
+            if app_dest.exists() {
+                local::require_legacy_directory_safety(&app_dest, "", &snapshot)?;
+                if matches!(sync_method, SyncMethod::Symlink)
+                    && fs::read_dir(&app_dest)
+                        .map_err(|e| AppError::io(&app_dest, e))?
+                        .next()
+                        .is_some()
                 {
-                    directories(&entry.path(), &dest.join(entry.file_name()), dirs)?;
+                    return Err(AppError::InvalidInput(
+                        "Pinned symlink install refuses an unmanaged directory tree".into(),
+                    ));
                 }
+                snapshot.retain_directories_from(&app_dest)?;
             }
-            match fs::symlink_metadata(dest) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => dirs.push(dest.to_path_buf()),
-                Err(e) => return Err(AppError::io(dest, e)),
-                Ok(_) => {}
-            }
-            Ok(())
         }
-        let mut created_dirs = Vec::new();
-        directories(source, &dest, &mut created_dirs)?;
+        snapshot.retain_directories_from(&dest)?;
+        let mut update = snapshot.prepare(&dest)?;
+
+        // Rollback only removes directories created by this captured publication.
+        let created_dirs = snapshot.new_directories_at(&dest)?;
         let mut registered = false;
         let result = (|| {
             update.apply()?;
-            installed.content_hash = Some(local::local_tree_hash(&dest)?);
+            installed.content_hash = Some(local::local_tree_hash_with_runtime(&dest, &runtime)?);
             Self::preflight_pi_skill_destination(&dest, &installed.directory, app)?;
             db.save_skill(&installed)?;
             registered = true;
@@ -3476,6 +3555,7 @@ impl SkillService {
 
     pub fn toggle_app(directory_or_id: &str, app: &AppType, enabled: bool) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let mut index = Self::load_index_unlocked()?;
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
             return Err(AppError::Message(format!(
@@ -3505,6 +3585,7 @@ impl SkillService {
 
     pub fn set_apps(directory_or_id: &str, apps: SkillApps) -> Result<bool, AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let mut index = Self::load_index_unlocked()?;
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
             return Err(AppError::Message(format!(
@@ -3542,6 +3623,7 @@ impl SkillService {
 
     pub fn uninstall(directory_or_id: &str) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let index = Self::load_index_unlocked()?;
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
             return Err(AppError::Message(format!(
@@ -3640,6 +3722,7 @@ impl SkillService {
         let new_repo = format!("{}/{}", discoverable.repo_owner, discoverable.repo_name);
         let needs_download = {
             let _state_guard = skill_state_write_guard();
+            let _publication_guard = publication_lock::acquire()?;
             if source_commit.is_some() {
                 Self::reject_pinned_existing_install(&install_name)?;
                 true
@@ -3733,6 +3816,7 @@ impl SkillService {
         // Network I/O is complete. Re-check under the write guard before any
         // SSOT or database mutation, then keep the projection consistent.
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         if source_commit.is_some() {
             Self::reject_pinned_existing_install(&install_name)?;
         } else {
@@ -3948,6 +4032,7 @@ impl SkillService {
         imports: Vec<ImportSkillSelection>,
     ) -> Result<Vec<InstalledSkill>, AppError> {
         let _state_guard = skill_state_write_guard();
+        let _publication_guard = publication_lock::acquire()?;
         let mut index = Self::load_index_unlocked()?;
         let ssot_dir = Self::get_ssot_dir()?;
         let agents_lock = parse_agents_lock();
@@ -4491,6 +4576,378 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
+    fn pinned_update_protects_added_ssot_directories_even_when_all_copies_match() {
+        for app in [Some(AppType::Claude), Some(AppType::Codex), None] {
+            for relative in ["notes", "notes/nested", "__pycache__"] {
+                let home = tempfile::tempdir().unwrap();
+                let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+                let _pi = crate::pi_config::test_support::TestAgentDir::new();
+                SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+                let _state_guard = skill_state_write_guard();
+                let (source, mut current) = pinned_source_fixture(home.path());
+                current.apps = app.as_ref().map(SkillApps::only).unwrap_or_default();
+                current.readme_url = Some(format!(
+                    "https://github.com/owner/repo/blob/{}/shared/SKILL.md",
+                    "a".repeat(40)
+                ));
+                let db = Database::init().unwrap();
+                let ssot = SkillService::get_ssot_dir()
+                    .unwrap()
+                    .join(&current.directory);
+                let mut destinations = vec![ssot.clone()];
+                let runtime = runtime_files::RuntimeFiles::default();
+                let current = if let Some(app) = &app {
+                    let current =
+                        SkillService::install_pinned_source(&source, current, app).unwrap();
+                    let app_dest = SkillService::get_app_skills_dir(app)
+                        .unwrap()
+                        .join(&current.directory);
+                    assert!(!SkillService::is_symlink(&app_dest));
+                    destinations.push(app_dest);
+                    current
+                } else {
+                    // Model an installed skill with no enabled apps or physical app copies.
+                    SkillService::copy_dir_recursive(&source, &ssot).unwrap();
+                    current.content_hash =
+                        Some(local::local_tree_hash_with_runtime(&ssot, &runtime).unwrap());
+                    db.save_skill(&current).unwrap();
+                    for app in SkillService::supported_skill_apps() {
+                        assert!(!SkillService::get_app_skills_dir(&app)
+                            .unwrap()
+                            .join(&current.directory)
+                            .exists());
+                    }
+                    current
+                };
+                for dest in &destinations {
+                    fs::create_dir_all(dest.join(relative)).unwrap();
+                }
+                let before = destinations
+                    .iter()
+                    .map(|dest| local::local_tree_hash(dest).unwrap())
+                    .collect::<Vec<_>>();
+                assert!(before.iter().all(|hash| hash == &before[0]));
+                let next = home.path().join("next");
+                fs::create_dir_all(&next).unwrap();
+                fs::write(next.join("SKILL.md"), "# updated pinned\n").unwrap();
+                fs::write(
+                    next.join(relative.split('/').next().unwrap()),
+                    "cannot replace user directory",
+                )
+                .unwrap();
+                let mut updated = current.clone();
+                updated.readme_url = Some(format!(
+                    "https://github.com/owner/repo/blob/{}/shared/SKILL.md",
+                    "b".repeat(40)
+                ));
+                updated.content_hash =
+                    Some(local::local_tree_hash_with_runtime(&next, &runtime).unwrap());
+                updated.updated_at = 123;
+
+                let error = SkillService::publish_pinned_update(&db, &next, &current, updated)
+                    .err()
+                    .unwrap();
+                assert!(error.to_string().contains("local edits"), "{error}");
+                assert_eq!(
+                    serde_json::to_value(db.get_installed_skill(&current.id).unwrap().unwrap())
+                        .unwrap(),
+                    serde_json::to_value(&current).unwrap()
+                );
+                for (dest, hash) in destinations.iter().zip(before) {
+                    assert_eq!(local::local_tree_hash(dest).unwrap(), hash);
+                    assert!(dest.join(relative).is_dir());
+                    assert!(fs::read_dir(dest.join(relative)).unwrap().next().is_none());
+                    assert_eq!(fs::read(dest.join("SKILL.md")).unwrap(), b"# pinned\n");
+                    assert_eq!(
+                        fs::read(dest.join("references/detail.md")).unwrap(),
+                        b"new detail\n"
+                    );
+                    assert_no_pinned_staging(dest.parent().unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_update_allows_baselined_empty_directory_conversion() {
+        for app in [AppType::Claude, AppType::Codex] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let _pi = crate::pi_config::test_support::TestAgentDir::new();
+            SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+            let _state_guard = skill_state_write_guard();
+            let (source, mut installed) = pinned_source_fixture(home.path());
+            installed.apps = SkillApps::only(&app);
+            let db = Database::init().unwrap();
+            let current = SkillService::install_pinned_source(&source, installed, &app).unwrap();
+            let destinations = [
+                SkillService::get_ssot_dir()
+                    .unwrap()
+                    .join(&current.directory),
+                SkillService::get_app_skills_dir(&app)
+                    .unwrap()
+                    .join(&current.directory),
+            ];
+            for dest in &destinations {
+                assert!(dest.join("references/empty").is_dir());
+            }
+            let next = home.path().join("next");
+            fs::create_dir_all(next.join("references")).unwrap();
+            fs::write(next.join("SKILL.md"), "# converted pinned\n").unwrap();
+            fs::write(next.join("references/empty"), "published file\n").unwrap();
+            let runtime = runtime_files::RuntimeFiles::default();
+            let mut updated = current.clone();
+            updated.readme_url = Some(format!(
+                "https://github.com/owner/repo/blob/{}/shared/SKILL.md",
+                "b".repeat(40)
+            ));
+            updated.content_hash =
+                Some(local::local_tree_hash_with_runtime(&next, &runtime).unwrap());
+            updated.updated_at = 123;
+
+            let outcome =
+                SkillService::publish_pinned_update(&db, &next, &current, updated).unwrap();
+            assert!(outcome.deployment_failures.is_empty());
+            assert_eq!(
+                serde_json::to_value(db.get_installed_skill(&current.id).unwrap().unwrap())
+                    .unwrap(),
+                serde_json::to_value(&outcome.skill).unwrap()
+            );
+            for dest in &destinations {
+                assert_eq!(
+                    fs::read(dest.join("references/empty")).unwrap(),
+                    b"published file\n"
+                );
+                assert_eq!(
+                    fs::read(dest.join("SKILL.md")).unwrap(),
+                    b"# converted pinned\n"
+                );
+                assert_eq!(
+                    Some(local::local_tree_hash_with_runtime(dest, &runtime).unwrap()),
+                    outcome.skill.content_hash
+                );
+                assert_no_pinned_staging(dest.parent().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_update_baselines_retained_source_directories_for_later_updates() {
+        for app in [AppType::Claude, AppType::Codex] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let _pi = crate::pi_config::test_support::TestAgentDir::new();
+            SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+            let _state_guard = skill_state_write_guard();
+            let (source, mut installed) = pinned_source_fixture(home.path());
+            installed.apps = SkillApps::only(&app);
+            let db = Database::init().unwrap();
+            let mut current =
+                SkillService::install_pinned_source(&source, installed, &app).unwrap();
+            let destinations = [
+                SkillService::get_ssot_dir()
+                    .unwrap()
+                    .join(&current.directory),
+                SkillService::get_app_skills_dir(&app)
+                    .unwrap()
+                    .join(&current.directory),
+            ];
+            let next = home.path().join("next");
+            fs::create_dir_all(&next).unwrap();
+            let runtime = runtime_files::RuntimeFiles::default();
+            // Separate source snapshots omit the old empty directory without deleting it.
+            for (commit, content, updated_at) in [
+                ("b", "# second pinned\n", 123),
+                ("c", "# third pinned\n", 456),
+            ] {
+                fs::write(next.join("SKILL.md"), content).unwrap();
+                assert!(!next.join("references").exists());
+                let source_hash = local::local_tree_hash_with_runtime(&next, &runtime).unwrap();
+                let mut updated = current.clone();
+                updated.readme_url = Some(format!(
+                    "https://github.com/owner/repo/blob/{}/shared/SKILL.md",
+                    commit.repeat(40)
+                ));
+                updated.content_hash = Some(source_hash.clone());
+                updated.updated_at = updated_at;
+
+                let outcome =
+                    SkillService::publish_pinned_update(&db, &next, &current, updated).unwrap();
+                assert!(outcome.deployment_failures.is_empty());
+                assert_eq!(
+                    serde_json::to_value(db.get_installed_skill(&current.id).unwrap().unwrap())
+                        .unwrap(),
+                    serde_json::to_value(&outcome.skill).unwrap()
+                );
+                for dest in &destinations {
+                    assert!(dest.join("references/empty").is_dir());
+                    assert!(fs::read_dir(dest.join("references/empty"))
+                        .unwrap()
+                        .next()
+                        .is_none());
+                    assert!(!dest.join("references/detail.md").exists());
+                    assert_eq!(fs::read_to_string(dest.join("SKILL.md")).unwrap(), content);
+                    let deployed_hash =
+                        local::local_tree_hash_with_runtime(dest, &runtime).unwrap();
+                    assert_ne!(deployed_hash, source_hash);
+                    assert_eq!(Some(deployed_hash), outcome.skill.content_hash);
+                    assert_no_pinned_staging(dest.parent().unwrap());
+                }
+                current = outcome.skill;
+            }
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_update_keeps_retained_and_runtime_only_topology_consistent() {
+        for (app, missing) in [
+            (AppType::Claude, true),
+            (AppType::Codex, true),
+            (AppType::Claude, false),
+            (AppType::Codex, false),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let _pi = crate::pi_config::test_support::TestAgentDir::new();
+            SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+            let _state_guard = skill_state_write_guard();
+            let (source, mut installed) = pinned_source_fixture(home.path());
+            for directory in ["private-dir", "generated/deep"] {
+                fs::create_dir_all(source.join(directory)).unwrap();
+                fs::write(source.join(directory).join("code.py"), "old code").unwrap();
+            }
+            installed.apps = SkillApps::only(&app);
+            let db = Database::init().unwrap();
+            let mut current =
+                SkillService::install_pinned_source(&source, installed, &app).unwrap();
+            let ssot = SkillService::get_ssot_dir()
+                .unwrap()
+                .join(&current.directory);
+            let app_dest = SkillService::get_app_skills_dir(&app)
+                .unwrap()
+                .join(&current.directory);
+            fs::write(ssot.join("private-dir/local.json"), "private").unwrap();
+            fs::create_dir_all(ssot.join("generated/deep/__pycache__")).unwrap();
+            fs::write(ssot.join("generated/deep/__pycache__/code.pyc"), "cache").unwrap();
+            if missing {
+                fs::rename(&app_dest, home.path().join("preserved-app")).unwrap();
+            }
+            let runtime =
+                runtime_files::RuntimeFiles::new(&["private-dir/local.json".into()]).unwrap();
+            let next = home.path().join("next");
+            fs::create_dir_all(&next).unwrap();
+            for content in ["# second", "# third"] {
+                fs::write(next.join("SKILL.md"), content).unwrap();
+                let outcome = SkillService::publish_pinned_update_with_runtime(
+                    &db,
+                    &next,
+                    &current,
+                    current.clone(),
+                    &runtime,
+                )
+                .unwrap();
+                assert!(outcome.deployment_failures.is_empty());
+                for dest in [&ssot, &app_dest] {
+                    assert!(dest.join("references/empty").is_dir());
+                    assert!(!dest.join("references/detail.md").exists());
+                    assert_eq!(fs::read_to_string(dest.join("SKILL.md")).unwrap(), content);
+                    assert_eq!(
+                        local::local_tree_hash_with_runtime(dest, &runtime).unwrap(),
+                        outcome.skill.content_hash.clone().unwrap()
+                    );
+                }
+                assert!(!app_dest.join("private-dir").exists());
+                assert!(!app_dest.join("generated").exists());
+                assert_eq!(
+                    fs::read(ssot.join("private-dir/local.json")).unwrap(),
+                    b"private"
+                );
+                assert_eq!(
+                    fs::read(ssot.join("generated/deep/__pycache__/code.pyc")).unwrap(),
+                    b"cache"
+                );
+                current = outcome.skill;
+            }
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_first_install_rejects_unbaselined_directory_to_file_conversion() {
+        for app in [AppType::Claude, AppType::Codex] {
+            for in_app in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+                let _pi = crate::pi_config::test_support::TestAgentDir::new();
+                SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+                let _state_guard = skill_state_write_guard();
+                let (source, installed) = pinned_source_fixture(home.path());
+                fs::write(source.join("notes"), "source file").unwrap();
+                let ssot = SkillService::get_ssot_dir()
+                    .unwrap()
+                    .join(&installed.directory);
+                let app_dest = SkillService::get_app_skills_dir(&app)
+                    .unwrap()
+                    .join(&installed.directory);
+                let target = if in_app { &app_dest } else { &ssot };
+                fs::create_dir_all(target.join("notes/empty")).unwrap();
+                let before = local::local_tree_hash(target).unwrap();
+                let error = SkillService::install_pinned_source(&source, installed.clone(), &app)
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains("no topology baseline"),
+                    "{error}"
+                );
+                assert_eq!(local::local_tree_hash(target).unwrap(), before);
+                assert!(target.join("notes/empty").is_dir());
+                assert!(!ssot.join("SKILL.md").exists());
+                assert!(Database::open_for_skill_publication()
+                    .unwrap()
+                    .get_installed_skill(&installed.id)
+                    .unwrap()
+                    .is_none());
+            }
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_first_install_retains_distinct_existing_empty_trees_in_all_copies() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let _pi = crate::pi_config::test_support::TestAgentDir::new();
+        SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+        let _state_guard = skill_state_write_guard();
+        let (source, installed) = pinned_source_fixture(home.path());
+        let ssot = SkillService::get_ssot_dir()
+            .unwrap()
+            .join(&installed.directory);
+        let app_dest = SkillService::get_app_skills_dir(&AppType::Claude)
+            .unwrap()
+            .join(&installed.directory);
+        fs::create_dir_all(ssot.join("ssot-only/empty")).unwrap();
+        fs::create_dir_all(app_dest.join("app-only/empty")).unwrap();
+        let current =
+            SkillService::install_pinned_source(&source, installed, &AppType::Claude).unwrap();
+        for dest in [&ssot, &app_dest] {
+            assert!(dest.join("ssot-only/empty").is_dir());
+            assert!(dest.join("app-only/empty").is_dir());
+            assert_eq!(
+                local::local_tree_hash(dest).unwrap(),
+                current.content_hash.clone().unwrap()
+            );
+        }
+        let db = Database::open_for_skill_publication().unwrap();
+        assert!(
+            SkillService::publish_pinned_update(&db, &source, &current, current.clone()).is_ok()
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn pinned_update_automatically_excludes_python_cache_only_in_one_app() {
         let home = tempfile::tempdir().unwrap();
         let _env = crate::test_support::TestEnvGuard::isolated(home.path());
@@ -4533,6 +4990,185 @@ mod tests {
                 fs::read(dest.join("SKILL.md")).unwrap(),
                 fs::read(source.join("SKILL.md")).unwrap()
             );
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_update_accepts_legacy_marketplace_cache_hash_without_opening_runtime_files() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let (db, source, mut current, mut updated, destinations) =
+            pinned_update_fixture(home.path());
+        for dest in &destinations {
+            fs::create_dir_all(dest.join("__pycache__")).unwrap();
+            fs::write(dest.join("__pycache__/module.pyc"), "legacy cache").unwrap();
+        }
+        // Reproduce the unprefixed hash saved by an install without a commit.
+        current.content_hash = Some(SkillService::compute_dir_hash(&destinations[0]).unwrap());
+        db.save_skill(&current).unwrap();
+        let runtime = runtime_files::RuntimeFiles::new(&["config/local.json".into()]).unwrap();
+        updated.content_hash = Some(local::file_tree_hash_with_runtime(&source, &runtime).unwrap());
+        // The captured source has no frontmatter name, so publication uses its directory.
+        updated.name = current.directory.clone();
+        #[cfg(windows)]
+        let runtime_path = "Config/Local.JSON";
+        #[cfg(not(windows))]
+        let runtime_path = "config/local.json";
+        #[cfg(windows)]
+        let mut handles = Vec::new();
+        for (i, dest) in destinations.iter().enumerate() {
+            let path = dest.join(runtime_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, format!("private-{i}")).unwrap();
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                handles.push(
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(0)
+                        .open(path)
+                        .unwrap(),
+                );
+            }
+        }
+        SkillService::publish_pinned_update_with_runtime(
+            &db,
+            &source,
+            &current,
+            updated.clone(),
+            &runtime,
+        )
+        .unwrap();
+        #[cfg(windows)]
+        drop(handles);
+        for (i, dest) in destinations.iter().enumerate() {
+            assert_eq!(
+                fs::read(dest.join("__pycache__/module.pyc")).unwrap(),
+                b"legacy cache"
+            );
+            assert_eq!(
+                fs::read_to_string(dest.join(runtime_path)).unwrap(),
+                format!("private-{i}")
+            );
+            assert_eq!(
+                fs::read(dest.join("SKILL.md")).unwrap(),
+                fs::read(source.join("SKILL.md")).unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(db.get_installed_skill(&current.id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(updated).unwrap()
+        );
+        assert_no_pinned_staging(&SkillService::get_ssot_dir().unwrap());
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_update_legacy_marketplace_cache_hash_still_protects_user_edits() {
+        for (edited, relative) in [
+            (0, "SKILL.md"),
+            (0, "__pycache__/keep.txt"),
+            (0, ".user-notes"),
+            (1, "SKILL.md"),
+            (2, "SKILL.md"),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let (db, source, mut current, updated, destinations) =
+                pinned_update_fixture(home.path());
+            for dest in &destinations {
+                fs::create_dir_all(dest.join("__pycache__")).unwrap();
+                fs::write(dest.join("__pycache__/module.pyc"), "legacy cache").unwrap();
+            }
+            current.content_hash = Some(SkillService::compute_dir_hash(&destinations[0]).unwrap());
+            db.save_skill(&current).unwrap();
+            let runtime = runtime_files::RuntimeFiles::new(&["local.json".into()]).unwrap();
+            for (i, dest) in destinations.iter().enumerate() {
+                fs::write(dest.join("local.json"), format!("private-{i}")).unwrap();
+            }
+            fs::write(destinations[edited].join(relative), "user edit").unwrap();
+            let error = SkillService::publish_pinned_update_with_runtime(
+                &db, &source, &current, updated, &runtime,
+            )
+            .err()
+            .unwrap();
+            assert!(
+                error.to_string().contains(if relative.starts_with('.') {
+                    "hidden content has no baseline"
+                } else {
+                    "local edits"
+                }),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read(destinations[edited].join(relative)).unwrap(),
+                b"user edit"
+            );
+            for (i, dest) in destinations.iter().enumerate() {
+                assert_eq!(
+                    fs::read(dest.join("SKILL.md")).unwrap(),
+                    if i == edited && relative == "SKILL.md" {
+                        b"user edit".as_slice()
+                    } else {
+                        b"old skill\n".as_slice()
+                    }
+                );
+                assert_eq!(
+                    fs::read_to_string(dest.join("local.json")).unwrap(),
+                    format!("private-{i}")
+                );
+            }
+            assert_eq!(
+                serde_json::to_value(db.get_installed_skill(&current.id).unwrap().unwrap())
+                    .unwrap(),
+                serde_json::to_value(&current).unwrap()
+            );
+            assert_no_pinned_staging(&SkillService::get_ssot_dir().unwrap());
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_update_legacy_marketplace_cache_hash_rejects_runtime_source_conflicts() {
+        let conflicts = ["config/local.json", "config/local.json/child", "config"];
+        #[cfg(windows)]
+        let conflicts = conflicts.into_iter().chain(["CONFIG/LOCAL.JSON"]);
+        for relative in conflicts {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let (db, source, mut current, updated, destinations) =
+                pinned_update_fixture(home.path());
+            for dest in &destinations {
+                fs::create_dir_all(dest.join("__pycache__")).unwrap();
+                fs::write(dest.join("__pycache__/module.pyc"), "legacy cache").unwrap();
+            }
+            current.content_hash = Some(SkillService::compute_dir_hash(&destinations[0]).unwrap());
+            db.save_skill(&current).unwrap();
+            let runtime = runtime_files::RuntimeFiles::new(&["config/local.json".into()]).unwrap();
+            let conflict = source.join(relative);
+            fs::create_dir_all(conflict.parent().unwrap()).unwrap();
+            fs::write(conflict, "source conflict").unwrap();
+            let error = SkillService::publish_pinned_update_with_runtime(
+                &db, &source, &current, updated, &runtime,
+            )
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains("source conflict"), "{error}");
+            for dest in destinations {
+                assert_eq!(fs::read(dest.join("SKILL.md")).unwrap(), b"old skill\n");
+                assert_eq!(
+                    fs::read(dest.join("__pycache__/module.pyc")).unwrap(),
+                    b"legacy cache"
+                );
+            }
+            assert_eq!(
+                serde_json::to_value(db.get_installed_skill(&current.id).unwrap().unwrap())
+                    .unwrap(),
+                serde_json::to_value(&current).unwrap()
+            );
+            assert_no_pinned_staging(&SkillService::get_ssot_dir().unwrap());
         }
     }
 
@@ -4833,21 +5469,29 @@ mod tests {
             assert_eq!(fs::read(dest.join(".user-notes")).unwrap(), b"keep");
             assert_eq!(fs::read(dest.join("SKILL.md")).unwrap(), b"old skill\n");
         }
-        // Matching hidden bytes can be adopted without changing them, after
-        // which the complete baseline supports normal future hidden updates.
+        // Matching hidden bytes can be adopted into the file baseline without
+        // granting ownership of directories absent from the legacy baseline.
         fs::write(source.join(".user-notes"), "keep").unwrap();
+        let runtime = runtime_files::RuntimeFiles::default();
         let mut updated = updated;
-        updated.content_hash = Some(local::local_tree_hash(&source).unwrap());
+        updated.content_hash = Some(local::file_tree_hash_with_runtime(&source, &runtime).unwrap());
         SkillService::publish_pinned_update(&db, &source, &current, updated).unwrap();
         let current = db.get_installed_skill(&current.id).unwrap().unwrap();
         assert_eq!(
             current.content_hash,
-            Some(local::local_tree_hash(&source).unwrap())
+            Some(local::file_tree_hash_with_runtime(&source, &runtime).unwrap())
         );
         fs::write(source.join(".user-notes"), "new tracked content").unwrap();
         let mut updated = current.clone();
-        updated.content_hash = Some(local::local_tree_hash(&source).unwrap());
+        updated.content_hash = Some(local::file_tree_hash_with_runtime(&source, &runtime).unwrap());
         SkillService::publish_pinned_update(&db, &source, &current, updated).unwrap();
+        assert_eq!(
+            db.get_installed_skill(&current.id)
+                .unwrap()
+                .unwrap()
+                .content_hash,
+            Some(local::file_tree_hash_with_runtime(&source, &runtime).unwrap())
+        );
         for dest in &destinations {
             assert_eq!(
                 fs::read(dest.join(".user-notes")).unwrap(),
@@ -4892,6 +5536,235 @@ mod tests {
                 .deployment_failures
                 .is_empty()
         );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_first_install_excludes_python_cache_and_keeps_update_baseline() {
+        for app in [AppType::Claude, AppType::Codex] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let _pi = crate::pi_config::test_support::TestAgentDir::new();
+            SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+            let _state_guard = skill_state_write_guard();
+            let (source, mut installed) = pinned_source_fixture(home.path());
+            installed.apps = SkillApps::only(&app);
+            installed.readme_url = Some(format!(
+                "https://github.com/owner/repo/blob/{}/shared/SKILL.md",
+                "a".repeat(40)
+            ));
+            fs::create_dir_all(source.join("scripts/__pycache__")).unwrap();
+            fs::write(source.join("scripts/worker.py"), "# managed script\n").unwrap();
+            fs::write(source.join("scripts/standalone.pyc"), "ordinary file\n").unwrap();
+            fs::write(
+                source.join("scripts/__pycache__/keep.txt"),
+                "managed note\n",
+            )
+            .unwrap();
+            let source_cache = "scripts/__pycache__/worker.cpython-313.pyc";
+            fs::write(source.join(source_cache), "source cache").unwrap();
+            let runtime = runtime_files::RuntimeFiles::default();
+            let expected = local::local_tree_hash_with_runtime(&source, &runtime).unwrap();
+            assert_ne!(expected, local::local_tree_hash(&source).unwrap());
+            let db = Database::init().unwrap();
+
+            let current = SkillService::install_pinned_source(&source, installed, &app).unwrap();
+            assert_eq!(current.content_hash.as_ref(), Some(&expected));
+            assert_eq!(
+                db.get_installed_skill(&current.id)
+                    .unwrap()
+                    .unwrap()
+                    .content_hash,
+                current.content_hash
+            );
+            let destinations = [
+                SkillService::get_ssot_dir()
+                    .unwrap()
+                    .join(&current.directory),
+                SkillService::get_app_skills_dir(&app)
+                    .unwrap()
+                    .join(&current.directory),
+            ];
+            assert!(!SkillService::paths_equal(
+                &destinations[0],
+                &destinations[1]
+            ));
+            for (i, dest) in destinations.iter().enumerate() {
+                assert!(!SkillService::is_symlink(dest));
+                assert!(!dest.join(source_cache).exists());
+                assert!(dest.join("references/empty").is_dir());
+                for relative in [
+                    "SKILL.md",
+                    "references/detail.md",
+                    "scripts/worker.py",
+                    "scripts/standalone.pyc",
+                    "scripts/__pycache__/keep.txt",
+                ] {
+                    assert_eq!(
+                        fs::read(dest.join(relative)).unwrap(),
+                        fs::read(source.join(relative)).unwrap()
+                    );
+                }
+                assert_eq!(local::local_tree_hash(dest).unwrap(), expected);
+                // Generated files after installation must not change its baseline.
+                fs::write(
+                    dest.join("scripts/__pycache__/local.pyc"),
+                    format!("local cache {i}"),
+                )
+                .unwrap();
+                assert_eq!(
+                    local::local_tree_hash_with_runtime(dest, &runtime).unwrap(),
+                    expected
+                );
+                assert_ne!(local::local_tree_hash(dest).unwrap(), expected);
+            }
+
+            fs::write(source.join(source_cache), "changed source cache").unwrap();
+            assert_eq!(
+                local::local_tree_hash_with_runtime(&source, &runtime).unwrap(),
+                expected
+            );
+            fs::write(source.join("SKILL.md"), "# updated pinned\n").unwrap();
+            let mut updated = current.clone();
+            updated.readme_url = Some(format!(
+                "https://github.com/owner/repo/blob/{}/shared/SKILL.md",
+                "b".repeat(40)
+            ));
+            updated.content_hash =
+                Some(local::local_tree_hash_with_runtime(&source, &runtime).unwrap());
+            updated.updated_at = 123;
+            let outcome =
+                SkillService::publish_pinned_update(&db, &source, &current, updated).unwrap();
+            assert!(outcome.deployment_failures.is_empty());
+            for (i, dest) in destinations.iter().enumerate() {
+                assert_eq!(
+                    fs::read(dest.join("SKILL.md")).unwrap(),
+                    b"# updated pinned\n"
+                );
+                assert!(!dest.join(source_cache).exists());
+                assert_eq!(
+                    fs::read_to_string(dest.join("scripts/__pycache__/local.pyc")).unwrap(),
+                    format!("local cache {i}")
+                );
+                assert_eq!(
+                    Some(local::local_tree_hash_with_runtime(dest, &runtime).unwrap()),
+                    outcome.skill.content_hash
+                );
+                assert_no_pinned_staging(dest.parent().unwrap());
+            }
+            assert_eq!(
+                db.get_installed_skill(&current.id)
+                    .unwrap()
+                    .unwrap()
+                    .content_hash,
+                outcome.skill.content_hash
+            );
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_first_install_omits_nested_cache_only_directories_but_keeps_empty_directories() {
+        for app in [AppType::Claude, AppType::Codex] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let _pi = crate::pi_config::test_support::TestAgentDir::new();
+            SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+            let _state_guard = skill_state_write_guard();
+            let (source, mut installed) = pinned_source_fixture(home.path());
+            installed.apps = SkillApps::only(&app);
+            let caches = [
+                "__pycache__/module.pyc",
+                "scripts/nested/__pycache__/worker.cpython-313.pyc",
+            ];
+            for relative in caches {
+                let path = source.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, "source cache").unwrap();
+            }
+            fs::create_dir_all(source.join("ordinary/nested/empty")).unwrap();
+            let runtime = runtime_files::RuntimeFiles::default();
+            let expected = local::local_tree_hash_with_runtime(&source, &runtime).unwrap();
+            let db = Database::init().unwrap();
+
+            let current = SkillService::install_pinned_source(&source, installed, &app).unwrap();
+            assert_eq!(current.content_hash.as_ref(), Some(&expected));
+            assert_eq!(
+                serde_json::to_value(db.get_installed_skill(&current.id).unwrap().unwrap())
+                    .unwrap(),
+                serde_json::to_value(&current).unwrap()
+            );
+            let destinations = [
+                SkillService::get_ssot_dir()
+                    .unwrap()
+                    .join(&current.directory),
+                SkillService::get_app_skills_dir(&app)
+                    .unwrap()
+                    .join(&current.directory),
+            ];
+            for dest in &destinations {
+                assert!(!SkillService::is_symlink(dest));
+                assert!(!dest.join("__pycache__").exists());
+                assert!(!dest.join("scripts").exists());
+                for relative in ["references/empty", "ordinary/nested/empty"] {
+                    assert!(dest.join(relative).is_dir());
+                    assert!(fs::read_dir(dest.join(relative)).unwrap().next().is_none());
+                }
+                for relative in ["SKILL.md", "references/detail.md"] {
+                    assert_eq!(
+                        fs::read(dest.join(relative)).unwrap(),
+                        fs::read(source.join(relative)).unwrap()
+                    );
+                }
+                assert_eq!(
+                    local::local_tree_hash_with_runtime(dest, &runtime).unwrap(),
+                    expected
+                );
+                assert_no_pinned_staging(dest.parent().unwrap());
+            }
+            for relative in caches {
+                assert_eq!(fs::read(source.join(relative)).unwrap(), b"source cache");
+            }
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn pinned_first_install_preserves_unregistered_app_python_cache() {
+        for app in [AppType::Claude, AppType::Codex] {
+            let home = tempfile::tempdir().unwrap();
+            let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+            let _pi = crate::pi_config::test_support::TestAgentDir::new();
+            SkillService::set_sync_method(SyncMethod::Copy).unwrap();
+            let _state_guard = skill_state_write_guard();
+            let (source, mut installed) = pinned_source_fixture(home.path());
+            installed.apps = SkillApps::only(&app);
+            let relative = "scripts/__pycache__/worker.pyc";
+            fs::create_dir_all(source.join("scripts/__pycache__")).unwrap();
+            fs::write(source.join(relative), "source cache").unwrap();
+            let app_dest = SkillService::get_app_skills_dir(&app)
+                .unwrap()
+                .join(&installed.directory);
+            fs::create_dir_all(app_dest.join("scripts/__pycache__")).unwrap();
+            // Even an identical runtime-only file cannot establish ownership.
+            fs::write(app_dest.join(relative), "source cache").unwrap();
+            let before = local::local_tree_hash(&app_dest).unwrap();
+            let ssot = SkillService::get_ssot_dir().unwrap();
+            let db = Database::init().unwrap();
+
+            let error =
+                SkillService::install_pinned_source(&source, installed.clone(), &app).unwrap_err();
+            assert!(
+                error.to_string().contains("unmanaged Skill deployment"),
+                "{error}"
+            );
+            assert_eq!(local::local_tree_hash(&app_dest).unwrap(), before);
+            assert_eq!(fs::read(app_dest.join(relative)).unwrap(), b"source cache");
+            assert!(!app_dest.join("SKILL.md").exists());
+            assert!(!ssot.join(&installed.directory).exists());
+            assert!(db.get_installed_skill(&installed.id).unwrap().is_none());
+            assert_no_pinned_staging(&ssot);
+        }
     }
 
     #[test]

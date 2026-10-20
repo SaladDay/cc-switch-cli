@@ -340,6 +340,7 @@ pub(crate) fn apply_snapshot(db_sql: &[u8], skills_zip: &[u8]) -> Result<(), App
     // Exclude local Skills mutations while both the SSOT and its database rows
     // are replaced. The outer sync/restore guards are acquired before this lock.
     let _skill_state_guard = skill_state_write_guard();
+    let _publication_guard = super::skill::publication_lock::acquire()?;
     let skills_backup = SkillsBackup::backup_current_skills()?;
     restore_skills_zip(skills_zip)?;
 

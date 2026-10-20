@@ -256,6 +256,7 @@ impl ConfigService {
             // fall into the gap and then be absent from both the database and backup.
             let backup_id = {
                 let _skill_state_guard = crate::services::skill::skill_state_write_guard();
+                let _publication_guard = crate::services::skill::publication_lock::acquire()?;
                 let backup_id = Self::create_backup(&db_path, None)?;
                 // Import SQL into DB (also performs an internal binary snapshot backup).
                 state.db.import_sql(file_path)?;

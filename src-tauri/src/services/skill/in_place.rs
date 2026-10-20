@@ -1,7 +1,8 @@
 //! File-content transaction. The caller holds the skill write lock through DB commit.
 //!
-//! Directories are retained except where a file/directory conversion requires
-//! removing an empty directory; those operations are journaled and reversible.
+//! Existing directories are retained except where a file/directory conversion
+//! requires removing an empty directory. Rollback removes empty directories
+//! created by an update to an existing tree; these changes are journaled.
 //! Unrelated directories are never replaced or removed. This is not an
 //! interprocess lock: callers must exclude simultaneous writers for race-free use.
 //! Content checks detect observed external edits, but cannot provide filesystem CAS.
@@ -115,13 +116,162 @@ fn reject_case_ambiguities(dest: &Path, old: &Inventory, next: &Inventory) -> Re
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Inventory {
     runtime_files: BTreeSet<PathBuf>,
     files: Files,
     permissions: BTreeMap<PathBuf, fs::Permissions>,
     dirs: BTreeSet<PathBuf>,
     dir_permissions: BTreeMap<PathBuf, fs::Permissions>,
+}
+
+impl Inventory {
+    fn omit_runtime_only_directories(&mut self) {
+        let mut managed_parents: BTreeSet<_> = self
+            .files
+            .keys()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect();
+        let nonempty_parents: BTreeSet<_> = self
+            .dirs
+            .iter()
+            .chain(self.runtime_files.iter())
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect();
+        let mut directories: Vec<_> = self.dirs.iter().cloned().collect();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for directory in directories {
+            if directory.as_os_str().is_empty() {
+                continue;
+            }
+            if !managed_parents.contains(&directory) && nonempty_parents.contains(&directory) {
+                self.dirs.remove(&directory);
+                self.dir_permissions.remove(&directory);
+            } else if let Some(parent) = directory.parent() {
+                managed_parents.insert(parent.to_path_buf());
+            }
+        }
+    }
+}
+
+// Capture the source once so metadata and every deployment use the same bytes,
+// even if an editor or checkout changes the source during publication.
+pub(super) struct SourceSnapshot {
+    source: PathBuf,
+    inventory: Inventory,
+    runtime: super::runtime_files::RuntimeFiles,
+    normalize_directories: bool,
+}
+
+impl SourceSnapshot {
+    pub(super) fn capture(
+        source: &Path,
+        runtime: &super::runtime_files::RuntimeFiles,
+    ) -> Result<Self, AppError> {
+        let source = absolute(source)?;
+        safe_path(&source)?;
+        if metadata(&source)?.is_none() {
+            return Err(error(&source, "source does not exist"));
+        }
+        let source = resolved(&source)?;
+        runtime.validate_source(&source)?;
+        let mut inventory = inventory_with_runtime(&source, runtime)?;
+        if let Some(path) = inventory
+            .runtime_files
+            .iter()
+            .find(|path| runtime.explicitly_contains(path))
+        {
+            return Err(error(
+                &source.join(path),
+                "Runtime file/source conflict during source capture",
+            ));
+        }
+        // Do not turn excluded source caches into ordinary empty directories.
+        // Keep genuinely empty source directories and any managed descendants.
+        inventory.omit_runtime_only_directories();
+        Ok(Self {
+            inventory,
+            source,
+            runtime: runtime.clone(),
+            normalize_directories: false,
+        })
+    }
+
+    pub(super) fn source(&self) -> &Path {
+        &self.source
+    }
+
+    pub(super) fn file(&self, relative: &Path) -> Option<&[u8]> {
+        if let Some(bytes) = self.inventory.files.get(relative) {
+            return Some(bytes);
+        }
+        #[cfg(windows)]
+        return self
+            .inventory
+            .files
+            .iter()
+            .find(|(path, _)| {
+                path.components().count() == relative.components().count()
+                    && super::runtime_files::RuntimeFiles::paths_overlap(path, relative)
+            })
+            .map(|(_, bytes)| bytes.as_slice());
+        #[cfg(not(windows))]
+        None
+    }
+
+    // Rebuilt projections need the ordinary directories retained in the SSOT,
+    // including ones omitted by the new source. Compute their final state:
+    // a directory losing its last managed file may now contain only runtime files.
+    pub(super) fn retain_directories_from(&mut self, root: &Path) -> Result<(), AppError> {
+        let old = inventory_with_runtime(&managed_path(root)?, &self.runtime)?;
+        let mut final_inventory = self.inventory.clone();
+        final_inventory.runtime_files = old.runtime_files;
+        for (directory, permissions) in old.dir_permissions {
+            if !directory
+                .ancestors()
+                .any(|p| final_inventory.files.contains_key(p))
+            {
+                final_inventory.dirs.insert(directory.clone());
+                final_inventory
+                    .dir_permissions
+                    .entry(directory)
+                    .or_insert(permissions);
+            }
+        }
+        final_inventory.omit_runtime_only_directories();
+        self.inventory.dirs = final_inventory.dirs;
+        self.inventory.dir_permissions = final_inventory.dir_permissions;
+        self.normalize_directories = true;
+        Ok(())
+    }
+
+    pub(super) fn new_directories_at(&self, dest: &Path) -> Result<Vec<PathBuf>, AppError> {
+        let mut directories = Vec::new();
+        for relative in &self.inventory.dirs {
+            let path = dest.join(relative);
+            if metadata(&path)?.is_none() {
+                directories.push(path);
+            }
+        }
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        Ok(directories)
+    }
+
+    pub(super) fn prepare(&self, dest: &Path) -> Result<Update, AppError> {
+        Update::prepare_snapshot(self, dest)
+    }
+}
+
+// Canonicalize existing ancestors to catch Windows case aliases and overlap.
+fn resolved(path: &Path) -> Result<PathBuf, AppError> {
+    if metadata(path)?.is_some() {
+        return fs::canonicalize(path).map_err(|e| AppError::io(path, e));
+    }
+    let parent = path.parent().ok_or_else(|| error(path, "missing parent"))?;
+    Ok(resolved(parent)?.join(
+        path.file_name()
+            .ok_or_else(|| error(path, "missing name"))?,
+    ))
 }
 
 #[derive(Clone)]
@@ -442,32 +592,21 @@ impl Update {
         dest: &Path,
         runtime: &super::runtime_files::RuntimeFiles,
     ) -> Result<Self, AppError> {
-        let source = absolute(source)?;
+        SourceSnapshot::capture(source, runtime)?.prepare(dest)
+    }
+
+    fn prepare_snapshot(snapshot: &SourceSnapshot, dest: &Path) -> Result<Self, AppError> {
         let dest = absolute(dest)?;
-        if metadata(&source)?.is_none() {
-            return Err(error(&source, "source does not exist"));
-        }
-        // Canonicalize existing ancestors to catch Windows case aliases and overlap.
-        fn resolved(path: &Path) -> Result<PathBuf, AppError> {
-            if metadata(path)?.is_some() {
-                return fs::canonicalize(path).map_err(|e| AppError::io(path, e));
-            }
-            let parent = path.parent().ok_or_else(|| error(path, "missing parent"))?;
-            Ok(resolved(parent)?.join(
-                path.file_name()
-                    .ok_or_else(|| error(path, "missing name"))?,
-            ))
-        }
-        let source = resolved(&source)?;
         let dest = resolved(&dest)?;
-        if source.starts_with(&dest) || dest.starts_with(&source) {
+        let source = snapshot.source();
+        if source.starts_with(&dest) || dest.starts_with(source) {
             return Err(error(
                 &dest,
                 format!("overlaps source {}", source.display()),
             ));
         }
-        runtime.validate_source(&source)?;
-        let next = inventory_with_runtime(&source, runtime)?;
+        let runtime = &snapshot.runtime;
+        let next = snapshot.inventory.clone();
         let old = inventory_with_runtime(&dest, runtime)?;
         for path in &old.runtime_files {
             if path.ancestors().any(|p| next.files.contains_key(p)) {
@@ -497,7 +636,15 @@ impl Update {
         let removed_dirs: BTreeMap<_, _> = old
             .dir_permissions
             .iter()
-            .filter(|(dir, _)| dir.ancestors().any(|p| next.files.contains_key(p)))
+            .filter(|(dir, _)| {
+                dir.ancestors().any(|p| next.files.contains_key(p))
+                    // Keep physical runtime parents in each copy. Other copies
+                    // may have become empty here after a managed file is removed;
+                    // journal their removal so all managed projections agree.
+                    || (snapshot.normalize_directories
+                        && !next.dirs.contains(*dir)
+                        && !old.runtime_files.iter().any(|path| path.starts_with(dir)))
+            })
             .map(|(dir, permissions)| (dir.clone(), permissions.clone()))
             .collect();
         let conversion_dirs: BTreeSet<_> = next
@@ -647,6 +794,9 @@ impl Update {
             "automatic_runtime_files": "__pycache__/*.pyc",
             "progress_log": "progress.jsonl", "files": entries,
             "before_directories": self.before_dirs,
+            "created_directories": self.dirs.difference(&self.before_dirs)
+                .filter(|path| !self.before_dirs.is_empty() && !self.conversion_dirs.contains(*path))
+                .collect::<Vec<_>>(),
             "created_conversion_directories": self.conversion_dirs,
             "removed_directories": self.removed_dirs.iter().map(|(path, permissions)|
                 serde_json::json!({"path": path, "permissions": permission_bits(permissions)})
@@ -747,9 +897,20 @@ impl Update {
             return Err(error(&self.dest, "directory inventory conflict"));
         }
         self.journal("applying", "phase", None)?;
-        for relative in &self.dirs {
-            if !self.conversion_dirs.contains(relative) {
-                ensure_dir(&self.dest.join(relative))?;
+        for relative in self.dirs.clone() {
+            if self.conversion_dirs.contains(&relative) {
+                continue;
+            }
+            let path = self.dest.join(&relative);
+            if !self.before_dirs.is_empty() && !self.before_dirs.contains(&relative) {
+                self.journal("applying", "create_dir_intent", Some(&relative))?;
+                safe_path(&path)?;
+                fs::create_dir(&path).map_err(|e| AppError::io(&path, e))?;
+                self.touched_operations
+                    .push(Mutation::CreateDir(relative.clone()));
+                self.journal("applying", "create_dir_mutated", Some(&relative))?;
+            } else {
+                ensure_dir(&path)?;
             }
         }
         for operation in self.operations.clone() {
@@ -818,6 +979,10 @@ impl Update {
     }
 
     pub(super) fn rollback(&mut self) -> Result<(), AppError> {
+        // A failed rollback no longer represents a committed after-state.
+        // Keep recovery evidence until a subsequent rollback verifies success.
+        self.applied = false;
+        self.rolled_back = false;
         let result = self.rollback_inner();
         result.map_err(|e| self.context(e))
     }
@@ -983,6 +1148,82 @@ impl Drop for Update {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_snapshot_keeps_metadata_and_all_copies_on_one_revision() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let source = home.path().join("input");
+        fs::create_dir_all(source.join("empty")).unwrap();
+        fs::create_dir_all(source.join("scripts/__pycache__")).unwrap();
+        fs::create_dir_all(source.join("cache-only/deep/__pycache__")).unwrap();
+        let skill = b"---\nname: demo\ndescription: Captured revision\n---\nfirst\n";
+        fs::write(source.join("SKILL.md"), skill).unwrap();
+        fs::write(source.join("scripts/run.py"), "first").unwrap();
+        fs::write(source.join("scripts/__pycache__/run.pyc"), "excluded").unwrap();
+        fs::write(
+            source.join("cache-only/deep/__pycache__/run.pyc"),
+            "excluded",
+        )
+        .unwrap();
+        let runtime =
+            super::super::runtime_files::RuntimeFiles::new(&["local.json".into()]).unwrap();
+        let snapshot = SourceSnapshot::capture(&source, &runtime).unwrap();
+        let first = home.path().join("first");
+        let second = home.path().join("second");
+        for (dest, private) in [(&first, "first private"), (&second, "second private")] {
+            fs::create_dir_all(dest).unwrap();
+            fs::write(dest.join("local.json"), private).unwrap();
+        }
+        let mut a = snapshot.prepare(&first).unwrap();
+        fs::write(source.join("SKILL.md"), "invalid newer metadata").unwrap();
+        fs::write(source.join("scripts/run.py"), "second").unwrap();
+        // Moving the live tree also proves preparation never reopens its files.
+        fs::rename(&source, home.path().join("moved-source")).unwrap();
+        let mut b = snapshot.prepare(&second).unwrap();
+        let metadata = super::super::SkillService::parse_skill_metadata_content(
+            std::str::from_utf8(snapshot.file(Path::new("SKILL.md")).unwrap()).unwrap(),
+        );
+        assert_eq!(metadata.description.as_deref(), Some("Captured revision"));
+        a.apply().unwrap();
+        b.apply().unwrap();
+        a.commit().unwrap();
+        b.commit().unwrap();
+        for (dest, private) in [(&first, "first private"), (&second, "second private")] {
+            assert_eq!(fs::read(dest.join("SKILL.md")).unwrap(), skill);
+            assert_eq!(fs::read(dest.join("scripts/run.py")).unwrap(), b"first");
+            assert!(dest.join("empty").is_dir());
+            assert!(!dest.join("scripts/__pycache__/run.pyc").exists());
+            assert!(!dest.join("scripts/__pycache__").exists());
+            assert!(!dest.join("cache-only").exists());
+            assert_eq!(
+                fs::read_to_string(dest.join("local.json")).unwrap(),
+                private
+            );
+        }
+    }
+
+    #[test]
+    fn source_snapshot_still_rejects_overlapping_destinations() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let source = home.path().join("input");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("SKILL.md"), "first").unwrap();
+        let snapshot = SourceSnapshot::capture(
+            &source,
+            &super::super::runtime_files::RuntimeFiles::default(),
+        )
+        .unwrap();
+        fs::rename(&source, home.path().join("moved-source")).unwrap();
+        for dest in [
+            source.clone(),
+            source.join("nested"),
+            home.path().to_path_buf(),
+        ] {
+            assert!(snapshot.prepare(&dest).is_err());
+        }
+    }
+
     #[test]
     fn runtime_files_are_not_staged_and_survive_apply_and_rollback() {
         let home = tempfile::tempdir().unwrap();
@@ -1332,6 +1573,52 @@ mod tests {
         assert!(dest.join("sub").is_dir());
         assert!(inventory(&dest).unwrap().files.is_empty());
         update.commit().unwrap();
+    }
+
+    #[test]
+    fn in_place_existing_tree_rollback_restores_directory_baseline_for_retry() {
+        let isolation_root = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(isolation_root.path());
+        let (_temp, source, dest) = fixture();
+        fs::create_dir_all(source.join("new/nested/empty")).unwrap();
+        fs::write(source.join("new/nested/item"), "new content").unwrap();
+        fs::create_dir(dest.join("user-empty")).unwrap();
+        let before = inventory(&dest).unwrap();
+        let mut update = Update::prepare(&source, &dest).unwrap();
+        update.apply().unwrap();
+        update.rollback().unwrap();
+        update.rollback().unwrap();
+        assert_directory_state(&dest, &before);
+        verify_state(&dest, &before.files, &before.permissions).unwrap();
+        update.commit().unwrap();
+        let mut retry = Update::prepare(&source, &dest).unwrap();
+        retry.apply().unwrap();
+        retry.commit().unwrap();
+        assert_eq!(
+            fs::read(dest.join("new/nested/item")).unwrap(),
+            b"new content"
+        );
+        assert!(dest.join("user-empty").is_dir());
+    }
+
+    #[test]
+    fn in_place_new_directory_external_content_survives_rollback() {
+        let isolation_root = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(isolation_root.path());
+        let (_temp, source, dest) = fixture();
+        fs::create_dir_all(source.join("new/nested")).unwrap();
+        fs::write(source.join("new/nested/item"), "new content").unwrap();
+        let mut update = Update::prepare(&source, &dest).unwrap();
+        update.apply().unwrap();
+        fs::write(dest.join("new/nested/user"), "external content").unwrap();
+        assert!(update.rollback().is_err());
+        assert_eq!(
+            fs::read(dest.join("new/nested/user")).unwrap(),
+            b"external content"
+        );
+        let stage = update.stage.clone();
+        assert!(update.commit().is_err());
+        assert!(stage.join("journal.json").is_file());
     }
 
     #[test]
