@@ -5290,6 +5290,158 @@ fn setting_claude_common_snippet_does_not_infer_existing_provider_opt_in() {
     );
 }
 
+const CLAUDE_COMMON_WITH_STATUS_LINE: &str =
+    r#"{"env":{"MY_TEST_KEY":"1"},"statusLine":{"type":"command","command":"/bin/true"}}"#;
+
+fn claude_state_using_common_with_status_line() -> AppState {
+    let provider = with_common_enabled(Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.invalid"
+            }
+        }),
+        None,
+    ));
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    config.common_config_snippets.claude = Some(CLAUDE_COMMON_WITH_STATUS_LINE.to_string());
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert("p1".to_string(), provider);
+    }
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+    state
+}
+
+fn assert_status_line_removed_and_user_objects_kept(live: &Value) {
+    assert!(
+        live.get("statusLine").is_none(),
+        "an object emptied by removing common keys should not stay behind: {live}"
+    );
+    assert_eq!(
+        live.get("hooks"),
+        Some(&json!({})),
+        "an empty object the user wrote must be kept"
+    );
+    assert_eq!(
+        live.get("permissions"),
+        Some(&json!({ "allow": ["Bash"] })),
+        "unrelated user settings must be kept"
+    );
+}
+
+#[test]
+#[serial]
+fn shrinking_or_clearing_claude_common_snippet_drops_emptied_parent_objects() {
+    for next in [Some(r#"{"env":{"MY_TEST_KEY":"1"}}"#), None] {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        std::fs::create_dir_all(crate::config::get_claude_config_dir())
+            .expect("create ~/.claude (initialized)");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "token1",
+                    "ANTHROPIC_BASE_URL": "https://claude.invalid",
+                    "MY_TEST_KEY": "1"
+                },
+                "hooks": {},
+                "permissions": { "allow": ["Bash"] },
+                "statusLine": { "type": "command", "command": "/bin/true" }
+            }),
+        )
+        .expect("seed live settings with common config applied");
+        let state = claude_state_using_common_with_status_line();
+
+        ProviderService::set_common_config_snippet(
+            &state,
+            AppType::Claude,
+            next.map(str::to_string),
+        )
+        .expect("update common snippet");
+
+        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+        assert_status_line_removed_and_user_objects_kept(&live);
+        assert_eq!(
+            live["env"].get("MY_TEST_KEY").is_some(),
+            next.is_some(),
+            "MY_TEST_KEY follows the new snippet ({next:?})"
+        );
+        assert_eq!(
+            live["env"]["ANTHROPIC_BASE_URL"], "https://claude.invalid",
+            "provider env is kept"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn clearing_claude_common_snippet_during_takeover_drops_emptied_parent_objects() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+    let state = claude_state_using_common_with_status_line();
+    let provider = state
+        .config
+        .read()
+        .expect("read config")
+        .get_manager(&AppType::Claude)
+        .and_then(|manager| manager.providers.get("p1").cloned())
+        .expect("provider p1");
+    let backup = ProviderService::build_live_backup_snapshot(
+        &AppType::Claude,
+        &provider,
+        Some(CLAUDE_COMMON_WITH_STATUS_LINE),
+        true,
+    )
+    .expect("build effective backup");
+    state
+        .db
+        .save_live_backup(
+            AppType::Claude.as_str(),
+            &serde_json::to_string(&backup).expect("serialize backup"),
+        )
+        .await
+        .expect("seed takeover backup");
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED",
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
+                "MY_TEST_KEY": "1"
+            },
+            "hooks": {},
+            "permissions": { "allow": ["Bash"] },
+            "statusLine": { "type": "command", "command": "/bin/true" }
+        }),
+    )
+    .expect("seed takeover-owned live settings");
+
+    ProviderService::clear_common_config_snippet(&state, AppType::Claude)
+        .expect("clear common snippet during takeover");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read takeover live");
+    assert_status_line_removed_and_user_objects_kept(&live);
+    assert_eq!(
+        live["env"],
+        json!({
+            "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED",
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721"
+        }),
+        "proxy fields stay attached and the common env key is removed"
+    );
+}
+
 #[test]
 #[serial]
 fn clearing_claude_common_snippet_tolerates_invalid_stored_snippet() {

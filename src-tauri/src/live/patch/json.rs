@@ -35,11 +35,25 @@ pub struct JsonPatch {
     pub seed: Vec<(KeyPath, Value)>,
     /// 当前值等于其中之一才删除（独有字段切走、残留清理）。`set` 里有同一路径时跳过。
     pub remove_if: Vec<(KeyPath, Vec<Value>)>,
+    /// 写前是非空对象、写后变成空对象时删除（被删键留下的空父对象）。写前就为空的不动。
+    pub prune_emptied: Vec<KeyPath>,
 }
 
 impl JsonPatch {
     pub fn apply_to(&self, path: &Path, doc: &mut Value) -> Result<(), LiveWriteError> {
         let targets: HashSet<&KeyPath> = self.set.iter().map(|(key_path, _)| key_path).collect();
+        let mut prune: Vec<&KeyPath> = self
+            .prune_emptied
+            .iter()
+            .filter(|key_path| {
+                !key_path.0.is_empty()
+                    && value_at(doc, key_path)
+                        .and_then(Value::as_object)
+                        .is_some_and(|map| !map.is_empty())
+            })
+            .collect();
+        // 先删深层，父对象才能随之变空。
+        prune.sort_by_key(|key_path| std::cmp::Reverse(key_path.0.len()));
 
         for scope in &self.clear {
             let Some(map) = object_at_mut(path, doc, &scope.parent.0)? else {
@@ -94,6 +108,17 @@ impl JsonPatch {
             };
             if map.get(key).is_some_and(|current| values.contains(current)) {
                 map.shift_remove(key);
+            }
+        }
+
+        for key_path in prune {
+            if value_at(doc, key_path)
+                .is_some_and(|value| value.as_object().is_some_and(Map::is_empty))
+            {
+                let (parent, key) = split(key_path);
+                if let Some(map) = object_at_mut(path, doc, parent)? {
+                    map.shift_remove(key);
+                }
             }
         }
 
@@ -430,6 +455,31 @@ mod tests {
         let pre = r#"{"env": {"WINDOW": "262144", "ARTIFACT": "1", "BETAS": "0"}}"#;
         let value: Value = serde_json::from_str(&apply(&patch, pre)).unwrap();
         assert_eq!(value, json!({"env": {"WINDOW": "983616", "BETAS": "0"}}));
+    }
+
+    #[test]
+    fn prune_emptied_drops_only_objects_this_write_emptied() {
+        let patch = JsonPatch {
+            remove_if: vec![
+                (
+                    KeyPath::new(&["statusLine", "type"]),
+                    vec![json!("command")],
+                ),
+                (KeyPath::new(&["a", "b", "c"]), vec![json!(1)]),
+                (KeyPath::new(&["kept", "x"]), vec![json!(1)]),
+            ],
+            prune_emptied: vec![
+                KeyPath::new(&["statusLine"]),
+                KeyPath::new(&["a"]),
+                KeyPath::new(&["a", "b"]),
+                KeyPath::new(&["kept"]),
+                KeyPath::new(&["hooks"]),
+            ],
+            ..JsonPatch::default()
+        };
+        let pre = r#"{"hooks":{},"statusLine":{"type":"command"},"a":{"b":{"c":1}},"kept":{"x":1,"y":2}}"#;
+        let out: Value = serde_json::from_str(&apply(&patch, pre)).unwrap();
+        assert_eq!(out, json!({ "hooks": {}, "kept": { "y": 2 } }));
     }
 
     #[test]
