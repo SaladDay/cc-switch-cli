@@ -6,7 +6,7 @@
 
 **対話型 TUI またはスクリプトで利用できる CLI から、Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw、Pi を一元管理できます。**
 
-[![バージョン](https://img.shields.io/badge/version-5.11.2-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![バージョン](https://img.shields.io/badge/version-5.11.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![対応プラットフォーム](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Rust 製](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![ライセンス](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
