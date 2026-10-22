@@ -1507,6 +1507,9 @@ mod tests {
         let second_messages = second["messages"].as_array().unwrap();
 
         assert_eq!(second_messages.len(), 6);
-        assert_eq!(&second_messages[..first_messages.len()], &first_messages[..]);
+        assert_eq!(
+            &second_messages[..first_messages.len()],
+            &first_messages[..]
+        );
     }
 }
