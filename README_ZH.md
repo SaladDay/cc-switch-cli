@@ -366,8 +366,10 @@ cc-switch --app pi prompts templates list     # 列出 Pi prompt templates
 cc-switch skills list                # 列出已安装技能
 cc-switch skills discover <query>      # 发现可用技能（别名：search）
 cc-switch skills install <name>      # 安装技能
+cc-switch skills install owner/repo:path --source-commit <40位SHA> # 安装指定提交
 cc-switch skills check-updates       # 手动检查更新
 cc-switch skills update <name>       # 更新一个仓库来源的技能
+cc-switch skills update <name> --source-commit <40位SHA> # 更新到指定提交
 cc-switch skills update --all        # 更新所有检测到的更新
 cc-switch skills uninstall <name>    # 卸载技能
 cc-switch skills enable <name>       # 为当前应用启用（配合 --app）
@@ -383,6 +385,8 @@ cc-switch skills repos remove <repo> # 移除仓库（owner/name 或 GitHub URL�
 cc-switch skills repos enable <repo> # 启用仓库但保留当前分支
 cc-switch skills repos disable <repo> # 禁用仓库但保留当前分支
 ```
+
+`--source-commit` 只固定本次命令；以后不带该参数更新时，仍会跟随技能配置的分支或仓库默认分支。
 
 ### 📊 用量概览
 

@@ -1980,6 +1980,7 @@ mod tests {
                 super::commands::skills::SkillsCommand::Update {
                     spec: Some(spec),
                     all: false,
+                    ..
                 }
             )) if spec == "hello"
         ));
@@ -1991,6 +1992,7 @@ mod tests {
                 super::commands::skills::SkillsCommand::Update {
                     spec: None,
                     all: true,
+                    ..
                 }
             ))
         ));
@@ -2000,6 +2002,73 @@ mod tests {
     fn manual_skill_update_requires_exactly_one_target() {
         assert!(Cli::try_parse_from(["cc-switch", "skills", "update"]).is_err());
         assert!(Cli::try_parse_from(["cc-switch", "skills", "update", "hello", "--all"]).is_err());
+    }
+
+    #[test]
+    fn parses_skill_source_commit_commands() {
+        let commit = "A".repeat(40);
+        let install = Cli::parse_from([
+            "cc-switch",
+            "skills",
+            "install",
+            "owner/repo:skills/demo",
+            "--source-commit",
+            &commit,
+        ]);
+        assert!(matches!(
+            install.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::Install {
+                    ref spec,
+                    source_commit: Some(ref source_commit),
+                }
+            )) if spec == "owner/repo:skills/demo"
+                && source_commit == &"a".repeat(40)
+        ));
+
+        let update = Cli::parse_from([
+            "cc-switch",
+            "skills",
+            "update",
+            "demo",
+            "--source-commit",
+            &commit,
+        ]);
+        assert!(matches!(
+            update.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::Update {
+                    spec: Some(ref spec),
+                    all: false,
+                    source_commit: Some(ref source_commit),
+                }
+            )) if spec == "demo" && source_commit == &"a".repeat(40)
+        ));
+    }
+
+    #[test]
+    fn skill_source_commit_requires_full_sha_and_single_update_target() {
+        let short = "a".repeat(12);
+        assert!(Cli::try_parse_from([
+            "cc-switch",
+            "skills",
+            "install",
+            "owner/repo:demo",
+            "--source-commit",
+            &short,
+        ])
+        .is_err());
+
+        let commit = "a".repeat(40);
+        assert!(Cli::try_parse_from([
+            "cc-switch",
+            "skills",
+            "update",
+            "--all",
+            "--source-commit",
+            &commit,
+        ])
+        .is_err());
     }
 
     #[test]
