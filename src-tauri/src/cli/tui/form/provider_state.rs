@@ -626,7 +626,21 @@ impl ProviderAddFormState {
             .unwrap_or(0)
     }
 
+    pub fn uses_managed_codex_quota(&self) -> bool {
+        self.extra
+            .pointer("/meta/providerType")
+            .and_then(Value::as_str)
+            == Some("codex_oauth")
+    }
+
     pub fn usage_query_fields(&self) -> Vec<UsageQueryField> {
+        if self.uses_managed_codex_quota() {
+            let mut fields = vec![UsageQueryField::Enabled];
+            if self.usage_query_enabled {
+                fields.push(UsageQueryField::AutoInterval);
+            }
+            return fields;
+        }
         let mut fields = vec![UsageQueryField::Enabled];
 
         if !self.usage_query_enabled {
@@ -1792,7 +1806,7 @@ impl ProviderAddFormState {
     }
 
     pub fn refresh_default_usage_query_template(&mut self) {
-        if self.usage_query_official_subscription {
+        if self.usage_query_official_subscription || self.uses_managed_codex_quota() {
             if self.usage_query_template != UsageQueryTemplate::OfficialSubscription {
                 self.set_usage_query_template(UsageQueryTemplate::OfficialSubscription);
             }
@@ -2026,7 +2040,7 @@ impl ProviderAddFormState {
     }
 
     pub fn available_usage_query_templates(&self) -> Vec<UsageQueryTemplate> {
-        if self.usage_query_official_subscription {
+        if self.usage_query_official_subscription || self.uses_managed_codex_quota() {
             return vec![UsageQueryTemplate::OfficialSubscription];
         }
 
@@ -2040,6 +2054,11 @@ impl ProviderAddFormState {
 
     pub fn set_usage_query_template(&mut self, template: UsageQueryTemplate) {
         self.clear_usage_query_field_error(UsageQueryField::Script);
+        let template = if self.uses_managed_codex_quota() {
+            UsageQueryTemplate::OfficialSubscription
+        } else {
+            template
+        };
         self.usage_query_template = template;
         match template {
             UsageQueryTemplate::Custom => {
@@ -2170,6 +2189,10 @@ impl ProviderAddFormState {
     }
 
     pub fn refresh_usage_query_provider_kind(&mut self) {
+        if self.uses_managed_codex_quota() {
+            self.set_usage_query_template(UsageQueryTemplate::OfficialSubscription);
+            return;
+        }
         let was_official = self.usage_query_official_subscription;
         let is_official = serde_json::from_value::<Provider>(self.to_provider_json_value())
             .ok()
