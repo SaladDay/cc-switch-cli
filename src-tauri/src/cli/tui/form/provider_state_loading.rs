@@ -66,6 +66,23 @@ fn populate_local_proxy_settings_form(form: &mut ProviderAddFormState, provider:
 }
 
 pub(super) fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    if provider.is_codex_oauth() {
+        form.set_usage_query_template(UsageQueryTemplate::OfficialSubscription);
+        let script = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.usage_script.as_ref());
+        form.usage_query_enabled = script
+            .is_some_and(|script| script.enabled && script.auto_query_interval.unwrap_or(0) > 0);
+        form.usage_query_auto_interval.set(
+            script
+                .and_then(|script| script.auto_query_interval)
+                .filter(|interval| *interval > 0)
+                .unwrap_or(5)
+                .to_string(),
+        );
+        return;
+    }
     form.usage_query_official_subscription = provider
         .official_subscription_tool(&form.app_type)
         .is_some();

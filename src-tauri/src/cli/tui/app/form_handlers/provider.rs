@@ -1336,7 +1336,7 @@ impl App {
         };
         provider.open_usage_query_page();
 
-        if self.usage_query_notice_confirmed {
+        if self.usage_query_notice_confirmed || provider.uses_managed_codex_quota() {
             return;
         }
 

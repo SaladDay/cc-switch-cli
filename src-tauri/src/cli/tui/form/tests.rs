@@ -8303,3 +8303,43 @@ fn claude_fallback_one_m_is_adjacent_and_resets_with_template() {
     assert!(!form.claude_fallback_one_m);
     assert!(form.claude_model.value.is_empty());
 }
+
+#[test]
+fn managed_codex_quota_form_preserves_binding_and_native_query() {
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "oauth", "name": "Account", "settingsConfig": {},
+        "meta": {"providerType": "codex_oauth", "authBinding": {
+            "source": "managed_account", "authProvider": "codex_oauth", "accountId": "acct-1"
+        }}
+    }))
+    .unwrap();
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    form.open_usage_query_page();
+    assert!(!form.usage_query_enabled);
+    assert_eq!(form.usage_query_fields(), vec![UsageQueryField::Enabled]);
+    assert!(form.to_provider_json_value()["meta"]
+        .get("usage_script")
+        .is_none());
+    form.toggle_usage_query_enabled();
+    assert_eq!(
+        form.usage_query_fields(),
+        vec![UsageQueryField::Enabled, UsageQueryField::AutoInterval]
+    );
+    let saved = form.to_provider_json_value();
+    assert_eq!(
+        saved["meta"]["authBinding"],
+        serde_json::to_value(&provider).unwrap()["meta"]["authBinding"]
+    );
+    assert_eq!(
+        saved["meta"]["usage_script"]["templateType"],
+        "official_subscription"
+    );
+    assert_eq!(saved["meta"]["usage_script"]["code"], "");
+    let saved: Provider = serde_json::from_value(saved).unwrap();
+    let mut reopened = ProviderAddFormState::from_provider(AppType::Claude, &saved);
+    reopened.open_usage_query_page();
+    assert!(reopened.usage_query_enabled);
+    reopened.toggle_usage_query_enabled();
+    let saved: Provider = serde_json::from_value(reopened.to_provider_json_value()).unwrap();
+    assert!(!ProviderAddFormState::from_provider(AppType::Claude, &saved).usage_query_enabled);
+}

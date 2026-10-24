@@ -98,6 +98,24 @@ pub(crate) fn quota_target_for_provider(
         .as_ref()
         .and_then(|meta| meta.usage_script.as_ref());
 
+    if is_codex_oauth_provider(provider) {
+        return Some(QuotaTarget {
+            app_type: app_type.clone(),
+            provider_id: id.to_string(),
+            provider_name,
+            kind: QuotaTargetKind::CodexOAuth {
+                account_id: provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("codex_oauth")),
+            },
+            auto_query_interval_minutes: usage_script
+                .filter(|script| script.enabled)
+                .and_then(|script| script.auto_query_interval)
+                .unwrap_or(0),
+        });
+    }
+
     if let Some(script) = usage_script.filter(|script| script.enabled) {
         let template = script
             .template_type
@@ -134,21 +152,6 @@ pub(crate) fn quota_target_for_provider(
                 auto_query_interval_minutes: script.auto_query_interval.unwrap_or(0),
             });
         }
-    }
-
-    if is_codex_oauth_provider(provider) {
-        return Some(QuotaTarget {
-            app_type: app_type.clone(),
-            provider_id: id.to_string(),
-            provider_name,
-            kind: QuotaTargetKind::CodexOAuth {
-                account_id: provider
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.managed_account_id_for("codex_oauth")),
-            },
-            auto_query_interval_minutes: 5,
-        });
     }
 
     None
@@ -402,6 +405,60 @@ mod tests {
             target.kind,
             QuotaTargetKind::CodexOAuth { account_id } if account_id.as_deref() == Some("acct-1")
         ));
+    }
+
+    #[test]
+    fn managed_codex_quota_ignores_templates_and_preserves_account_scheduling() {
+        let mut keys = Vec::new();
+        for account in ["acct-1", "acct-2"] {
+            let mut provider = test_provider("oauth", "Unrelated name", json!({}));
+            set_usage_script(&mut provider, true, "general");
+            let meta = provider.meta.as_mut().unwrap();
+            meta.provider_type = Some("codex_oauth".into());
+            meta.auth_binding = Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".into()),
+                account_id: Some(account.into()),
+            });
+            for interval in [0, 3] {
+                provider
+                    .meta
+                    .as_mut()
+                    .unwrap()
+                    .usage_script
+                    .as_mut()
+                    .unwrap()
+                    .auto_query_interval = Some(interval);
+                let target =
+                    quota_target_for_provider(&AppType::Claude, "oauth", &provider).unwrap();
+                assert_eq!(
+                    target.kind,
+                    QuotaTargetKind::CodexOAuth {
+                        account_id: Some(account.into())
+                    }
+                );
+                assert_eq!(target.auto_query_interval_minutes, interval);
+            }
+            provider
+                .meta
+                .as_mut()
+                .unwrap()
+                .usage_script
+                .as_mut()
+                .unwrap()
+                .enabled = false;
+            assert_eq!(
+                quota_target_for_provider(&AppType::Claude, "oauth", &provider)
+                    .unwrap()
+                    .auto_query_interval_minutes,
+                0
+            );
+            provider.meta.as_mut().unwrap().usage_script = None;
+            let target = quota_target_for_provider(&AppType::Claude, "oauth", &provider).unwrap();
+            assert_eq!(target.auto_query_interval_minutes, 0);
+            keys.push(target.cache_key());
+        }
+        assert_ne!(keys[0], keys[1]);
     }
 
     #[test]

@@ -3331,6 +3331,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_managed_codex_auto_refresh() -> &'static str {
+        if is_chinese() {
+            "内置 Codex OAuth / ChatGPT · 自动刷新"
+        } else {
+            "Built-in Codex OAuth / ChatGPT · Auto refresh"
+        }
+    }
+
     pub fn tui_usage_query_enable() -> &'static str {
         if is_chinese() {
             "启用用量查询"

@@ -85,6 +85,7 @@ enum HelpTarget {
         template: UsageQueryTemplate,
     },
     UsageQueryInstructions,
+    ManagedCodexQuota,
     S3Field {
         field: S3SyncField,
     },
@@ -217,6 +218,10 @@ fn current_help_target(app: &App) -> HelpTarget {
         return HelpTarget::Global;
     };
 
+    if matches!(provider.page, ProviderFormPage::UsageQuery) && provider.uses_managed_codex_quota()
+    {
+        return HelpTarget::ManagedCodexQuota;
+    }
     if matches!(provider.page, ProviderFormPage::UsageQuery) {
         return match provider.focus {
             FormFocus::Fields => {
@@ -421,6 +426,13 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         HelpTarget::LocalProxySettingsField { field } => local_proxy_settings_field_help(field),
         HelpTarget::CodexModelCatalogField { field } => codex_model_catalog_field_help(field),
         HelpTarget::UsageQueryExtractor { template } => usage_query_extractor_help(template),
+        HelpTarget::ManagedCodexQuota => HelpContent::new(
+            texts::tui_managed_codex_auto_refresh(),
+            help_lines(
+                "使用绑定的 ChatGPT 账号查询订阅额度，无需余额模板。关闭自动刷新（或间隔为 0）后不会自动联网；仍可在供应商列表按 r 手动刷新。查询失败或登录过期与自动刷新开关无关。",
+                "Queries subscription quota for the bound ChatGPT account without a balance template. Disabling automatic refresh (or setting interval to 0) prevents automatic network queries; press r in the provider list to refresh manually. Query failures and expired credentials are separate from automatic refresh settings.",
+            ),
+        ),
         HelpTarget::UsageQueryInstructions => HelpContent::new(
             texts::tui_usage_query_script_help_title(),
             super::form::ProviderAddFormState::usage_query_script_help_lines(),
