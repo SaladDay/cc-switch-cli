@@ -1728,8 +1728,6 @@ pub fn update_codex_config_snippet(
     base_url: &str,
     model: &str,
     wire_api: &str,
-    requires_openai_auth: bool,
-    env_key: &str,
 ) -> String {
     let mut doc = match original.trim().parse::<toml_edit::DocumentMut>() {
         Ok(doc) => doc,
@@ -1778,17 +1776,6 @@ pub fn update_codex_config_snippet(
         }
 
         section.insert("wire_api", toml_edit::value(wire_api));
-        section.insert(
-            "requires_openai_auth",
-            toml_edit::value(requires_openai_auth),
-        );
-
-        if requires_openai_auth {
-            section.remove("env_key");
-        } else {
-            let env_key = non_empty(env_key).unwrap_or("OPENAI_API_KEY");
-            section.insert("env_key", toml_edit::value(env_key));
-        }
     } else {
         if let Some(base_url) = non_empty(base_url) {
             doc["base_url"] = toml_edit::value(base_url);
@@ -1797,13 +1784,6 @@ pub fn update_codex_config_snippet(
         }
 
         doc["wire_api"] = toml_edit::value(wire_api);
-        doc["requires_openai_auth"] = toml_edit::value(requires_openai_auth);
-
-        if requires_openai_auth {
-            doc.remove("env_key");
-        } else {
-            doc["env_key"] = toml_edit::value(non_empty(env_key).unwrap_or("OPENAI_API_KEY"));
-        }
     }
 
     let result = doc.to_string();
@@ -2331,8 +2311,6 @@ env_key = "OLD_API_KEY"
             "https://new.example.com/v1",
             "gpt-new",
             "responses",
-            true,
-            "OPENAI_API_KEY",
         );
         let table = toml::from_str::<toml::Table>(&updated).expect("parse updated config");
 
@@ -2352,9 +2330,9 @@ env_key = "OLD_API_KEY"
             table
                 .get("requires_openai_auth")
                 .and_then(|value| value.as_bool()),
-            Some(true)
+            Some(false)
         );
-        assert!(table.get("env_key").is_none());
+        assert_eq!(table["env_key"].as_str(), Some("OLD_API_KEY"));
         assert!(table.get("model_provider").is_none());
         assert!(table.get("model_providers").is_none());
     }

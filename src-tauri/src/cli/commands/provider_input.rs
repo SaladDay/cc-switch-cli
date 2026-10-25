@@ -2676,8 +2676,6 @@ pub(crate) fn build_codex_settings_config_from_prompt(
         base_url,
         model,
         "responses",
-        true,
-        "OPENAI_API_KEY",
     );
 
     let mut settings_obj = current
