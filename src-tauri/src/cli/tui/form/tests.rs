@@ -8303,3 +8303,46 @@ fn claude_fallback_one_m_is_adjacent_and_resets_with_template() {
     assert!(!form.claude_fallback_one_m);
     assert!(form.claude_model.value.is_empty());
 }
+
+#[test]
+fn codex_oauth_hides_usage_query_and_preserves_binding_and_saved_script() {
+    for script in [
+        serde_json::Value::Null,
+        json!({
+            "enabled": true, "language": "javascript", "code": "invalid legacy script",
+            "templateType": "general", "autoQueryInterval": 0
+        }),
+    ] {
+        let mut value = json!({
+            "id": "oauth", "name": "Account", "settingsConfig": {},
+            "meta": {"providerType": "codex_oauth", "authBinding": {
+                "source": "managed_account", "authProvider": "codex_oauth", "accountId": "acct-1"
+            }}
+        });
+        if !script.is_null() {
+            value["meta"]["usage_script"] = script;
+        }
+        let provider: Provider = serde_json::from_value(value.clone()).unwrap();
+        let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+        assert!(!form.fields().contains(&ProviderAddField::UsageQuery));
+        assert!(!form.fields().contains(&ProviderAddField::UsageQueryDivider));
+        form.open_usage_query_page();
+        assert!(matches!(form.page, ProviderFormPage::Main));
+        assert!(form.usage_query_script_validation_error().is_none());
+        form.name.set("Renamed account");
+        let saved = form.to_provider_json_value();
+        assert_eq!(saved["meta"]["authBinding"], value["meta"]["authBinding"]);
+        assert_eq!(saved["meta"]["usage_script"], value["meta"]["usage_script"]);
+        let reopened = ProviderAddFormState::from_provider(
+            AppType::Claude,
+            &serde_json::from_value(saved).unwrap(),
+        );
+        assert!(!reopened.fields().contains(&ProviderAddField::UsageQuery));
+    }
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "custom", "name": "Codex OAuth", "settingsConfig": {}
+    }))
+    .unwrap();
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert!(form.fields().contains(&ProviderAddField::UsageQuery));
+}

@@ -831,8 +831,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::CodexOAuthAccount => HelpContent::new(
             texts::tui_label_chatgpt_account(),
             help_lines(
-                "绑定 ChatGPT/Codex 官方登录账号。官方账号可用于 Codex 插件、移动端远程操作等官方能力。",
-                "Binds an official ChatGPT/Codex account. Official login can keep Codex plugins, mobile remote control, and other official app features available.",
+                "绑定 ChatGPT/Codex 官方登录账号。官方账号可用于 Codex 插件、移动端远程操作等官方能力。订阅额度通过绑定账号的内置查询显示，无需余额模板；可在供应商列表按 r 刷新。",
+                "Binds an official ChatGPT/Codex account. Official login can keep Codex plugins, mobile remote control, and other official app features available. Subscription quota uses the bound account's built-in query without a balance template; press r in the provider list to refresh.",
             ),
         ),
         ProviderAddField::CodexFastMode => HelpContent::new(

@@ -598,8 +598,12 @@ impl ProviderAddFormState {
             AppType::Codex => fields.push(ProviderAddField::CodexQuickConfig),
             _ => {}
         }
-        fields.push(ProviderAddField::UsageQueryDivider);
-        fields.push(ProviderAddField::UsageQuery);
+        // Managed Codex OAuth uses the bound account's native quota, like the
+        // desktop provider card; generic usage templates do not apply.
+        if !self.is_claude_codex_oauth_provider() {
+            fields.push(ProviderAddField::UsageQueryDivider);
+            fields.push(ProviderAddField::UsageQuery);
+        }
 
         // Add mode leads with the template picker row plus its divider, so the
         // template reads as its own group above the real fields. Inserted last
@@ -695,7 +699,8 @@ impl ProviderAddFormState {
     }
 
     pub fn usage_query_script_validation_error(&self) -> Option<&'static str> {
-        if !self.usage_query_enabled
+        if self.is_claude_codex_oauth_provider()
+            || !self.usage_query_enabled
             || matches!(
                 self.usage_query_template,
                 UsageQueryTemplate::GitHubCopilot
@@ -1536,6 +1541,9 @@ impl ProviderAddFormState {
     }
 
     pub fn open_usage_query_page(&mut self) {
+        if self.is_claude_codex_oauth_provider() {
+            return;
+        }
         self.refresh_usage_query_provider_kind();
         self.refresh_default_usage_query_template();
         self.page = ProviderFormPage::UsageQuery;
