@@ -11,6 +11,14 @@ use crate::error::AppError;
 use crate::services::skill::{ImportSkillSelection, SkillRepo, SkillStorageLocation, SyncMethod};
 use crate::services::SkillService;
 
+fn parse_source_commit(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("source commit must be a full 40-character hexadecimal SHA".to_string());
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 #[derive(Subcommand)]
 pub enum SkillsCommand {
     /// List installed skills (from SSOT + database state)
@@ -37,6 +45,9 @@ pub enum SkillsCommand {
     Install {
         /// Skill directory name or full key (owner/name:directory)
         spec: String,
+        /// Fetch one exact GitHub commit instead of the configured branch.
+        #[arg(long, value_name = "40_HEX_SHA", value_parser = parse_source_commit)]
+        source_commit: Option<String>,
     },
     /// Manually check installed repository-backed skills for updates
     CheckUpdates,
@@ -52,6 +63,14 @@ pub enum SkillsCommand {
         /// Update every skill reported by a fresh manual check
         #[arg(long)]
         all: bool,
+        /// Fetch one exact GitHub commit for this single repository-backed skill.
+        #[arg(
+            long,
+            value_name = "40_HEX_SHA",
+            value_parser = parse_source_commit,
+            conflicts_with = "all"
+        )]
+        source_commit: Option<String>,
     },
     /// Uninstall a skill (remove from SSOT and app dirs)
     Uninstall {
@@ -159,9 +178,16 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
             limit,
             offset,
         } => search_market(&query, limit, offset),
-        SkillsCommand::Install { spec } => install_skill(&app_type, &spec),
+        SkillsCommand::Install {
+            spec,
+            source_commit,
+        } => install_skill(&app_type, &spec, source_commit.as_deref()),
         SkillsCommand::CheckUpdates => check_skill_updates(),
-        SkillsCommand::Update { spec, all } => update_skills(spec.as_deref(), all),
+        SkillsCommand::Update {
+            spec,
+            all,
+            source_commit,
+        } => update_skills(spec.as_deref(), all, source_commit.as_deref()),
         SkillsCommand::Uninstall { spec } => uninstall_skill(&spec),
         SkillsCommand::Enable { spec, apps } => toggle_skill(&app_type, &spec, &apps, true),
         SkillsCommand::Disable { spec, apps } => toggle_skill(&app_type, &spec, &apps, false),
@@ -290,10 +316,17 @@ fn discover_skills(query: Option<&str>) -> Result<(), AppError> {
     Ok(())
 }
 
-fn install_skill(app_type: &AppType, spec: &str) -> Result<(), AppError> {
+fn install_skill(
+    app_type: &AppType,
+    spec: &str,
+    source_commit: Option<&str>,
+) -> Result<(), AppError> {
     ensure_supported_skills_app(app_type, "install")?;
     let service = SkillService::new()?;
-    let installed = run_async(service.install(spec, app_type))?;
+    let installed = match source_commit {
+        Some(commit) => run_async(service.install_at_commit(spec, app_type, commit))?,
+        None => run_async(service.install(spec, app_type))?,
+    };
     println!(
         "{}",
         success(&format!(
@@ -332,7 +365,11 @@ fn check_skill_updates() -> Result<(), AppError> {
     }
 }
 
-fn update_skills(spec: Option<&str>, all: bool) -> Result<(), AppError> {
+fn update_skills(
+    spec: Option<&str>,
+    all: bool,
+    source_commit: Option<&str>,
+) -> Result<(), AppError> {
     let service = SkillService::new()?;
     let mut check_failures = Vec::new();
     let ids = if all {
@@ -368,7 +405,12 @@ fn update_skills(spec: Option<&str>, all: bool) -> Result<(), AppError> {
         )));
     }
 
-    let batch = run_async(async { Ok(service.update_skills(&ids).await) })?;
+    let batch = run_async(async {
+        Ok(match source_commit {
+            Some(commit) => service.update_skills_at_commit(&ids, commit).await,
+            None => service.update_skills(&ids).await,
+        })
+    })?;
     if !batch.updated.is_empty() {
         println!(
             "{}",

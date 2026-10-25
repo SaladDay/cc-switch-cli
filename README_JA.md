@@ -378,8 +378,10 @@ cc-switch skills list                # インストール済みスキルを一�
 cc-switch skills discover <query>      # 利用可能なスキルを検索（別名：search）
 cc-switch skills market <query>      # skills.sh マーケットプレイスを検索
 cc-switch skills install <name>      # スキルをインストール
+cc-switch skills install owner/repo:path --source-commit <40桁SHA> # 指定コミットをインストール
 cc-switch skills check-updates       # 更新の有無を手動で確認
 cc-switch skills update <name>       # リポジトリ由来のスキルを 1 件更新
+cc-switch skills update <name> --source-commit <40桁SHA> # 指定コミットへ更新
 cc-switch skills update --all        # 検出された更新をすべて適用
 cc-switch skills uninstall <name>    # スキルをアンインストール
 cc-switch skills enable <name>       # 現在のアプリ（--app）で有効化
@@ -395,6 +397,8 @@ cc-switch skills repos remove <repo> # リポジトリを削除（owner/name ま
 cc-switch skills repos enable <repo> # ブランチを変えずにリポジトリを有効化
 cc-switch skills repos disable <repo> # ブランチを変えずにリポジトリを無効化
 ```
+
+`--source-commit` はそのコマンドだけに適用されます。フラグなしの今後の更新は、設定されたブランチまたはリポジトリのデフォルトブランチに従います。
 
 ### 📊 使用状況の概要
 

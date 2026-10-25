@@ -2470,20 +2470,37 @@ impl SkillService {
             }
         }
 
+        fn parse_path(raw: &str, strip_manifest: bool) -> Option<PathBuf> {
+            let mut path = PathBuf::from(raw.trim_end_matches('/'));
+            if strip_manifest && path.file_name().is_some_and(|name| name == "SKILL.md") {
+                path.pop();
+            }
+            path.components()
+                .all(|component| matches!(component, Component::Normal(_)))
+                .then_some(path)
+        }
+
         for kind in ["tree", "blob"] {
             for branch in &branches {
                 let prefix = format!("https://github.com/{owner}/{repo}/{kind}/{branch}/");
                 let Some(raw) = url.strip_prefix(&prefix) else {
                     continue;
                 };
-                let mut path = PathBuf::from(raw.trim_end_matches('/'));
-                if kind == "blob" && path.file_name().is_some_and(|name| name == "SKILL.md") {
-                    path.pop();
+                if let Some(path) = parse_path(raw, kind == "blob") {
+                    return Some(path);
                 }
-                if path
-                    .components()
-                    .all(|component| matches!(component, Component::Normal(_)))
-                {
+            }
+        }
+        for kind in ["tree", "blob"] {
+            let prefix = format!("https://github.com/{owner}/{repo}/{kind}/");
+            let Some(rest) = url.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some((commit, raw)) = rest.split_once('/') else {
+                continue;
+            };
+            if commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                if let Some(path) = parse_path(raw, kind == "blob") {
                     return Some(path);
                 }
             }
@@ -2676,7 +2693,15 @@ impl SkillService {
     }
 
     /// Update one repository-backed Skill after an explicit user action.
-    async fn update_skill(&self, skill_id: &str) -> Result<SkillUpdateOutcome, AppError> {
+    async fn update_skill(
+        &self,
+        skill_id: &str,
+        source_commit: Option<&str>,
+        archive_base: &str,
+    ) -> Result<SkillUpdateOutcome, AppError> {
+        let source_commit = source_commit
+            .map(Self::normalize_source_commit)
+            .transpose()?;
         let db = Database::init()?;
         let mut skill = db
             .get_installed_skill(skill_id)?
@@ -2687,9 +2712,14 @@ impl SkillService {
         let (owner, name) = match (&skill.repo_owner, &skill.repo_name) {
             (Some(owner), Some(name)) => (owner.clone(), name.clone()),
             _ => {
+                let detail = if source_commit.is_some() {
+                    "; --source-commit requires a repository-backed Skill"
+                } else {
+                    ""
+                };
                 return Err(AppError::InvalidInput(format!(
-                    "Cannot update local Skill: {skill_id}"
-                )))
+                    "Cannot update local Skill: {skill_id}{detail}"
+                )));
             }
         };
         let repo = SkillRepo {
@@ -2702,16 +2732,28 @@ impl SkillService {
             enabled: true,
         };
 
-        let (temp_dir, used_branch) = timeout(
-            std::time::Duration::from_secs(60),
-            self.download_repo_for_update(&repo),
-        )
-        .await
-        .map_err(|_| {
-            AppError::Message(format!("Timed out downloading {owner}/{name} for update"))
-        })??;
+        let (temp_dir, used_ref): (PathBuf, String) = if let Some(commit) = source_commit.as_deref()
+        {
+            timeout(
+                std::time::Duration::from_secs(60),
+                self.download_repo_at_commit_with_base(&repo, commit, archive_base),
+            )
+            .await
+            .map_err(|_| {
+                AppError::Message(format!("Timed out downloading {owner}/{name} for update"))
+            })??
+        } else {
+            timeout(
+                std::time::Duration::from_secs(60),
+                self.download_repo_for_update_with_base(&repo, archive_base),
+            )
+            .await
+            .map_err(|_| {
+                AppError::Message(format!("Timed out downloading {owner}/{name} for update"))
+            })??
+        };
         let temp_dir = DownloadedRepoGuard::new(temp_dir);
-        let source = Self::resolve_update_source(temp_dir.path(), &skill, Some(&used_branch))?;
+        let source = Self::resolve_update_source(temp_dir.path(), &skill, Some(&used_ref))?;
         let source_relative = source
             .strip_prefix(temp_dir.path())
             .map_err(|_| AppError::Message("Remote Skill source escaped its repository".into()))?
@@ -2779,9 +2821,14 @@ impl SkillService {
 
         // Preserve app enablement changes made while the repository was downloading.
         let mut updated = current;
+        let tracked_branch = updated.repo_branch.clone();
         updated.name = new_name;
         updated.description = new_description;
-        updated.repo_branch = Some(used_branch.clone());
+        updated.repo_branch = if source_commit.is_some() {
+            tracked_branch
+        } else {
+            Some(used_ref.clone())
+        };
         let doc_path = if source_relative.as_os_str().is_empty() {
             "SKILL.md".to_string()
         } else {
@@ -2791,10 +2838,7 @@ impl SkillService {
             )
         };
         updated.readme_url = Some(Self::build_skill_doc_url(
-            &owner,
-            &name,
-            &used_branch,
-            &doc_path,
+            &owner, &name, &used_ref, &doc_path,
         ));
         updated.content_hash = Some(content_hash);
         updated.updated_at = Utc::now().timestamp();
@@ -2850,13 +2894,57 @@ impl SkillService {
     }
 
     pub async fn update_skills(&self, ids: &[String]) -> SkillUpdateBatchResult {
+        self.update_skills_at_commit_with_archive_base(ids, None, "https://github.com/")
+            .await
+    }
+
+    /// Update exactly one repository-backed Skill from a full Git commit.
+    pub async fn update_skills_at_commit(
+        &self,
+        ids: &[String],
+        source_commit: &str,
+    ) -> SkillUpdateBatchResult {
+        self.update_skills_at_commit_with_archive_base(
+            ids,
+            Some(source_commit),
+            "https://github.com/",
+        )
+        .await
+    }
+
+    async fn update_skills_at_commit_with_archive_base(
+        &self,
+        ids: &[String],
+        source_commit: Option<&str>,
+        archive_base: &str,
+    ) -> SkillUpdateBatchResult {
         let mut result = SkillUpdateBatchResult::default();
+        let source_commit = match source_commit.map(Self::normalize_source_commit).transpose() {
+            Ok(commit) => commit,
+            Err(error) => {
+                result.failures.push(SkillUpdateFailure {
+                    id: ids.join(","),
+                    error: error.to_string(),
+                });
+                return result;
+            }
+        };
+        if source_commit.is_some() && ids.len() != 1 {
+            result.failures.push(SkillUpdateFailure {
+                id: ids.join(","),
+                error: "commit-pinned update requires exactly one Skill".to_string(),
+            });
+            return result;
+        }
         let mut seen = HashSet::new();
         for id in ids {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            match self.update_skill(id).await {
+            match self
+                .update_skill(id, source_commit.as_deref(), archive_base)
+                .await
+            {
                 Ok(outcome) => {
                     if !outcome.deployment_failures.is_empty() {
                         result.failures.push(SkillUpdateFailure {
@@ -2952,6 +3040,7 @@ impl SkillService {
         discoverable: &DiscoverableSkill,
         install_name: &str,
         app: &AppType,
+        reject_existing: bool,
     ) -> Result<Option<InstalledSkill>, AppError> {
         let db = Database::init()?;
         for existing in db.get_all_installed_skills()?.values() {
@@ -2977,6 +3066,20 @@ impl SkillService {
                         ("new_repo", new_repo.as_str()),
                     ],
                     Some("uninstallFirst"),
+                )));
+            }
+            if reject_existing {
+                let expected_source = Self::sanitize_skill_source_path(&discoverable.directory);
+                let existing_source = Self::source_path_from_readme(existing, None);
+                if expected_source.is_none() || existing_source != expected_source {
+                    return Err(AppError::InvalidInput(format!(
+                        "Skill '{}' is already installed from a different source path",
+                        install_name
+                    )));
+                }
+                return Err(AppError::InvalidInput(format!(
+                    "Skill '{}' is already installed; use `cc-switch skills update {} --source-commit <SHA>` instead",
+                    install_name, install_name
                 )));
             }
 
@@ -3126,16 +3229,50 @@ impl SkillService {
     }
 
     pub async fn install(&self, spec: &str, app: &AppType) -> Result<InstalledSkill, AppError> {
+        self.install_with_source_commit(spec, app, None, "https://github.com/")
+            .await
+    }
+
+    /// Install a new Skill from an explicit repository source at one Git commit.
+    pub async fn install_at_commit(
+        &self,
+        spec: &str,
+        app: &AppType,
+        source_commit: &str,
+    ) -> Result<InstalledSkill, AppError> {
+        self.install_with_source_commit(spec, app, Some(source_commit), "https://github.com/")
+            .await
+    }
+
+    async fn install_with_source_commit(
+        &self,
+        spec: &str,
+        app: &AppType,
+        source_commit: Option<&str>,
+        archive_base: &str,
+    ) -> Result<InstalledSkill, AppError> {
         let spec = spec.trim();
         if spec.is_empty() {
             return Err(AppError::InvalidInput("Skill 不能为空".to_string()));
         }
+        let source_commit = source_commit
+            .map(Self::normalize_source_commit)
+            .transpose()?;
 
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index)?;
 
-        // Resolve spec to a discoverable skill.
-        let discoverable = self.resolve_install_spec(&index, spec).await?;
+        // A commit-pinned install must name its repository and source directory
+        // explicitly; fuzzy marketplace lookup cannot provide that contract.
+        let discoverable = if source_commit.is_some() {
+            discoverable_from_repo_spec(spec).ok_or_else(|| {
+                AppError::InvalidInput(
+                    "--source-commit requires an explicit owner/repo:directory source".to_string(),
+                )
+            })?
+        } else {
+            self.resolve_install_spec(&index, spec).await?
+        };
 
         // Repository sources may be nested, but the installed directory is one safe segment.
         let source_rel =
@@ -3158,16 +3295,30 @@ impl SkillService {
         let new_repo = format!("{}/{}", discoverable.repo_owner, discoverable.repo_name);
         let needs_download = {
             let _state_guard = skill_state_write_guard();
-            if let Some(existing) = Self::reuse_existing_install(&discoverable, &install_name, app)?
-            {
+            if let Some(existing) = Self::reuse_existing_install(
+                &discoverable,
+                &install_name,
+                app,
+                source_commit.is_some(),
+            )? {
                 return Ok(existing);
             }
             let dest = Self::get_ssot_dir()?.join(&install_name);
             Self::reject_unmanaged_install_collision(&dest, &install_name, &new_repo)?;
+            if source_commit.is_some() && fs::symlink_metadata(&dest).is_ok() {
+                return Err(AppError::InvalidInput(format!(
+                    "Commit-pinned install requires an unused Skill directory: {}",
+                    dest.display()
+                )));
+            }
             !dest.exists()
         };
 
-        let mut installed_branch = discoverable.repo_branch.clone();
+        let mut installed_branch = if source_commit.is_some() {
+            None
+        } else {
+            Some(discoverable.repo_branch.clone())
+        };
         let mut installed_readme_url = discoverable.readme_url.clone();
         let mut downloaded_source: Option<(DownloadedRepoGuard, PathBuf)> = None;
         if needs_download {
@@ -3178,22 +3329,42 @@ impl SkillService {
                 enabled: true,
             };
 
-            let (temp_dir, used_branch) = timeout(
-                std::time::Duration::from_secs(60),
-                self.download_repo(&repo),
-            )
-            .await
-            .map_err(|_| {
-                AppError::Message(format_skill_error(
-                    "DOWNLOAD_TIMEOUT",
-                    &[
-                        ("owner", repo.owner.as_str()),
-                        ("name", repo.name.as_str()),
-                        ("timeout", "60"),
-                    ],
-                    Some("checkNetwork"),
-                ))
-            })??;
+            let (temp_dir, used_ref): (PathBuf, String) =
+                if let Some(commit) = source_commit.as_deref() {
+                    timeout(
+                        std::time::Duration::from_secs(60),
+                        self.download_repo_at_commit_with_base(&repo, commit, archive_base),
+                    )
+                    .await
+                    .map_err(|_| {
+                        AppError::Message(format_skill_error(
+                            "DOWNLOAD_TIMEOUT",
+                            &[
+                                ("owner", repo.owner.as_str()),
+                                ("name", repo.name.as_str()),
+                                ("timeout", "60"),
+                            ],
+                            Some("checkNetwork"),
+                        ))
+                    })??
+                } else {
+                    timeout(
+                        std::time::Duration::from_secs(60),
+                        self.download_repo(&repo),
+                    )
+                    .await
+                    .map_err(|_| {
+                        AppError::Message(format_skill_error(
+                            "DOWNLOAD_TIMEOUT",
+                            &[
+                                ("owner", repo.owner.as_str()),
+                                ("name", repo.name.as_str()),
+                                ("timeout", "60"),
+                            ],
+                            Some("checkNetwork"),
+                        ))
+                    })??
+                };
 
             let temp_dir = DownloadedRepoGuard::new(temp_dir);
             let source = Self::resolve_skill_source_dir(temp_dir.path(), &discoverable.directory)?
@@ -3226,22 +3397,35 @@ impl SkillService {
             installed_readme_url = Some(Self::build_skill_doc_url(
                 &repo.owner,
                 &repo.name,
-                &used_branch,
+                &used_ref,
                 &doc_path,
             ));
-            installed_branch = used_branch;
+            if source_commit.is_none() {
+                installed_branch = Some(used_ref);
+            }
             downloaded_source = Some((temp_dir, source));
         }
 
         // Network I/O is complete. Re-check under the write guard before any
         // SSOT or database mutation, then keep the projection consistent.
         let _state_guard = skill_state_write_guard();
-        if let Some(existing) = Self::reuse_existing_install(&discoverable, &install_name, app)? {
+        if let Some(existing) = Self::reuse_existing_install(
+            &discoverable,
+            &install_name,
+            app,
+            source_commit.is_some(),
+        )? {
             return Ok(existing);
         }
         let ssot_dir = Self::get_ssot_dir()?;
         let dest = ssot_dir.join(&install_name);
         Self::reject_unmanaged_install_collision(&dest, &install_name, &new_repo)?;
+        if source_commit.is_some() && fs::symlink_metadata(&dest).is_ok() {
+            return Err(AppError::InvalidInput(format!(
+                "Commit-pinned install requires an unused Skill directory: {}",
+                dest.display()
+            )));
+        }
         if !dest.exists() {
             let source = downloaded_source
                 .as_ref()
@@ -3264,7 +3448,7 @@ impl SkillService {
             readme_url: installed_readme_url,
             repo_owner: Some(discoverable.repo_owner.clone()),
             repo_name: Some(discoverable.repo_name.clone()),
-            repo_branch: Some(installed_branch),
+            repo_branch: installed_branch,
             apps: SkillApps::only(app),
             installed_at: Utc::now().timestamp(),
             content_hash: Self::compute_dir_hash(&dest).ok(),
@@ -3843,6 +4027,76 @@ mod tests {
         test_repo_archive_at("repo-main/SKILL.md", content)
     }
 
+    fn test_repo_archive_bytes(root: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .add_directory(format!("{root}/"), options)
+            .expect("add archive root");
+        for (path, content) in files {
+            writer
+                .start_file(format!("{root}/{path}"), options)
+                .expect("add archive file");
+            std::io::Write::write_all(&mut writer, content).expect("write archive content");
+        }
+        writer.finish().expect("finish archive").into_inner()
+    }
+
+    fn archive_server(responses: Vec<(String, Vec<u8>)>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind archive server");
+        let address = listener.local_addr().expect("archive server address");
+        listener
+            .set_nonblocking(true)
+            .expect("set archive listener nonblocking");
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            for (path, body) in responses {
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "archive request missing: {path}"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept archive request: {error}"),
+                    }
+                };
+                socket
+                    .set_nonblocking(false)
+                    .expect("set archive socket blocking");
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                    .expect("set archive read timeout");
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = std::io::Read::read(&mut socket, &mut buffer)
+                        .expect("read archive request");
+                    assert!(read > 0 && request.len() < 16 * 1024);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request_line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .expect("request line")
+                    .to_string();
+                assert_eq!(request_line, format!("GET {path} HTTP/1.1"));
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write archive response headers");
+                std::io::Write::write_all(&mut socket, &body).expect("write archive response body");
+            }
+        });
+        (format!("http://{address}/"), handle)
+    }
+
     fn repository_skill(readme_url: Option<&str>) -> InstalledSkill {
         InstalledSkill {
             id: "owner/repo:shared".to_string(),
@@ -4151,6 +4405,17 @@ mod tests {
     #[test]
     fn github_archive_coordinates_cannot_change_the_download_endpoint() {
         assert!(SkillService::github_archive_url("owner", "repo", "feature/nested").is_ok());
+        let commit = "a".repeat(40);
+        assert_eq!(
+            SkillService::github_commit_archive_url_with_base(
+                "https://github.com/",
+                "owner",
+                "repo",
+                &commit,
+            )
+            .expect("build commit archive URL"),
+            format!("https://github.com/owner/repo/archive/{commit}.zip")
+        );
         for invalid in [
             ("owner/escape", "repo", "main"),
             ("owner", "../releases", "main"),
@@ -4158,6 +4423,20 @@ mod tests {
         ] {
             assert!(SkillService::github_archive_url(invalid.0, invalid.1, invalid.2).is_err());
         }
+        assert!(SkillService::github_commit_archive_url_with_base(
+            "https://github.com/",
+            "owner",
+            "repo",
+            "abc"
+        )
+        .is_err());
+        assert!(SkillService::github_commit_archive_url_with_base(
+            "https://github.com/",
+            "owner/escape",
+            "repo",
+            &commit
+        )
+        .is_err());
     }
 
     #[test]
@@ -4403,6 +4682,203 @@ mod tests {
             .expect("readme path should disambiguate duplicate names");
 
         assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn update_source_uses_commit_path_to_disambiguate_nested_skill() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        let first = temp.path().join("first/shared");
+        let expected = temp.path().join("second/shared");
+        fs::create_dir_all(&first).expect("create first duplicate");
+        fs::create_dir_all(&expected).expect("create expected duplicate");
+        fs::write(first.join("SKILL.md"), "first").expect("write first manifest");
+        fs::write(expected.join("SKILL.md"), "second").expect("write expected manifest");
+
+        let commit = "a".repeat(40);
+        let mut skill = repository_skill(Some(&format!(
+            "https://github.com/owner/repo/blob/{commit}/second/shared/SKILL.md"
+        )));
+        skill.repo_branch = None;
+        let resolved = SkillService::resolve_update_source(temp.path(), &skill, Some(&commit))
+            .expect("commit path should disambiguate duplicate names");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[tokio::test]
+    async fn commit_pinned_update_rejects_multiple_skills_before_io() {
+        let service = SkillService::new().expect("create Skill service");
+        let commit = "a".repeat(40);
+        let result = service
+            .update_skills_at_commit(&["first".to_string(), "second".to_string()], &commit)
+            .await;
+
+        assert!(result.updated.is_empty());
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.failures[0].error.contains("exactly one Skill"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn commit_pinned_operations_require_repository_targets() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let service = SkillService::new().expect("create Skill service");
+        let commit = "a".repeat(40);
+
+        let install_error = service
+            .install_at_commit("demo", &AppType::Codex, &commit)
+            .await
+            .expect_err("commit install requires an explicit repository source");
+        assert!(install_error
+            .to_string()
+            .contains("owner/repo:directory source"));
+
+        let db = Database::init().expect("open Skill database");
+        db.save_skill(&poisoned_skill("local:demo", "demo"))
+            .expect("save local Skill");
+        let update = service
+            .update_skills_at_commit(&["local:demo".to_string()], &commit)
+            .await;
+        assert_eq!(update.failures.len(), 1);
+        assert!(update.failures[0].error.contains("repository-backed Skill"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_commit_install_update_and_later_branch_update() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let first = "a".repeat(40);
+        let second = "b".repeat(40);
+        let archives = vec![
+            (
+                format!("/owner/repo/archive/{first}.zip"),
+                test_repo_archive_bytes(
+                    "repo-a",
+                    &[("skills/shared/SKILL.md", b"# first commit\n")],
+                ),
+            ),
+            (
+                format!("/owner/repo/archive/{second}.zip"),
+                test_repo_archive_bytes(
+                    "repo-b",
+                    &[("skills/shared/SKILL.md", b"# second commit\n")],
+                ),
+            ),
+            (
+                "/owner/repo/archive/refs/heads/main.zip".to_string(),
+                test_repo_archive_bytes(
+                    "repo-main",
+                    &[("skills/shared/SKILL.md", b"# branch head\n")],
+                ),
+            ),
+        ];
+        let (archive_base, server) = archive_server(archives);
+        let service = SkillService::new().expect("create Skill service");
+        let installed = service
+            .install_with_source_commit(
+                "owner/repo:skills/shared",
+                &AppType::Codex,
+                Some(&first),
+                &archive_base,
+            )
+            .await
+            .expect("install exact commit");
+
+        assert_eq!(installed.id, "owner/repo:skills/shared");
+        assert_eq!(installed.directory, "shared");
+        assert_eq!(installed.repo_branch, None);
+        assert!(installed.apps.codex);
+        assert_eq!(
+            installed.readme_url,
+            Some(format!(
+                "https://github.com/owner/repo/blob/{first}/skills/shared/SKILL.md"
+            ))
+        );
+        let ssot = SkillService::get_ssot_dir()
+            .expect("resolve isolated SSOT")
+            .join("shared");
+        assert_eq!(
+            fs::read_to_string(ssot.join("SKILL.md")).expect("read installed manifest"),
+            "# first commit\n"
+        );
+
+        let duplicate = service
+            .install_with_source_commit(
+                "owner/repo:skills/shared",
+                &AppType::Codex,
+                Some(&second),
+                &archive_base,
+            )
+            .await
+            .expect_err("existing install must direct the caller to update");
+        assert!(duplicate.to_string().contains("skills update"));
+        let different_source = service
+            .install_with_source_commit(
+                "owner/repo:other/shared",
+                &AppType::Codex,
+                Some(&second),
+                &archive_base,
+            )
+            .await
+            .expect_err("same repository with a different source path must not reuse the Skill");
+        assert!(different_source
+            .to_string()
+            .contains("different source path"));
+
+        let db = Database::init().expect("open Skill database");
+        let mut stored = db
+            .get_installed_skill(&installed.id)
+            .expect("read installed Skill")
+            .expect("installed Skill row");
+        stored.repo_branch = Some("main".to_string());
+        db.save_skill(&stored).expect("set branch tracking");
+
+        let updated = service
+            .update_skills_at_commit_with_archive_base(
+                std::slice::from_ref(&installed.id),
+                Some(&second),
+                &archive_base,
+            )
+            .await;
+        assert!(updated.failures.is_empty(), "{:?}", updated.failures);
+        assert_eq!(updated.updated.len(), 1);
+        assert!(updated.updated[0].apps.codex);
+        assert_eq!(updated.updated[0].repo_branch.as_deref(), Some("main"));
+        assert_eq!(
+            updated.updated[0].readme_url,
+            Some(format!(
+                "https://github.com/owner/repo/blob/{second}/skills/shared/SKILL.md"
+            ))
+        );
+        assert_eq!(
+            fs::read_to_string(ssot.join("SKILL.md")).expect("read exact-updated manifest"),
+            "# second commit\n"
+        );
+
+        let branch_update = service
+            .update_skills_at_commit_with_archive_base(
+                std::slice::from_ref(&installed.id),
+                None,
+                &archive_base,
+            )
+            .await;
+        assert!(
+            branch_update.failures.is_empty(),
+            "{:?}",
+            branch_update.failures
+        );
+        server.join().expect("archive server");
+        assert!(branch_update.updated[0].apps.codex);
+        assert_eq!(
+            branch_update.updated[0].readme_url.as_deref(),
+            Some("https://github.com/owner/repo/blob/main/skills/shared/SKILL.md")
+        );
+        assert_eq!(
+            fs::read_to_string(ssot.join("SKILL.md")).expect("read branch-updated manifest"),
+            "# branch head\n"
+        );
     }
 
     #[test]

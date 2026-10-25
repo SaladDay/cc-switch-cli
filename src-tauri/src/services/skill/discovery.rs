@@ -50,9 +50,18 @@ impl SkillService {
         repo: &str,
         branch: &str,
     ) -> Result<String, AppError> {
+        Self::github_archive_url_with_base("https://github.com/", owner, repo, branch)
+    }
+
+    fn github_archive_url_with_base(
+        base: &str,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<String, AppError> {
         Self::validate_github_repo_ref(owner, repo, branch)?;
-        let mut url = url::Url::parse("https://github.com/")
-            .map_err(|error| AppError::Message(error.to_string()))?;
+        let mut url =
+            url::Url::parse(base).map_err(|error| AppError::Message(error.to_string()))?;
         let components = branch.split('/').collect::<Vec<_>>();
         {
             let mut segments = url
@@ -64,6 +73,32 @@ impl SkillService {
             }
             segments.push(&format!("{}.zip", components[components.len() - 1]));
         }
+        Ok(url.to_string())
+    }
+
+    pub(super) fn normalize_source_commit(commit: &str) -> Result<String, AppError> {
+        let commit = commit.trim();
+        if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(AppError::InvalidInput(
+                "source-commit must be a full 40-character Git SHA".to_string(),
+            ));
+        }
+        Ok(commit.to_ascii_lowercase())
+    }
+
+    pub(super) fn github_commit_archive_url_with_base(
+        base: &str,
+        owner: &str,
+        repo: &str,
+        commit: &str,
+    ) -> Result<String, AppError> {
+        let commit = Self::normalize_source_commit(commit)?;
+        Self::validate_github_repo_ref(owner, repo, &commit)?;
+        let mut url =
+            url::Url::parse(base).map_err(|error| AppError::Message(error.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|_| AppError::Message("Invalid GitHub archive base URL".into()))?
+            .extend([owner, repo, "archive", &format!("{commit}.zip")]);
         Ok(url.to_string())
     }
 
@@ -311,14 +346,50 @@ impl SkillService {
         &self,
         repo: &SkillRepo,
     ) -> Result<(PathBuf, String), AppError> {
-        self.download_repo_with_fallback(repo, true).await
+        self.download_repo_with_fallback(repo, true, "https://github.com/")
+            .await
     }
 
     pub(super) async fn download_repo_for_update(
         &self,
         repo: &SkillRepo,
     ) -> Result<(PathBuf, String), AppError> {
-        self.download_repo_with_fallback(repo, false).await
+        self.download_repo_for_update_with_base(repo, "https://github.com/")
+            .await
+    }
+
+    pub(super) async fn download_repo_for_update_with_base(
+        &self,
+        repo: &SkillRepo,
+        archive_base: &str,
+    ) -> Result<(PathBuf, String), AppError> {
+        self.download_repo_with_fallback(repo, false, archive_base)
+            .await
+    }
+
+    pub(super) async fn download_repo_at_commit_with_base(
+        &self,
+        repo: &SkillRepo,
+        commit: &str,
+        archive_base: &str,
+    ) -> Result<(PathBuf, String), AppError> {
+        let commit = Self::normalize_source_commit(commit)?;
+        let url = Self::github_commit_archive_url_with_base(
+            archive_base,
+            &repo.owner,
+            &repo.name,
+            &commit,
+        )?;
+        let temp_dir = tempfile::tempdir().map_err(|error| {
+            AppError::localized(
+                "skills.tempdir_failed",
+                format!("创建临时目录失败: {error}"),
+                format!("Failed to create temp dir: {error}"),
+            )
+        })?;
+        let temp_path = temp_dir.path().to_path_buf();
+        self.download_and_extract(&url, &temp_path).await?;
+        Ok((temp_dir.keep(), commit))
     }
 
     pub(super) fn branch_candidates(
@@ -347,6 +418,7 @@ impl SkillService {
         &self,
         repo: &SkillRepo,
         allow_explicit_fallback: bool,
+        archive_base: &str,
     ) -> Result<(PathBuf, String), AppError> {
         let requested_branch = if repo.branch.trim().is_empty() {
             "HEAD"
@@ -380,7 +452,8 @@ impl SkillService {
 
         let mut last_error = default_branch_error;
         for branch in branches {
-            let url = Self::github_archive_url(&repo.owner, &repo.name, &branch)?;
+            let url =
+                Self::github_archive_url_with_base(archive_base, &repo.owner, &repo.name, &branch)?;
 
             match self.download_and_extract(&url, &temp_path).await {
                 Ok(()) => return Ok((temp_dir.keep(), branch)),
