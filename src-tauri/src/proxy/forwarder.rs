@@ -11,7 +11,7 @@ use crate::{app_config::AppType, provider::Provider};
 
 use super::{
     error::ProxyError,
-    provider_router::ProviderRouter,
+    provider_router::{ProviderRequestPermit, ProviderRouter},
     providers::codex_chat_history::CodexChatHistoryStore,
     providers::gemini_shadow::GeminiShadowStore,
     providers::get_adapter,
@@ -269,13 +269,10 @@ impl RequestForwarder {
             }
 
             let permit = if bypass_circuit_breaker {
-                super::circuit_breaker::AllowResult {
-                    allowed: true,
-                    used_half_open_permit: false,
-                }
+                ProviderRequestPermit::bypassed()
             } else {
                 self.router
-                    .allow_provider_request(&provider.id, app_type.as_str())
+                    .acquire_provider_request(&provider.id, app_type.as_str())
                     .await
             };
 
@@ -310,10 +307,10 @@ impl RequestForwarder {
                         if !bypass_circuit_breaker {
                             let _ = self
                                 .router
-                                .record_result(
+                                .record_guarded_result(
+                                    &permit,
                                     &provider.id,
                                     app_type.as_str(),
-                                    permit.used_half_open_permit,
                                     true,
                                     None,
                                 )
@@ -325,16 +322,6 @@ impl RequestForwarder {
 
                     match outcome.attempt_decision {
                         AttemptDecision::NeutralRelease => {
-                            if !bypass_circuit_breaker {
-                                self.router
-                                    .release_permit_neutral(
-                                        &provider.id,
-                                        app_type.as_str(),
-                                        permit.used_half_open_permit,
-                                    )
-                                    .await;
-                            }
-
                             if claude_error_path && !provider_needs_transform {
                                 return Err(ForwardFailure::new(
                                     Some(provider),
@@ -348,10 +335,10 @@ impl RequestForwarder {
                             if !bypass_circuit_breaker {
                                 let _ = self
                                     .router
-                                    .record_result(
+                                    .record_guarded_result(
+                                        &permit,
                                         &provider.id,
                                         app_type.as_str(),
-                                        permit.used_half_open_permit,
                                         false,
                                         Some(format!(
                                             "upstream returned {}",
@@ -390,10 +377,10 @@ impl RequestForwarder {
                             if !bypass_circuit_breaker {
                                 let _ = self
                                     .router
-                                    .record_result(
+                                    .record_guarded_result(
+                                        &permit,
                                         &provider.id,
                                         app_type.as_str(),
-                                        permit.used_half_open_permit,
                                         false,
                                         Some(format!(
                                             "upstream returned {}",
@@ -414,10 +401,10 @@ impl RequestForwarder {
                             if !bypass_circuit_breaker {
                                 let _ = self
                                     .router
-                                    .record_result(
+                                    .record_guarded_result(
+                                        &permit,
                                         &provider.id,
                                         app_type.as_str(),
-                                        permit.used_half_open_permit,
                                         false,
                                         Some(error.to_string()),
                                     )
@@ -426,15 +413,6 @@ impl RequestForwarder {
                             last_error = Some(ForwardFailure::new(Some(provider.clone()), error));
                         }
                         AttemptDecision::NeutralRelease | AttemptDecision::FatalStop => {
-                            if !bypass_circuit_breaker {
-                                self.router
-                                    .release_permit_neutral(
-                                        &provider.id,
-                                        app_type.as_str(),
-                                        permit.used_half_open_permit,
-                                    )
-                                    .await;
-                            }
                             return Err(ForwardFailure::new(Some(provider), error));
                         }
                     }
@@ -514,13 +492,10 @@ impl RequestForwarder {
             }
 
             let permit = if bypass_circuit_breaker {
-                super::circuit_breaker::AllowResult {
-                    allowed: true,
-                    used_half_open_permit: false,
-                }
+                ProviderRequestPermit::bypassed()
             } else {
                 self.router
-                    .allow_provider_request(&provider.id, app_type.as_str())
+                    .acquire_provider_request(&provider.id, app_type.as_str())
                     .await
             };
 
@@ -555,10 +530,10 @@ impl RequestForwarder {
                         if !bypass_circuit_breaker {
                             let _ = self
                                 .router
-                                .record_result(
+                                .record_guarded_result(
+                                    &permit,
                                     &provider.id,
                                     app_type.as_str(),
-                                    permit.used_half_open_permit,
                                     true,
                                     None,
                                 )
@@ -570,16 +545,6 @@ impl RequestForwarder {
 
                     match outcome.attempt_decision {
                         AttemptDecision::NeutralRelease => {
-                            if !bypass_circuit_breaker {
-                                self.router
-                                    .release_permit_neutral(
-                                        &provider.id,
-                                        app_type.as_str(),
-                                        permit.used_half_open_permit,
-                                    )
-                                    .await;
-                            }
-
                             if claude_error_path && !provider_needs_transform {
                                 return Err(ForwardFailure::new(
                                     Some(provider),
@@ -593,10 +558,10 @@ impl RequestForwarder {
                             if !bypass_circuit_breaker {
                                 let _ = self
                                     .router
-                                    .record_result(
+                                    .record_guarded_result(
+                                        &permit,
                                         &provider.id,
                                         app_type.as_str(),
-                                        permit.used_half_open_permit,
                                         false,
                                         Some(format!(
                                             "upstream returned {}",
@@ -635,10 +600,10 @@ impl RequestForwarder {
                             if !bypass_circuit_breaker {
                                 let _ = self
                                     .router
-                                    .record_result(
+                                    .record_guarded_result(
+                                        &permit,
                                         &provider.id,
                                         app_type.as_str(),
-                                        permit.used_half_open_permit,
                                         false,
                                         Some(format!(
                                             "upstream returned {}",
@@ -659,10 +624,10 @@ impl RequestForwarder {
                             if !bypass_circuit_breaker {
                                 let _ = self
                                     .router
-                                    .record_result(
+                                    .record_guarded_result(
+                                        &permit,
                                         &provider.id,
                                         app_type.as_str(),
-                                        permit.used_half_open_permit,
                                         false,
                                         Some(error.to_string()),
                                     )
@@ -671,15 +636,6 @@ impl RequestForwarder {
                             last_error = Some(ForwardFailure::new(Some(provider.clone()), error));
                         }
                         AttemptDecision::NeutralRelease | AttemptDecision::FatalStop => {
-                            if !bypass_circuit_breaker {
-                                self.router
-                                    .release_permit_neutral(
-                                        &provider.id,
-                                        app_type.as_str(),
-                                        permit.used_half_open_permit,
-                                    )
-                                    .await;
-                            }
                             return Err(ForwardFailure::new(Some(provider), error));
                         }
                     }
