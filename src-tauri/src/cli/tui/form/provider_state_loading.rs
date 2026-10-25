@@ -251,15 +251,9 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
         form.codex_remote_compaction =
             crate::codex_config::is_codex_remote_compaction_enabled(config);
     }
-    if let Some(auth) = provider
-        .settings_config
-        .get("auth")
-        .and_then(|value| value.as_object())
-    {
-        if let Some(key) = auth.get("OPENAI_API_KEY").and_then(|value| value.as_str()) {
-            form.codex_api_key.set(key);
-        }
-    }
+    form.codex_api_key.set(super::codex_config::codex_api_key(
+        &provider.settings_config,
+    ));
     form.claude_api_format = parse_codex_api_format(provider);
     form.claude_api_key_field = provider
         .meta

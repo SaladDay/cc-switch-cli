@@ -238,6 +238,13 @@ pub(crate) fn codex_settings_contain_common_config_for_form(
 }
 
 impl ProviderAddFormState {
+    fn codex_api_key_changed(&self) -> bool {
+        self.codex_api_key.value
+            != super::codex_config::codex_api_key(
+                self.extra.get("settingsConfig").unwrap_or(&Value::Null),
+            )
+    }
+
     pub(crate) fn existing_codex_config_text(&self) -> &str {
         self.extra
             .get("settingsConfig")
@@ -342,14 +349,14 @@ impl ProviderAddFormState {
         } else {
             existing_config.to_string()
         };
-        let mut config = update_codex_config_snippet(
-            &base_config,
-            base_url,
-            model,
-            self.codex_wire_api,
-            self.codex_requires_openai_auth,
-            self.codex_env_key.value.trim(),
-        );
+        let mut config =
+            update_codex_config_snippet(&base_config, base_url, model, self.codex_wire_api);
+        if self.codex_api_key_changed() {
+            config = super::codex_config::update_existing_codex_bearer(
+                &config,
+                &self.codex_api_key.value,
+            );
+        }
         if self.codex_goal_mode_touched {
             config = crate::codex_config::set_codex_goal_mode(&config, self.codex_goal_mode);
         }
@@ -505,30 +512,32 @@ impl ProviderAddFormState {
                         settings_obj.remove("modelCatalog");
                     }
 
-                    let api_key = self.codex_api_key.value.trim();
-                    if api_key.is_empty() {
-                        if let Some(auth_obj) = settings_obj
-                            .get_mut("auth")
-                            .and_then(|value| value.as_object_mut())
-                        {
-                            auth_obj.remove("OPENAI_API_KEY");
-                            if auth_obj.is_empty() {
+                    if self.codex_api_key_changed() {
+                        let api_key = self.codex_api_key.value.trim();
+                        if api_key.is_empty() {
+                            if let Some(auth_obj) = settings_obj
+                                .get_mut("auth")
+                                .and_then(|value| value.as_object_mut())
+                            {
+                                auth_obj.remove("OPENAI_API_KEY");
+                                if auth_obj.is_empty() {
+                                    settings_obj.remove("auth");
+                                }
+                            } else {
                                 settings_obj.remove("auth");
                             }
                         } else {
-                            settings_obj.remove("auth");
+                            let auth_value = settings_obj
+                                .entry("auth".to_string())
+                                .or_insert_with(|| json!({}));
+                            if !auth_value.is_object() {
+                                *auth_value = json!({});
+                            }
+                            let auth_obj = auth_value
+                                .as_object_mut()
+                                .expect("auth must be a JSON object");
+                            auth_obj.insert("OPENAI_API_KEY".to_string(), json!(api_key));
                         }
-                    } else {
-                        let auth_value = settings_obj
-                            .entry("auth".to_string())
-                            .or_insert_with(|| json!({}));
-                        if !auth_value.is_object() {
-                            *auth_value = json!({});
-                        }
-                        let auth_obj = auth_value
-                            .as_object_mut()
-                            .expect("auth must be a JSON object");
-                        auth_obj.insert("OPENAI_API_KEY".to_string(), json!(api_key));
                     }
                 }
             }

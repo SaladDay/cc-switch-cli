@@ -3220,18 +3220,21 @@ fn codex_provider_form_renders_toml_values_in_plaintext() {
     let mut app = App::new(Some(AppType::Codex));
     app.route = Route::Providers;
     app.focus = Focus::Content;
-    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Codex);
-    form.focus = FormFocus::JsonPreview;
-    form.codex_preview_section = crate::cli::tui::form::CodexPreviewSection::Config;
-    form.extra = json!({
-        "settingsConfig": {
+    let provider = crate::provider::Provider::with_id(
+        "custom".into(),
+        "Custom".into(),
+        json!({
             "auth": {},
             "config": format!(
                 "experimental_bearer_token = \"{secret}\"\nmodel = \"gpt-5.4\"\n\n[cookies]\nsession = \"{plural_container_secret}\"\n"
             )
-        }
-    });
-    form.codex_model.set("gpt-5.4");
+        }),
+        None,
+    );
+    let mut form =
+        crate::cli::tui::form::ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    form.focus = FormFocus::JsonPreview;
+    form.codex_preview_section = crate::cli::tui::form::CodexPreviewSection::Config;
     app.form = Some(FormState::ProviderAdd(form));
 
     let all = all_text(&render_with_size(

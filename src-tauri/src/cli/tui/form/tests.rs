@@ -8346,3 +8346,214 @@ fn codex_oauth_hides_usage_query_and_preserves_binding_and_saved_script() {
     let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
     assert!(form.fields().contains(&ProviderAddField::UsageQuery));
 }
+
+#[test]
+fn codex_auth_form_preserves_explicit_auth_and_bearer_on_unrelated_save() {
+    for auth in [
+        json!({"tokens": {"account_id": "account"}}),
+        json!({"OPENAI_API_KEY": "sk-stored"}),
+    ] {
+        for directive in [
+            "",
+            "requires_openai_auth = false",
+            "requires_openai_auth = true",
+            "requires_openai_auth = true\nenv_key = \"CUSTOM_KEY\"",
+        ] {
+            let config = format!("model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://example.com/v1\"\nexperimental_bearer_token = \"sk-bearer\"\n{directive}\n[model_providers.other]\nexperimental_bearer_token = \"sk-other\"\n");
+            let provider = Provider::with_id(
+                "custom".into(),
+                "Custom".into(),
+                json!({"auth": auth, "config": config}),
+                None,
+            );
+            let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+            assert_eq!(
+                form.codex_api_key.value,
+                auth.get("OPENAI_API_KEY")
+                    .and_then(Value::as_str)
+                    .unwrap_or("sk-bearer")
+            );
+            form.name.set("Renamed");
+            let saved = form.to_provider_json_value();
+            assert_eq!(saved["settingsConfig"]["auth"], auth);
+            let before: toml::Table = toml::from_str(&config).unwrap();
+            let after: toml::Table =
+                toml::from_str(saved["settingsConfig"]["config"].as_str().unwrap()).unwrap();
+            for key in [
+                "requires_openai_auth",
+                "env_key",
+                "experimental_bearer_token",
+            ] {
+                assert_eq!(
+                    after["model_providers"]["custom"].get(key),
+                    before["model_providers"]["custom"].get(key),
+                    "{directive}: {key}"
+                );
+            }
+            assert_eq!(
+                after["model_providers"]["other"],
+                before["model_providers"]["other"]
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_auth_form_key_edits_update_or_clear_existing_bearer() {
+    for location in ["provider", "root", "absent"] {
+        let root = if location == "root" {
+            "experimental_bearer_token = \"sk-old\"\n"
+        } else {
+            ""
+        };
+        let token = if location == "provider" {
+            "experimental_bearer_token = \"sk-old\"\n"
+        } else {
+            ""
+        };
+        let config = format!("{root}model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://example.com/v1\"\nrequires_openai_auth = false\n{token}[model_providers.other]\nexperimental_bearer_token = \"sk-other\"\n");
+        let provider = Provider::with_id(
+            "custom".into(),
+            "Custom".into(),
+            json!({"auth": {"OPENAI_API_KEY": "sk-old", "tokens": {"account_id": "account"}}, "config": config}),
+            None,
+        );
+        for key in ["sk-new", ""] {
+            let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+            form.codex_api_key.set(key);
+            let saved = form.to_provider_json_value();
+            assert_eq!(
+                saved["settingsConfig"]["auth"]["tokens"]["account_id"],
+                "account"
+            );
+            assert_eq!(
+                saved["settingsConfig"]["auth"]
+                    .get("OPENAI_API_KEY")
+                    .and_then(Value::as_str),
+                (!key.is_empty()).then_some(key)
+            );
+            let after: toml::Table =
+                toml::from_str(saved["settingsConfig"]["config"].as_str().unwrap()).unwrap();
+            let table = if location == "root" {
+                &after
+            } else {
+                after["model_providers"]["custom"].as_table().unwrap()
+            };
+            assert_eq!(
+                table
+                    .get("experimental_bearer_token")
+                    .and_then(toml::Value::as_str),
+                (location != "absent" && !key.is_empty()).then_some(key)
+            );
+            assert!(after["model_providers"]["custom"].get("env_key").is_none());
+            assert_eq!(
+                after["model_providers"]["other"]["experimental_bearer_token"].as_str(),
+                Some("sk-other")
+            );
+            let reopened: Provider = serde_json::from_value(saved).unwrap();
+            assert_eq!(
+                ProviderAddFormState::from_provider(AppType::Codex, &reopened)
+                    .codex_api_key
+                    .value,
+                key
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_auth_form_bearer_fallback_accepts_inline_tables_and_empty_provider_tokens() {
+    for (config, expected) in [
+        (
+            r#"model_provider = "custom"
+experimental_bearer_token = "sk-root"
+[model_providers.custom]
+base_url = "https://example.com/v1"
+experimental_bearer_token = "  "
+"#,
+            "sk-root",
+        ),
+        (
+            r#"model_provider = "custom"
+model_providers = { custom = { base_url = "https://example.com/v1", experimental_bearer_token = "sk-inline" } }
+"#,
+            "sk-inline",
+        ),
+    ] {
+        let provider = Provider::with_id(
+            "custom".into(),
+            "Custom".into(),
+            json!({"auth": {"tokens": {"account_id": "account"}}, "config": config}),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+        assert_eq!(form.codex_api_key.value, expected);
+        form.name.set("Renamed");
+        let saved = form.to_provider_json_value();
+        assert_eq!(
+            saved["settingsConfig"]["auth"],
+            provider.settings_config["auth"]
+        );
+        let reopened: Provider = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            ProviderAddFormState::from_provider(AppType::Codex, &reopened)
+                .codex_api_key
+                .value,
+            expected
+        );
+    }
+}
+
+#[test]
+fn codex_auth_form_uses_case_sensitive_current_builtin_ids() {
+    for (id, custom) in [
+        ("OpenAI", true),
+        ("oss", true),
+        ("ollama-chat", true),
+        ("openai", false),
+        ("amazon-bedrock-runtime", false),
+    ] {
+        let config = format!("model_provider = \"{id}\"\nexperimental_bearer_token = \"sk-root\"\n[model_providers.{id}]\nbase_url = \"https://example.com/v1\"\nexperimental_bearer_token = \"sk-provider\"\n");
+        let provider = Provider::with_id(
+            "custom".into(),
+            "Custom".into(),
+            json!({"config": config}),
+            None,
+        );
+        let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+        assert_eq!(
+            form.codex_api_key.value,
+            if custom { "sk-provider" } else { "sk-root" },
+            "{id}"
+        );
+        for key in ["sk-new", ""] {
+            let mut form = form.clone();
+            form.codex_api_key.set(key);
+            let saved = form.to_provider_json_value();
+            let after: toml::Table =
+                toml::from_str(saved["settingsConfig"]["config"].as_str().unwrap()).unwrap();
+            let changed = if custom {
+                after["model_providers"][id].as_table().unwrap()
+            } else {
+                &after
+            };
+            assert_eq!(
+                changed
+                    .get("experimental_bearer_token")
+                    .and_then(toml::Value::as_str),
+                (!key.is_empty()).then_some(key),
+                "{id}"
+            );
+            let untouched = if custom {
+                &after
+            } else {
+                after["model_providers"][id].as_table().unwrap()
+            };
+            assert_eq!(
+                untouched["experimental_bearer_token"].as_str(),
+                Some(if custom { "sk-root" } else { "sk-provider" }),
+                "{id}"
+            );
+        }
+    }
+}

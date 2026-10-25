@@ -1065,8 +1065,8 @@ fn provider_preview_help(app_type: AppType, section: Option<CodexPreviewSection>
         (AppType::Codex, Some(CodexPreviewSection::Auth)) => HelpContent::new(
             texts::tui_codex_auth_json_title(),
             help_lines(
-                "这里预览将保存的 Codex 认证配置。代理接管时，上游会强调这里是存储配置，不是运行中的 auth.json。",
-                "This previews the Codex auth config to be saved. During proxy takeover, upstream treats this as stored config, not the live auth.json.",
+                "这里预览保存在 CC Switch 中的认证配置，不是运行中的 auth.json。第三方 API Key 在切换时写入 config.toml；auth.json 用于官方登录。",
+                "This previews the auth config stored in CC Switch, not the live auth.json. Third-party API keys are written to config.toml on switch; auth.json is used for official login.",
             ),
         ),
         (AppType::Codex, Some(CodexPreviewSection::Config)) => HelpContent::new(
