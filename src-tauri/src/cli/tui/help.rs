@@ -842,6 +842,7 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Enables the priority service tier for Codex OAuth requests. It only affects accounts or services that support it.",
             ),
         ),
+        ProviderAddField::ClaudeInactiveFields => HelpContent::new(crate::t!("Inactive fields", "未应用字段"), help_lines("这些旧配置保存在供应商记录中，但不会随切换生效。可以复制到当前编辑内容，检查后保存。", "These legacy values remain in the provider record but are not applied when switching. Copy them into the editor, review, then save.")),
         ProviderAddField::CommonSnippet => HelpContent::new(
             texts::tui_config_item_common_snippet(),
             help_lines(
@@ -1079,8 +1080,8 @@ fn provider_preview_help(app_type: AppType, section: Option<CodexPreviewSection>
         (AppType::Claude, _) => HelpContent::new(
             texts::tui_provider_config_title(),
             help_lines(
-                "这里预览将保存的供应商配置。Proxy 开启时，Claude 实际读取的 settings.json 会由代理临时接管，因此会显示本地代理地址、占位凭据和模型映射，而不是这里的真实上游配置。按 Enter 可打开编辑器进行高级修改。",
-                "This previews the stored provider config. While Proxy is on, Claude's live settings.json is temporarily managed by the proxy, so it contains the local proxy URL, placeholder credentials, and model mappings instead of the real upstream config shown here. Press Enter to open the advanced editor.",
+                "这里展示切到此供应商后的 settings.json。密钥、模型和上下文限制随供应商保存；语言、权限等全局设置按修改直接写盘，编辑其他供应商时也会生效。外部修改发生冲突时会提示选择。代理开启时仍显示真实供应商配置，保存不会覆盖代理地址和占位凭据。按 Enter 编辑。旧通用片段仅保留兼容，可用 config common show 查看后按需复制。",
+                "This shows settings.json after switching to this provider. Keys, models and context limits belong to the provider; changed global settings such as language and permissions are written immediately, even when editing an inactive provider. Conflicting external edits require a choice. While proxying, the editor shows real provider settings and saving preserves the proxy route. Press Enter to edit. Legacy common snippets remain available through config common show for manual copying.",
             ),
         ),
         _ => HelpContent::new(

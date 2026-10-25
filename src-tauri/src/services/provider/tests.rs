@@ -2268,263 +2268,6 @@ fn sync_current_to_live_prefers_effective_current_from_local_settings() {
 
 #[test]
 #[serial]
-fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "missing".to_string();
-
-        let mut p1 = with_common_enabled(Provider::with_id(
-            "p1".to_string(),
-            "First".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token1",
-                    "ANTHROPIC_BASE_URL": "https://claude.one"
-                }
-            }),
-            None,
-        ));
-        p1.sort_index = Some(10);
-
-        let mut p2 = with_common_enabled(Provider::with_id(
-            "p2".to_string(),
-            "Second".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token2",
-                    "ANTHROPIC_BASE_URL": "https://claude.two"
-                }
-            }),
-            None,
-        ));
-        p2.sort_index = Some(0);
-
-        manager.providers.insert("p1".to_string(), p1);
-        manager.providers.insert("p2".to_string(), p2);
-    }
-
-    write_json_file(
-        &get_claude_settings_path(),
-        &json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token1",
-                "ANTHROPIC_BASE_URL": "https://claude.one",
-                "LOCAL_ONLY": "preserve-me"
-            }
-        }),
-    )
-    .expect("seed live settings");
-
-    let state = state_from_config(config);
-    state
-        .db
-        .save_provider(
-            AppType::Claude.as_str(),
-            &with_common_enabled(Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token1",
-                        "ANTHROPIC_BASE_URL": "https://claude.one"
-                    }
-                }),
-                None,
-            )),
-        )
-        .expect("save first provider to db");
-    state
-        .db
-        .save_provider(
-            AppType::Claude.as_str(),
-            &with_common_enabled(Provider::with_id(
-                "p2".to_string(),
-                "Second".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token2",
-                        "ANTHROPIC_BASE_URL": "https://claude.two"
-                    }
-                }),
-                None,
-            )),
-        )
-        .expect("save second provider to db");
-    state
-        .db
-        .set_current_provider(AppType::Claude.as_str(), "p1")
-        .expect("set db current provider");
-
-    ProviderService::set_common_config_snippet(
-        &state,
-        AppType::Claude,
-        Some(r#"{"includeCoAuthoredBy":false}"#.to_string()),
-    )
-    .expect("update common snippet");
-
-    let cfg = state.config.read().expect("read config");
-    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
-    assert_eq!(
-        manager.current, "missing",
-        "updating common snippet should not rewrite stale config.current while syncing live from db current"
-    );
-    drop(cfg);
-
-    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
-    assert_eq!(
-        live.get("includeCoAuthoredBy").and_then(Value::as_bool),
-        Some(false),
-        "new common snippet should be applied to the healed current live settings"
-    );
-    let env = live
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("live env should be object");
-    assert_eq!(
-        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token1"),
-        "live settings should refresh from the effective current provider instead of fallback-healing config.current"
-    );
-}
-
-#[test]
-#[serial]
-fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_current_provider() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "missing".to_string();
-        manager.providers.insert(
-            "p2".to_string(),
-            Provider::with_id(
-                "p2".to_string(),
-                "Second".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token2",
-                        "ANTHROPIC_BASE_URL": "https://claude.two"
-                    }
-                }),
-                None,
-            ),
-        );
-    }
-
-    write_json_file(
-        &get_claude_settings_path(),
-        &json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token1",
-                "ANTHROPIC_BASE_URL": "https://claude.one",
-                "LOCAL_ONLY": "preserve-me"
-            }
-        }),
-    )
-    .expect("seed live settings");
-
-    let state = state_from_config(config);
-    state
-        .db
-        .save_provider(
-            AppType::Claude.as_str(),
-            &with_common_enabled(Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token1",
-                        "ANTHROPIC_BASE_URL": "https://claude.one"
-                    }
-                }),
-                None,
-            )),
-        )
-        .expect("save current provider to db");
-    state
-        .db
-        .save_provider(
-            AppType::Claude.as_str(),
-            &with_common_enabled(Provider::with_id(
-                "p2".to_string(),
-                "Second".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token2",
-                        "ANTHROPIC_BASE_URL": "https://claude.two"
-                    }
-                }),
-                None,
-            )),
-        )
-        .expect("save non-current provider to db");
-    state
-        .db
-        .set_current_provider(AppType::Claude.as_str(), "p1")
-        .expect("set db current provider");
-
-    ProviderService::set_common_config_snippet(
-        &state,
-        AppType::Claude,
-        Some(r#"{"includeCoAuthoredBy":false}"#.to_string()),
-    )
-    .expect("update common snippet should use db current even when config snapshot is missing it");
-
-    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
-    assert_eq!(
-        live.get("includeCoAuthoredBy").and_then(Value::as_bool),
-        Some(false),
-        "new common snippet should be applied to live settings"
-    );
-    let env = live
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("live env should be object");
-    assert_eq!(
-        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token1"),
-        "live settings should be refreshed from the db current provider even when config snapshot lacks it"
-    );
-
-    let cfg = state.config.read().expect("read config after update");
-    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
-    assert_eq!(
-        manager.current, "missing",
-        "updating common snippet should not rewrite stale config.current even when hydrating the current provider snapshot from db"
-    );
-    assert!(
-        manager.providers.contains_key("p1"),
-        "missing current provider snapshot should be hydrated from db before the common snippet update is persisted"
-    );
-
-    let db_providers = state
-        .db
-        .get_all_providers(AppType::Claude.as_str())
-        .expect("read db providers after update");
-    assert!(
-        db_providers.contains_key("p1"),
-        "db current provider should remain persisted after updating the common snippet"
-    );
-}
-
-#[test]
-#[serial]
 fn claude_switch_does_not_replay_saved_common_snippet() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
@@ -2578,61 +2321,6 @@ fn claude_switch_does_not_replay_saved_common_snippet() {
         env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
         Some("token"),
         "provider env key should remain in settings.env"
-    );
-}
-
-#[test]
-fn build_effective_live_snapshot_merges_claude_common_config_with_upstream_precedence() {
-    let provider = with_common_enabled(Provider::with_id(
-        "p1".to_string(),
-        "First".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token",
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            },
-            "includeCoAuthoredBy": true,
-            "permissions": {
-                "allow": ["Bash(git status)"]
-            }
-        }),
-        None,
-    ));
-
-    let effective = ProviderService::build_effective_live_snapshot(
-        &AppType::Claude,
-        &provider,
-        Some(
-            r#"{"env":{"ANTHROPIC_BASE_URL":"https://common.example","CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false,"permissions":{"allow":["Bash(ls)"]}}"#,
-        ),
-        true,
-    )
-    .expect("build effective snapshot");
-
-    assert_eq!(
-        effective["env"]["ANTHROPIC_AUTH_TOKEN"],
-        json!("token"),
-        "provider auth token should be preserved"
-    );
-    assert_eq!(
-        effective["env"]["ANTHROPIC_BASE_URL"],
-        json!("https://common.example"),
-        "common config should follow upstream merge precedence"
-    );
-    assert_eq!(
-        effective["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
-        json!(1),
-        "common env values should still be merged"
-    );
-    assert_eq!(
-        effective["includeCoAuthoredBy"],
-        json!(false),
-        "common top-level settings should follow upstream merge precedence"
-    );
-    assert_eq!(
-        effective["permissions"]["allow"],
-        json!(["Bash(ls)"]),
-        "common nested settings should follow upstream merge precedence"
     );
 }
 
@@ -3168,216 +2856,6 @@ fn common_config_snippet_can_be_disabled_per_provider_for_claude() {
 }
 
 #[test]
-#[serial]
-fn provider_add_strips_common_snippet_before_claude_snapshot_persist() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude = Some(
-        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
-            .to_string(),
-    );
-
-    let state = state_from_config(config);
-
-    let provider = with_common_enabled(Provider::with_id(
-        "p1".to_string(),
-        "First".to_string(),
-        json!({
-            "includeCoAuthoredBy": false,
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token",
-                "ANTHROPIC_BASE_URL": "https://claude.example",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-            }
-        }),
-        None,
-    ));
-
-    ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
-
-    let cfg = state.config.read().expect("read config after add");
-    let provider = cfg
-        .get_manager(&AppType::Claude)
-        .expect("claude manager")
-        .providers
-        .get("p1")
-        .expect("p1 exists");
-    assert!(
-        provider
-            .settings_config
-            .get("includeCoAuthoredBy")
-            .is_none(),
-        "common top-level keys should be stripped before persisting Claude snapshot"
-    );
-    let env = provider
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("provider env should be object");
-    assert!(
-        !env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-        "common env keys should be stripped before persisting Claude snapshot"
-    );
-    assert_eq!(
-        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token"),
-        "provider-specific env keys should remain in the stored snapshot"
-    );
-}
-
-#[test]
-#[cfg(feature = "cli")]
-#[serial]
-fn tui_claude_quick_config_round_trip_crosses_storage_normalization() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    let common_snippet = r#"{
-        "attribution": { "commit": "", "pr": "" },
-        "env": {
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-            "ENABLE_TOOL_SEARCH": "true",
-            "CLAUDE_CODE_EFFORT_LEVEL": "max",
-            "DISABLE_AUTOUPDATER": "1"
-        }
-    }"#;
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude = Some(common_snippet.to_string());
-    let state = state_from_config(config);
-
-    let mut form = crate::cli::tui::ProviderAddFormState::new_with_common_snippet(
-        AppType::Claude,
-        common_snippet,
-    );
-    form.id.set("p1");
-    form.name.set("Provider One");
-    form.claude_base_url.set("https://claude.example");
-    form.claude_api_key.set("sk-provider");
-    assert_eq!(form.claude_quick_config_enabled_count(), 5);
-
-    let provider: Provider = serde_json::from_value(form.to_provider_json_value())
-        .expect("form payload should deserialize");
-    ProviderService::add(&state, AppType::Claude, provider).expect("provider add should succeed");
-
-    let stored = state
-        .db
-        .get_provider_by_id("p1", AppType::Claude.as_str())
-        .expect("read provider from database")
-        .expect("stored provider");
-    assert_eq!(
-        stored
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config),
-        Some(true)
-    );
-    assert!(stored.settings_config.get("attribution").is_none());
-    let stored_env = stored
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("stored provider env");
-    for common_key in [
-        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
-        "ENABLE_TOOL_SEARCH",
-        "CLAUDE_CODE_EFFORT_LEVEL",
-        "DISABLE_AUTOUPDATER",
-    ] {
-        assert!(
-            !stored_env.contains_key(common_key),
-            "{common_key} should remain common-owned in storage"
-        );
-    }
-
-    let reopened = crate::cli::tui::ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &stored,
-        common_snippet,
-    );
-    assert_eq!(reopened.claude_quick_config_enabled_count(), 5);
-    assert!(!reopened.has_unsaved_changes());
-}
-
-#[test]
-#[cfg(feature = "cli")]
-#[serial]
-fn tui_claude_quick_edit_persists_legacy_inferred_common_config() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    let common_snippet = r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#;
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude = Some(common_snippet.to_string());
-    let state = state_from_config(config);
-
-    let legacy_provider = Provider::with_id(
-        "legacy-provider".to_string(),
-        "Legacy Provider".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider",
-                "ANTHROPIC_BASE_URL": "https://claude.example",
-                "CC_SWITCH_SHARED": "1"
-            }
-        }),
-        None,
-    );
-    let mut form = crate::cli::tui::ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &legacy_provider,
-        common_snippet,
-    );
-    assert!(form.include_common_config);
-
-    form.toggle_claude_quick_config_field(
-        crate::cli::tui::ProviderAddField::ClaudeToolSearch,
-        common_snippet,
-    )
-    .expect("provider-only quick edit should succeed");
-    let edited: Provider = serde_json::from_value(form.to_provider_json_value())
-        .expect("edited form payload should deserialize");
-    ProviderService::add(&state, AppType::Claude, edited).expect("provider add should succeed");
-
-    let stored = state
-        .db
-        .get_provider_by_id("legacy-provider", AppType::Claude.as_str())
-        .expect("read provider from database")
-        .expect("stored provider");
-    assert_eq!(
-        stored
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config),
-        Some(true)
-    );
-    let stored_env = stored
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("stored provider env");
-    assert!(!stored_env.contains_key("CC_SWITCH_SHARED"));
-    assert_eq!(
-        stored_env.get("ENABLE_TOOL_SEARCH").and_then(Value::as_str),
-        Some("true")
-    );
-
-    let reopened = crate::cli::tui::ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &stored,
-        common_snippet,
-    );
-    assert!(reopened.include_common_config);
-    assert!(reopened.claude_tool_search);
-}
-
-#[test]
 #[cfg(feature = "cli")]
 #[serial]
 fn tui_codex_conflicting_quick_edit_preserves_storage_only_settings() {
@@ -3599,89 +3077,6 @@ fn provider_add_migrates_legacy_claude_model_to_provider_owned_roles() {
         env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
         Some("token"),
         "provider-specific env keys should remain in the stored snapshot"
-    );
-}
-
-#[test]
-#[serial]
-fn provider_update_strips_common_snippet_before_claude_snapshot_persist() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude = Some(
-        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
-            .to_string(),
-    );
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "p1".to_string();
-        manager.providers.insert(
-            "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token",
-                        "ANTHROPIC_BASE_URL": "https://claude.example"
-                    }
-                }),
-                None,
-            ),
-        );
-    }
-
-    let state = state_from_config(config);
-
-    let provider = with_common_enabled(Provider::with_id(
-        "p1".to_string(),
-        "First Updated".to_string(),
-        json!({
-            "includeCoAuthoredBy": false,
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token-updated",
-                "ANTHROPIC_BASE_URL": "https://claude.updated",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-            }
-        }),
-        None,
-    ));
-
-    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
-
-    let cfg = state.config.read().expect("read config after update");
-    let provider = cfg
-        .get_manager(&AppType::Claude)
-        .expect("claude manager")
-        .providers
-        .get("p1")
-        .expect("p1 exists");
-    assert!(
-        provider
-            .settings_config
-            .get("includeCoAuthoredBy")
-            .is_none(),
-        "common top-level keys should be stripped before persisting updated Claude snapshot"
-    );
-    let env = provider
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("provider env should be object");
-    assert!(
-        !env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-        "common env keys should be stripped before persisting updated Claude snapshot"
-    );
-    assert_eq!(
-        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token-updated"),
-        "provider-specific env keys should remain in the updated stored snapshot"
     );
 }
 
@@ -4065,93 +3460,6 @@ async fn provider_update_waits_for_state_mutation_guard() {
         live.pointer("/env/ANTHROPIC_BASE_URL")
             .and_then(Value::as_str),
         Some("https://claude.new")
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn common_snippet_update_during_takeover_edits_live_globals() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let provider = with_common_enabled(Provider::with_id(
-        "p1".to_string(),
-        "First".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token",
-                "ANTHROPIC_BASE_URL": "https://claude.example"
-            }
-        }),
-        None,
-    ));
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude =
-        Some(r#"{"includeCoAuthoredBy":true,"env":{"OLD_COMMON":"remove-me"}}"#.to_string());
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "p1".to_string();
-        manager.providers.insert("p1".to_string(), provider.clone());
-    }
-
-    let state = state_from_config(config);
-    let old_backup = ProviderService::build_live_backup_snapshot(
-        &AppType::Claude,
-        &provider,
-        Some(r#"{"includeCoAuthoredBy":true,"env":{"OLD_COMMON":"remove-me"}}"#),
-        true,
-    )
-    .expect("build old effective backup");
-    state
-        .db
-        .save_live_backup(
-            AppType::Claude.as_str(),
-            &serde_json::to_string(&old_backup).expect("serialize old backup"),
-        )
-        .await
-        .expect("seed takeover backup");
-    let takeover_live = json!({
-        "env": {
-            "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED",
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721"
-        }
-    });
-    write_json_file(&get_claude_settings_path(), &takeover_live)
-        .expect("seed takeover-owned live settings");
-    assert!(!state.proxy_service.is_running().await);
-
-    ProviderService::set_common_config_snippet(
-        &state,
-        AppType::Claude,
-        Some(r#"{"includeCoAuthoredBy":false}"#.to_string()),
-    )
-    .expect("update common snippet during stopped takeover");
-
-    let backup = state
-        .db
-        .get_live_backup(AppType::Claude.as_str())
-        .await
-        .expect("read refreshed backup")
-        .expect("takeover backup should remain");
-    let backup: Value =
-        serde_json::from_str(&backup.original_config).expect("parse refreshed backup");
-    assert_eq!(
-        backup, old_backup,
-        "global edits do not replay or rewrite legacy backups"
-    );
-    let live: Value = read_json_file(&get_claude_settings_path()).expect("read takeover live");
-    assert_eq!(
-        live["env"], takeover_live["env"],
-        "proxy fields stay attached"
-    );
-    assert_eq!(
-        live["includeCoAuthoredBy"], false,
-        "explicit global edits apply immediately"
     );
 }
 
@@ -4850,532 +4158,6 @@ fn switch_backfill_preserves_matching_common_fields_when_meta_missing() {
             .and_then(|meta| meta.apply_common_config),
         None,
         "backfill must not silently opt missing-meta providers into common config"
-    );
-}
-
-#[test]
-#[serial]
-fn updating_common_snippet_removes_stale_fields_from_other_claude_provider_snapshots() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let old_snippet =
-        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#;
-    let new_snippet = r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":1},"includeCoAuthoredBy":true}"#;
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude = Some(old_snippet.to_string());
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "p1".to_string();
-        manager.providers.insert(
-            "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token1",
-                        "ANTHROPIC_BASE_URL": "https://claude.one"
-                    }
-                }),
-                None,
-            ),
-        );
-        manager.providers.insert(
-            "p2".to_string(),
-            Provider::with_id(
-                "p2".to_string(),
-                "Second".to_string(),
-                json!({
-                    "includeCoAuthoredBy": false,
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token2",
-                        "ANTHROPIC_BASE_URL": "https://claude.two",
-                        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-                    }
-                }),
-                None,
-            ),
-        );
-    }
-
-    write_json_file(
-        &get_claude_settings_path(),
-        &json!({
-            "includeCoAuthoredBy": false,
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token1",
-                "ANTHROPIC_BASE_URL": "https://claude.one",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-            }
-        }),
-    )
-    .expect("seed current live settings");
-
-    let state = state_from_config(config);
-    state.save().expect("persist config snapshot to db");
-
-    ProviderService::set_common_config_snippet(
-        &state,
-        AppType::Claude,
-        Some(new_snippet.to_string()),
-    )
-    .expect("update common snippet");
-
-    let cfg = state.config.read().expect("read config after update");
-    assert_eq!(
-        cfg.common_config_snippets.claude.as_deref(),
-        Some(new_snippet),
-        "new snippet should be persisted into app config"
-    );
-
-    let p2_after = cfg
-        .get_manager(&AppType::Claude)
-        .expect("claude manager")
-        .providers
-        .get("p2")
-        .expect("p2 exists");
-    assert!(
-        p2_after
-            .settings_config
-            .get("includeCoAuthoredBy")
-            .is_none(),
-        "old top-level common keys should be stripped from other provider snapshots"
-    );
-    let p2_env = p2_after
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("p2 env should be object");
-    assert!(
-        !p2_env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-        "old common env keys should be stripped from other provider snapshots"
-    );
-    assert_eq!(
-        p2_env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token2"),
-        "provider-specific env keys should remain after migration"
-    );
-    drop(cfg);
-
-    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
-    assert_eq!(
-        live.get("includeCoAuthoredBy").and_then(Value::as_bool),
-        Some(true),
-        "current live settings should reflect the new common snippet"
-    );
-    let live_env = live
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("live env should be object");
-    assert_eq!(
-        live_env
-            .get("CLAUDE_CODE_USE_BEDROCK")
-            .and_then(Value::as_i64),
-        None,
-        "global snippet edits must not switch provider-owned protocol selectors"
-    );
-    assert!(
-        !live_env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-        "old common env key should be removed from current live settings"
-    );
-    assert_eq!(
-        live_env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token1"),
-        "current provider env should remain in live settings"
-    );
-}
-
-#[test]
-#[serial]
-fn updating_common_snippet_preserves_migrated_provider_owned_claude_models() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let old_snippet = r#"{"env":{"ANTHROPIC_SMALL_FAST_MODEL":"claude-3-5-haiku-20241022"}}"#;
-    let new_snippet = r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":1}}"#;
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude = Some(old_snippet.to_string());
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "p1".to_string();
-        manager.providers.insert(
-            "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token1",
-                        "ANTHROPIC_BASE_URL": "https://claude.one"
-                    }
-                }),
-                None,
-            ),
-        );
-        manager.providers.insert(
-            "p2".to_string(),
-            Provider::with_id(
-                "p2".to_string(),
-                "Second".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token2",
-                        "ANTHROPIC_BASE_URL": "https://claude.two",
-                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-3-5-haiku-20241022",
-                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-3-5-haiku-20241022",
-                        "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-3-5-haiku-20241022"
-                    }
-                }),
-                None,
-            ),
-        );
-    }
-
-    write_json_file(
-        &get_claude_settings_path(),
-        &json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token1",
-                "ANTHROPIC_BASE_URL": "https://claude.one"
-            }
-        }),
-    )
-    .expect("seed current live settings");
-
-    let state = state_from_config(config);
-
-    ProviderService::set_common_config_snippet(
-        &state,
-        AppType::Claude,
-        Some(new_snippet.to_string()),
-    )
-    .expect("update common snippet");
-
-    let cfg = state.config.read().expect("read config after update");
-    let p2_after = cfg
-        .get_manager(&AppType::Claude)
-        .expect("claude manager")
-        .providers
-        .get("p2")
-        .expect("p2 exists");
-    let p2_env = p2_after
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("p2 env should be object");
-
-    for key in [
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    ] {
-        assert_eq!(
-            p2_env.get(key).and_then(Value::as_str),
-            Some("claude-3-5-haiku-20241022"),
-            "{key} should remain provider-owned after the old common snippet is retired"
-        );
-    }
-    assert_eq!(
-        p2_env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token2"),
-        "provider-specific env keys should remain after migration"
-    );
-}
-
-#[test]
-#[serial]
-fn updating_common_snippet_skips_providers_with_apply_common_config_disabled() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let old_snippet =
-        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#;
-    let new_snippet = r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":1},"includeCoAuthoredBy":true}"#;
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude = Some(old_snippet.to_string());
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "p1".to_string();
-        manager.providers.insert(
-            "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token1",
-                        "ANTHROPIC_BASE_URL": "https://claude.one"
-                    }
-                }),
-                None,
-            ),
-        );
-        manager.providers.insert(
-            "p2".to_string(),
-            serde_json::from_value(json!({
-                "id": "p2",
-                "name": "Second",
-                "settingsConfig": {
-                    "includeCoAuthoredBy": false,
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token2",
-                        "ANTHROPIC_BASE_URL": "https://claude.two",
-                        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-                    }
-                },
-                "meta": { "applyCommonConfig": false }
-            }))
-            .expect("parse provider p2"),
-        );
-    }
-
-    write_json_file(
-        &get_claude_settings_path(),
-        &json!({
-            "includeCoAuthoredBy": false,
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token1",
-                "ANTHROPIC_BASE_URL": "https://claude.one",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-            }
-        }),
-    )
-    .expect("seed current live settings");
-
-    let state = state_from_config(config);
-
-    ProviderService::set_common_config_snippet(
-        &state,
-        AppType::Claude,
-        Some(new_snippet.to_string()),
-    )
-    .expect("update common snippet");
-
-    let cfg = state.config.read().expect("read config after update");
-    let p2_after = cfg
-        .get_manager(&AppType::Claude)
-        .expect("claude manager")
-        .providers
-        .get("p2")
-        .expect("p2 exists");
-    assert_eq!(
-        p2_after
-            .settings_config
-            .get("includeCoAuthoredBy")
-            .and_then(Value::as_bool),
-        Some(false),
-        "applyCommonConfig=false provider should keep its stored top-level fields during migration"
-    );
-    let p2_env = p2_after
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("p2 env should be object");
-    assert_eq!(
-        p2_env
-            .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            .and_then(Value::as_i64),
-        Some(1),
-        "applyCommonConfig=false provider should keep its stored common env keys during migration"
-    );
-    assert_eq!(
-        p2_env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token2"),
-        "provider-specific env keys should remain untouched"
-    );
-}
-
-#[test]
-#[serial]
-fn setting_claude_common_snippet_does_not_infer_existing_provider_opt_in() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let new_snippet =
-        r#"{"includeCoAuthoredBy":false,"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#;
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "p1".to_string();
-        manager.providers.insert(
-            "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "includeCoAuthoredBy": false,
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token1",
-                        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-                    }
-                }),
-                None,
-            ),
-        );
-    }
-
-    let state = state_from_config(config);
-
-    ProviderService::set_common_config_snippet(
-        &state,
-        AppType::Claude,
-        Some(new_snippet.to_string()),
-    )
-    .expect("set common snippet");
-
-    let cfg = state.config.read().expect("read config after update");
-    let provider = cfg
-        .get_manager(&AppType::Claude)
-        .expect("claude manager")
-        .providers
-        .get("p1")
-        .expect("p1 exists");
-
-    assert_eq!(
-        provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config),
-        None,
-        "setting a new snippet must not silently enable common config on existing providers"
-    );
-    assert_eq!(
-        provider
-            .settings_config
-            .get("includeCoAuthoredBy")
-            .and_then(Value::as_bool),
-        Some(false),
-        "new Claude common top-level fields should remain provider-owned without explicit opt-in"
-    );
-    let env = provider
-        .settings_config
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("stored claude env should be object");
-    assert_eq!(
-        env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            .and_then(Value::as_i64),
-        Some(1),
-        "new Claude common env fields should remain provider-owned without explicit opt-in"
-    );
-    assert_eq!(
-        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token1"),
-        "provider-specific Claude env should remain after normalization"
-    );
-}
-
-#[test]
-#[serial]
-fn clearing_claude_common_snippet_tolerates_invalid_stored_snippet() {
-    let temp_home = TempDir::new().expect("create temp home");
-    let _env = TestEnvGuard::isolated(temp_home.path());
-    std::fs::create_dir_all(crate::config::get_claude_config_dir())
-        .expect("create ~/.claude (initialized)");
-
-    let invalid_old_snippet = r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}"#;
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::Claude);
-    config.common_config_snippets.claude = Some(invalid_old_snippet.to_string());
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
-        manager.current = "p1".to_string();
-        manager.providers.insert(
-            "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token1",
-                        "ANTHROPIC_BASE_URL": "https://claude.one"
-                    }
-                }),
-                None,
-            ),
-        );
-        manager.providers.insert(
-            "p2".to_string(),
-            Provider::with_id(
-                "p2".to_string(),
-                "Second".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token2",
-                        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-                    }
-                }),
-                None,
-            ),
-        );
-    }
-
-    write_json_file(
-        &get_claude_settings_path(),
-        &json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "token1",
-                "ANTHROPIC_BASE_URL": "https://claude.one",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-            }
-        }),
-    )
-    .expect("seed current live settings");
-
-    let state = state_from_config(config);
-    state.save().expect("persist config snapshot to db");
-
-    ProviderService::clear_common_config_snippet(&state, AppType::Claude)
-        .expect("clear should recover from invalid stored snippet");
-
-    let cfg = state.config.read().expect("read config after clear");
-    assert_eq!(
-        cfg.common_config_snippets.claude, None,
-        "invalid stored snippet should not block clearing the saved common snippet"
-    );
-    drop(cfg);
-
-    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
-    let env = live
-        .get("env")
-        .and_then(Value::as_object)
-        .expect("live env should be object");
-    assert!(
-        env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-        "an unreadable old snippet cannot establish ownership of existing user settings"
-    );
-    assert_eq!(
-        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-        Some("token1"),
-        "provider-specific Claude env should remain after recovery"
     );
 }
 
@@ -7863,52 +6645,6 @@ fn key_field_gemini_invalid_settings_does_not_publish_env_or_pointer() {
     );
 }
 
-#[test]
-#[serial]
-fn key_field_common_edit_preserves_active_proxy_route() {
-    let (_home, _env, state) = setup_claude_switch_preview_state(json!({
-        "env": {"ANTHROPIC_AUTH_TOKEN":"PROXY_MANAGED", "ANTHROPIC_BASE_URL":"http://127.0.0.1:15721"},
-        "permissions": {"allow":["Read"]}
-    }));
-    {
-        let mut config = state.config.write().unwrap();
-        let current = config
-            .get_manager_mut(&AppType::Claude)
-            .unwrap()
-            .providers
-            .get_mut("p1")
-            .unwrap();
-        current.meta = Some(ProviderMeta {
-            apply_common_config: Some(true),
-            ..Default::default()
-        });
-    }
-    state.save().unwrap();
-    ProviderService::set_common_config_snippet(
-        &state,
-        AppType::Claude,
-        Some(r#"{"env":{"API_TIMEOUT_MS":"999"},"includeCoAuthoredBy":false}"#.into()),
-    )
-    .expect("edit global settings while proxy is attached");
-    let live: Value = read_json_file(&get_claude_settings_path()).unwrap();
-    assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "PROXY_MANAGED");
-    assert_eq!(live["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:15721");
-    assert_eq!(live["env"]["API_TIMEOUT_MS"], "999");
-    assert_eq!(live["includeCoAuthoredBy"], false);
-    assert_eq!(live["permissions"]["allow"], json!(["Read"]));
-    for env in [json!(null), json!("invalid"), json!([])] {
-        ProviderService::set_common_config_snippet(
-            &state,
-            AppType::Claude,
-            Some(json!({"env":env}).to_string()),
-        )
-        .unwrap();
-        let live: Value = read_json_file(&get_claude_settings_path()).unwrap();
-        assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "PROXY_MANAGED");
-        assert_eq!(live["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:15721");
-    }
-}
-
 #[tokio::test]
 #[serial]
 async fn key_field_proxy_update_cleans_removed_exclusive_fields() {
@@ -8275,4 +7011,357 @@ async fn key_field_gemini_removing_entire_config_does_not_restore_old_model() {
             read_json_file(&crate::gemini_config::get_gemini_settings_path()).unwrap();
         assert!(settings.pointer("/model/name").is_none());
     }
+}
+
+#[test]
+#[serial]
+fn claude_editor_saves_issue_530_fields_and_preserves_globals_on_switch() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir()).unwrap();
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+    let mut first = Provider::with_id(
+        "first".into(),
+        "First".into(),
+        json!({"env":{"ANTHROPIC_AUTH_TOKEN":"key-first","ANTHROPIC_BASE_URL":"https://first.example"}}),
+        None,
+    );
+    let second = Provider::with_id(
+        "second".into(),
+        "Second".into(),
+        json!({"env":{"ANTHROPIC_AUTH_TOKEN":"key-second","ANTHROPIC_BASE_URL":"https://second.example"}}),
+        None,
+    );
+    ProviderService::add(&state, AppType::Claude, first.clone()).unwrap();
+    ProviderService::add(&state, AppType::Claude, second.clone()).unwrap();
+    let view = ProviderService::claude_editor_view(&state, &first.settings_config).unwrap();
+    first.settings_config = view.settings.clone();
+    first.settings_config["env"]["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = json!("1");
+    first.settings_config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = json!("120000");
+    first.settings_config["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = json!("102000");
+    first.settings_config["language"] = json!("chinese");
+    first.settings_config["disableDeepLinkRegistration"] = json!("disable");
+    ProviderService::save_claude_from_editor(
+        &state,
+        first,
+        claude_editor::EditorSave {
+            base: view.settings,
+            draft: None,
+            on_conflict: Default::default(),
+        },
+        false,
+        None,
+    )
+    .unwrap();
+    let live: Value = read_json_file(&get_claude_settings_path()).unwrap();
+    assert_eq!(live["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "120000");
+    assert_eq!(live["env"]["CLAUDE_CODE_DISABLE_1M_CONTEXT"], "1");
+    assert_eq!(live["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "102000");
+    assert_eq!(live["language"], "chinese");
+    assert_eq!(live["disableDeepLinkRegistration"], "disable");
+    let stored = state
+        .db
+        .get_provider_by_id("first", "claude")
+        .unwrap()
+        .unwrap();
+    assert!(stored.settings_config.get("language").is_none());
+    assert_eq!(
+        stored.settings_config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+        "120000"
+    );
+    ProviderService::switch(&state, AppType::Claude, "second").unwrap();
+    let live: Value = read_json_file(&get_claude_settings_path()).unwrap();
+    assert_eq!(live["language"], "chinese");
+    assert!(live["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS").is_none());
+    assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "key-second");
+    ProviderService::switch(&state, AppType::Claude, "first").unwrap();
+    let live: Value = read_json_file(&get_claude_settings_path()).unwrap();
+    assert_eq!(live["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "120000");
+}
+
+#[test]
+#[serial]
+fn claude_editor_inactive_save_conflicts_are_explicit_and_row_is_rolled_back() {
+    use claude_editor::{ConflictPolicy, EditorSave};
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir()).unwrap();
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+    let first = Provider::with_id(
+        "first".into(),
+        "First".into(),
+        json!({"env":{"ANTHROPIC_AUTH_TOKEN":"key-first"}}),
+        None,
+    );
+    let mut second = Provider::with_id(
+        "second".into(),
+        "Second".into(),
+        json!({"env":{"ANTHROPIC_AUTH_TOKEN":"key-second"},"language":"legacy"}),
+        None,
+    );
+    ProviderService::add(&state, AppType::Claude, first).unwrap();
+    ProviderService::add(&state, AppType::Claude, second.clone()).unwrap();
+    let view = ProviderService::claude_editor_view(&state, &second.settings_config).unwrap();
+    assert_eq!(view.inactive.len(), 1);
+    assert!(view.settings.get("language").is_none());
+    second.settings_config = view.settings.clone();
+    second.settings_config["language"] = json!("mine");
+    second.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("new-key");
+    second.settings_config["permissions"] = json!({"allow":["Read"]});
+    let path = get_claude_settings_path();
+    let mut external: Value = read_json_file(&path).unwrap();
+    external["language"] = json!("external");
+    external["env"]["EXTERNAL_UNTOUCHED"] = json!("keep");
+    std::fs::write(&path, serde_json::to_vec(&external).unwrap()).unwrap();
+    let editor = EditorSave {
+        base: view.settings,
+        draft: None,
+        on_conflict: ConflictPolicy::Refuse,
+    };
+    let before_copy = serde_json::to_value(state.db.get_all_providers("claude").unwrap()).unwrap();
+    let copy_error = ProviderService::save_claude_from_editor(
+        &state,
+        second.clone(),
+        editor.clone(),
+        true,
+        Some("first"),
+    )
+    .unwrap_err();
+    assert!(claude_editor::conflict_keys(&copy_error).is_some());
+    assert_eq!(
+        serde_json::to_value(state.db.get_all_providers("claude").unwrap()).unwrap(),
+        before_copy
+    );
+    assert_eq!(read_json_file::<Value>(&path).unwrap(), external);
+    let error = ProviderService::save_claude_from_editor(
+        &state,
+        second.clone(),
+        editor.clone(),
+        false,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        claude_editor::conflict_keys(&error).unwrap(),
+        vec!["language"]
+    );
+    assert_eq!(read_json_file::<Value>(&path).unwrap(), external);
+    assert_eq!(
+        state
+            .db
+            .get_provider_by_id("second", "claude")
+            .unwrap()
+            .unwrap()
+            .settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+        "key-second"
+    );
+    ProviderService::save_claude_from_editor(
+        &state,
+        second.clone(),
+        EditorSave {
+            on_conflict: ConflictPolicy::KeepTheirs,
+            ..editor.clone()
+        },
+        false,
+        None,
+    )
+    .unwrap();
+    let live: Value = read_json_file(&path).unwrap();
+    assert_eq!(live["language"], "external");
+    assert_eq!(live["permissions"]["allow"], json!(["Read"]));
+    assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "key-first");
+    assert_eq!(live["env"]["EXTERNAL_UNTOUCHED"], "keep");
+    ProviderService::save_claude_from_editor(
+        &state,
+        second,
+        EditorSave {
+            on_conflict: ConflictPolicy::KeepMine,
+            ..editor
+        },
+        false,
+        None,
+    )
+    .unwrap();
+    assert_eq!(read_json_file::<Value>(&path).unwrap()["language"], "mine");
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_editor_proxy_save_keeps_route_and_globals_after_restore() {
+    let (_home, _env, state) = setup_claude_switch_preview_state(json!({"env":{}}));
+    state.db.set_app_proxy_preferred_port("claude", 0).unwrap();
+    state
+        .proxy_service
+        .set_takeover_for_app("claude", true)
+        .await
+        .unwrap();
+    let mut provider = state
+        .db
+        .get_provider_by_id("p1", "claude")
+        .unwrap()
+        .unwrap();
+    let view = ProviderService::claude_editor_view(&state, &provider.settings_config).unwrap();
+    let expected_key = view.settings["env"]["ANTHROPIC_AUTH_TOKEN"].clone();
+    assert_ne!(expected_key, json!("PROXY_MANAGED"));
+    provider.settings_config = view.settings.clone();
+    provider.settings_config["language"] = json!("chinese");
+    provider.settings_config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = json!("120000");
+    ProviderService::save_claude_from_editor(
+        &state,
+        provider,
+        claude_editor::EditorSave {
+            base: view.settings,
+            draft: None,
+            on_conflict: Default::default(),
+        },
+        false,
+        None,
+    )
+    .unwrap();
+    let live: Value = read_json_file(&get_claude_settings_path()).unwrap();
+    assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "PROXY_MANAGED");
+    assert_eq!(live["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "120000");
+    assert_eq!(live["language"], "chinese");
+    state
+        .proxy_service
+        .set_takeover_for_app("claude", false)
+        .await
+        .unwrap();
+    let live: Value = read_json_file(&get_claude_settings_path()).unwrap();
+    assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], expected_key);
+    assert_eq!(live["language"], "chinese");
+    assert_eq!(live["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "120000");
+}
+
+#[test]
+#[serial]
+fn claude_editor_preserves_legacy_snippet_and_row_data_without_runtime_merging() {
+    let home = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    let snippet = r#"{"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"120000"},"language":"legacy"}"#;
+    let row = json!({"env":{"ANTHROPIC_AUTH_TOKEN":"key","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"120000"},"language":"legacy"});
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    config.common_config_snippets.claude = Some(snippet.into());
+    let mut provider = with_common_enabled(Provider::with_id(
+        "p1".into(),
+        "First".into(),
+        row.clone(),
+        None,
+    ));
+    config
+        .get_manager_mut(&AppType::Claude)
+        .unwrap()
+        .providers
+        .insert("p1".into(), provider.clone());
+    let state = state_from_config(config);
+    super::common_config::migrate_common_config_upstream_semantics_if_needed(
+        &state.db,
+        &mut state.config.write().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        state
+            .db
+            .get_provider_by_id("p1", "claude")
+            .unwrap()
+            .unwrap()
+            .settings_config,
+        row
+    );
+    assert_eq!(
+        state.db.get_config_snippet("claude").unwrap().as_deref(),
+        Some(snippet)
+    );
+    assert!(
+        ProviderService::set_common_config_snippet(&state, AppType::Claude, Some("{}".into()))
+            .is_err()
+    );
+    assert_eq!(
+        state.db.get_config_snippet("claude").unwrap().as_deref(),
+        Some(snippet)
+    );
+    let view = ProviderService::claude_editor_view(&state, &provider.settings_config).unwrap();
+    assert!(view.settings.get("language").is_none());
+    assert!(view
+        .inactive
+        .iter()
+        .any(|field| field.path == vec!["language"]));
+    provider.settings_config = view.settings.clone();
+    provider.settings_config["language"] = json!("chinese");
+    ProviderService::save_claude_from_editor(
+        &state,
+        provider,
+        claude_editor::EditorSave {
+            base: view.settings,
+            draft: None,
+            on_conflict: Default::default(),
+        },
+        false,
+        None,
+    )
+    .unwrap();
+    let saved = state
+        .db
+        .get_provider_by_id("p1", "claude")
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.settings_config["language"], "legacy");
+    assert_eq!(
+        saved.settings_config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+        "120000"
+    );
+    assert_eq!(
+        read_json_file::<Value>(&get_claude_settings_path()).unwrap()["language"],
+        "chinese"
+    );
+}
+
+#[test]
+#[serial]
+fn claude_editor_first_add_commits_pointer_and_compatibility_marker() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(home.path());
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+    let view = ProviderService::claude_editor_view(&state, &json!({})).unwrap();
+    let provider = Provider::with_id(
+        "first".into(),
+        "First".into(),
+        json!({"env":{"ANTHROPIC_AUTH_TOKEN":"first-key"},"language":"chinese"}),
+        None,
+    );
+    ProviderService::save_claude_from_editor(
+        &state,
+        provider,
+        claude_editor::EditorSave {
+            base: view.settings,
+            draft: None,
+            on_conflict: Default::default(),
+        },
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::settings::get_effective_current_provider(&state.db, &AppType::Claude)
+            .unwrap()
+            .as_deref(),
+        Some("first")
+    );
+    let stored = state
+        .db
+        .get_provider_by_id("first", "claude")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.meta.unwrap().apply_common_config, Some(true));
+    assert!(stored.settings_config.get("language").is_none());
+    let live: Value = read_json_file(&get_claude_settings_path()).unwrap();
+    assert_eq!(live["language"], "chinese");
+    assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "first-key");
 }

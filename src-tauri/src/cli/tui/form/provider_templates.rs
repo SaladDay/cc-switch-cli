@@ -471,6 +471,34 @@ impl ProviderAddFormState {
     }
 
     pub fn apply_template(&mut self, idx: usize, existing_ids: &[String]) {
+        let before = self.claude_editor.as_ref().map(|_| self.clone());
+        self.apply_template_fields(idx, existing_ids);
+        if let Some(before) = before {
+            use crate::live::project::claude::{project_onto, ClaudeProjection};
+            let previous = before.to_provider_json_value()["settingsConfig"].clone();
+            let mut value = self.to_provider_json_value();
+            let result = project_onto(
+                &crate::config::get_claude_settings_path(),
+                &previous,
+                Some(&ClaudeProjection::of(&previous)),
+                &ClaudeProjection::of(&value["settingsConfig"]),
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|settings| {
+                value["settingsConfig"] = settings;
+                self.apply_provider_json_value_to_fields(value)
+            });
+            if let Err(message) = result {
+                *self = before;
+                self.field_errors.push(super::InlineFieldError {
+                    field: super::ProviderAddField::Template,
+                    message,
+                });
+            }
+        }
+    }
+
+    fn apply_template_fields(&mut self, idx: usize, existing_ids: &[String]) {
         let builtin_defs = provider_builtin_template_defs(&self.app_type);
         let sponsor_presets = provider_sponsor_presets(&self.app_type);
         let after_sponsor_defs = provider_after_sponsor_template_defs(&self.app_type);

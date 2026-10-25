@@ -380,13 +380,9 @@ mod tests {
             .expect("create ~/.claude (initialized)");
 
         let state = crate::store::AppState::try_new().expect("create state");
-        ProviderService::set_common_config_snippet(
-            &state,
-            AppType::Claude,
-            Some(
-                r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
-                    .to_string(),
-            ),
+        state.db.set_config_snippet(
+            "claude",
+            Some(r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#.to_string()),
         )
         .expect("set common config snippet");
 

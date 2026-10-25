@@ -1133,7 +1133,7 @@ mod tests {
 
     #[test]
     fn config_e_key_opens_common_snippet_editor_when_selected() {
-        let mut app = App::new(Some(AppType::Claude));
+        let mut app = App::new(Some(AppType::Gemini));
         app.route = Route::Config;
         app.focus = Focus::Content;
         app.config_idx = ConfigItem::ALL
@@ -1148,7 +1148,7 @@ mod tests {
             Some((
                 EditorKind::Json,
                 EditorSubmit::ConfigCommonSnippet {
-                    app_type: AppType::Claude,
+                    app_type: AppType::Gemini,
                     source: CommonSnippetViewSource::Global
                 }
             ))
@@ -4771,7 +4771,7 @@ mod tests {
 
     #[test]
     fn config_common_snippet_opens_editor_directly() {
-        let mut app = App::new(Some(AppType::Claude));
+        let mut app = App::new(Some(AppType::Gemini));
         app.route = Route::Config;
         app.focus = Focus::Content;
         app.config_idx = ConfigItem::ALL
@@ -4786,7 +4786,7 @@ mod tests {
             Some((
                 EditorKind::Json,
                 EditorSubmit::ConfigCommonSnippet {
-                    app_type: AppType::Claude,
+                    app_type: AppType::Gemini,
                     source: CommonSnippetViewSource::Global
                 }
             ))
@@ -4912,33 +4912,8 @@ mod tests {
     }
 
     #[test]
-    fn provider_add_form_common_snippet_row_opens_json_editor_claude() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Providers;
-        app.focus = Focus::Content;
-
-        let data = data();
-        app.on_key(key(KeyCode::Char('a')), &data);
-        apply_current_provider_template(&mut app, &data); // apply template -> fields
-        select_provider_common_snippet_row(&mut app);
-
-        let action = app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(action, Action::None));
-        assert!(matches!(
-            app.editor.as_ref().map(|e| (&e.kind, &e.submit)),
-            Some((
-                EditorKind::Json,
-                EditorSubmit::ConfigCommonSnippet {
-                    app_type: AppType::Claude,
-                    source: CommonSnippetViewSource::ProviderForm
-                }
-            ))
-        ));
-    }
-
-    #[test]
     fn common_snippet_editor_function_keys_trigger_format_and_extract() {
-        let mut app = App::new(Some(AppType::Claude));
+        let mut app = App::new(Some(AppType::Gemini));
         app.route = Route::Providers;
         app.focus = Focus::Content;
 
@@ -4951,24 +4926,24 @@ mod tests {
         assert!(matches!(
             app.on_key(key(KeyCode::F(2)), &data),
             Action::EditorFormatCommonSnippet {
-                app_type: AppType::Claude
+                app_type: AppType::Gemini
             }
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::F(4)), &data),
             Action::EditorExtractCommonSnippet {
-                app_type: AppType::Claude
+                app_type: AppType::Gemini
             }
         ));
     }
 
     #[test]
     fn global_common_snippet_editor_only_formats_not_extracts() {
-        let mut app = App::new(Some(AppType::Claude));
+        let mut app = App::new(Some(AppType::Gemini));
         app.route = Route::Config;
         app.focus = Focus::Content;
         app.open_common_snippet_editor(
-            AppType::Claude,
+            AppType::Gemini,
             &data(),
             Some(r#"{"env":{"COMMON_FLAG":"1"}}"#.to_string()),
             CommonSnippetViewSource::Global,
@@ -4977,7 +4952,7 @@ mod tests {
         assert!(matches!(
             app.on_key(key(KeyCode::F(2)), &data()),
             Action::EditorFormatCommonSnippet {
-                app_type: AppType::Claude
+                app_type: AppType::Gemini
             }
         ));
 
@@ -5041,7 +5016,7 @@ mod tests {
 
     #[test]
     fn provider_add_form_first_open_shows_common_config_notice_for_supported_apps() {
-        let mut app = App::new(Some(AppType::Claude));
+        let mut app = App::new(Some(AppType::Gemini));
         app.route = Route::Providers;
         app.focus = Focus::Content;
         app.common_config_notice_confirmed = false;
@@ -5060,7 +5035,7 @@ mod tests {
 
     #[test]
     fn provider_add_form_skips_common_config_notice_after_confirmed() {
-        let mut app = App::new(Some(AppType::Claude));
+        let mut app = App::new(Some(AppType::Gemini));
         app.route = Route::Providers;
         app.focus = Focus::Content;
 
@@ -5153,12 +5128,20 @@ mod tests {
                 json!({
                     "env": {
                         "ANTHROPIC_BASE_URL": "https://example.com",
-                        "ANTHROPIC_AUTH_TOKEN": "sk-demo"
+                        "ANTHROPIC_AUTH_TOKEN": "sk-demo",
+                        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "120000",
+                        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "102000"
                     }
                 }),
                 None,
             );
             original.sort_index = Some(4);
+            manager.current = original.id.clone();
+            crate::config::write_json_file(
+                &crate::config::get_claude_settings_path(),
+                &original.settings_config,
+            )
+            .expect("write current provider live config");
             manager.providers.insert(original.id.clone(), original);
 
             let mut existing_copy = Provider::with_id(
@@ -5201,6 +5184,15 @@ mod tests {
             "sk-demo"
         );
 
+        assert_eq!(
+            copied.provider.settings_config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+            "120000"
+        );
+        assert_eq!(
+            copied.provider.settings_config["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+            "102000"
+        );
+
         let shifted = refreshed
             .providers
             .rows
@@ -5212,7 +5204,7 @@ mod tests {
 
     #[test]
     fn provider_copy_confirm_preserves_first_common_config_notice() {
-        let mut app = App::new(Some(AppType::Claude));
+        let mut app = App::new(Some(AppType::Gemini));
         app.route = Route::Providers;
         app.focus = Focus::Content;
         app.common_config_notice_confirmed = false;
@@ -13610,42 +13602,6 @@ mod tests {
 
     /// The common-snippet refresh moved into the picker's Enter arm; its
     /// failure path must still surface as a Warning toast.
-    #[test]
-    fn provider_template_picker_enter_warns_on_malformed_common_snippet() {
-        let mut form = ProviderAddFormState::new(AppType::Claude);
-        form.include_common_config = true;
-
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Providers;
-        app.focus = Focus::Content;
-        app.form = Some(FormState::ProviderAdd(form));
-
-        let mut data = data();
-        data.config.common_snippet = r#"{"env": {"#.to_string();
-        app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(
-            app.overlay,
-            Overlay::ProviderTemplatePicker { .. }
-        ));
-
-        // Claude Official, so the apply path is a real template, not a reset.
-        app.on_key(key(KeyCode::Down), &data);
-        let action = app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::None));
-        assert_eq!(provider_form_focus(&app), FormFocus::Fields);
-        assert!(
-            matches!(
-                app.toast.as_ref(),
-                Some(Toast {
-                    kind: ToastKind::Warning,
-                    ..
-                })
-            ),
-            "expected a Warning toast, got: {:?}",
-            app.toast
-        );
-    }
 
     #[test]
     fn provider_template_picker_closes_when_form_is_gone() {
@@ -16534,7 +16490,7 @@ mod tests {
         assert!(matches!(
             claude_app.form,
             Some(FormState::ProviderAdd(ref form))
-                if !form.claude_teammates && !form.include_common_config
+                if form.claude_teammates && !form.include_common_config
         ));
 
         let codex_snippet = "[features]\ngoals = true\n";
@@ -16570,44 +16526,6 @@ mod tests {
             Some(FormState::ProviderAdd(ref form))
                 if !form.codex_goal_mode && !form.include_common_config
         ));
-    }
-
-    #[test]
-    fn provider_template_enter_preserves_effective_common_quick_config() {
-        let cases = [
-            (
-                AppType::Claude,
-                r#"{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}}"#,
-            ),
-            (AppType::Codex, "[features]\ngoals = true\n"),
-        ];
-
-        for (app_type, common_snippet) in cases {
-            let mut app = App::new(Some(app_type.clone()));
-            app.route = Route::Providers;
-            app.focus = Focus::Content;
-            app.form = Some(FormState::ProviderAdd(
-                ProviderAddFormState::new_with_common_snippet(app_type.clone(), common_snippet),
-            ));
-            let mut data = data();
-            data.config.common_snippet = common_snippet.to_string();
-
-            // Go through the picker so the apply + common-snippet refresh path
-            // is genuinely exercised, not just the constructor's seed state.
-            apply_current_provider_template(&mut app, &data);
-            assert!(matches!(app.overlay, Overlay::None));
-
-            let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
-                panic!("expected provider form for {app_type:?}");
-            };
-            assert_eq!(form.focus, FormFocus::Fields);
-            assert!(form.include_common_config);
-            match app_type {
-                AppType::Claude => assert!(form.claude_teammates),
-                AppType::Codex => assert!(form.codex_goal_mode),
-                _ => unreachable!(),
-            }
-        }
     }
 
     #[test]
@@ -20937,5 +20855,116 @@ mod tests {
                 ..
             }) if model_id == "claude-sonnet-4-5"
         ));
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn claude_editor_open_projects_live_globals_and_inactive_fields() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+    let live = serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"current-key","GLOBAL_FLAG":"keep"},"language":"chinese"});
+    crate::config::write_json_file(&crate::config::get_claude_settings_path(), &live).unwrap();
+    let mut app = App::new(Some(AppType::Claude));
+    let data = UiData::default();
+    let row = super::data::ProviderRow {
+        id: "other".into(),
+        provider: crate::provider::Provider::with_id(
+            "other".into(),
+            "Other".into(),
+            serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"other-key"},"language":"legacy","legacyOnly":true}),
+            None,
+        ),
+        api_url: None,
+        is_current: false,
+        is_in_config: true,
+        is_saved: true,
+        is_default_model: false,
+        primary_model_id: None,
+        default_model_id: None,
+    };
+    app.open_provider_edit_form(&row, &data);
+    let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+        panic!("form should open")
+    };
+    assert_eq!(
+        form.claude_editor.as_ref().unwrap().base["language"],
+        "chinese"
+    );
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+        "other-key"
+    );
+    assert_eq!(form.claude_inactive.len(), 2);
+    assert!(form.to_provider_json_value()["settingsConfig"]
+        .get("legacyOnly")
+        .is_none());
+    assert!(!form.has_unsaved_changes());
+    assert!(!visible_config_items(&app.filter, &app.app_type).contains(&ConfigItem::CommonSnippet));
+    let before = std::fs::read(crate::config::get_claude_settings_path()).unwrap();
+    app.overlay = Overlay::Confirm(ConfirmOverlay {
+        title: String::new(),
+        message: String::new(),
+        action: ConfirmAction::ClaudeCopyInactive,
+    });
+    app.on_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        &data,
+    );
+    let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+        panic!("form should remain")
+    };
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["language"],
+        "legacy"
+    );
+    assert_eq!(
+        form.claude_editor.as_ref().unwrap().base["language"],
+        "chinese"
+    );
+    assert_eq!(
+        std::fs::read(crate::config::get_claude_settings_path()).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn claude_editor_conflict_choices_preserve_the_draft() {
+    use crate::services::provider::claude_editor::{ConflictPolicy, EditorSave};
+    for (key, policy) in [
+        ('m', ConflictPolicy::KeepMine),
+        ('t', ConflictPolicy::KeepTheirs),
+    ] {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        form.claude_editor = Some(EditorSave {
+            base: serde_json::json!({}),
+            draft: None,
+            on_conflict: ConflictPolicy::Refuse,
+        });
+        app.form = Some(FormState::ProviderAdd(form));
+        app.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: String::new(),
+            message: String::new(),
+            action: ConfirmAction::ClaudeEditorConflict {
+                submit: EditorSubmit::ProviderAdd,
+                content: "draft".into(),
+            },
+        });
+        let action = app.on_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(key),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &UiData::default(),
+        );
+        assert!(matches!(action,Action::EditorSubmit{content,..} if content=="draft"));
+        let Some(FormState::ProviderAdd(form)) = app.form else {
+            panic!("form should remain")
+        };
+        assert_eq!(form.claude_editor.unwrap().on_conflict, policy);
     }
 }

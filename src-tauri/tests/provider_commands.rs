@@ -406,7 +406,7 @@ fn provider_usage_query_set_rejects_enabled_script_without_return() {
 
 #[test]
 #[serial]
-fn provider_export_writes_merged_claude_settings_to_default_path() {
+fn provider_export_does_not_replay_legacy_claude_snippets() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -476,15 +476,15 @@ fn provider_export_writes_merged_claude_settings_to_default_path() {
             .get("env")
             .and_then(|v| v.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|v| v.as_i64()),
-        Some(1),
-        "common config snippet should be merged into export"
+        None,
+        "legacy common snippets must not be replayed into exports"
     );
     assert_eq!(
         exported
             .get("includeCoAuthoredBy")
             .and_then(|v| v.as_bool()),
-        Some(false),
-        "top-level common config should be present in export"
+        None,
+        "legacy global snippet values must not enter exports"
     );
     assert_eq!(
         exported

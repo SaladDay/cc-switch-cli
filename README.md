@@ -412,11 +412,14 @@ cc-switch config show                # Display configuration
 cc-switch config path                # Show config file paths
 cc-switch config validate            # Validate config file
 
-# Common snippet (shared settings across providers)
-# Tries to refresh live config when applicable (`--apply` is kept only as a compatibility flag)
+# Claude: open the TUI, edit a provider, then open its JSON editor
+cc-switch --app claude
+# Read a legacy common snippet to copy into the configuration editor if needed
 cc-switch --app claude config common show
-cc-switch --app claude config common set --snippet '{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}'
-cc-switch --app claude config common clear
+
+# Codex / Gemini still support common snippets
+cc-switch --app codex config common set --snippet 'model_reasoning_effort = "high"'
+cc-switch --app codex config common clear
 
 # Backup
 cc-switch config backup              # Create backup (auto-named)

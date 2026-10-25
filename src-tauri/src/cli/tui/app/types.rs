@@ -4347,6 +4347,11 @@ impl Toast {
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
+    ClaudeCopyInactive,
+    ClaudeEditorConflict {
+        submit: EditorSubmit,
+        content: String,
+    },
     Quit,
     ProviderDelete {
         id: String,

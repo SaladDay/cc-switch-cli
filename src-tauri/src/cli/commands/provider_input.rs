@@ -126,7 +126,7 @@ impl SettingsConfigPromptResult {
 }
 
 pub fn supports_common_config(app_type: &AppType) -> bool {
-    matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+    matches!(app_type, AppType::Codex | AppType::Gemini)
 }
 
 pub fn common_snippet_has_effective_config(
@@ -1151,7 +1151,7 @@ requires_openai_auth = true
 
     #[test]
     fn common_config_helpers_detect_and_mark_supported_provider() {
-        assert!(common_snippet_has_effective_config(
+        assert!(!common_snippet_has_effective_config(
             &AppType::Claude,
             Some(r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#)
         ));
