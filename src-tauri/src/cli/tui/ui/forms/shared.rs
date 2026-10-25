@@ -44,6 +44,7 @@ pub(crate) fn add_form_key_items(
                         | ProviderAddField::CodexOAuthAccount
                         | ProviderAddField::CodexLocalRouting
                         | ProviderAddField::LocalProxySettings
+                        | ProviderAddField::ClaudeInactiveFields
                         | ProviderAddField::CommonSnippet
                         | ProviderAddField::UsageQuery
                         | ProviderAddField::OpenClawModels

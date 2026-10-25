@@ -660,6 +660,28 @@ impl App {
                 }
                 Action::None
             }
+            ProviderAddField::ClaudeInactiveFields => {
+                if matches!(key.code, KeyCode::Enter) {
+                    if let Some(FormState::ProviderAdd(form)) = self.form.as_ref() {
+                        let fields = form
+                            .claude_inactive
+                            .iter()
+                            .map(|field| format!("{}: {}", field.path.join("."), field.value))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.overlay = Overlay::Confirm(ConfirmOverlay {
+                            title: crate::t!(
+                                "Copy inactive fields into editor?",
+                                "将未应用字段复制到编辑器？"
+                            )
+                            .to_string(),
+                            message: fields,
+                            action: ConfirmAction::ClaudeCopyInactive,
+                        });
+                    }
+                }
+                Action::None
+            }
             ProviderAddField::CommonSnippet => {
                 if matches!(key.code, KeyCode::Enter) {
                     let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {

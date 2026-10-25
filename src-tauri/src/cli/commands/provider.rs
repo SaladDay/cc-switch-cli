@@ -1716,7 +1716,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let manager = config
         .get_manager(&app_type)
         .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
-    let original = manager
+    let mut original = manager
         .providers
         .get(id)
         .ok_or_else(|| {
@@ -1727,6 +1727,36 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let is_current = manager.current == id;
     let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
+
+    let claude_editor = if matches!(app_type, AppType::Claude) {
+        let view = ProviderService::claude_editor_view(&state, &original.settings_config)?;
+        original.settings_config = view.settings.clone();
+        if !view.inactive.is_empty() {
+            for field in &view.inactive {
+                println!("{}: {}", field.path.join("."), field.value);
+            }
+            if Confirm::new(crate::t!(
+                "Copy these inactive fields into the editor?",
+                "将这些未应用字段复制到编辑器？"
+            ))
+            .with_default(false)
+            .prompt()
+            .map_err(|e| AppError::Message(e.to_string()))?
+            {
+                crate::services::provider::claude_editor::copy_inactive_fields(
+                    &mut original.settings_config,
+                    &view.inactive,
+                );
+            }
+        }
+        Some(crate::services::provider::claude_editor::EditorSave {
+            base: view.settings,
+            draft: None,
+            on_conflict: Default::default(),
+        })
+    } else {
+        None
+    };
 
     // 2. 显示当前配置
     println!("\n{}", highlight(texts::current_config_header()));
@@ -1817,8 +1847,13 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         return Ok(());
     }
 
-    // 8. 调用 Service 层（upstream parity：干净写入，无冲突提示）
-    ProviderService::update(&state, app_type.clone(), updated)?;
+    if let Some(editor) = claude_editor {
+        if !save_claude_editor_interactive(&state, &updated, editor, None)? {
+            return Ok(());
+        }
+    } else {
+        ProviderService::update(&state, app_type.clone(), updated)?;
+    }
 
     // 9. 成功消息
     println!(
@@ -1830,6 +1865,56 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn save_claude_editor_interactive(
+    state: &AppState,
+    provider: &Provider,
+    mut editor: crate::services::provider::claude_editor::EditorSave,
+    copy_source: Option<&str>,
+) -> Result<bool, AppError> {
+    loop {
+        match ProviderService::save_claude_from_editor(
+            state,
+            provider.clone(),
+            editor.clone(),
+            copy_source.is_some(),
+            copy_source,
+        ) {
+            Ok(_) => return Ok(true),
+            Err(error)
+                if crate::services::provider::claude_editor::conflict_keys(&error).is_some() =>
+            {
+                let choices = vec![
+                    crate::t!("Cancel", "取消"),
+                    crate::t!("Keep my changes", "保留我的修改"),
+                    crate::t!("Keep external changes", "保留外部修改"),
+                ];
+                let keys = crate::services::provider::claude_editor::conflict_keys(&error)
+                    .unwrap_or_default()
+                    .join(", ");
+                let prompt = format!(
+                    "{}: {keys}",
+                    crate::t!(
+                        "Fields changed outside the editor",
+                        "以下字段已被其他程序修改"
+                    )
+                );
+                let choice = inquire::Select::new(&prompt, choices.clone())
+                    .prompt()
+                    .map_err(|e| AppError::Message(e.to_string()))?;
+                use crate::services::provider::claude_editor::ConflictPolicy;
+                editor.on_conflict = if choice == choices[1] {
+                    ConflictPolicy::KeepMine
+                } else if choice == choices[2] {
+                    ConflictPolicy::KeepTheirs
+                } else {
+                    return Ok(false);
+                };
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
@@ -1922,7 +2007,18 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
     let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
 
-    let draft = provider_duplicate_draft(&source, &existing_ids);
+    let mut draft = provider_duplicate_draft(&source, &existing_ids);
+    let claude_editor = if matches!(app_type, AppType::Claude) {
+        let view = ProviderService::claude_editor_view(&state, &draft.settings_config)?;
+        draft.settings_config = view.settings;
+        Some(crate::services::provider::claude_editor::EditorSave {
+            base: view.base_for_new,
+            draft: None,
+            on_conflict: Default::default(),
+        })
+    } else {
+        None
+    };
 
     println!("\n{}", highlight(texts::current_config_header()));
     display_provider_summary(&draft, &app_type);
@@ -1994,7 +2090,14 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
         return Ok(());
     }
 
-    let duplicate = ProviderService::duplicate(&state, app_type, id, Some(copied))?;
+    let duplicate = if let Some(editor) = claude_editor {
+        if !save_claude_editor_interactive(&state, &copied, editor, Some(id))? {
+            return Ok(());
+        }
+        copied
+    } else {
+        ProviderService::duplicate(&state, app_type, id, Some(copied))?
+    };
     println!(
         "{}",
         success(&texts::provider_duplicated_success(id, &duplicate.id))

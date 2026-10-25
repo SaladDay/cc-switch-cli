@@ -73,7 +73,6 @@ pub(super) fn edit_common(
     current: Option<&str>,
     previous: Option<&str>,
 ) -> Result<(), AppError> {
-    use crate::live::patch::KeyPath;
     use serde_json::Value;
     fn parse(text: &str) -> Result<Value, AppError> {
         let value: Value =
@@ -85,25 +84,6 @@ pub(super) fn edit_common(
         }
         Ok(value)
     }
-    fn entries(value: &Value, path: KeyPath, out: &mut Vec<(KeyPath, Value)>) {
-        if let Some(map) = value.as_object() {
-            for (key, value) in map {
-                entries(value, path.child(key), out);
-            }
-        } else {
-            out.push((path, value.clone()));
-        }
-    }
-    fn global_claude(path: &KeyPath) -> bool {
-        use crate::live::floor;
-        match path.0.as_slice() {
-            [top, key, ..] if top == "env" => {
-                !floor::claude_floor_env(key) && !floor::claude_exclusive_env(key)
-            }
-            [top, ..] => top != "env" && !floor::claude_floor_top(top),
-            _ => false,
-        }
-    }
     let current = current
         .map(parse)
         .transpose()?
@@ -112,23 +92,6 @@ pub(super) fn edit_common(
         .and_then(|s| parse(s).ok())
         .unwrap_or(serde_json::json!({}));
     match prepared {
-        PreparedLiveWrite::Claude { patch } => {
-            let mut set = Vec::new();
-            entries(&current, KeyPath::root(), &mut set);
-            // Explicit common edits may change global settings; provider keys
-            // retain the values selected by the provider projection.
-            set.retain(|(path, _)| {
-                global_claude(path) && !patch.set.iter().any(|(key, _)| key == path)
-            });
-            patch.set.extend(set);
-            let mut old = Vec::new();
-            entries(&previous, KeyPath::root(), &mut old);
-            patch.remove_if.extend(
-                old.into_iter()
-                    .filter(|(path, _)| global_claude(path))
-                    .map(|(path, value)| (path, vec![value])),
-            );
-        }
         PreparedLiveWrite::Gemini { env, .. } => {
             for (key, value) in current.as_object().unwrap() {
                 if crate::live::floor::gemini_floor_env(key) {

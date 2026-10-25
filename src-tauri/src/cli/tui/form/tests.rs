@@ -43,9 +43,8 @@ fn normalize_template_provider_json(mut value: serde_json::Value) -> serde_json:
     if let Some(obj) = value.as_object_mut() {
         obj.remove("inFailoverQueue");
         if let Some(meta) = obj.get_mut("meta").and_then(|value| value.as_object_mut()) {
-            if meta.get("commonConfigEnabled") == Some(&json!(false)) {
-                meta.remove("commonConfigEnabled");
-            }
+            // Compatibility metadata is assigned on save, not part of a template.
+            meta.remove("commonConfigEnabled");
             if meta.is_empty() {
                 obj.remove("meta");
             }
@@ -1925,7 +1924,7 @@ fn provider_add_form_claude_fields_include_model_config_entry() {
 }
 
 #[test]
-fn provider_add_form_claude_places_quick_config_menu_below_common_config() {
+fn provider_add_form_claude_places_quick_config_menu_after_model_config() {
     let form = ProviderAddFormState::new(AppType::Claude);
     let fields = form.fields();
     let pos = |field: ProviderAddField| {
@@ -1936,7 +1935,7 @@ fn provider_add_form_claude_places_quick_config_menu_below_common_config() {
     };
     let advanced_divider_idx = pos(ProviderAddField::ClaudeAdvancedDivider);
     let model_cfg_idx = pos(ProviderAddField::ClaudeModelConfig);
-    let include_common_idx = pos(ProviderAddField::IncludeCommonConfig);
+    assert!(!fields.contains(&ProviderAddField::IncludeCommonConfig));
     let quick_config_idx = pos(ProviderAddField::ClaudeQuickConfig);
     let usage_divider_idx = pos(ProviderAddField::UsageQueryDivider);
 
@@ -1945,8 +1944,8 @@ fn provider_add_form_claude_places_quick_config_menu_below_common_config() {
         "model mapping should sit in the advanced section after the divider"
     );
     assert!(
-        quick_config_idx == include_common_idx + 1,
-        "the quick-config menu should sit directly below the add-common-config toggle"
+        quick_config_idx > model_cfg_idx,
+        "the quick-config menu follows the model configuration"
     );
     assert!(
         quick_config_idx < usage_divider_idx,
@@ -2006,204 +2005,6 @@ fn provider_add_form_claude_quick_config_menu_opens_and_toggles() {
 
     form.close_claude_quick_config_page();
     assert!(matches!(form.page, super::ProviderFormPage::Main));
-}
-
-#[test]
-fn provider_add_form_claude_quick_config_reflects_effective_common_config() {
-    use crate::provider::ProviderMeta;
-
-    let common_snippet = r#"{
-        "attribution": { "commit": "", "pr": "" },
-        "env": {
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-            "ENABLE_TOOL_SEARCH": "true",
-            "CLAUDE_CODE_EFFORT_LEVEL": "max",
-            "DISABLE_AUTOUPDATER": "1"
-        }
-    }"#;
-
-    let new_form = ProviderAddFormState::new_with_common_snippet(AppType::Claude, common_snippet);
-    assert!(new_form.include_common_config);
-    assert_eq!(new_form.claude_quick_config_enabled_count(), 5);
-    assert!(new_form.claude_effort_max);
-    assert!(!new_form.has_unsaved_changes());
-
-    let mut enabled_later = ProviderAddFormState::new(AppType::Claude);
-    enabled_later
-        .toggle_include_common_config(common_snippet)
-        .expect("common config should enable");
-    assert_eq!(enabled_later.claude_quick_config_enabled_count(), 5);
-
-    let mut provider = Provider::with_id(
-        "provider-1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider",
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            }
-        }),
-        None,
-    );
-    provider.meta = Some(ProviderMeta {
-        apply_common_config: Some(true),
-        ..Default::default()
-    });
-
-    let form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        common_snippet,
-    );
-    assert_eq!(form.claude_quick_config_enabled_count(), 5);
-    assert!(!form.has_unsaved_changes());
-
-    let raw = form.to_provider_json_value();
-    assert!(raw["settingsConfig"].get("attribution").is_none());
-    assert!(raw["settingsConfig"]["env"]
-        .get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
-        .is_none());
-    assert!(raw["settingsConfig"]["env"]
-        .get("CLAUDE_CODE_EFFORT_LEVEL")
-        .is_none());
-}
-
-#[test]
-fn provider_edit_form_claude_can_disable_inherited_effort_max() {
-    use crate::provider::ProviderMeta;
-
-    let common_snippet = r#"{"env":{"CLAUDE_CODE_EFFORT_LEVEL":"max"}}"#;
-    let mut provider = Provider::with_id(
-        "provider-1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider",
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            }
-        }),
-        None,
-    );
-    provider.meta = Some(ProviderMeta {
-        apply_common_config: Some(true),
-        ..Default::default()
-    });
-
-    let mut form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        common_snippet,
-    );
-    assert!(form.claude_effort_max);
-    assert_eq!(form.claude_quick_config_enabled_count(), 1);
-
-    form.toggle_claude_quick_config_field(ProviderAddField::ClaudeEffortMax, common_snippet)
-        .expect("inherited max effort should be editable");
-
-    assert!(!form.include_common_config);
-    assert!(!form.claude_effort_max);
-    let raw = form.to_provider_json_value();
-    assert_eq!(raw["meta"]["commonConfigEnabled"], false);
-    assert!(raw["settingsConfig"]["env"]
-        .get("CLAUDE_CODE_EFFORT_LEVEL")
-        .is_none());
-}
-
-#[test]
-fn provider_edit_form_claude_can_disable_inherited_quick_config() {
-    use crate::provider::ProviderMeta;
-
-    let common_snippet = r#"{
-        "attribution": { "commit": "", "pr": "" },
-        "env": {
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-            "ENABLE_TOOL_SEARCH": "true",
-            "DISABLE_AUTOUPDATER": "1",
-            "SHARED_FLAG": "keep-me"
-        }
-    }"#;
-    let mut provider = Provider::with_id(
-        "provider-1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider",
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            }
-        }),
-        None,
-    );
-    provider.meta = Some(ProviderMeta {
-        apply_common_config: Some(true),
-        ..Default::default()
-    });
-
-    let mut form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        common_snippet,
-    );
-    form.set_main_field_error(ProviderAddField::ClaudeBaseUrl, "invalid base URL");
-    form.set_usage_query_field_error(UsageQueryField::ApiKey, "missing query key");
-    form.toggle_claude_quick_config_field(ProviderAddField::ClaudeTeammates, common_snippet)
-        .expect("inherited quick config should be editable");
-
-    assert!(!form.include_common_config);
-    assert_eq!(form.claude_quick_config_enabled_count(), 3);
-    assert!(form.has_unsaved_changes());
-    assert_eq!(
-        form.main_field_error(ProviderAddField::ClaudeBaseUrl),
-        Some("invalid base URL")
-    );
-    assert_eq!(
-        form.usage_query_field_error(UsageQueryField::ApiKey),
-        Some("missing query key")
-    );
-
-    let saved = form.to_provider_json_value();
-    assert_eq!(saved["meta"]["commonConfigEnabled"], false);
-    assert!(saved["settingsConfig"]["env"]
-        .get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
-        .is_none());
-    assert_eq!(saved["settingsConfig"]["env"]["ENABLE_TOOL_SEARCH"], "true");
-    assert_eq!(saved["settingsConfig"]["env"]["SHARED_FLAG"], "keep-me");
-    assert_eq!(
-        saved["settingsConfig"]["attribution"],
-        json!({ "commit": "", "pr": "" })
-    );
-
-    let saved_provider: Provider =
-        serde_json::from_value(saved).expect("saved provider should deserialize");
-    let reopened = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &saved_provider,
-        common_snippet,
-    );
-    assert!(!reopened.include_common_config);
-    assert!(!reopened.claude_teammates);
-    assert!(reopened.claude_hide_attribution);
-    assert!(reopened.claude_tool_search);
-    assert!(reopened.claude_disable_auto_upgrade);
-}
-
-#[test]
-fn provider_add_form_claude_can_override_conflicting_common_quick_config() {
-    let common_snippet = r#"{
-        "env": { "ENABLE_TOOL_SEARCH": "false", "SHARED_FLAG": "keep-me" }
-    }"#;
-    let mut form = ProviderAddFormState::new_with_common_snippet(AppType::Claude, common_snippet);
-    assert!(form.include_common_config);
-    assert!(!form.claude_tool_search);
-
-    form.toggle_claude_quick_config_field(ProviderAddField::ClaudeToolSearch, common_snippet)
-        .expect("conflicting common quick config should be overridable");
-
-    assert!(!form.include_common_config);
-    assert!(form.claude_tool_search);
-    let saved = form.to_provider_json_value();
-    assert_eq!(saved["meta"]["commonConfigEnabled"], false);
-    assert_eq!(saved["settingsConfig"]["env"]["ENABLE_TOOL_SEARCH"], "true");
-    assert_eq!(saved["settingsConfig"]["env"]["SHARED_FLAG"], "keep-me");
 }
 
 #[test]
@@ -5224,55 +5025,6 @@ fn provider_add_form_has_unsaved_changes_roundtrip_edit_returns_clean() {
 }
 
 #[test]
-fn provider_add_form_common_config_json_merges_into_preview_but_not_raw_submit_payload() {
-    let mut form = ProviderAddFormState::new(AppType::Claude);
-    form.id.set("p1");
-    form.name.set("Provider One");
-    form.include_common_config = true;
-    form.claude_base_url.set("https://provider.example");
-    form.claude_api_key.set("sk-provider");
-
-    let raw = form.to_provider_json_value();
-    let raw_settings = raw
-        .get("settingsConfig")
-        .expect("settingsConfig should exist");
-
-    assert!(
-        raw_settings.get("alwaysThinkingEnabled").is_none(),
-        "raw submit payload should not include common snippet scalar keys"
-    );
-    assert_eq!(
-        raw_settings["env"]["ANTHROPIC_BASE_URL"], "https://provider.example",
-        "raw submit payload should still include provider-specific fields"
-    );
-    assert_eq!(raw_settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-provider");
-
-    let merged = form
-        .to_provider_json_value_with_common_config(
-            r#"{
-                "alwaysThinkingEnabled": false,
-                "env": {
-                    "ANTHROPIC_BASE_URL": "https://common.example",
-                    "COMMON_FLAG": "1"
-                }
-            }"#,
-        )
-        .expect("common config should merge");
-    let settings = merged
-        .get("settingsConfig")
-        .expect("settingsConfig should exist");
-
-    assert_eq!(settings["alwaysThinkingEnabled"], false);
-    assert_eq!(settings["env"]["COMMON_FLAG"], "1");
-    assert_eq!(
-        settings["env"]["ANTHROPIC_BASE_URL"], "https://common.example",
-        "common config should follow backend merge precedence"
-    );
-    assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-provider");
-    assert_eq!(merged["meta"]["commonConfigEnabled"], true);
-}
-
-#[test]
 fn provider_add_form_removes_legacy_apply_common_config_alias_from_meta() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     form.id.set("p1");
@@ -5376,8 +5128,8 @@ fn provider_add_form_defaults_common_config_from_effective_snippet_only() {
         r#"{"permissions":{"allow":["Bash"]}}"#,
     );
     assert!(
-        with_snippet.include_common_config,
-        "new provider should attach common config when a usable snippet exists"
+        !with_snippet.include_common_config,
+        "Claude no longer attaches legacy common snippets"
     );
 
     let blank_gemini =
@@ -5401,7 +5153,7 @@ fn provider_add_form_empty_common_config_toggle_matches_upstream_apps() {
     claude
         .toggle_include_common_config("")
         .expect("upstream Claude permits explicitly enabling an empty snippet");
-    assert!(claude.include_common_config);
+    assert!(!claude.include_common_config);
 
     for app_type in [AppType::Codex, AppType::Gemini] {
         let mut form = ProviderAddFormState::new(app_type);
@@ -5489,7 +5241,6 @@ fn gemini_empty_effective_snippet_matches_upstream_ui_state_transitions() {
 #[test]
 fn provider_form_disabling_malformed_common_config_matches_upstream_apps() {
     for (app_type, malformed) in [
-        (AppType::Claude, r#"{"env":{"#),
         (AppType::Codex, "[features\ngoals = true"),
         (AppType::Gemini, r#"{"BROKEN":"#),
     ] {
@@ -5511,7 +5262,7 @@ fn provider_add_form_empty_content_snippet_replacement_keeps_upstream_enabled_st
     claude
         .replace_common_config_snippet(claude_previous, "{}")
         .expect("valid Claude replacement should succeed");
-    assert!(claude.include_common_config);
+    assert!(!claude.include_common_config);
     assert!(!claude.claude_tool_search);
 
     let codex_previous = "[features]\ngoals = true\n";
@@ -5564,7 +5315,7 @@ fn provider_form_membership_rejects_valid_snippets_without_effective_content() {
 fn provider_form_array_membership_matches_upstream_ui_exactness() {
     let claude_snippet = r#"{"permissions":{"allow":["Bash"]}}"#;
     assert!(
-        ProviderAddFormState::settings_contain_common_config_for_form(
+        !ProviderAddFormState::settings_contain_common_config_for_form(
             &AppType::Claude,
             &json!({ "permissions": { "allow": ["Bash"] } }),
             claude_snippet,
@@ -5617,89 +5368,6 @@ fn provider_form_array_membership_matches_upstream_ui_exactness() {
 }
 
 #[test]
-fn claude_form_common_config_removal_treats_arrays_as_atomic() {
-    let snippet = r#"{"permissions":{"allow":["Bash"]}}"#;
-    let mut provider_owned = json!({
-        "permissions": { "allow": ["Read", "Bash"] }
-    });
-    strip_common_config_from_settings(&AppType::Claude, &mut provider_owned, snippet)
-        .expect("valid snippet should be removable");
-    assert_eq!(
-        provider_owned,
-        json!({ "permissions": { "allow": ["Read", "Bash"] } })
-    );
-
-    let mut exact = json!({
-        "permissions": { "allow": ["Bash"] },
-        "env": { "PROVIDER_ONLY": "keep" }
-    });
-    strip_common_config_from_settings(&AppType::Claude, &mut exact, snippet)
-        .expect("exact array should be removable");
-    assert_eq!(exact, json!({ "env": { "PROVIDER_ONLY": "keep" } }));
-}
-
-#[test]
-fn claude_form_common_config_recursively_ignores_upstream_forbidden_keys() {
-    let mixed_snippet = r#"{
-        "__proto__": {"COMMON": "drop"},
-        "env": {
-            "SAFE": "1",
-            "constructor": {"COMMON": "drop"},
-            "NESTED": [{"prototype": {"COMMON": "drop"}, "keep": "yes"}]
-        }
-    }"#;
-    let settings = json!({
-        "__proto__": {"PROVIDER_ONLY": "keep"},
-        "env": {
-            "SAFE": "1",
-            "constructor": {"PROVIDER_ONLY": "keep"},
-            "NESTED": [{"keep": "yes"}]
-        }
-    });
-    assert!(
-        ProviderAddFormState::settings_contain_common_config_for_form(
-            &AppType::Claude,
-            &settings,
-            mixed_snippet,
-        )
-    );
-
-    let mut stripped = settings.clone();
-    strip_common_config_from_settings(&AppType::Claude, &mut stripped, mixed_snippet)
-        .expect("valid sanitized snippet should be removable");
-    assert_eq!(
-        stripped,
-        json!({
-            "__proto__": {"PROVIDER_ONLY": "keep"},
-            "env": {"constructor": {"PROVIDER_ONLY": "keep"}}
-        })
-    );
-
-    let forbidden_only = r#"{"__proto__":{},"constructor":{},"prototype":{}}"#;
-    assert!(
-        !ProviderAddFormState::settings_contain_common_config_for_form(
-            &AppType::Claude,
-            &json!({}),
-            forbidden_only,
-        )
-    );
-    let mut new_form =
-        ProviderAddFormState::new_with_common_snippet(AppType::Claude, forbidden_only);
-    assert!(
-        new_form.include_common_config,
-        "upstream's new-form effect checks the raw object before merge filtering"
-    );
-    let effective = new_form
-        .to_provider_json_value_with_common_config(forbidden_only)
-        .expect("forbidden-only snippet should be a no-op");
-    assert!(effective["settingsConfig"].get("__proto__").is_none());
-    new_form
-        .toggle_claude_quick_config_field(ProviderAddField::ClaudeToolSearch, forbidden_only)
-        .expect("a later settings edit should succeed");
-    assert!(!new_form.include_common_config);
-}
-
-#[test]
 fn provider_edit_form_malformed_snippet_state_matches_upstream_apps() {
     let mut provider = Provider::with_id(
         "provider-1".to_string(),
@@ -5713,7 +5381,6 @@ fn provider_edit_form_malformed_snippet_state_matches_upstream_apps() {
     });
 
     for (app_type, snippet) in [
-        (AppType::Claude, r#"{"env":{"#),
         (AppType::Codex, "[features\ngoals = true"),
         (AppType::Gemini, r#"{"BROKEN":"#),
     ] {
@@ -5738,7 +5405,7 @@ fn provider_edit_form_valid_empty_snippet_matches_upstream_effect_order() {
 
     let claude =
         ProviderAddFormState::from_provider_with_common_snippet(AppType::Claude, &provider, "{}");
-    assert!(claude.include_common_config);
+    assert!(!claude.include_common_config);
 
     let codex = ProviderAddFormState::from_provider_with_common_snippet(
         AppType::Codex,
@@ -5787,11 +5454,6 @@ fn codex_edit_form_preserves_text_fallback_membership_for_malformed_config() {
 fn disabled_form_reinfers_membership_after_common_snippet_replacement() {
     for (app_type, settings, next_snippet) in [
         (
-            AppType::Claude,
-            json!({"env": {"SHARED": "claude"}}),
-            r#"{"env":{"SHARED":"claude"}}"#,
-        ),
-        (
             AppType::Codex,
             json!({"config": "[features]\ngoals = true\n"}),
             "[features]\ngoals = true\n",
@@ -5838,7 +5500,6 @@ fn provider_form_malformed_snippet_replacement_matches_upstream_apps() {
     assert_eq!(effective["settingsConfig"]["env"]["SHARED"], "next");
 
     for (app_type, malformed) in [
-        (AppType::Claude, r#"{"env":{"#),
         (AppType::Codex, "[features\ngoals = true"),
         (AppType::Gemini, r#"{"BROKEN":"#),
     ] {
@@ -5851,17 +5512,9 @@ fn provider_form_malformed_snippet_replacement_matches_upstream_apps() {
             "clearing should disable sharing for {app_type:?}"
         );
     }
-
-    let mut claude = ProviderAddFormState::new(AppType::Claude);
-    claude.include_common_config = true;
-    assert!(claude
-        .replace_common_config_snippet(r#"{"env":{"#, r#"{"env":{"ENABLE_TOOL_SEARCH":"true"}}"#,)
-        .is_err());
-    assert!(!claude.include_common_config);
 }
-
 #[test]
-fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
+fn provider_edit_form_preserves_missing_common_config_meta_for_legacy_claude() {
     let provider = Provider::with_id(
         "legacy-provider".to_string(),
         "Legacy Provider".to_string(),
@@ -5897,71 +5550,7 @@ fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
     )
     .expect("toggle should succeed");
     let toggled = form.to_provider_json_value();
-    assert_eq!(toggled["meta"]["commonConfigEnabled"], true);
-}
-
-#[test]
-fn provider_edit_form_missing_meta_inferrs_common_config_from_subset() {
-    let provider = Provider::with_id(
-        "legacy-provider".to_string(),
-        "Legacy Provider".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://provider.example",
-                "CC_SWITCH_SHARED": "1"
-            }
-        }),
-        None,
-    );
-
-    let form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#,
-    );
-
-    assert!(
-        form.include_common_config,
-        "missing-meta edit should infer common config usage when provider settings contain the snippet"
-    );
-    let raw = form.to_provider_json_value();
-    assert!(
-        raw.get("meta")
-            .and_then(|meta| meta.get("commonConfigEnabled"))
-            .is_none(),
-        "inferred missing-meta usage should not force explicit meta until the user toggles"
-    );
-}
-
-#[test]
-fn provider_edit_form_quick_edit_persists_inferred_common_config_opt_in() {
-    let common_snippet = r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#;
-    let provider = Provider::with_id(
-        "legacy-provider".to_string(),
-        "Legacy Provider".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://provider.example",
-                "CC_SWITCH_SHARED": "1"
-            }
-        }),
-        None,
-    );
-
-    let mut form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        common_snippet,
-    );
-    assert!(form.include_common_config);
-
-    form.toggle_claude_quick_config_field(ProviderAddField::ClaudeToolSearch, common_snippet)
-        .expect("provider-only quick edit should succeed");
-
-    let saved = form.to_provider_json_value();
-    assert!(form.include_common_config);
-    assert!(form.claude_tool_search);
-    assert_eq!(saved["meta"]["commonConfigEnabled"], true);
+    assert!(toggled["meta"].get("commonConfigEnabled").is_none());
 }
 
 #[test]
@@ -6021,102 +5610,6 @@ fn provider_edit_form_apply_provider_json_keeps_locked_id() {
     assert_eq!(form.id.value, "locked-id");
     assert_eq!(form.name.value, "Edited Name");
     assert_eq!(form.claude_base_url.value, "https://after.example");
-}
-
-#[test]
-fn provider_add_form_disabling_common_config_strips_common_fields_from_json() {
-    let mut form = ProviderAddFormState::new(AppType::Claude);
-    form.id.set("p1");
-    form.name.set("Provider One");
-    form.include_common_config = true;
-
-    let parsed = Provider::with_id(
-        "p1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "alwaysThinkingEnabled": false,
-            "statusLine": {
-                "type": "command",
-                "command": "~/.claude/statusline.sh",
-                "padding": 0
-            },
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            }
-        }),
-        None,
-    );
-    form.apply_provider_json_to_fields(&parsed);
-
-    let common = r#"{
-        "alwaysThinkingEnabled": false,
-        "statusLine": {
-            "type": "command",
-            "command": "~/.claude/statusline.sh",
-            "padding": 0
-        }
-    }"#;
-    form.toggle_include_common_config(common)
-        .expect("toggle should succeed");
-
-    assert!(
-        !form.include_common_config,
-        "toggle should disable include_common_config"
-    );
-    let provider = form.to_provider_json_value();
-    let settings = provider
-        .get("settingsConfig")
-        .expect("settingsConfig should exist");
-    assert!(
-        settings.get("alwaysThinkingEnabled").is_none(),
-        "common scalar field should be removed after disabling common config"
-    );
-    assert!(
-        settings.get("statusLine").is_none(),
-        "common nested field should be removed after disabling common config"
-    );
-}
-
-#[test]
-fn provider_add_form_disabling_common_config_preserves_provider_specific_env_keys() {
-    let mut form = ProviderAddFormState::new(AppType::Claude);
-    form.id.set("p1");
-    form.name.set("Provider One");
-    form.include_common_config = true;
-
-    let parsed = Provider::with_id(
-        "p1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://common.example",
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider"
-            }
-        }),
-        None,
-    );
-    form.apply_provider_json_to_fields(&parsed);
-
-    form.toggle_include_common_config(r#"{"env":{"ANTHROPIC_BASE_URL":"https://common.example"}}"#)
-        .expect("toggle should succeed");
-
-    let provider = form.to_provider_json_value();
-    let env = provider
-        .get("settingsConfig")
-        .and_then(|settings| settings.get("env"))
-        .and_then(|value| value.as_object())
-        .expect("env should exist");
-
-    assert!(
-        env.get("ANTHROPIC_BASE_URL").is_none(),
-        "common env keys should be removed"
-    );
-    assert_eq!(
-        env.get("ANTHROPIC_AUTH_TOKEN")
-            .and_then(|value| value.as_str()),
-        Some("sk-provider"),
-        "provider-specific env keys should be preserved"
-    );
 }
 
 #[test]
@@ -8556,4 +8049,37 @@ fn codex_auth_form_uses_case_sensitive_current_builtin_ids() {
             );
         }
     }
+}
+
+#[test]
+fn claude_editor_context_and_global_values_survive_json_and_template_changes() {
+    let base = json!({"env":{"ANTHROPIC_AUTH_TOKEN":"key","ANTHROPIC_BASE_URL":"https://old.example","GLOBAL_ENV":"keep"},"language":"chinese","permissions":{"allow":["Read"]}});
+    let provider = Provider::with_id("old".into(), "Old".into(), base.clone(), None);
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    form.claude_editor = Some(crate::services::provider::claude_editor::EditorSave {
+        base: base.clone(),
+        draft: None,
+        on_conflict: Default::default(),
+    });
+    let mut value = form.to_provider_json_value();
+    value["settingsConfig"]["language"] = json!("english");
+    value["settingsConfig"]
+        .as_object_mut()
+        .unwrap()
+        .remove("permissions");
+    form.apply_provider_json_value_to_fields(value).unwrap();
+    assert_eq!(form.claude_editor.as_ref().unwrap().base, base);
+    assert!(form.to_provider_json_value()["settingsConfig"]
+        .get("permissions")
+        .is_none());
+    form.apply_template(0, &[]);
+    let settings = &form.to_provider_json_value()["settingsConfig"];
+    assert_eq!(settings["language"], "english");
+    assert_eq!(settings["env"]["GLOBAL_ENV"], "keep");
+    assert!(settings.get("permissions").is_none());
+    assert_eq!(form.claude_editor.as_ref().unwrap().base, base);
+    assert!(!form
+        .fields()
+        .contains(&ProviderAddField::IncludeCommonConfig));
+    assert!(!form.fields().contains(&ProviderAddField::CommonSnippet));
 }

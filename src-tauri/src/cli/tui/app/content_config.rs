@@ -1529,6 +1529,16 @@ impl App {
         initial_override: Option<String>,
         source: CommonSnippetViewSource,
     ) {
+        if matches!(app_type, AppType::Claude) {
+            self.push_toast(
+                crate::t!(
+                    "Edit Claude settings in the provider configuration editor.",
+                    "请在供应商配置编辑器中修改 Claude 设置。"
+                ),
+                ToastKind::Warning,
+            );
+            return;
+        }
         let snippet = initial_override.unwrap_or_else(|| {
             let snippet = self.common_snippet_text_for(&app_type, data);
             if snippet.trim().is_empty() {
@@ -1566,6 +1576,52 @@ impl App {
         });
     }
 
+    fn initialize_claude_editor(&mut self, data: &UiData) {
+        if !matches!(self.app_type, AppType::Claude) {
+            return;
+        }
+        let result = (|| -> Result<(), crate::error::AppError> {
+            let Some(FormState::ProviderAdd(form)) = self.form.as_mut() else {
+                return Ok(());
+            };
+            let mut provider: crate::provider::Provider =
+                serde_json::from_value(form.to_provider_json_value())
+                    .map_err(|e| crate::error::AppError::Message(e.to_string()))?;
+            let current = data
+                .providers
+                .rows
+                .iter()
+                .find(|row| row.is_current)
+                .map(|row| &row.provider);
+            let view = crate::services::provider::claude_editor::view_for_current(
+                &provider.settings_config,
+                current,
+            )?;
+            provider.settings_config = view.settings.clone();
+            form.apply_provider_json_value_to_fields(
+                serde_json::to_value(&provider)
+                    .map_err(|e| crate::error::AppError::Message(e.to_string()))?,
+            )
+            .map_err(crate::error::AppError::Message)?;
+            form.claude_inactive = view.inactive;
+            form.capture_initial_snapshot();
+            form.claude_editor = Some(crate::services::provider::claude_editor::EditorSave {
+                base: if form.mode.is_edit() {
+                    view.settings
+                } else {
+                    view.base_for_new
+                },
+                draft: None,
+                on_conflict: Default::default(),
+            });
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.form = None;
+            self.push_toast(error.to_string(), ToastKind::Error);
+        }
+    }
+
     pub(crate) fn open_provider_add_form(&mut self, data: &UiData) {
         self.filter.active = false;
         self.overlay = Overlay::None;
@@ -1577,6 +1633,7 @@ impl App {
                 &data.config.common_snippet,
             ),
         ));
+        self.initialize_claude_editor(data);
         self.maybe_show_common_config_notice();
     }
 
@@ -1596,6 +1653,7 @@ impl App {
                 &data.config.common_snippet,
             ),
         ));
+        self.initialize_claude_editor(data);
         self.maybe_show_common_config_notice();
     }
 
@@ -1616,6 +1674,7 @@ impl App {
                 &data.existing_provider_ids(),
             ),
         ));
+        self.initialize_claude_editor(data);
         self.maybe_show_common_config_notice();
     }
 

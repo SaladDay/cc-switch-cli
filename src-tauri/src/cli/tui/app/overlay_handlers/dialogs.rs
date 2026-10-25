@@ -77,10 +77,44 @@ impl App {
             return None;
         };
         let confirm = confirm.clone();
+        if let ConfirmAction::ClaudeEditorConflict { submit, content } = confirm.action {
+            use crate::services::provider::claude_editor::ConflictPolicy;
+            let policy = match key.code {
+                KeyCode::Char('m') | KeyCode::Char('M') => ConflictPolicy::KeepMine,
+                KeyCode::Char('t') | KeyCode::Char('T') => ConflictPolicy::KeepTheirs,
+                KeyCode::Esc => {
+                    self.close_overlay();
+                    return Some(Action::None);
+                }
+                _ => return Some(Action::None),
+            };
+            if let Some(FormState::ProviderAdd(form)) = self.form.as_mut() {
+                if let Some(editor) = form.claude_editor.as_mut() {
+                    editor.on_conflict = policy;
+                }
+            }
+            self.close_overlay();
+            return Some(Action::EditorSubmit { submit, content });
+        }
 
         let action = match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 let action = match &confirm.action {
+                    ConfirmAction::ClaudeEditorConflict { .. } => Action::None,
+                    ConfirmAction::ClaudeCopyInactive => {
+                        if let Some(FormState::ProviderAdd(form)) = self.form.as_mut() {
+                            let mut value = form.to_provider_json_value();
+                            crate::services::provider::claude_editor::copy_inactive_fields(
+                                &mut value["settingsConfig"],
+                                &form.claude_inactive,
+                            );
+                            if let Ok(provider) = serde_json::from_value(value) {
+                                form.apply_provider_json_to_fields(&provider);
+                                form.claude_inactive.clear();
+                            }
+                        }
+                        Action::None
+                    }
                     ConfirmAction::Quit => Action::Quit,
                     ConfirmAction::ProviderDelete { id } => {
                         Action::ProviderDelete { id: id.clone() }
