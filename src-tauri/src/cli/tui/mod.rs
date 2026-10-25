@@ -292,15 +292,6 @@ fn queue_current_quota_refresh_if_due(
         return;
     };
 
-    if matches!(
-        target.kind,
-        crate::cli::provider_quota::QuotaTargetKind::CodexOAuth { .. }
-    ) && target.auto_query_interval_minutes == 0
-    {
-        app.quota_auto_target_key = None;
-        app.quota_last_auto_tick = None;
-        return;
-    }
     let target_key = target.cache_key();
     let target_changed = app.quota_auto_target_key.as_deref() != Some(target_key.as_str());
     let target_missing_state = data.quota.state_for(&target.provider_id).is_none();

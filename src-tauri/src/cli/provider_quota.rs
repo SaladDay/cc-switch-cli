@@ -98,7 +98,7 @@ pub(crate) fn quota_target_for_provider(
         .as_ref()
         .and_then(|meta| meta.usage_script.as_ref());
 
-    if is_codex_oauth_provider(provider) {
+    if provider.is_codex_oauth() {
         return Some(QuotaTarget {
             app_type: app_type.clone(),
             provider_id: id.to_string(),
@@ -109,10 +109,7 @@ pub(crate) fn quota_target_for_provider(
                     .as_ref()
                     .and_then(|meta| meta.managed_account_id_for("codex_oauth")),
             },
-            auto_query_interval_minutes: usage_script
-                .filter(|script| script.enabled)
-                .and_then(|script| script.auto_query_interval)
-                .unwrap_or(0),
+            auto_query_interval_minutes: 5,
         });
     }
 
@@ -135,8 +132,7 @@ pub(crate) fn quota_target_for_provider(
                 });
             }
             // Ignore an imported or hand-edited native template on a custom
-            // provider. Managed OAuth providers may still use their own quota
-            // path below.
+            // provider.
         } else {
             // Official providers expose only the native subscription template.
             // A stale script template must not bypass the opt-in switch.
@@ -239,14 +235,6 @@ pub(crate) fn usage_number(value: f64) -> String {
     } else {
         format!("{value:.2}")
     }
-}
-
-fn is_codex_oauth_provider(provider: &Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.provider_type.as_deref())
-        .is_some_and(|value| value == "codex_oauth")
 }
 
 #[cfg(test)]
@@ -408,55 +396,35 @@ mod tests {
     }
 
     #[test]
-    fn managed_codex_quota_ignores_templates_and_preserves_account_scheduling() {
+    fn codex_oauth_quota_ignores_usage_templates_and_keeps_account_refresh() {
         let mut keys = Vec::new();
         for account in ["acct-1", "acct-2"] {
-            let mut provider = test_provider("oauth", "Unrelated name", json!({}));
-            set_usage_script(&mut provider, true, "general");
-            let meta = provider.meta.as_mut().unwrap();
-            meta.provider_type = Some("codex_oauth".into());
-            meta.auth_binding = Some(AuthBinding {
-                source: AuthBindingSource::ManagedAccount,
-                auth_provider: Some("codex_oauth".into()),
-                account_id: Some(account.into()),
-            });
-            for interval in [0, 3] {
-                provider
-                    .meta
-                    .as_mut()
-                    .unwrap()
-                    .usage_script
-                    .as_mut()
-                    .unwrap()
-                    .auto_query_interval = Some(interval);
-                let target =
-                    quota_target_for_provider(&AppType::Claude, "oauth", &provider).unwrap();
-                assert_eq!(
-                    target.kind,
-                    QuotaTargetKind::CodexOAuth {
-                        account_id: Some(account.into())
+            for template in ["general", "balance", "official_subscription"] {
+                for enabled in [false, true] {
+                    let mut provider = test_provider("oauth", "Unrelated name", json!({}));
+                    set_usage_script(&mut provider, enabled, template);
+                    let meta = provider.meta.as_mut().unwrap();
+                    meta.provider_type = Some("codex_oauth".into());
+                    meta.auth_binding = Some(AuthBinding {
+                        source: AuthBindingSource::ManagedAccount,
+                        auth_provider: Some("codex_oauth".into()),
+                        account_id: Some(account.into()),
+                    });
+                    meta.usage_script.as_mut().unwrap().auto_query_interval = Some(0);
+                    let target = quota_target_for_provider(&AppType::Claude, "oauth", &provider)
+                        .expect("native quota target");
+                    assert_eq!(
+                        target.kind,
+                        QuotaTargetKind::CodexOAuth {
+                            account_id: Some(account.into()),
+                        }
+                    );
+                    assert_eq!(target.auto_query_interval_minutes, 5);
+                    if template == "general" && enabled {
+                        keys.push(target.cache_key());
                     }
-                );
-                assert_eq!(target.auto_query_interval_minutes, interval);
+                }
             }
-            provider
-                .meta
-                .as_mut()
-                .unwrap()
-                .usage_script
-                .as_mut()
-                .unwrap()
-                .enabled = false;
-            assert_eq!(
-                quota_target_for_provider(&AppType::Claude, "oauth", &provider)
-                    .unwrap()
-                    .auto_query_interval_minutes,
-                0
-            );
-            provider.meta.as_mut().unwrap().usage_script = None;
-            let target = quota_target_for_provider(&AppType::Claude, "oauth", &provider).unwrap();
-            assert_eq!(target.auto_query_interval_minutes, 0);
-            keys.push(target.cache_key());
         }
         assert_ne!(keys[0], keys[1]);
     }

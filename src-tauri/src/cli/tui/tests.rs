@@ -5799,25 +5799,3 @@ fn periodic_usage_sync_waits_one_interval_and_honors_the_opt_out() {
     queue_usage_session_sync_if_due(&mut app, Some(&tx), &mut tracker);
     assert!(rx.try_recv().is_err(), "opting out disables the re-sync");
 }
-
-#[test]
-fn managed_codex_quota_auto_off_skips_initial_query_but_manual_refresh_works() {
-    let mut app = App::new(Some(AppType::Claude));
-    let mut data = UiData {
-        providers: official_claude_providers(),
-        ..UiData::default()
-    };
-    let row = &mut data.providers.rows[0];
-    let meta = row.provider.meta.as_mut().unwrap();
-    meta.provider_type = Some("codex_oauth".into());
-    meta.usage_script = None;
-    let provider_id = row.id.clone();
-    let (tx, rx) = mpsc::channel();
-    for tick in [0, 100 * TUI_TICKS_PER_MINUTE] {
-        app.tick = tick;
-        queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&tx));
-        assert!(rx.try_recv().is_err());
-    }
-    queue_provider_quota_refresh(&mut app, &mut data, Some(&tx), &provider_id);
-    assert!(matches!(rx.try_recv(), Ok(QuotaReq::Refresh { .. })));
-}

@@ -8305,41 +8305,44 @@ fn claude_fallback_one_m_is_adjacent_and_resets_with_template() {
 }
 
 #[test]
-fn managed_codex_quota_form_preserves_binding_and_native_query() {
+fn codex_oauth_hides_usage_query_and_preserves_binding_and_saved_script() {
+    for script in [
+        serde_json::Value::Null,
+        json!({
+            "enabled": true, "language": "javascript", "code": "invalid legacy script",
+            "templateType": "general", "autoQueryInterval": 0
+        }),
+    ] {
+        let mut value = json!({
+            "id": "oauth", "name": "Account", "settingsConfig": {},
+            "meta": {"providerType": "codex_oauth", "authBinding": {
+                "source": "managed_account", "authProvider": "codex_oauth", "accountId": "acct-1"
+            }}
+        });
+        if !script.is_null() {
+            value["meta"]["usage_script"] = script;
+        }
+        let provider: Provider = serde_json::from_value(value.clone()).unwrap();
+        let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+        assert!(!form.fields().contains(&ProviderAddField::UsageQuery));
+        assert!(!form.fields().contains(&ProviderAddField::UsageQueryDivider));
+        form.open_usage_query_page();
+        assert!(matches!(form.page, ProviderFormPage::Main));
+        assert!(form.usage_query_script_validation_error().is_none());
+        form.name.set("Renamed account");
+        let saved = form.to_provider_json_value();
+        assert_eq!(saved["meta"]["authBinding"], value["meta"]["authBinding"]);
+        assert_eq!(saved["meta"]["usage_script"], value["meta"]["usage_script"]);
+        let reopened = ProviderAddFormState::from_provider(
+            AppType::Claude,
+            &serde_json::from_value(saved).unwrap(),
+        );
+        assert!(!reopened.fields().contains(&ProviderAddField::UsageQuery));
+    }
     let provider: Provider = serde_json::from_value(json!({
-        "id": "oauth", "name": "Account", "settingsConfig": {},
-        "meta": {"providerType": "codex_oauth", "authBinding": {
-            "source": "managed_account", "authProvider": "codex_oauth", "accountId": "acct-1"
-        }}
+        "id": "custom", "name": "Codex OAuth", "settingsConfig": {}
     }))
     .unwrap();
-    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
-    form.open_usage_query_page();
-    assert!(!form.usage_query_enabled);
-    assert_eq!(form.usage_query_fields(), vec![UsageQueryField::Enabled]);
-    assert!(form.to_provider_json_value()["meta"]
-        .get("usage_script")
-        .is_none());
-    form.toggle_usage_query_enabled();
-    assert_eq!(
-        form.usage_query_fields(),
-        vec![UsageQueryField::Enabled, UsageQueryField::AutoInterval]
-    );
-    let saved = form.to_provider_json_value();
-    assert_eq!(
-        saved["meta"]["authBinding"],
-        serde_json::to_value(&provider).unwrap()["meta"]["authBinding"]
-    );
-    assert_eq!(
-        saved["meta"]["usage_script"]["templateType"],
-        "official_subscription"
-    );
-    assert_eq!(saved["meta"]["usage_script"]["code"], "");
-    let saved: Provider = serde_json::from_value(saved).unwrap();
-    let mut reopened = ProviderAddFormState::from_provider(AppType::Claude, &saved);
-    reopened.open_usage_query_page();
-    assert!(reopened.usage_query_enabled);
-    reopened.toggle_usage_query_enabled();
-    let saved: Provider = serde_json::from_value(reopened.to_provider_json_value()).unwrap();
-    assert!(!ProviderAddFormState::from_provider(AppType::Claude, &saved).usage_query_enabled);
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert!(form.fields().contains(&ProviderAddField::UsageQuery));
 }

@@ -1839,9 +1839,6 @@ pub(crate) fn usage_query_field_label_and_value(
     field: super::form::UsageQueryField,
 ) -> (String, String) {
     let label = match field {
-        super::form::UsageQueryField::Enabled if provider.uses_managed_codex_quota() => {
-            texts::tui_managed_codex_auto_refresh().to_string()
-        }
         super::form::UsageQueryField::Enabled => texts::tui_usage_query_enable().to_string(),
         super::form::UsageQueryField::Template => texts::tui_usage_query_template().to_string(),
         super::form::UsageQueryField::ApiKey => {
@@ -2182,17 +2179,6 @@ pub(crate) fn provider_field_label_and_value(
             .copied()
             .unwrap_or_default()
             .to_string(),
-        ProviderAddField::UsageQuery if provider.uses_managed_codex_quota() => {
-            format!(
-                "{}: {} ›",
-                texts::tui_managed_codex_auto_refresh(),
-                if provider.usage_query_enabled {
-                    texts::enabled()
-                } else {
-                    texts::disabled()
-                }
-            )
-        }
         ProviderAddField::UsageQuery => {
             if provider.usage_query_enabled {
                 format!(

@@ -598,8 +598,12 @@ impl ProviderAddFormState {
             AppType::Codex => fields.push(ProviderAddField::CodexQuickConfig),
             _ => {}
         }
-        fields.push(ProviderAddField::UsageQueryDivider);
-        fields.push(ProviderAddField::UsageQuery);
+        // Managed Codex OAuth uses the bound account's native quota, like the
+        // desktop provider card; generic usage templates do not apply.
+        if !self.is_claude_codex_oauth_provider() {
+            fields.push(ProviderAddField::UsageQueryDivider);
+            fields.push(ProviderAddField::UsageQuery);
+        }
 
         // Add mode leads with the template picker row plus its divider, so the
         // template reads as its own group above the real fields. Inserted last
@@ -626,21 +630,7 @@ impl ProviderAddFormState {
             .unwrap_or(0)
     }
 
-    pub fn uses_managed_codex_quota(&self) -> bool {
-        self.extra
-            .pointer("/meta/providerType")
-            .and_then(Value::as_str)
-            == Some("codex_oauth")
-    }
-
     pub fn usage_query_fields(&self) -> Vec<UsageQueryField> {
-        if self.uses_managed_codex_quota() {
-            let mut fields = vec![UsageQueryField::Enabled];
-            if self.usage_query_enabled {
-                fields.push(UsageQueryField::AutoInterval);
-            }
-            return fields;
-        }
         let mut fields = vec![UsageQueryField::Enabled];
 
         if !self.usage_query_enabled {
@@ -709,7 +699,8 @@ impl ProviderAddFormState {
     }
 
     pub fn usage_query_script_validation_error(&self) -> Option<&'static str> {
-        if !self.usage_query_enabled
+        if self.is_claude_codex_oauth_provider()
+            || !self.usage_query_enabled
             || matches!(
                 self.usage_query_template,
                 UsageQueryTemplate::GitHubCopilot
@@ -1550,6 +1541,9 @@ impl ProviderAddFormState {
     }
 
     pub fn open_usage_query_page(&mut self) {
+        if self.is_claude_codex_oauth_provider() {
+            return;
+        }
         self.refresh_usage_query_provider_kind();
         self.refresh_default_usage_query_template();
         self.page = ProviderFormPage::UsageQuery;
@@ -1806,7 +1800,7 @@ impl ProviderAddFormState {
     }
 
     pub fn refresh_default_usage_query_template(&mut self) {
-        if self.usage_query_official_subscription || self.uses_managed_codex_quota() {
+        if self.usage_query_official_subscription {
             if self.usage_query_template != UsageQueryTemplate::OfficialSubscription {
                 self.set_usage_query_template(UsageQueryTemplate::OfficialSubscription);
             }
@@ -2040,7 +2034,7 @@ impl ProviderAddFormState {
     }
 
     pub fn available_usage_query_templates(&self) -> Vec<UsageQueryTemplate> {
-        if self.usage_query_official_subscription || self.uses_managed_codex_quota() {
+        if self.usage_query_official_subscription {
             return vec![UsageQueryTemplate::OfficialSubscription];
         }
 
@@ -2054,11 +2048,6 @@ impl ProviderAddFormState {
 
     pub fn set_usage_query_template(&mut self, template: UsageQueryTemplate) {
         self.clear_usage_query_field_error(UsageQueryField::Script);
-        let template = if self.uses_managed_codex_quota() {
-            UsageQueryTemplate::OfficialSubscription
-        } else {
-            template
-        };
         self.usage_query_template = template;
         match template {
             UsageQueryTemplate::Custom => {
@@ -2189,10 +2178,6 @@ impl ProviderAddFormState {
     }
 
     pub fn refresh_usage_query_provider_kind(&mut self) {
-        if self.uses_managed_codex_quota() {
-            self.set_usage_query_template(UsageQueryTemplate::OfficialSubscription);
-            return;
-        }
         let was_official = self.usage_query_official_subscription;
         let is_official = serde_json::from_value::<Provider>(self.to_provider_json_value())
             .ok()
