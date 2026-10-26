@@ -10,6 +10,7 @@ use super::transform_responses::{
     build_anthropic_usage_from_responses, map_responses_stop_reason,
     sanitize_anthropic_tool_use_input_json,
 };
+use super::reasoning_bridge::encode_openai_reasoning_item;
 
 #[inline]
 fn response_object_from_event(data: &Value) -> &Value {
@@ -226,6 +227,7 @@ pub fn create_anthropic_sse_stream_from_responses(
                                 | "response.refusal.delta"
                                 | "response.function_call_arguments.delta"
                                 | "response.reasoning.delta"
+                                | "response.reasoning_text.delta"
                         ) && !has_sent_message_start
                         {
                             yield Ok(message_start_sse(
@@ -553,7 +555,7 @@ pub fn create_anthropic_sse_stream_from_responses(
                                     tool_args_by_index.remove(&index);
                                 }
                             }
-                            "response.reasoning.delta" => {
+                            "response.reasoning.delta" | "response.reasoning_text.delta" => {
                                 if let Some(delta) = data
                                     .get("delta")
                                     .or_else(|| data.get("text"))
@@ -596,7 +598,7 @@ pub fn create_anthropic_sse_stream_from_responses(
                                     yield Ok(Bytes::from(sse));
                                 }
                             }
-                            "response.reasoning.done" => {
+                            "response.reasoning.done" | "response.reasoning_text.done" => {
                                 let key = content_part_key(&data);
                                 let index = if let Some(k) = key {
                                     index_by_key.get(&k).copied()
@@ -606,6 +608,38 @@ pub fn create_anthropic_sse_stream_from_responses(
                                 if let Some(index) = index {
                                     if !open_indices.remove(&index) {
                                         continue;
+                                    }
+                                    if let Some(text) = data
+                                        .get("text")
+                                        .and_then(Value::as_str)
+                                        .filter(|text| !text.is_empty())
+                                    {
+                                        let mut reasoning_item = json!({
+                                            "type": "reasoning",
+                                            "summary": [],
+                                            "content": [{"type": "reasoning_text", "text": text}]
+                                        });
+                                        if let Some(item_id) = data
+                                            .get("item_id")
+                                            .and_then(Value::as_str)
+                                            .filter(|id| !id.is_empty())
+                                        {
+                                            reasoning_item["id"] = json!(item_id);
+                                        }
+                                        if let Some(envelope) =
+                                            encode_openai_reasoning_item(&reasoning_item)
+                                        {
+                                            let event = json!({
+                                                "type": "content_block_delta",
+                                                "index": index,
+                                                "delta": {
+                                                    "type": "signature_delta",
+                                                    "signature": envelope
+                                                }
+                                            });
+                                            let sse = format!("event: content_block_delta\ndata: {}\n\n", serde_json::to_string(&event).unwrap_or_default());
+                                            yield Ok(Bytes::from(sse));
+                                        }
                                     }
                                     let event = json!({ "type": "content_block_stop", "index": index });
                                     let sse = format!("event: content_block_stop\ndata: {}\n\n", serde_json::to_string(&event).unwrap_or_default());

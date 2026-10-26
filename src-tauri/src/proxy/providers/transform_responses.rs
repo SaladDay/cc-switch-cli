@@ -7,6 +7,10 @@ use crate::proxy::{
 };
 use serde_json::{json, Value};
 
+use super::reasoning_bridge::{
+    anthropic_block_from_openai_reasoning_item, openai_reasoning_item_from_anthropic_block,
+};
+
 pub(crate) const TOOL_RESULT_ERROR_MARKER: &str = "[cc-switch:tool-result-error]";
 
 fn anthropic_image_to_responses_part(block: &Value) -> Option<Value> {
@@ -615,7 +619,11 @@ fn convert_messages_to_input(messages: &[Value]) -> Result<Vec<Value>, ProxyErro
                                 "output": output
                             }));
                         }
-                        "thinking" => {}
+                        "thinking" | "redacted_thinking" => {
+                            if let Some(item) = openai_reasoning_item_from_anthropic_block(block) {
+                                input.push(item);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -688,25 +696,8 @@ pub fn responses_to_anthropic(body: Value) -> Result<Value, ProxyError> {
                 has_tool_use = true;
             }
             "reasoning" => {
-                if let Some(summary) = item.get("summary").and_then(|s| s.as_array()) {
-                    let thinking_text: String = summary
-                        .iter()
-                        .filter_map(|s| {
-                            if s.get("type").and_then(|t| t.as_str()) == Some("summary_text") {
-                                s.get("text").and_then(|t| t.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-
-                    if !thinking_text.is_empty() {
-                        content.push(json!({
-                            "type": "thinking",
-                            "thinking": thinking_text
-                        }));
-                    }
+                if let Some(block) = anthropic_block_from_openai_reasoning_item(item) {
+                    content.push(block);
                 }
             }
             _ => {}
@@ -733,6 +724,71 @@ pub fn responses_to_anthropic(body: Value) -> Result<Value, ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deepseek_plaintext_reasoning_round_trips_through_anthropic_history() {
+        let original = json!({
+            "id": "fixture_reasoning",
+            "type": "reasoning",
+            "summary": [],
+            "content": [
+                {"type": "reasoning_text", "text": "Need to call lookup."}
+            ]
+        });
+        let response = json!({
+            "id": "resp_deepseek",
+            "status": "completed",
+            "model": "deepseek-flash",
+            "output": [
+                original.clone(),
+                {
+                    "type": "function_call",
+                    "id": "call_lookup",
+                    "call_id": "call_lookup",
+                    "name": "lookup",
+                    "arguments": "{}"
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 2}
+        });
+
+        let anthropic = responses_to_anthropic(response).expect("responses_to_anthropic");
+        let thinking = anthropic["content"][0].clone();
+        assert_eq!(thinking["type"], "thinking");
+        assert_eq!(thinking["thinking"], "Need to call lookup.");
+        assert!(thinking["signature"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("ccswitch-openai-reasoning-v1:")));
+
+        let replay = anthropic_to_responses(
+            json!({
+                "model": "deepseek-flash",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            thinking,
+                            {"type": "tool_use", "id": "call_lookup", "name": "lookup", "input": {}}
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call_lookup", "content": "lookup result"}
+                        ]
+                    }
+                ]
+            }),
+            None,
+            false,
+            false,
+        )
+        .expect("anthropic_to_responses");
+
+        assert_eq!(replay["input"][0], original);
+        assert_eq!(replay["input"][1]["type"], "function_call");
+        assert_eq!(replay["input"][2]["type"], "function_call_output");
+    }
 
     #[test]
     fn anthropic_to_responses_removes_billing_header_from_system_string() {
