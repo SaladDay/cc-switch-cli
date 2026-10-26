@@ -34,12 +34,12 @@ use rust_decimal::Decimal;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
 
 const CODEX_THREAD_REQUEST_ID_PREFIX: &str = "codex_session:thread-v1";
@@ -90,8 +90,22 @@ struct ParsedCodexFile {
 
 #[derive(Debug, Clone)]
 struct RootMeta {
+    /// Stable logical thread ID; replacement rollouts have a separate filename suffix ID.
+    meta_thread_id: Option<String>,
     timestamp: Option<DateTime<Utc>>,
     parent: ParentResolution,
+    /// Paginated replacements reference inherited history instead of copying it.
+    is_paginated_replacement: bool,
+    is_paginated: bool,
+    history_base: Result<Option<ParentHistoryBase>, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParentHistoryBase {
+    /// This protocol field is named thread_id, but identifies a physical rollout.
+    rollout_id: String,
+    end_ordinal_exclusive: u64,
+    end_byte_offset: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +124,7 @@ struct PendingEntry {
 
 /// 父 rollout 快照的新鲜度戳
 ///
-/// 由**已打开句柄**的 `fstat` 生成（见 `parent_signatures_before`）：戳与随后读到
+/// 由**已打开句柄**的 `fstat` 生成（见 `load_parent_snapshot`）：戳与随后读到
 /// 的内容必然出自同一个文件对象，不存在"stat 到 A、读到 B"的窗口。
 ///
 /// Unix 上除 `(mtime_ns, size)` 外还带 `(dev, ino)`：symlink 改指向、或把另一个
@@ -175,6 +189,14 @@ struct ParentSignatureSnapshot {
     stamp: ParentFileStamp,
     /// 按文件顺序保存的 token_count 签名及其时间戳
     entries: Vec<(DateTime<Utc>, TokenUsageSignature)>,
+    /// Physical end offsets for the corresponding token_count JSONL records.
+    entry_end_offsets: Vec<u64>,
+    /// Complete parsed JSONL boundaries, needed only by paginated references.
+    record_end_offsets: Vec<u64>,
+    /// Root identity from the same opened file as the cached signatures.
+    root_meta: Option<RootMeta>,
+    /// UTC creation time from the first session_meta; only used to order segments.
+    creation_timestamp: Option<DateTime<Utc>>,
     /// 全文件（含非 token_count 行）的最大 timestamp
     max_timestamp: Option<DateTime<Utc>>,
     /// 是否存在缺少有效 timestamp 的 token_count 行（上游扫描到该行即报错）
@@ -183,7 +205,7 @@ struct ParentSignatureSnapshot {
 
 #[derive(Debug, Default)]
 struct CodexReplayCaches {
-    parent_signatures: HashMap<PathBuf, ParentSignatureSnapshot>,
+    parent_signatures: HashMap<PathBuf, Arc<ParentSignatureSnapshot>>,
     pending: HashMap<PathBuf, PendingEntry>,
 }
 
@@ -385,6 +407,37 @@ fn thread_id_from_filename(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let candidate = stem.get(stem.len().checked_sub(36)?..)?;
     uuid::Uuid::parse_str(candidate)
+        .ok()
+        .map(|value| value.hyphenated().to_string())
+}
+
+/// `thread/revert` keeps the logical thread ID but creates a new rollout ID:
+/// `rollout-...-<threadId>_<rolloutId>.jsonl`. The trailing ID remains the
+/// request-ID namespace because event indexes are local to each physical rollout.
+fn dual_rollout_filename_ids(path: &Path) -> Option<(&str, &str)> {
+    let stem = path.file_stem()?.to_str()?.strip_prefix("rollout-")?;
+    let timestamp = stem.get(..19)?;
+    chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H-%M-%S").ok()?;
+    let ids = stem.get(19..)?.strip_prefix('-')?;
+    ids.split_once('_')
+}
+
+fn leading_thread_id_from_filename(path: &Path) -> Option<String> {
+    let (logical_id, rollout_id) = dual_rollout_filename_ids(path)?;
+    if logical_id.len() != 36 || rollout_id.len() != 36 {
+        return None;
+    }
+    uuid::Uuid::parse_str(rollout_id).ok()?;
+    uuid::Uuid::parse_str(logical_id)
+        .ok()
+        .map(|value| value.hyphenated().to_string())
+}
+
+/// An invalid replacement must remain evidence that its logical family may be
+/// incomplete. This is a claim to validate, not an authorized parent alias.
+fn claimed_logical_thread_id_from_filename(path: &Path) -> Option<String> {
+    let (logical_id, _) = dual_rollout_filename_ids(path)?;
+    uuid::Uuid::parse_str(logical_id)
         .ok()
         .map(|value| value.hyphenated().to_string())
 }
@@ -601,7 +654,40 @@ fn parse_cumulative_tokens(total_usage: &serde_json::Value) -> Option<Cumulative
     })
 }
 
-fn root_meta_from_value(value: &serde_json::Value, root_thread_id: Option<&str>) -> RootMeta {
+fn parent_history_base(payload: &serde_json::Value) -> Result<Option<ParentHistoryBase>, String> {
+    let Some(base) = payload.get("history_base").filter(|base| !base.is_null()) else {
+        return Ok(None);
+    };
+    let invalid =
+        || "history_base 缺少有效的 physical rollout ID / ordinal / byte offset".to_string();
+    let rollout_id = base
+        .get("thread_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .ok_or_else(invalid)?
+        .hyphenated()
+        .to_string();
+    let end_ordinal_exclusive = base
+        .get("end_ordinal_exclusive")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|ordinal| *ordinal > 0 && ordinal.checked_add(1).is_some())
+        .ok_or_else(invalid)?;
+    let end_byte_offset = base
+        .get("end_byte_offset")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(invalid)?;
+    Ok(Some(ParentHistoryBase {
+        rollout_id,
+        end_ordinal_exclusive,
+        end_byte_offset,
+    }))
+}
+
+fn root_meta_from_value(
+    value: &serde_json::Value,
+    root_thread_id: Option<&str>,
+    file_path: &Path,
+) -> RootMeta {
     let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
     let mut parent = explicit_parent_from_meta(payload);
 
@@ -610,8 +696,22 @@ fn root_meta_from_value(value: &serde_json::Value, root_thread_id: Option<&str>)
             .get("id")
             .or_else(|| payload.get("thread_id"))
             .or_else(|| payload.get("threadId")),
-    );
-    if let (Some(filename_id), Some(meta_id)) = (root_thread_id, meta_thread_id) {
+    )
+    .map(|id| {
+        uuid::Uuid::parse_str(&id)
+            .map(|value| value.hyphenated().to_string())
+            .unwrap_or(id)
+    });
+    let leading_id = leading_thread_id_from_filename(file_path);
+    if let Some(logical_id) = leading_id.as_deref() {
+        if meta_thread_id.as_deref() != Some(logical_id) {
+            parent = ParentResolution::Deferred(format!(
+                "文件名逻辑线程 ID ({logical_id}) 与 root meta ID 不一致"
+            ));
+        }
+    } else if claimed_logical_thread_id_from_filename(file_path).is_some() {
+        parent = ParentResolution::Deferred("双 UUID rollout 文件名无效".to_string());
+    } else if let (Some(filename_id), Some(meta_id)) = (root_thread_id, meta_thread_id.as_deref()) {
         if filename_id != meta_id {
             parent = ParentResolution::Deferred(format!(
                 "文件名线程 ID ({filename_id}) 与 root meta ID ({meta_id}) 不一致"
@@ -629,14 +729,30 @@ fn root_meta_from_value(value: &serde_json::Value, root_thread_id: Option<&str>)
             }
         }
     }
-    if matches!((root_thread_id, &parent), (Some(root), ParentResolution::Parent(parent_id)) if root == parent_id)
+    if matches!(&parent, ParentResolution::Parent(parent_id)
+        if root_thread_id == Some(parent_id.as_str())
+            || leading_id.as_deref() == Some(parent_id.as_str())
+            || meta_thread_id.as_deref() == Some(parent_id.as_str()))
     {
         parent = ParentResolution::Deferred("parent_thread_id 与 root_thread_id 相同".to_string());
     }
 
+    let is_paginated = payload
+        .get("history_mode")
+        .and_then(serde_json::Value::as_str)
+        == Some("paginated");
+    let is_paginated_replacement = leading_id.as_deref().is_some_and(|logical_id| {
+        root_thread_id.is_some_and(|rollout_id| rollout_id != logical_id)
+    }) && is_paginated
+        && !matches!(parent, ParentResolution::Deferred(_));
+
     RootMeta {
+        meta_thread_id,
         timestamp: parse_timestamp(value.get("timestamp")),
         parent,
+        is_paginated_replacement,
+        is_paginated,
+        history_base: parent_history_base(payload),
     }
 }
 
@@ -657,7 +773,11 @@ fn read_root_meta(
             continue;
         };
         if value.get("type").and_then(serde_json::Value::as_str) == Some("session_meta") {
-            return Ok(Some(root_meta_from_value(&value, root_thread_id)));
+            return Ok(Some(root_meta_from_value(
+                &value,
+                root_thread_id,
+                file_path,
+            )));
         }
     }
     Ok(None)
@@ -760,7 +880,7 @@ fn parse_codex_file(
 // ---------------------------------------------------------------------------
 // 父 rollout 行的窄化解析（`ParentLine` / `ParentPayload`）
 //
-// 父文件扫描只关心四个值：顶层 `timestamp`、顶层 `type`、`payload.type`、
+// 窄化扫描只关心四个值：顶层 `timestamp`、顶层 `type`、`payload.type`、
 // `payload.info`。这里手写 visitor 只捕获它们，其余键的值一律交给 `IgnoredAny`
 // 跳过——不构造 `Value` 树、不为长正文分配 `String`。
 //
@@ -1118,12 +1238,30 @@ impl ParentSignatureSnapshot {
                 parent_path.display()
             ));
         }
-        Ok(self
-            .entries
+        Ok(self.signatures_at(cutoff))
+    }
+
+    fn signatures_in_prefix(
+        &self,
+        cutoff: DateTime<Utc>,
+        end: Option<u64>,
+    ) -> Vec<TokenUsageSignature> {
+        self.entries
+            .iter()
+            .zip(&self.entry_end_offsets)
+            .filter(|((timestamp, _), offset)| {
+                *timestamp <= cutoff && end.is_none_or(|end| **offset <= end)
+            })
+            .map(|((_, signature), _)| signature.clone())
+            .collect()
+    }
+
+    fn signatures_at(&self, cutoff: DateTime<Utc>) -> Vec<TokenUsageSignature> {
+        self.entries
             .iter()
             .filter(|(timestamp, _)| *timestamp <= cutoff)
             .map(|(_, signature)| signature.clone())
-            .collect())
+            .collect()
     }
 }
 
@@ -1131,9 +1269,10 @@ impl ParentSignatureSnapshot {
 ///
 /// ## 解析策略：一条路径，不猜字节
 ///
-/// 每一行都只走 `serde_json::from_str::<ParentLine>` 这一条路径——一个只捕获
+/// 每一行先走 `serde_json::from_str::<ParentLine>`——一个只捕获
 /// `timestamp` / `type` / `payload.type` / `payload.info` 的窄化 visitor，其余键
-/// 的值交给 `IgnoredAny` 跳过。父文件扫描里不存在任何"用原始字节猜 JSON 语义"的
+/// 的值交给 `IgnoredAny` 跳过。只有首条 session_meta 另读为 Value，用于缓存同一
+/// 文件句柄中的根身份和创建时间；正文和 token 事件不走 Value 路径。父文件扫描不存在任何"用原始字节猜 JSON 语义"的
 /// 前置过滤或快路径，因此转义写法（判别字符串写成 `"\u0074oken_count"` /
 /// `"\u0065vent_msg"`）、带空白的重复键（`"timestamp" : "B"`）、转义的重复键名
 /// （`"\u0074imestamp"`）等全部由解析器按 JSON 规范处理，与参考实现（逐行构造
@@ -1196,25 +1335,68 @@ fn parse_parent_signature_file(
 ) -> ParentSignatureSnapshot {
     let started = Instant::now();
     let mut entries: Vec<(DateTime<Utc>, TokenUsageSignature)> = Vec::new();
+    let mut entry_end_offsets = Vec::new();
+    let mut record_end_offsets = Vec::new();
     let mut max_timestamp: Option<DateTime<Utc>> = None;
+    let mut creation_timestamp = None;
+    let mut root_meta = None;
+    let mut seen_root_meta = false;
     let mut missing_timestamp = false;
     let mut total_lines = 0u64;
 
     // 必须扫描完整父文件并逐行应用 cutoff，不能在首个未来时间戳处 break：
     // rollout 写入顺序不承诺时间戳严格单调。
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
+    let mut reader = BufReader::new(file);
+    let mut line_bytes = Vec::new();
+    let mut byte_offset = 0u64;
+    loop {
+        line_bytes.clear();
+        let read = reader.read_until(b'\n', &mut line_bytes);
+        byte_offset = byte_offset.saturating_add(line_bytes.len() as u64);
+        match read {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => continue,
+        }
+        let Ok(line) = std::str::from_utf8(&line_bytes) else {
             continue;
         };
         total_lines += 1;
 
-        // 解析失败即跳过该行（与参考实现对非法 JSON 的处理一致）。
-        let Ok(parsed) = serde_json::from_str::<ParentLine<'_>>(&line) else {
+        // Keep the narrow parser's JSON semantics; offsets include LF/CRLF bytes.
+        let Ok(parsed) = serde_json::from_str::<ParentLine<'_>>(line) else {
             continue;
         };
         let timestamp = parsed.timestamp.as_deref().and_then(parse_timestamp_str);
         if let Some(timestamp) = timestamp {
             max_timestamp = Some(max_timestamp.map_or(timestamp, |current| current.max(timestamp)));
+        }
+        if parsed.kind.as_deref() == Some("session_meta") && !seen_root_meta {
+            seen_root_meta = true;
+            // Validate aliases against this opened file, not a separate path read
+            // that may have preceded a replacement. Only root metadata takes the
+            // full Value path; event/content lines keep the narrow cached parser.
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                let rollout_id = thread_id_from_filename(parent_path);
+                root_meta = Some(root_meta_from_value(
+                    &value,
+                    rollout_id.as_deref(),
+                    parent_path,
+                ));
+                // Codex filenames use local time; payload.timestamp records UTC creation.
+                // The outer timestamp remains the legacy fallback, never a substitute
+                // for an explicitly malformed creation timestamp.
+                creation_timestamp = match value
+                    .get("payload")
+                    .and_then(|payload| payload.get("timestamp"))
+                {
+                    Some(creation) => parse_timestamp(Some(creation)),
+                    None => timestamp,
+                };
+            }
+        }
+        if line_bytes.ends_with(b"\n") && root_meta.as_ref().is_some_and(|meta| meta.is_paginated) {
+            record_end_offsets.push(byte_offset);
         }
         if parsed.kind.as_deref() != Some("event_msg") {
             continue;
@@ -1236,6 +1418,7 @@ fn parse_parent_signature_file(
             continue;
         };
         entries.push((timestamp, signature));
+        entry_end_offsets.push(byte_offset);
     }
 
     log::debug!(
@@ -1248,31 +1431,31 @@ fn parse_parent_signature_file(
     ParentSignatureSnapshot {
         stamp,
         entries,
+        entry_end_offsets,
+        record_end_offsets,
+        root_meta,
+        creation_timestamp,
         max_timestamp,
         missing_timestamp,
     }
 }
 
-/// 查询父 rollout 在 cutoff 之前的全部 token_count 签名
-///
-/// ## 先 open、再 fstat、再读，全程同一个句柄
-///
-/// 1. **无条件先 `open`**。打开失败直接返回，错误文案与参考实现同一份，因此
-///    `open` 类错误永远是**当次**的新鲜结果，不会被缓存掩盖。这一点是必要的：
-///    `chmod 000` 只改 ctime/mode，`(mtime_ns, size, dev, ino)` 全不变，若先查缓存
-///    就会把旧的内容型错误（"尚未写到…"）当成答案，与参考实现逐字发散。缓存能够
-///    回答的只有**由内容推导**的结论（签名集合、"尚未写到"、"缺少有效 timestamp"）。
-/// 2. 新鲜度戳取自这个句柄的 `fstat`（而非再对路径 stat 一次），戳与随后读到的
-///    内容必然出自同一个文件对象，不存在"stat 到 A、读到 B"的窗口。
-/// 3. 戳与缓存快照一致就丢掉句柄、直接在内存快照上按 cutoff 作答；不一致或未命中
-///    则从**同一个句柄**整表重解析，写回缓存后作答。
-///
-/// 父文件在解析期间被继续追加时，快照带的仍是解析开始时的戳，下次查询自然重解析。
-/// 残余风险见 `ParentFileStamp` 的文档注释。
+/// 查询单个父 rollout 的签名，保留测试 oracle 的原有接口。
+#[cfg(test)]
 fn parent_signatures_before(
     parent_path: &Path,
     cutoff: DateTime<Utc>,
 ) -> Result<Vec<TokenUsageSignature>, String> {
+    load_parent_snapshot(parent_path)?.query(parent_path, cutoff)
+}
+
+/// Load the full parent segment; the fork cutoff is checked after merging segments.
+///
+/// Always open before checking the cache, so current access errors cannot be hidden
+/// by a cached snapshot. The freshness stamp comes from that open handle's fstat,
+/// and any cache miss is parsed through the same handle. An append changes its
+/// stamp and forces a reload on the next query. See `ParentFileStamp` for limits.
+fn load_parent_snapshot(parent_path: &Path) -> Result<Arc<ParentSignatureSnapshot>, String> {
     let file = fs::File::open(parent_path)
         .map_err(|error| format!("无法打开父 rollout {}: {error}", parent_path.display()))?;
     let stamp = file
@@ -1285,28 +1468,157 @@ fn parent_signatures_before(
             if let Some(snapshot) = caches.parent_signatures.get(parent_path) {
                 if snapshot.stamp == stamp {
                     log::debug!(
-                        "[CODEX-SYNC] parent-cache hit {}: signatures={} cutoff={cutoff}",
+                        "[CODEX-SYNC] parent-cache hit {}: signatures={}",
                         parent_path.display(),
                         snapshot.entries.len()
                     );
-                    // 缓存有效：句柄再无用处，先释放再作答。
+                    // 缓存有效：句柄再无用处，先释放再返回快照。
                     drop(file);
-                    return snapshot.query(parent_path, cutoff);
+                    return Ok(Arc::clone(snapshot));
                 }
             }
         }
     }
 
-    let snapshot = parse_parent_signature_file(file, parent_path, stamp.unwrap_or_default());
-    let answer = snapshot.query(parent_path, cutoff);
+    let snapshot = Arc::new(parse_parent_signature_file(
+        file,
+        parent_path,
+        stamp.unwrap_or_default(),
+    ));
     if stamp.is_some() {
         if let Ok(mut caches) = replay_caches().lock() {
             caches
                 .parent_signatures
-                .insert(parent_path.to_path_buf(), snapshot);
+                .insert(parent_path.to_path_buf(), Arc::clone(&snapshot));
         }
     }
-    answer
+    Ok(snapshot)
+}
+
+/// One physical rollout may have identical copies in sessions and archives.
+struct ParentSegment {
+    rollout_id: Option<String>,
+    creation_timestamp: Option<DateTime<Utc>>,
+    snapshot: Arc<ParentSignatureSnapshot>,
+    copies: Vec<Arc<ParentSignatureSnapshot>>,
+    /// Earliest end timestamp among copies of this segment.
+    max_timestamp: Option<DateTime<Utc>>,
+}
+
+/// Reconstruct only the same-family physical prefix chain that existed at the
+/// fork. Logical ancestry is not a substitute for a missing physical rollout;
+/// unsupported cross-family history stays deferred rather than partly imported.
+fn resolve_paginated_parent_signatures(
+    parent_id: &str,
+    cutoff: DateTime<Utc>,
+    segments: &[ParentSegment],
+) -> Result<Vec<TokenUsageSignature>, String> {
+    let invalid = |reason: &str| format!("父 rollout {parent_id} 的分页历史不完整: {reason}");
+    let mut by_rollout_id = HashMap::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let rollout_id = segment
+            .rollout_id
+            .as_deref()
+            .ok_or_else(|| invalid("物理 UUID 无效"))?;
+        by_rollout_id.insert(rollout_id, index);
+        if segment.creation_timestamp.is_none() {
+            return Err(invalid("缺少一致有效的创建 timestamp"));
+        }
+        let first_meta = segment
+            .snapshot
+            .root_meta
+            .as_ref()
+            .ok_or_else(|| invalid("缺少 root meta"))?;
+        for copy in &segment.copies {
+            let meta = copy
+                .root_meta
+                .as_ref()
+                .ok_or_else(|| invalid("副本缺少 root meta"))?;
+            if meta.meta_thread_id.as_deref() != Some(parent_id)
+                || !meta.is_paginated
+                || matches!(meta.parent, ParentResolution::Deferred(_))
+            {
+                return Err(invalid("root meta 身份或 history_mode 无效"));
+            }
+            if meta.history_base != first_meta.history_base {
+                return Err(invalid("副本 history_base 不一致"));
+            }
+            if let Err(reason) = &meta.history_base {
+                return Err(invalid(reason));
+            }
+            if copy.missing_timestamp {
+                return Err(invalid("token_count 缺少有效 timestamp"));
+            }
+        }
+    }
+    // A later revert cannot certify a prefix for a child that already existed.
+    let Some((head_index, head)) = segments.iter().enumerate().rev().find(|(_, segment)| {
+        segment
+            .creation_timestamp
+            .is_some_and(|created| created <= cutoff)
+    }) else {
+        return Err(invalid("fork 时刻尚无可用父分段"));
+    };
+    if head
+        .max_timestamp
+        .is_none_or(|timestamp| timestamp < cutoff)
+    {
+        return Err(invalid("尚未写到 child fork 时刻"));
+    }
+
+    let mut seen = HashSet::new();
+    let mut current = head_index;
+    let mut prefix_end = None;
+    let mut chain = Vec::new();
+    loop {
+        let segment = &segments[current];
+        let rollout_id = segment
+            .rollout_id
+            .as_deref()
+            .ok_or_else(|| invalid("物理 UUID 无效"))?;
+        if !seen.insert(rollout_id) {
+            return Err(invalid("history_base 引用成环"));
+        }
+        let signatures = segment.snapshot.signatures_in_prefix(cutoff, prefix_end);
+        for copy in &segment.copies {
+            if let Some(end) = prefix_end {
+                if end > copy.stamp.size || copy.record_end_offsets.binary_search(&end).is_err() {
+                    return Err(invalid("history_base 字节前缀尚未完整写入所有副本"));
+                }
+            }
+            if copy.signatures_in_prefix(cutoff, prefix_end) != signatures {
+                return Err(invalid("副本 history_base 字节前缀内容不一致"));
+            }
+        }
+        chain.push(signatures);
+        let meta = segment
+            .snapshot
+            .root_meta
+            .as_ref()
+            .ok_or_else(|| invalid("缺少 root meta"))?;
+        let Some(base) = meta
+            .history_base
+            .as_ref()
+            .map_err(|reason| invalid(reason))?
+            .as_ref()
+        else {
+            break;
+        };
+        if seen.contains(base.rollout_id.as_str()) {
+            return Err(invalid("history_base 引用成环"));
+        }
+        let Some(&next) = by_rollout_id.get(base.rollout_id.as_str()) else {
+            return Err(invalid(
+                "找不到同一逻辑线程的 physical history_base rollout",
+            ));
+        };
+        if segments[next].creation_timestamp >= segment.creation_timestamp {
+            return Err(invalid("history_base 创建时间与引用顺序不一致"));
+        }
+        current = next;
+        prefix_end = Some(base.end_byte_offset);
+    }
+    Ok(chain.into_iter().rev().flatten().collect())
 }
 
 fn resolve_parent_signatures(
@@ -1318,19 +1630,117 @@ fn resolve_parent_signatures(
         return Err(format!("找不到父 rollout: {parent_id}"));
     };
 
-    let mut snapshots = Vec::with_capacity(candidates.len());
+    // Replacement rollouts belong to the same logical thread, but distinct
+    // trailing IDs identify successive segments, not conflicting replicas.
+    let mut merged = ParentSignatureSnapshot {
+        stamp: ParentFileStamp::default(),
+        entries: Vec::new(),
+        entry_end_offsets: Vec::new(),
+        record_end_offsets: Vec::new(),
+        root_meta: None,
+        creation_timestamp: None,
+        max_timestamp: None,
+        missing_timestamp: false,
+    };
+    let mut segments: Vec<ParentSegment> = Vec::new();
+    let mut latest_path: Option<&Path> = None;
     for candidate in candidates {
-        snapshots.push(parent_signatures_before(candidate, cutoff)?);
+        let snapshot = load_parent_snapshot(candidate)?;
+        if let Some(logical_id) = claimed_logical_thread_id_from_filename(candidate) {
+            if leading_thread_id_from_filename(candidate).as_deref() != Some(logical_id.as_str())
+                || !snapshot.root_meta.as_ref().is_some_and(|meta| {
+                    meta.meta_thread_id.as_deref() == Some(logical_id.as_str())
+                        && !matches!(meta.parent, ParentResolution::Deferred(_))
+                })
+            {
+                return Err(format!(
+                    "父 rollout {} 的 root meta 与逻辑线程 ID 不一致",
+                    candidate.display()
+                ));
+            }
+        }
+        // A malformed duplicate must not disappear when its signatures match.
+        merged.missing_timestamp |= snapshot.missing_timestamp;
+        let rollout_id = thread_id_from_filename(candidate);
+        if let Some(segment) = segments
+            .iter_mut()
+            .find(|segment| segment.rollout_id == rollout_id)
+        {
+            if segment.snapshot.signatures_at(cutoff) != snapshot.signatures_at(cutoff) {
+                return Err(format!(
+                    "父 rollout UUID {parent_id} 对应多个内容不一致的文件"
+                ));
+            }
+            if segment.creation_timestamp != snapshot.creation_timestamp {
+                segment.creation_timestamp = None;
+            }
+            segment.copies.push(Arc::clone(&snapshot));
+            segment.max_timestamp = match (segment.max_timestamp, snapshot.max_timestamp) {
+                (Some(current), Some(other)) => Some(current.min(other)),
+                _ => None,
+            };
+            continue;
+        }
+        segments.push(ParentSegment {
+            rollout_id,
+            creation_timestamp: snapshot.creation_timestamp,
+            max_timestamp: snapshot.max_timestamp,
+            copies: vec![Arc::clone(&snapshot)],
+            snapshot,
+        });
+        latest_path = Some(candidate.as_path());
     }
-    let Some(first) = snapshots.first() else {
+    // Old single rollouts (and their copies) never needed root timestamps.
+    // Multiple segments do: local filename clocks cannot establish their order.
+    if segments.len() > 1 {
+        if segments
+            .iter()
+            .any(|segment| segment.creation_timestamp.is_none())
+        {
+            return Err(format!(
+                "父 rollout UUID {parent_id} 缺少一致有效的创建 timestamp"
+            ));
+        }
+        segments.sort_by_key(|segment| segment.creation_timestamp);
+        if segments
+            .windows(2)
+            .any(|pair| pair[0].creation_timestamp == pair[1].creation_timestamp)
+        {
+            return Err(format!(
+                "父 rollout UUID {parent_id} 的创建 timestamp 无法确定分段顺序"
+            ));
+        }
+    }
+    let has_replacement = candidates.iter().any(|path| {
+        leading_thread_id_from_filename(path).is_some_and(|logical_id| {
+            thread_id_from_filename(path).is_some_and(|rollout_id| rollout_id != logical_id)
+        })
+    });
+    let has_reference_history = segments.iter().any(|segment| {
+        segment.copies.iter().any(|copy| {
+            copy.root_meta.as_ref().is_some_and(|meta| {
+                meta.is_paginated_replacement || !matches!(meta.history_base, Ok(None))
+            })
+        })
+    });
+    if has_replacement && has_reference_history {
+        return resolve_paginated_parent_signatures(parent_id, cutoff, &segments);
+    }
+
+    for segment in &segments {
+        // Preserve each file's event order, including non-monotonic event clocks.
+        merged
+            .entries
+            .extend(segment.snapshot.entries.iter().cloned());
+    }
+    // Only the final chronological segment can prove the continuation reached
+    // the fork. An out-of-order timestamp in an older segment is not evidence
+    // that the latest segment (including every replica) is complete.
+    merged.max_timestamp = segments.last().and_then(|segment| segment.max_timestamp);
+    let Some(latest_path) = latest_path else {
         return Err(format!("找不到父 rollout: {parent_id}"));
     };
-    if snapshots.iter().skip(1).any(|snapshot| snapshot != first) {
-        return Err(format!(
-            "父 rollout UUID {parent_id} 对应多个内容不一致的文件"
-        ));
-    }
-    Ok(first.clone())
+    merged.query(latest_path, cutoff)
 }
 
 fn mark_deferred(
@@ -1478,12 +1888,19 @@ fn collect_codex_session_files(codex_dir: &Path) -> Vec<(PathBuf, i64)> {
 fn build_rollout_index(files: &[(PathBuf, i64)]) -> RolloutIndex {
     let mut index = RolloutIndex::new();
     for (path, _) in files {
-        if let Some(thread_id) = thread_id_from_filename(path) {
-            index.entry(thread_id).or_default().push(path.clone());
+        // Keep malformed replacements as negative evidence. Dropping them here
+        // would let a valid sibling certify an incomplete logical parent history.
+        // Every claimed alias is validated against its opened snapshot on use.
+        if let Some(logical_id) = claimed_logical_thread_id_from_filename(path) {
+            index.entry(logical_id).or_default().push(path.clone());
+        }
+        if let Some(rollout_id) = thread_id_from_filename(path) {
+            index.entry(rollout_id).or_default().push(path.clone());
         }
     }
     for paths in index.values_mut() {
         paths.sort();
+        paths.dedup();
     }
     index
 }
@@ -1612,6 +2029,9 @@ fn sync_single_codex_file(
         }
     };
 
+    let session_thread_id = root_meta
+        .meta_thread_id
+        .unwrap_or_else(|| root_thread_id.clone());
     let (parent_signatures, initial_replay_phase) = match root_meta.parent {
         ParentResolution::None => (Vec::new(), ReplayPhase::Live),
         ParentResolution::Deferred(reason) => {
@@ -1623,6 +2043,12 @@ fn sync_single_codex_file(
                 Some(root_thread_id),
                 PendingReason::Stable(reason),
             );
+        }
+        ParentResolution::Parent(_) if root_meta.is_paginated_replacement => {
+            // Revert preserves ancestry but writes only metadata plus new events;
+            // inherited records live behind history_base, not in this file. The
+            // replacement creation time is not a new logical fork cutoff.
+            (Vec::new(), ReplayPhase::Live)
         }
         ParentResolution::Parent(parent_id) => {
             let Some(cutoff) = root_meta.timestamp else {
@@ -1822,7 +2248,7 @@ fn sync_single_codex_file(
                         request_id,
                         delta,
                         model: state.current_model.clone(),
-                        session_id: Some(root_thread_id.clone()),
+                        session_id: Some(session_thread_id.clone()),
                         created_at,
                     });
                 }
@@ -2073,6 +2499,7 @@ mod tests {
     const PARENT_ID: &str = "00000000-0000-4000-8000-000000000001";
     const CHILD_A_ID: &str = "00000000-0000-4000-8000-000000000002";
     const CHILD_B_ID: &str = "00000000-0000-4000-8000-000000000003";
+    const PARENT_PAGE_ID: &str = "00000000-0000-4000-8000-000000000004";
 
     fn write_jsonl(path: &Path, values: &[serde_json::Value]) {
         let contents = values
@@ -2205,6 +2632,567 @@ mod tests {
             resolve_codex_created_at(timestamp),
             suspected_duplicates,
         )
+    }
+
+    #[test]
+    fn test_resumed_rollouts_keep_distinct_request_ids_and_logical_session_id(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let original = rollout_path(&sessions, PARENT_ID);
+        let first_page = sessions.join(format!(
+            "rollout-2026-07-10T03-00-10-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        let second_page = sessions.join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{CHILD_B_ID}.jsonl"
+        ));
+        let files = [&original, &first_page, &second_page];
+        for (index, path) in files.iter().enumerate() {
+            write_jsonl(
+                path,
+                &[
+                    session_meta(PARENT_ID),
+                    turn_context(),
+                    token_count(100 + index as u64, 50, 10),
+                ],
+            );
+        }
+        let all_files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
+        let read_rows = || -> Result<Vec<(String, String, i64)>, AppError> {
+            let conn = lock_conn!(db.conn);
+            let mut statement = conn.prepare(
+                "SELECT request_id, session_id, input_tokens FROM proxy_request_logs
+                 WHERE data_source = 'codex_session' ORDER BY request_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        for path in &files {
+            let imported = sync_test_file(&db, path, &all_files)?;
+            assert_eq!((imported.imported, imported.deferred), (1, false));
+            assert_eq!(sync_test_file(&db, path, &all_files)?.imported, 0);
+        }
+        let before = read_rows()?;
+        let mut expected = [PARENT_ID, PARENT_PAGE_ID, CHILD_B_ID]
+            .into_iter()
+            .enumerate()
+            .map(|(index, rollout_id)| {
+                (
+                    format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{rollout_id}:1"),
+                    PARENT_ID.to_string(),
+                    100 + index as i64,
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(before, expected);
+
+        {
+            let conn = lock_conn!(db.conn);
+            reset_codex_usage_on_conn(&conn, temp.path())?;
+        }
+        for path in &files {
+            assert_eq!(sync_test_file(&db, path, &all_files)?.imported, 1);
+        }
+        assert_eq!(read_rows()?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn test_paginated_fork_and_spawn_replacements_import_live_usage_and_rebuild(
+    ) -> Result<(), AppError> {
+        use std::io::Write as _;
+
+        for ancestry in ["fork", "spawn", "both"] {
+            for history_base in ["present", "absent", "null"] {
+                for ancestor_available in [true, false] {
+                    let db = Database::memory()?;
+                    let temp = tempdir().unwrap();
+                    let sessions = temp.path().join("sessions");
+                    fs::create_dir_all(&sessions).unwrap();
+                    let ancestor = rollout_path(&sessions, PARENT_ID);
+                    let original = rollout_path(&sessions, CHILD_A_ID);
+                    let replacement = sessions.join(format!(
+                        "rollout-2026-07-10T03-00-20-{CHILD_A_ID}_{PARENT_PAGE_ID}.jsonl"
+                    ));
+                    let (forked, spawned) = match ancestry {
+                        "fork" => (Some(PARENT_ID), None),
+                        "spawn" => (None, Some(PARENT_ID)),
+                        _ => (Some(PARENT_ID), Some(PARENT_ID)),
+                    };
+                    let mut original_meta =
+                        session_meta_at(CHILD_A_ID, forked, spawned, "2026-07-10T03:00:05Z");
+                    original_meta["payload"]["history_mode"] = serde_json::json!("paginated");
+                    original_meta["ordinal"] = serde_json::json!(0);
+                    write_jsonl(&original, &[original_meta]);
+                    if ancestor_available {
+                        write_jsonl(
+                            &ancestor,
+                            &[
+                                session_meta(PARENT_ID),
+                                token_count_at(100, 0, 10, "2026-07-10T03:00:01Z"),
+                                token_count_at(200, 0, 20, "2026-07-10T03:00:10Z"),
+                                turn_context_at("2026-07-10T03:00:40Z"),
+                            ],
+                        );
+                    }
+                    let mut meta =
+                        session_meta_at(CHILD_A_ID, forked, spawned, "2026-07-10T03:00:20Z");
+                    meta["payload"]["history_mode"] = serde_json::json!("paginated");
+                    match history_base {
+                        "present" => {
+                            meta["payload"]["history_base"] = serde_json::json!({
+                                "thread_id": CHILD_A_ID,
+                                "end_ordinal_exclusive": 1,
+                                "end_byte_offset": fs::metadata(&original).unwrap().len()
+                            })
+                        }
+                        "null" => meta["payload"]["history_base"] = serde_json::Value::Null,
+                        _ => {}
+                    }
+                    // Both counters happen to equal ancestor events: one before
+                    // the original fork, the other after it. Neither is replay.
+                    write_jsonl(
+                        &replacement,
+                        &[
+                            meta,
+                            token_count_at(100, 0, 10, "2026-07-10T03:00:21Z"),
+                            token_count_at(200, 0, 20, "2026-07-10T03:00:22Z"),
+                        ],
+                    );
+                    let mut files = vec![original.as_path(), replacement.as_path()];
+                    if ancestor_available {
+                        files.push(ancestor.as_path());
+                    }
+                    let read_rows = || -> Result<Vec<(String, String, i64, i64)>, AppError> {
+                        let conn = lock_conn!(db.conn);
+                        let mut statement = conn.prepare(
+                            "SELECT request_id, session_id, input_tokens, output_tokens
+                             FROM proxy_request_logs ORDER BY request_id",
+                        )?;
+                        let rows = statement
+                            .query_map([], |row| {
+                                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                            })?
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(rows)
+                    };
+                    let first = sync_test_file(&db, &replacement, &files)?;
+                    assert_eq!(
+                        (first.imported, first.skipped, first.deferred),
+                        (2, 0, false),
+                        "{ancestry}/{history_base}/{ancestor_available}"
+                    );
+                    let expected_row = |index, input, output| {
+                        (
+                            format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{PARENT_PAGE_ID}:{index}"),
+                            CHILD_A_ID.to_string(),
+                            input,
+                            output,
+                        )
+                    };
+                    let mut expected = vec![expected_row(1, 100, 10), expected_row(2, 100, 10)];
+                    assert_eq!(read_rows()?, expected);
+                    assert_eq!(sync_test_file(&db, &replacement, &files)?.imported, 0);
+                    {
+                        let mut file = fs::OpenOptions::new()
+                            .append(true)
+                            .open(&replacement)
+                            .unwrap();
+                        writeln!(
+                            file,
+                            "{}",
+                            token_count_at(350, 0, 35, "2026-07-10T03:00:23Z")
+                        )
+                        .unwrap();
+                    }
+                    let appended = sync_test_file(&db, &replacement, &files)?;
+                    assert_eq!((appended.imported, appended.deferred), (1, false));
+                    expected.push(expected_row(3, 150, 15));
+                    assert_eq!(read_rows()?, expected);
+                    assert_eq!(get_sync_state(&db, &replacement.to_string_lossy())?.1, 4);
+                    assert_eq!(sync_test_file(&db, &replacement, &files)?.imported, 0);
+                    {
+                        let conn = lock_conn!(db.conn);
+                        reset_codex_usage_on_conn(&conn, temp.path())?;
+                    }
+                    clear_codex_replay_caches();
+                    let rebuilt = sync_test_file(&db, &replacement, &files)?;
+                    assert_eq!(
+                        (rebuilt.imported, rebuilt.skipped, rebuilt.deferred),
+                        (3, 0, false)
+                    );
+                    assert_eq!(read_rows()?, expected);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_non_replacement_or_unspecified_history_keeps_replay_matching() -> Result<(), AppError> {
+        for (dual, distinct, mode) in [
+            (false, false, Some(serde_json::json!("paginated"))),
+            (true, false, Some(serde_json::json!("paginated"))),
+            (true, true, None),
+            (true, true, Some(serde_json::json!("legacy"))),
+            (true, true, Some(serde_json::json!("unknown"))),
+            (true, true, Some(serde_json::json!(123))),
+            (true, true, Some(serde_json::Value::Null)),
+        ] {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let parent = rollout_path(temp.path(), PARENT_ID);
+            let rollout_id = if distinct { PARENT_PAGE_ID } else { CHILD_A_ID };
+            let child = if dual {
+                temp.path().join(format!(
+                    "rollout-2026-07-10T03-00-20-{CHILD_A_ID}_{rollout_id}.jsonl"
+                ))
+            } else {
+                rollout_path(temp.path(), CHILD_A_ID)
+            };
+            write_jsonl(
+                &parent,
+                &[
+                    session_meta(PARENT_ID),
+                    token_count(100, 0, 10),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ],
+            );
+            let mut meta =
+                session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z");
+            if let Some(mode) = mode {
+                meta["payload"]["history_mode"] = mode;
+            }
+            write_jsonl(
+                &child,
+                &[
+                    meta,
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                    token_count_at(150, 0, 15, "2026-07-10T03:00:32Z"),
+                ],
+            );
+            let result = sync_test_file(&db, &child, &[&parent, &child])?;
+            assert_eq!(
+                (result.imported, result.skipped, result.deferred),
+                (1, 1, false)
+            );
+            let conn = lock_conn!(db.conn);
+            let row: (String, String, i64) = conn.query_row(
+                "SELECT request_id, session_id, input_tokens FROM proxy_request_logs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(
+                row,
+                (
+                    format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{rollout_id}:2"),
+                    CHILD_A_ID.to_string(),
+                    50
+                )
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_paginated_replacement_cannot_bypass_identity_and_parent_guards() -> Result<(), AppError>
+    {
+        for (meta_id, forked, spawned) in [
+            (Some(PARENT_PAGE_ID), Some(PARENT_ID), None),
+            (None, Some(PARENT_ID), None),
+            (Some("invalid"), Some(PARENT_ID), None),
+            (Some(CHILD_A_ID), Some("invalid"), None),
+            (Some(CHILD_A_ID), Some(CHILD_A_ID), None),
+            (Some(CHILD_A_ID), None, Some(PARENT_PAGE_ID)),
+            (Some(CHILD_A_ID), Some(PARENT_ID), Some(CHILD_B_ID)),
+        ] {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let child = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-20-{CHILD_A_ID}_{PARENT_PAGE_ID}.jsonl"
+            ));
+            let mut meta = session_meta_at(CHILD_A_ID, forked, spawned, "2026-07-10T03:00:20Z");
+            meta["payload"]["history_mode"] = serde_json::json!("paginated");
+            match meta_id {
+                Some(id) => meta["payload"]["id"] = serde_json::json!(id),
+                None => {
+                    meta["payload"].as_object_mut().unwrap().remove("id");
+                }
+            }
+            let parsed = root_meta_from_value(&meta, Some(PARENT_PAGE_ID), &child);
+            assert!(matches!(parsed.parent, ParentResolution::Deferred(_)));
+            assert!(!parsed.is_paginated_replacement);
+            write_jsonl(&child, &[meta, token_count(100, 0, 10)]);
+            let result = sync_test_file(&db, &child, &[&child])?;
+            assert_eq!(
+                (result.imported, result.skipped, result.deferred),
+                (0, 0, true)
+            );
+            assert_eq!(get_sync_state(&db, &child.to_string_lossy())?, (0, 0));
+            let conn = lock_conn!(db.conn);
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_rollout_filename_meta_mismatch_still_defers() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        for path in [
+            rollout_path(temp.path(), PARENT_ID),
+            temp.path().join(format!(
+                "rollout-2026-07-10T03-00-10-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+            )),
+        ] {
+            write_jsonl(&path, &[session_meta(CHILD_A_ID), token_count(100, 50, 10)]);
+            let result = sync_test_file(&db, &path, &[&path])?;
+            assert!(result.deferred);
+            assert_eq!(result.imported, 0);
+            assert_eq!(get_sync_state(&db, &path.to_string_lossy())?, (0, 0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_rollout_index_includes_both_ids_without_duplicate_paths() {
+        let temp = tempdir().unwrap();
+        let original = rollout_path(temp.path(), PARENT_ID);
+        let page = temp.path().join(format!(
+            "rollout-2026-07-10T03-00-10-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        let same_ids = temp.path().join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_ID}.jsonl"
+        ));
+        for path in [&original, &page, &same_ids] {
+            write_jsonl(path, &[session_meta(PARENT_ID)]);
+        }
+        let index = build_rollout_index(&[
+            (original.clone(), 0),
+            (page.clone(), 0),
+            (page.clone(), 0),
+            (same_ids.clone(), 0),
+        ]);
+        assert_eq!(index[PARENT_ID], vec![original, page.clone(), same_ids]);
+        assert_eq!(index[PARENT_PAGE_ID], vec![page]);
+        assert_eq!(index.len(), 2);
+    }
+
+    #[test]
+    fn test_dual_rollout_logical_self_parent_defers_without_cursor() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        let page = temp.path().join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        write_jsonl(
+            &page,
+            &[
+                session_meta_at(PARENT_ID, Some(PARENT_ID), None, "2026-07-10T03:00:20Z"),
+                token_count(100, 50, 10),
+            ],
+        );
+        let result = sync_test_file(&db, &page, &[&page])?;
+        assert_eq!(
+            (result.imported, result.skipped, result.deferred),
+            (0, 0, true)
+        );
+        assert_eq!(get_sync_state(&db, &page.to_string_lossy())?, (0, 0));
+        let index = build_rollout_index(&[(page.clone(), 0)]);
+        assert!(index[PARENT_ID].contains(&page));
+        assert!(resolve_parent_signatures(
+            PARENT_ID,
+            parse_timestamp_str("2026-07-10T03:00:30Z").unwrap(),
+            &index
+        )
+        .is_err());
+        let conn = lock_conn!(db.conn);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_dual_rollout_id_cannot_supply_parent_alias() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        let parent = temp.path().join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{}.jsonl",
+            "x".repeat(36)
+        ));
+        let child = rollout_path(temp.path(), CHILD_A_ID);
+        write_jsonl(
+            &parent,
+            &[
+                session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:20Z"),
+                token_count(100, 50, 10),
+                turn_context_at("2026-07-10T03:00:40Z"),
+            ],
+        );
+        write_jsonl(
+            &child,
+            &[
+                session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                token_count_at(100, 50, 10, "2026-07-10T03:00:31Z"),
+            ],
+        );
+        assert!(leading_thread_id_from_filename(&parent).is_none());
+        let index = build_rollout_index(&[(parent.clone(), 0), (child.clone(), 0)]);
+        assert!(index[PARENT_ID].contains(&parent));
+        assert!(resolve_parent_signatures(
+            PARENT_ID,
+            parse_timestamp_str("2026-07-10T03:00:30Z").unwrap(),
+            &index
+        )
+        .is_err());
+        for file in [&parent, &child] {
+            let result = sync_test_file(&db, file, &[&parent, &child])?;
+            assert_eq!(
+                (result.imported, result.skipped, result.deferred),
+                (0, 0, true)
+            );
+            assert_eq!(get_sync_state(&db, &file.to_string_lossy())?, (0, 0));
+        }
+        let conn = lock_conn!(db.conn);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_dual_rollout_requires_logical_meta_id_for_import_and_parent_alias(
+    ) -> Result<(), AppError> {
+        for meta_id in [
+            Some(PARENT_PAGE_ID),
+            Some(CHILD_B_ID),
+            Some("invalid"),
+            None,
+        ] {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let parent = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+            ));
+            let child = rollout_path(temp.path(), CHILD_A_ID);
+            let mut meta = session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:20Z");
+            match meta_id {
+                Some(id) => meta["payload"]["id"] = serde_json::json!(id),
+                None => {
+                    meta["payload"].as_object_mut().unwrap().remove("id");
+                }
+            }
+            write_jsonl(
+                &parent,
+                &[
+                    meta,
+                    token_count(100, 50, 10),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ],
+            );
+            write_jsonl(
+                &child,
+                &[
+                    session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                    token_count_at(100, 50, 10, "2026-07-10T03:00:31Z"),
+                ],
+            );
+            let index = build_rollout_index(&[(parent.clone(), 0), (child.clone(), 0)]);
+            assert!(
+                index[PARENT_ID].contains(&parent),
+                "invalid meta {meta_id:?}"
+            );
+            assert!(
+                resolve_parent_signatures(
+                    PARENT_ID,
+                    parse_timestamp_str("2026-07-10T03:00:30Z").unwrap(),
+                    &index
+                )
+                .is_err(),
+                "invalid meta {meta_id:?}"
+            );
+            for file in [&parent, &child] {
+                let result = sync_test_file(&db, file, &[&parent, &child])?;
+                assert_eq!(
+                    (result.imported, result.skipped, result.deferred),
+                    (0, 0, true)
+                );
+                assert_eq!(get_sync_state(&db, &file.to_string_lossy())?, (0, 0));
+            }
+            let conn = lock_conn!(db.conn);
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parent_alias_is_revalidated_after_file_replacement() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        let parent = temp.path().join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        let child = rollout_path(temp.path(), CHILD_A_ID);
+        let mut parent_lines = [
+            session_meta(PARENT_ID),
+            token_count(100, 50, 10),
+            turn_context_at("2026-07-10T03:00:40Z"),
+        ];
+        write_jsonl(&parent, &parent_lines);
+        write_jsonl(
+            &child,
+            &[
+                session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                token_count_at(100, 50, 10, "2026-07-10T03:00:31Z"),
+            ],
+        );
+        let index = build_rollout_index(&[(parent.clone(), 0), (child.clone(), 0)]);
+        let cutoff = parse_timestamp_str("2026-07-10T03:00:30Z").unwrap();
+        assert_eq!(
+            resolve_parent_signatures(PARENT_ID, cutoff, &index)
+                .unwrap()
+                .len(),
+            1
+        );
+        parent_lines[0]["payload"]["id"] = serde_json::json!(PARENT_PAGE_ID);
+        // A rename forces a distinct opened file even when bytes/mtime match.
+        let replacement = temp.path().join("replacement.jsonl");
+        write_jsonl(&replacement, &parent_lines);
+        fs::rename(replacement, &parent).unwrap();
+        assert!(resolve_parent_signatures(PARENT_ID, cutoff, &index).is_err());
+        let result = sync_single_codex_file(
+            &db,
+            &child,
+            0,
+            &index,
+            &mut PricingCache::new(),
+            None,
+            &HashMap::new(),
+        )?;
+        assert_eq!(
+            (result.imported, result.skipped, result.deferred),
+            (0, 0, true)
+        );
+        assert_eq!(get_sync_state(&db, &child.to_string_lossy())?, (0, 0));
+        Ok(())
     }
 
     #[test]
@@ -2633,6 +3621,872 @@ mod tests {
             (1, 0, false)
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_paginated_parent_pages_are_merged_before_fork_cutoff() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let parent_root = rollout_path(&sessions, PARENT_ID);
+        let parent_page = sessions.join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        let child = rollout_path(&sessions, CHILD_A_ID);
+        write_jsonl(
+            &parent_root,
+            &[
+                session_meta(PARENT_ID),
+                token_count_at(1_000, 900, 100, "2026-07-10T03:00:01Z"),
+            ],
+        );
+        write_jsonl(
+            &parent_page,
+            &[
+                session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:20Z"),
+                token_count_at(2_000, 1_800, 200, "2026-07-10T03:00:21Z"),
+                turn_context_at("2026-07-10T03:00:40Z"),
+            ],
+        );
+        write_jsonl(
+            &child,
+            &[
+                session_meta_at(
+                    CHILD_A_ID,
+                    Some(PARENT_ID),
+                    Some(PARENT_ID),
+                    "2026-07-10T03:00:30Z",
+                ),
+                turn_context(),
+                token_count_at(1_000, 900, 100, "2026-07-10T03:00:31Z"),
+                token_count_at(2_000, 1_800, 200, "2026-07-10T03:00:32Z"),
+                token_count_at(2_300, 1_950, 250, "2026-07-10T03:00:33Z"),
+            ],
+        );
+
+        // A parent with no continuation still retains the existing cutoff guard.
+        assert!(sync_test_file(&db, &child, &[&parent_root, &child])?.deferred);
+        assert_eq!(get_sync_state(&db, &child.to_string_lossy())?, (0, 0));
+        let files = [&parent_page as &Path, &child, &parent_root];
+        let result = sync_test_file(&db, &child, &files)?;
+        assert_eq!(
+            (result.imported, result.skipped, result.deferred),
+            (1, 2, false)
+        );
+        assert_eq!(sync_test_file(&db, &child, &files)?.imported, 0);
+
+        {
+            let conn = lock_conn!(db.conn);
+            let usage: (i64, i64, i64) = conn.query_row(
+                "SELECT input_tokens, cache_read_tokens, output_tokens
+                 FROM proxy_request_logs WHERE request_id = ?1",
+                [format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{CHILD_A_ID}:3")],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(usage, (300, 150, 50));
+            reset_codex_usage_on_conn(&conn, temp.path())?;
+        }
+        let rebuilt = sync_test_file(&db, &child, &files)?;
+        assert_eq!(
+            (rebuilt.imported, rebuilt.skipped, rebuilt.deferred),
+            (1, 2, false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parent_segments_follow_utc_creation_and_preserve_event_order() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        // The original filename uses UTC+8; the replacement uses UTC. Filename
+        // and outer write timestamps both disagree with authoritative creation order.
+        let original = temp
+            .path()
+            .join(format!("rollout-2026-07-10T11-00-00-{PARENT_ID}.jsonl"));
+        let page = temp.path().join(format!(
+            "rollout-2026-07-10T04-00-00-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        let child = rollout_path(temp.path(), CHILD_A_ID);
+        let mut original_meta = session_meta_at(PARENT_ID, None, None, "2026-07-10T05:00:00Z");
+        original_meta["payload"]["timestamp"] = serde_json::json!("2026-07-10T11:00:00+08:00");
+        let mut page_meta = session_meta_at(PARENT_ID, None, None, "2026-07-10T04:00:00Z");
+        page_meta["payload"]["timestamp"] = serde_json::json!("2026-07-10T04:00:00Z");
+        write_jsonl(
+            &original,
+            &[
+                original_meta,
+                token_count_at(100, 0, 10, "2026-07-10T03:00:02Z"),
+                token_count_at(150, 0, 15, "2026-07-10T03:00:01Z"),
+            ],
+        );
+        write_jsonl(
+            &page,
+            &[
+                page_meta,
+                token_count_at(200, 0, 20, "2026-07-10T04:00:01Z"),
+                turn_context_at("2026-07-10T05:00:00Z"),
+            ],
+        );
+        write_jsonl(
+            &child,
+            &[
+                session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T04:30:00Z"),
+                token_count_at(100, 0, 10, "2026-07-10T04:30:01Z"),
+                token_count_at(150, 0, 15, "2026-07-10T04:30:02Z"),
+                token_count_at(200, 0, 20, "2026-07-10T04:30:03Z"),
+                token_count_at(250, 0, 25, "2026-07-10T04:30:04Z"),
+            ],
+        );
+        let files = [&original as &Path, &page, &child];
+        let result = sync_test_file(&db, &child, &files)?;
+        assert_eq!(
+            (result.imported, result.skipped, result.deferred),
+            (1, 3, false)
+        );
+        assert_eq!(get_sync_state(&db, &child.to_string_lossy())?.1, 5);
+        assert_eq!(sync_test_file(&db, &child, &files)?.imported, 0);
+        let conn = lock_conn!(db.conn);
+        let usage: (String, String, i64, i64) = conn.query_row(
+            "SELECT request_id, session_id, input_tokens, output_tokens FROM proxy_request_logs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(
+            usage,
+            (
+                format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{CHILD_A_ID}:4"),
+                CHILD_A_ID.to_string(),
+                50,
+                5
+            )
+        );
+        Ok(())
+    }
+
+    fn paginated_parent_meta(
+        timestamp: &str,
+        base: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut meta = session_meta_at(PARENT_ID, None, None, timestamp);
+        meta["payload"]["timestamp"] = serde_json::json!(timestamp);
+        meta["payload"]["history_mode"] = serde_json::json!("paginated");
+        if let Some(base) = base {
+            meta["payload"]["history_base"] = base;
+        }
+        meta
+    }
+
+    fn history_reference(rollout_id: &str, bytes: u64) -> serde_json::Value {
+        serde_json::json!({ "thread_id": rollout_id, "end_ordinal_exclusive": 2, "end_byte_offset": bytes })
+    }
+
+    fn assert_child_deferred(db: &Database, child: &Path, files: &[&Path]) -> Result<(), AppError> {
+        let result = sync_test_file(db, child, files)?;
+        assert_eq!(
+            (result.imported, result.skipped, result.deferred),
+            (0, 0, true)
+        );
+        assert_eq!(get_sync_state(db, &child.to_string_lossy())?, (0, 0));
+        let conn = lock_conn!(db.conn);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_missing_physical_history_dependencies_recover_without_child_changes(
+    ) -> Result<(), AppError> {
+        for missing_original in [true, false] {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let sessions = temp.path().join("sessions");
+            fs::create_dir_all(&sessions).unwrap();
+            let original = rollout_path(&sessions, PARENT_ID);
+            let middle = sessions.join(format!(
+                "rollout-2026-07-10T03-00-10-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+            ));
+            let head = sessions.join(format!(
+                "rollout-2026-07-10T03-00-20-{PARENT_ID}_{CHILD_B_ID}.jsonl"
+            ));
+            let child = rollout_path(&sessions, CHILD_A_ID);
+            write_jsonl(
+                &original,
+                &[
+                    paginated_parent_meta("2026-07-10T03:00:00Z", None),
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:01Z"),
+                ],
+            );
+            write_jsonl(
+                &middle,
+                &[
+                    paginated_parent_meta(
+                        "2026-07-10T03:00:10Z",
+                        Some(history_reference(
+                            PARENT_ID,
+                            fs::metadata(&original).unwrap().len(),
+                        )),
+                    ),
+                    token_count_at(150, 0, 15, "2026-07-10T03:00:11Z"),
+                ],
+            );
+            write_jsonl(
+                &head,
+                &[
+                    paginated_parent_meta(
+                        "2026-07-10T03:00:20Z",
+                        Some(history_reference(
+                            PARENT_PAGE_ID,
+                            fs::metadata(&middle).unwrap().len(),
+                        )),
+                    ),
+                    token_count_at(200, 0, 20, "2026-07-10T03:00:21Z"),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ],
+            );
+            write_jsonl(
+                &child,
+                &[
+                    session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                    token_count_at(150, 0, 15, "2026-07-10T03:00:32Z"),
+                    token_count_at(200, 0, 20, "2026-07-10T03:00:33Z"),
+                    token_count_at(250, 0, 25, "2026-07-10T03:00:34Z"),
+                ],
+            );
+            let missing = if missing_original { &original } else { &middle };
+            let saved = fs::read(missing).unwrap();
+            let child_before = fs::read(&child).unwrap();
+            fs::remove_file(missing).unwrap();
+            let all = [&original as &Path, &middle, &head, &child];
+            let present = all
+                .iter()
+                .copied()
+                .filter(|path| path.exists())
+                .collect::<Vec<_>>();
+            assert_child_deferred(&db, &child, &present)?;
+            assert_child_deferred(&db, &child, &present)?;
+            // Do not clear caches: an unchanged deferred child must retry after
+            // its missing original/intermediate physical rollout becomes available.
+            fs::write(missing, saved).unwrap();
+            let recovered = sync_test_file(&db, &child, &all)?;
+            assert_eq!(
+                (recovered.imported, recovered.skipped, recovered.deferred),
+                (1, 3, false)
+            );
+            assert_eq!(fs::read(&child).unwrap(), child_before);
+            let read_row = || -> Result<(String, String, i64, i64), AppError> {
+                let conn = lock_conn!(db.conn);
+                Ok(conn.query_row("SELECT request_id, session_id, input_tokens, output_tokens FROM proxy_request_logs", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?)
+            };
+            let expected = (
+                format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{CHILD_A_ID}:4"),
+                CHILD_A_ID.to_string(),
+                50,
+                5,
+            );
+            assert_eq!(read_row()?, expected);
+            assert_eq!(sync_test_file(&db, &child, &all)?.imported, 0);
+            {
+                let conn = lock_conn!(db.conn);
+                reset_codex_usage_on_conn(&conn, temp.path())?;
+            }
+            clear_codex_replay_caches();
+            let rebuilt = sync_test_file(&db, &child, &all)?;
+            assert_eq!(
+                (rebuilt.imported, rebuilt.skipped, rebuilt.deferred),
+                (1, 3, false)
+            );
+            assert_eq!(read_row()?, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_replacement_evidence_blocks_valid_sibling_until_repaired(
+    ) -> Result<(), AppError> {
+        for bad in ["metadata", "invalid", "compact", "braced"] {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let original = rollout_path(temp.path(), PARENT_ID);
+            let child = rollout_path(temp.path(), CHILD_A_ID);
+            let valid = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+            ));
+            let suffix = match bad {
+                "invalid" => "x".repeat(36),
+                "compact" => PARENT_PAGE_ID.replace('-', ""),
+                "braced" => format!("{{{PARENT_PAGE_ID}}}"),
+                _ => PARENT_PAGE_ID.to_string(),
+            };
+            let candidate = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-20-{PARENT_ID}_{suffix}.jsonl"
+            ));
+            write_jsonl(
+                &original,
+                &[
+                    session_meta(PARENT_ID),
+                    token_count(100, 0, 10),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ],
+            );
+            let mut page_lines = vec![
+                session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:20Z"),
+                token_count_at(200, 0, 20, "2026-07-10T03:00:21Z"),
+                turn_context_at("2026-07-10T03:00:40Z"),
+            ];
+            if bad == "metadata" {
+                page_lines[0]["payload"]["id"] = serde_json::json!(PARENT_PAGE_ID);
+            }
+            write_jsonl(&candidate, &page_lines);
+            write_jsonl(
+                &child,
+                &[
+                    session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                    token_count_at(200, 0, 20, "2026-07-10T03:00:32Z"),
+                    token_count_at(300, 0, 30, "2026-07-10T03:00:33Z"),
+                ],
+            );
+            let files = [&original as &Path, &candidate, &child];
+            assert_child_deferred(&db, &candidate, &files)?;
+            assert_child_deferred(&db, &child, &files)?;
+            assert!(
+                build_rollout_index(&[(original.clone(), 0), (candidate.clone(), 0)])[PARENT_ID]
+                    .contains(&candidate)
+            );
+            let child_before = fs::read(&child).unwrap();
+            if bad == "metadata" {
+                page_lines[0]["payload"]["id"] = serde_json::json!(PARENT_ID);
+                write_jsonl(&candidate, &page_lines);
+            } else {
+                fs::rename(&candidate, &valid).unwrap();
+            }
+            let recovered = sync_test_file(&db, &child, &[&original, &valid, &child])?;
+            assert_eq!(
+                (recovered.imported, recovered.skipped, recovered.deferred),
+                (1, 2, false),
+                "{bad}"
+            );
+            assert_eq!(fs::read(&child).unwrap(), child_before);
+            let conn = lock_conn!(db.conn);
+            assert_eq!(
+                conn.query_row("SELECT input_tokens FROM proxy_request_logs", [], |row| row
+                    .get::<_, i64>(0))?,
+                100
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_paginated_parent_reference_guards_defer_without_cursor() -> Result<(), AppError> {
+        for case in [
+            "truncated",
+            "mid_record",
+            "no_final_newline",
+            "zero_ordinal",
+            "overflow_ordinal",
+            "malformed",
+            "cycle",
+            "conflicting_refs",
+            "cross_family",
+            "missing_mode",
+            "unknown_mode",
+        ] {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let original = rollout_path(temp.path(), PARENT_ID);
+            let page = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+            ));
+            let child = rollout_path(temp.path(), CHILD_A_ID);
+            let extra_dir = temp.path().join("archive");
+            fs::create_dir_all(&extra_dir).unwrap();
+            let copy = extra_dir.join(page.file_name().unwrap());
+            let foreign = rollout_path(temp.path(), CHILD_B_ID);
+            let original_lines = [
+                paginated_parent_meta("2026-07-10T03:00:00Z", None),
+                token_count(100, 0, 10),
+            ];
+            write_jsonl(&original, &original_lines);
+            let original_size = fs::metadata(&original).unwrap().len();
+            let mut reference = history_reference(PARENT_ID, original_size);
+            match case {
+                "mid_record" => reference["end_byte_offset"] = serde_json::json!(original_size - 2),
+                "no_final_newline" => {
+                    reference["end_byte_offset"] = serde_json::json!(original_size - 1)
+                }
+                "zero_ordinal" => reference["end_ordinal_exclusive"] = serde_json::json!(0),
+                "overflow_ordinal" => {
+                    reference["end_ordinal_exclusive"] = serde_json::json!(u64::MAX)
+                }
+                "malformed" => reference["thread_id"] = serde_json::json!("invalid"),
+                "cross_family" => reference["thread_id"] = serde_json::json!(CHILD_B_ID),
+                _ => {}
+            }
+            let mut page_lines = [
+                paginated_parent_meta("2026-07-10T03:00:20Z", Some(reference)),
+                token_count_at(200, 0, 20, "2026-07-10T03:00:21Z"),
+                turn_context_at("2026-07-10T03:00:40Z"),
+            ];
+            match case {
+                "missing_mode" => {
+                    page_lines[0]["payload"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("history_mode");
+                }
+                "unknown_mode" => {
+                    page_lines[0]["payload"]["history_mode"] = serde_json::json!("future")
+                }
+                _ => {}
+            }
+            write_jsonl(&page, &page_lines);
+            match case {
+                "truncated" | "no_final_newline" => {
+                    let bytes = fs::read(&original).unwrap();
+                    fs::write(&original, &bytes[..bytes.len() - 1]).unwrap();
+                }
+                "cycle" => {
+                    let mut lines = original_lines;
+                    // Keep byte caps valid so the dependency loop itself causes deferral.
+                    for _ in 0..3 {
+                        lines[0]["payload"]["history_base"] =
+                            history_reference(PARENT_PAGE_ID, fs::metadata(&page).unwrap().len());
+                        write_jsonl(&original, &lines);
+                        page_lines[0]["payload"]["history_base"] =
+                            history_reference(PARENT_ID, fs::metadata(&original).unwrap().len());
+                        write_jsonl(&page, &page_lines);
+                    }
+                }
+                "conflicting_refs" => {
+                    page_lines[0]["payload"]["history_base"]["end_ordinal_exclusive"] =
+                        serde_json::json!(3);
+                    write_jsonl(&copy, &page_lines);
+                }
+                "cross_family" => {
+                    let mut lines = original_lines;
+                    lines[0]["payload"]["id"] = serde_json::json!(CHILD_B_ID);
+                    write_jsonl(&foreign, &lines);
+                }
+                _ => {}
+            }
+            write_jsonl(
+                &child,
+                &[
+                    session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                    token_count_at(200, 0, 20, "2026-07-10T03:00:32Z"),
+                    token_count_at(300, 0, 30, "2026-07-10T03:00:33Z"),
+                ],
+            );
+            let paths = [&original as &Path, &page, &child, &copy, &foreign];
+            let files = paths
+                .iter()
+                .copied()
+                .filter(|path| path.exists())
+                .collect::<Vec<_>>();
+            if case == "cycle" {
+                let index = build_rollout_index(
+                    &files
+                        .iter()
+                        .map(|path| (path.to_path_buf(), 0))
+                        .collect::<Vec<_>>(),
+                );
+                let error = resolve_parent_signatures(
+                    PARENT_ID,
+                    parse_timestamp_str("2026-07-10T03:00:30Z").unwrap(),
+                    &index,
+                )
+                .unwrap_err();
+                assert!(error.contains("成环"), "{error}");
+            }
+            assert_child_deferred(&db, &child, &files)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_history_prefix_is_complete_and_consistent_in_every_replica() -> Result<(), AppError> {
+        for shortened_copy in [true, false] {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let original = rollout_path(temp.path(), PARENT_ID);
+            let archive = temp.path().join("archive");
+            fs::create_dir_all(&archive).unwrap();
+            let copy = rollout_path(&archive, PARENT_ID);
+            let page = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+            ));
+            let child = rollout_path(temp.path(), CHILD_A_ID);
+            let meta = paginated_parent_meta("2026-07-10T03:00:00Z", None).to_string() + "\n";
+            let first = token_count_at(100, 0, 10, "2026-07-10T03:00:01Z").to_string() + "\n";
+            let second = token_count_at(150, 0, 15, "2026-07-10T03:00:02Z").to_string() + "\n";
+            let cap = if shortened_copy {
+                let trailing = turn_context_at("2026-07-10T03:00:03Z").to_string() + "\n";
+                fs::write(&original, format!("{meta}{first}{second}{trailing}")).unwrap();
+                fs::write(&copy, format!("{meta}{first}{second}")).unwrap();
+                fs::metadata(&original).unwrap().len()
+            } else {
+                // Same whole-file signatures, but one replica reaches the fixed
+                // byte cap after 100 and the other after 150. Both are boundaries.
+                let padding = " ".repeat(second.len() - 1) + "\n";
+                fs::write(&original, format!("{meta}{padding}{first}{second}")).unwrap();
+                fs::write(&copy, format!("{meta}{first}{second}")).unwrap();
+                (meta.len() + padding.len() + first.len()) as u64
+            };
+            write_jsonl(
+                &page,
+                &[
+                    paginated_parent_meta(
+                        "2026-07-10T03:00:20Z",
+                        Some(history_reference(PARENT_ID, cap)),
+                    ),
+                    token_count_at(200, 0, 20, "2026-07-10T03:00:21Z"),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ],
+            );
+            write_jsonl(
+                &child,
+                &[
+                    session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                    token_count_at(200, 0, 20, "2026-07-10T03:00:32Z"),
+                    token_count_at(300, 0, 30, "2026-07-10T03:00:33Z"),
+                ],
+            );
+            assert_child_deferred(&db, &child, &[&original, &copy, &page, &child])?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parent_chain_uses_fork_time_and_excludes_discarded_history() -> Result<(), AppError> {
+        for (before_revert, live_total, expected_input) in
+            [(true, 250, 50), (false, 150, 50), (false, 200, 100)]
+        {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let original = rollout_path(temp.path(), PARENT_ID);
+            let abandoned = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-10-{PARENT_ID}_{CHILD_B_ID}.jsonl"
+            ));
+            let page = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+            ));
+            let child = rollout_path(temp.path(), CHILD_A_ID);
+            let prefix = [
+                paginated_parent_meta("2026-07-10T03:00:00Z", None),
+                token_count_at(100, 0, 10, "2026-07-10T03:00:01Z"),
+            ];
+            write_jsonl(&original, &prefix);
+            let cap = fs::metadata(&original).unwrap().len();
+            let mut root_lines = prefix.to_vec();
+            root_lines.extend([
+                token_count_at(200, 0, 20, "2026-07-10T03:00:03Z"),
+                turn_context_at("2026-07-10T03:00:40Z"),
+            ]);
+            write_jsonl(&original, &root_lines);
+            write_jsonl(
+                &abandoned,
+                &[
+                    paginated_parent_meta(
+                        "2026-07-10T03:00:10Z",
+                        Some(history_reference(PARENT_ID, cap)),
+                    ),
+                    token_count_at(150, 0, 15, "2026-07-10T03:00:11Z"),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ],
+            );
+            write_jsonl(
+                &page,
+                &[
+                    paginated_parent_meta(
+                        "2026-07-10T03:00:20Z",
+                        Some(history_reference(PARENT_ID, cap)),
+                    ),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ],
+            );
+            let cutoff = if before_revert {
+                "2026-07-10T03:00:05Z"
+            } else {
+                "2026-07-10T03:00:30Z"
+            };
+            let mut child_lines = vec![
+                session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, cutoff),
+                token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+            ];
+            if before_revert {
+                child_lines.push(token_count_at(200, 0, 20, "2026-07-10T03:00:32Z"));
+            }
+            child_lines.push(token_count_at(
+                live_total,
+                0,
+                live_total / 10,
+                "2026-07-10T03:00:33Z",
+            ));
+            write_jsonl(&child, &child_lines);
+            let result = sync_test_file(&db, &child, &[&original, &abandoned, &page, &child])?;
+            assert_eq!(
+                (result.imported, result.skipped, result.deferred),
+                (1, if before_revert { 2 } else { 1 }, false)
+            );
+            let conn = lock_conn!(db.conn);
+            let row: (String, i64) = conn.query_row(
+                "SELECT request_id, input_tokens FROM proxy_request_logs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(
+                row,
+                (
+                    format!(
+                        "{CODEX_THREAD_REQUEST_ID_PREFIX}:{CHILD_A_ID}:{}",
+                        if before_revert { 3 } else { 2 }
+                    ),
+                    expected_input
+                )
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_incomplete_parent_continuation_defers_until_append_then_rebuilds_consistently(
+    ) -> Result<(), AppError> {
+        use std::io::Write as _;
+
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let original = rollout_path(&sessions, PARENT_ID);
+        let page = sessions.join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        let child = rollout_path(&sessions, CHILD_A_ID);
+        let mut original_meta = session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:40Z");
+        original_meta["payload"]["timestamp"] = serde_json::json!("2026-07-10T03:00:00Z");
+        write_jsonl(
+            &original,
+            &[
+                original_meta,
+                token_count_at(100, 0, 10, "2026-07-10T03:00:01Z"),
+            ],
+        );
+        write_jsonl(
+            &page,
+            &[
+                session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:20Z"),
+                token_count_at(200, 0, 20, "2026-07-10T03:00:21Z"),
+            ],
+        );
+        write_jsonl(
+            &child,
+            &[
+                session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                token_count_at(200, 0, 20, "2026-07-10T03:00:32Z"),
+                token_count_at(300, 0, 30, "2026-07-10T03:00:33Z"),
+                token_count_at(350, 0, 35, "2026-07-10T03:00:34Z"),
+            ],
+        );
+        let files = [&original as &Path, &page, &child];
+        let read_rows = || -> Result<Vec<(String, String, i64, i64)>, AppError> {
+            let conn = lock_conn!(db.conn);
+            let mut statement = conn.prepare(
+                "SELECT request_id, session_id, input_tokens, output_tokens
+                 FROM proxy_request_logs ORDER BY request_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        // The original's late timestamp must not certify this incomplete page.
+        let deferred = sync_test_file(&db, &child, &files)?;
+        assert_eq!(
+            (deferred.imported, deferred.skipped, deferred.deferred),
+            (0, 0, true)
+        );
+        assert_eq!(get_sync_state(&db, &child.to_string_lossy())?, (0, 0));
+        assert!(read_rows()?.is_empty());
+        let child_before = fs::read(&child).unwrap();
+        {
+            let mut file = fs::OpenOptions::new().append(true).open(&page).unwrap();
+            writeln!(
+                file,
+                "{}",
+                token_count_at(300, 0, 30, "2026-07-10T03:00:25Z")
+            )
+            .unwrap();
+            writeln!(file, "{}", turn_context_at("2026-07-10T03:00:40Z")).unwrap();
+        }
+        assert_eq!(fs::read(&child).unwrap(), child_before);
+        let recovered = sync_test_file(&db, &child, &files)?;
+        assert_eq!(
+            (recovered.imported, recovered.skipped, recovered.deferred),
+            (1, 3, false)
+        );
+        assert_eq!(get_sync_state(&db, &child.to_string_lossy())?.1, 5);
+        let expected = vec![(
+            format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{CHILD_A_ID}:4"),
+            CHILD_A_ID.to_string(),
+            50,
+            5,
+        )];
+        assert_eq!(read_rows()?, expected);
+        assert_eq!(sync_test_file(&db, &child, &files)?.imported, 0);
+        assert_eq!(read_rows()?, expected);
+        {
+            let conn = lock_conn!(db.conn);
+            reset_codex_usage_on_conn(&conn, temp.path())?;
+        }
+        clear_codex_replay_caches();
+        let rebuilt = sync_test_file(&db, &child, &files)?;
+        assert_eq!(
+            (rebuilt.imported, rebuilt.skipped, rebuilt.deferred),
+            (1, 3, false)
+        );
+        assert_eq!(read_rows()?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parent_segments_defer_when_creation_order_is_missing_or_conflicting() {
+        let temp = tempdir().unwrap();
+        let original = rollout_path(temp.path(), PARENT_ID);
+        let page = temp.path().join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        let copies = temp.path().join("archives");
+        fs::create_dir_all(&copies).unwrap();
+        let replica = copies.join(page.file_name().unwrap());
+        let cutoff = parse_timestamp_str("2026-07-10T03:00:30Z").unwrap();
+        write_jsonl(
+            &original,
+            &[session_meta(PARENT_ID), token_count(100, 0, 10)],
+        );
+        let page_meta = session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:20Z");
+        let page_lines = [
+            page_meta.clone(),
+            token_count_at(200, 0, 20, "2026-07-10T03:00:21Z"),
+            turn_context_at("2026-07-10T03:00:40Z"),
+        ];
+        write_jsonl(&page, &page_lines);
+        for timestamp in [
+            serde_json::Value::Null,
+            serde_json::json!("invalid"),
+            serde_json::json!("2026-07-10T03:00:22Z"),
+        ] {
+            let mut replica_lines = page_lines.clone();
+            replica_lines[0]["payload"]["timestamp"] = timestamp;
+            write_jsonl(&replica, &replica_lines);
+            let index = build_rollout_index(&[
+                (original.clone(), 0),
+                (page.clone(), 0),
+                (replica.clone(), 0),
+            ]);
+            assert!(resolve_parent_signatures(PARENT_ID, cutoff, &index).is_err());
+            // A single physical rollout keeps legacy copy checks: creation order
+            // is unnecessary when signatures and cutoff evidence agree.
+            let copies_only = build_rollout_index(&[(page.clone(), 0), (replica.clone(), 0)]);
+            assert_eq!(
+                resolve_parent_signatures(PARENT_ID, cutoff, &copies_only)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        let mut missing_meta_lines = page_lines;
+        missing_meta_lines[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("timestamp");
+        write_jsonl(&page, &missing_meta_lines);
+        let index = build_rollout_index(&[(original, 0), (page.clone(), 0)]);
+        assert!(resolve_parent_signatures(PARENT_ID, cutoff, &index).is_err());
+        assert_eq!(
+            resolve_parent_signatures(PARENT_ID, cutoff, &build_rollout_index(&[(page, 0)]))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_parent_page_replicas_preserve_conflict_timestamp_and_staleness_guards() {
+        let temp = tempdir().unwrap();
+        let parent_root = rollout_path(temp.path(), PARENT_ID);
+        write_jsonl(
+            &parent_root,
+            &[
+                session_meta(PARENT_ID),
+                token_count_at(1_000, 900, 100, "2026-07-10T03:00:01Z"),
+            ],
+        );
+        let cutoff = parse_timestamp_str("2026-07-10T03:00:30Z").unwrap();
+        for (case, expected_error) in [
+            ("identical", None),
+            ("conflicting", Some("对应多个内容不一致的文件")),
+            ("missing_timestamp", Some("缺少有效 timestamp")),
+            ("stale", Some("尚未写到 child fork 时刻")),
+        ] {
+            let page_dir = temp.path().join(case).join("sessions");
+            let copy_dir = temp.path().join(case).join("archived_sessions");
+            fs::create_dir_all(&page_dir).unwrap();
+            fs::create_dir_all(&copy_dir).unwrap();
+            let filename =
+                format!("rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl");
+            let page = page_dir.join(&filename);
+            let replica = copy_dir.join(&filename);
+            let page_lines = [
+                session_meta_at(PARENT_ID, None, None, "2026-07-10T03:00:20Z"),
+                token_count_at(2_000, 1_800, 200, "2026-07-10T03:00:21Z"),
+                turn_context_at("2026-07-10T03:00:40Z"),
+            ];
+            let mut replica_lines = page_lines.to_vec();
+            match case {
+                "conflicting" => {
+                    replica_lines[1] = token_count_at(2_100, 1_800, 200, "2026-07-10T03:00:21Z");
+                }
+                "missing_timestamp" => {
+                    let mut missing_timestamp = token_count(500, 400, 50);
+                    missing_timestamp
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("timestamp");
+                    replica_lines.push(missing_timestamp);
+                }
+                "stale" => {
+                    replica_lines[2] = turn_context_at("2026-07-10T03:00:25Z");
+                }
+                _ => {}
+            }
+            write_jsonl(&page, &page_lines);
+            write_jsonl(&replica, &replica_lines);
+            let mut index =
+                build_rollout_index(&[(parent_root.clone(), 0), (page, 0), (replica, 0)]);
+            for _ in 0..2 {
+                let result = resolve_parent_signatures(PARENT_ID, cutoff, &index);
+                match expected_error {
+                    Some(reason) => assert!(
+                        result.is_err_and(|error| error.contains(reason)),
+                        "{case}: each replica must retain its defensive checks"
+                    ),
+                    None => assert_eq!(result.unwrap().len(), 2, "copies must not replay twice"),
+                }
+                // Equal basenames preserve input order during segment sorting.
+                index.get_mut(PARENT_ID).unwrap().reverse();
+            }
+        }
     }
 
     #[test]
