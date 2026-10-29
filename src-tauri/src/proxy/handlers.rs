@@ -35,6 +35,60 @@ use super::{
     usage::{log_error_request, RequestLogContext, UsageLogPolicy},
 };
 
+type NamespaceRestoreMap = std::collections::HashMap<
+    String,
+    super::providers::transform_codex_responses_namespace::NamespacedName,
+>;
+
+/// Restore native Responses tool identities without bypassing the ordinary
+/// timeout, usage logging, and stream-completion handling.
+fn restore_xai_namespaces(
+    result: Result<PreparedResponse, ProxyError>,
+    app_type: &AppType,
+    provider: &Provider,
+    names: &NamespaceRestoreMap,
+) -> Result<PreparedResponse, ProxyError> {
+    let mut prepared = result?;
+    // 与请求侧展平使用同一判定。
+    if !super::providers::rewrites_codex_requests_for_xai(app_type, provider)
+        || names.is_empty()
+        || !prepared.response.status().is_success()
+    {
+        return Ok(prepared);
+    }
+    if prepared
+        .response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream"))
+    {
+        let (mut parts, body) = prepared.response.into_parts();
+        parts.headers.remove("content-length");
+        let stream = super::providers::transform_codex_responses_namespace::create_namespace_restore_sse_stream(
+            body.into_data_stream(), names.clone(),
+        );
+        prepared.response = Response::from_parts(parts, axum::body::Body::from_stream(stream));
+    } else if let Some(bytes) = prepared.body_bytes.as_ref() {
+        if let Ok(mut value) = serde_json::from_slice::<Value>(bytes) {
+            if super::providers::transform_codex_responses_namespace::restore_response_namespaces(
+                &mut value, names,
+            ) {
+                let bytes = Bytes::from(
+                    serde_json::to_vec(&value)
+                        .map_err(|error| ProxyError::TransformError(error.to_string()))?,
+                );
+                let (mut parts, _) = prepared.response.into_parts();
+                parts.headers.remove("content-length");
+                prepared.response =
+                    Response::from_parts(parts, axum::body::Body::from(bytes.clone()));
+                prepared.body_bytes = Some(bytes);
+            }
+        }
+    }
+    Ok(prepared)
+}
+
 pub async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({ "ok": true })))
 }
@@ -187,6 +241,56 @@ pub async fn handle_responses_compact(
         headers,
         body,
         AppType::Codex,
+        endpoint_with_query(&uri, "/responses/compact"),
+    )
+    .await
+}
+
+/// Grok Build 的 Responses 端点：接管时 api_backend 固定为 `responses`，
+/// 客户端请求打在 `/grokbuild/v1/responses`。
+pub async fn handle_grokbuild_responses(
+    State(state): State<ProxyServerState>,
+    uri: Uri,
+    mut headers: HeaderMap,
+    body_bytes: Bytes,
+) -> Response {
+    let body_bytes = match decode_codex_request_body(&mut headers, body_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
+    };
+    let body = match Json::<Value>::from_bytes(&body_bytes) {
+        Ok(Json(body)) => body,
+        Err(err) => return err.into_response(),
+    };
+    handle_passthrough_request(
+        state,
+        headers,
+        body,
+        AppType::GrokBuild,
+        endpoint_with_query(&uri, "/responses"),
+    )
+    .await
+}
+
+pub async fn handle_grokbuild_responses_compact(
+    State(state): State<ProxyServerState>,
+    uri: Uri,
+    mut headers: HeaderMap,
+    body_bytes: Bytes,
+) -> Response {
+    let body_bytes = match decode_codex_request_body(&mut headers, body_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
+    };
+    let body = match Json::<Value>::from_bytes(&body_bytes) {
+        Ok(Json(body)) => body,
+        Err(err) => return err.into_response(),
+    };
+    handle_passthrough_request(
+        state,
+        headers,
+        body,
+        AppType::GrokBuild,
         endpoint_with_query(&uri, "/responses/compact"),
     )
     .await
@@ -589,9 +693,12 @@ async fn handle_passthrough_request(
     forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = request_is_streaming(&context.app_type, &endpoint, &body);
-    let codex_tool_context = matches!(context.app_type, AppType::Codex).then(|| {
-        super::providers::transform_codex_chat::build_codex_tool_context_from_request(&body)
-    });
+    let namespace_map =
+        super::providers::transform_codex_responses_namespace::namespace_restore_map(&body);
+    let codex_tool_context =
+        matches!(context.app_type, AppType::Codex | AppType::GrokBuild).then(|| {
+            super::providers::transform_codex_chat::build_codex_tool_context_from_request(&body)
+        });
     let options = if is_stream {
         ForwardOptions {
             max_retries: context.app_proxy.max_retries,
@@ -634,7 +741,7 @@ async fn handle_passthrough_request(
                     );
                     log_error_request(&context.state, &request_log, &error).await;
                 }
-                if matches!(context.app_type, AppType::Codex) {
+                if matches!(context.app_type, AppType::Codex | AppType::GrokBuild) {
                     context.state.record_request_error(&error).await;
                     return build_codex_proxy_error_response(
                         &context,
@@ -736,6 +843,12 @@ async fn handle_passthrough_request(
                 build_buffered_passthrough_response(status, &response.headers, response.body)
             }
         };
+        let response_result = restore_xai_namespaces(
+            response_result,
+            &context.app_type,
+            &forward_result.provider,
+            &namespace_map,
+        );
         let request_log = Some(RequestLogContext::from_handler(
             &context,
             forward_result.provider.clone(),
@@ -756,7 +869,7 @@ async fn handle_passthrough_request(
         .await;
     }
 
-    if matches!(context.app_type, AppType::Codex) {
+    if matches!(context.app_type, AppType::Codex | AppType::GrokBuild) {
         let streaming_first_byte_timeout = context.streaming_first_byte_timeout();
         let non_streaming_timeout = context.non_streaming_timeout();
         let request_started_at = Instant::now();
@@ -802,6 +915,7 @@ async fn handle_passthrough_request(
             streaming_first_byte_timeout,
             non_streaming_timeout,
             codex_tool_context.unwrap_or_default(),
+            &namespace_map,
         )
         .await;
     }
@@ -1057,6 +1171,7 @@ fn compact_codex_proxy_error_message(message: &str, max_chars: usize) -> String 
     format!("{truncated}...(truncated)")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_codex_live_aware_response(
     context: &HandlerContext,
     endpoint: &str,
@@ -1065,6 +1180,7 @@ async fn finish_codex_live_aware_response(
     streaming_first_byte_timeout: Option<Duration>,
     non_streaming_timeout: Option<Duration>,
     tool_context: super::providers::transform_codex_chat::CodexToolContext,
+    namespace_map: &NamespaceRestoreMap,
 ) -> Response {
     let provider = forward_result.provider;
     let response = forward_result.response;
@@ -1212,6 +1328,12 @@ async fn finish_codex_live_aware_response(
                 context.streaming_idle_timeout(),
             )
             .await;
+            let response_result = restore_xai_namespaces(
+                response_result,
+                &context.app_type,
+                &provider,
+                namespace_map,
+            );
             if response_result
                 .as_ref()
                 .is_ok_and(|prepared| prepared.stream_completion.is_some())
@@ -1256,6 +1378,12 @@ async fn finish_codex_live_aware_response(
             ));
             let response_result =
                 build_buffered_passthrough_response(status, &response.headers, response.body);
+            let response_result = restore_xai_namespaces(
+                response_result,
+                &context.app_type,
+                &provider,
+                namespace_map,
+            );
             ResponseHandler::finish_buffered(
                 &context.state,
                 response_result,
@@ -1286,7 +1414,7 @@ fn passthrough_usage_log_policy(
     provider: &Provider,
     endpoint: &str,
 ) -> UsageLogPolicy {
-    if matches!(app_type, AppType::Codex)
+    if matches!(app_type, AppType::Codex | AppType::GrokBuild)
         && (super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
             || super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint))
     {
@@ -1370,6 +1498,78 @@ mod tests {
     use std::{collections::HashMap, env, sync::Arc, time::Duration};
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn xai_namespace_reply_restores_tool_identity_in_json_and_sse() {
+        let request = json!({"tools": [{"type": "namespace", "name": "browser", "tools": [
+            {"type": "function", "name": "open", "parameters": {"type": "object"}}
+        ]}]});
+        let names =
+            crate::proxy::providers::transform_codex_responses_namespace::namespace_restore_map(
+                &request,
+            );
+        let mut provider = Provider::with_id("xai".into(), "xAI".into(), json!({}), None);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("xai_oauth".into()),
+            ..Default::default()
+        });
+        let item = json!({"type":"function_call", "name":"browser__open", "call_id":"call_1", "arguments":"{}"});
+        let json_body = json!({"output": [item.clone()]});
+        let prepared = crate::proxy::response::build_buffered_passthrough_response(
+            StatusCode::OK,
+            &HeaderMap::new(),
+            serde_json::to_vec(&json_body).unwrap().into(),
+        )
+        .unwrap();
+        let prepared =
+            super::restore_xai_namespaces(Ok(prepared), &AppType::Codex, &provider, &names)
+                .unwrap();
+        let decoded: Value = serde_json::from_slice(prepared.body_bytes.as_ref().unwrap()).unwrap();
+        assert_eq!(decoded["output"][0]["name"], "open");
+        assert_eq!(decoded["output"][0]["namespace"], "browser");
+
+        let event = json!({"type":"response.output_item.added", "item":item});
+        let sse = format!("event: response.output_item.added\ndata: {event}\n\n");
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/event-stream".parse().unwrap());
+        let prepared = crate::proxy::response::build_buffered_passthrough_response(
+            StatusCode::OK,
+            &headers,
+            sse.into(),
+        )
+        .unwrap();
+        let prepared =
+            super::restore_xai_namespaces(Ok(prepared), &AppType::Codex, &provider, &names)
+                .unwrap();
+        let bytes = to_bytes(prepared.response.into_body(), 16_384)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("\"namespace\":\"browser\""), "{text}");
+        assert!(text.contains("\"name\":\"open\""), "{text}");
+        assert!(!text.contains("browser__open"), "{text}");
+
+        // 原生 Grok Build（含路由中的 Grok Official）请求未被展平，响应原样透传。
+        let mut official = Provider::with_id(
+            "grokbuild-official".into(),
+            "Grok Official".into(),
+            json!({"config": ""}),
+            None,
+        );
+        official.category = Some("official".into());
+        let prepared = crate::proxy::response::build_buffered_passthrough_response(
+            StatusCode::OK,
+            &HeaderMap::new(),
+            serde_json::to_vec(&json_body).unwrap().into(),
+        )
+        .unwrap();
+        let prepared =
+            super::restore_xai_namespaces(Ok(prepared), &AppType::GrokBuild, &official, &names)
+                .unwrap();
+        let decoded: Value = serde_json::from_slice(prepared.body_bytes.as_ref().unwrap()).unwrap();
+        assert_eq!(decoded["output"][0]["name"], "browser__open");
+        assert!(decoded["output"][0].get("namespace").is_none());
+    }
 
     struct TempHome {
         #[allow(dead_code)]

@@ -2508,6 +2508,23 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_xai_account() -> &'static str {
+        if is_chinese() {
+            "xAI 账号"
+        } else {
+            "xAI Account"
+        }
+    }
+
+    /// Account label for a managed auth provider (`codex_oauth` / `xai_oauth`).
+    pub fn tui_label_managed_account(auth_provider: &str) -> &'static str {
+        if auth_provider == "xai_oauth" {
+            tui_label_xai_account()
+        } else {
+            tui_label_chatgpt_account()
+        }
+    }
+
     pub fn tui_label_codex_fast_mode() -> &'static str {
         if is_chinese() {
             "FAST 模式"
@@ -5899,16 +5916,17 @@ pub mod texts {
         claude: usize,
         codex: usize,
         gemini: usize,
+        grokbuild: usize,
         opencode: usize,
         hermes: usize,
     ) -> String {
         if is_chinese() {
             format!(
-                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
+                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · Grok Build: {grokbuild} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         } else {
             format!(
-                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
+                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · Grok Build: {grokbuild} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         }
     }

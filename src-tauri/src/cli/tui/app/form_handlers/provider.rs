@@ -318,6 +318,7 @@ impl App {
                     selected,
                     ProviderAddField::CodexModel
                         | ProviderAddField::GeminiModel
+                        | ProviderAddField::GrokModel
                         | ProviderAddField::OpenCodeModelId
                 ) =>
             {
@@ -598,29 +599,31 @@ impl App {
                 provider.toggle_claude_disable_auto_upgrade();
                 Action::None
             }
-            ProviderAddField::CodexOAuthAccount => {
+            ProviderAddField::ManagedAccount => {
                 if matches!(key.code, KeyCode::Enter) {
-                    let selected = self
-                        .form
-                        .as_ref()
-                        .and_then(|form| match form {
-                            FormState::ProviderAdd(provider) => {
-                                Some(provider.codex_oauth_account_id.clone())
-                            }
-                            _ => None,
-                        })
-                        .flatten();
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+                        return Action::None;
+                    };
+                    let Some(auth_provider) = provider.managed_auth_provider() else {
+                        return Action::None;
+                    };
+                    let selected = provider.managed_account_id.clone();
                     self.overlay = Overlay::ManagedAccountPicker {
-                        auth_provider: "codex_oauth".to_string(),
+                        auth_provider: auth_provider.to_string(),
                         selected: 0,
                         binding: true,
                         selected_account_id: selected,
                     };
                     // managed_auth status is no longer fetched at startup, so pull
-                    // it on demand the first time this picker is opened.
-                    if self.managed_auth_status.is_none() {
+                    // it on demand the first time this picker is opened (or when
+                    // the loaded status belongs to the other auth provider).
+                    if self
+                        .managed_auth_status
+                        .as_ref()
+                        .is_none_or(|status| status.provider != auth_provider)
+                    {
                         return Action::ManagedAuthRefresh {
-                            auth_provider: "codex_oauth".to_string(),
+                            auth_provider: auth_provider.to_string(),
                         };
                     }
                 }
@@ -722,6 +725,7 @@ impl App {
             }
             ProviderAddField::CodexModel
             | ProviderAddField::GeminiModel
+            | ProviderAddField::GrokModel
             | ProviderAddField::OpenCodeModelId => {
                 self.handle_provider_model_field_activate(selected, key)
             }
@@ -1582,6 +1586,8 @@ impl App {
         let mut api_key = match selected {
             ProviderAddField::CodexModel => (!provider.codex_api_key.value.trim().is_empty())
                 .then(|| provider.codex_api_key.value.clone()),
+            ProviderAddField::GrokModel => (!provider.grok_api_key.value.trim().is_empty())
+                .then(|| provider.grok_api_key.value.clone()),
             ProviderAddField::GeminiModel => (!provider.gemini_api_key.value.trim().is_empty())
                 .then(|| provider.gemini_api_key.value.clone()),
             ProviderAddField::OpenCodeModelId => {
@@ -1599,6 +1605,7 @@ impl App {
         let base_url = match selected {
             ProviderAddField::CodexModel => provider.codex_base_url.value.clone(),
             ProviderAddField::GeminiModel => provider.gemini_base_url.value.clone(),
+            ProviderAddField::GrokModel => provider.grok_base_url.value.clone(),
             ProviderAddField::OpenCodeModelId => provider.opencode_base_url.value.clone(),
             ProviderAddField::HermesModels => provider.hermes_base_url.value.clone(),
             ProviderAddField::OpenClawModels if matches!(provider.app_type, AppType::Pi) => {
@@ -2019,11 +2026,13 @@ fn usage_query_provider_credential_field(field: ProviderAddField) -> bool {
         field,
         ProviderAddField::ClaudeApiKey
             | ProviderAddField::ClaudeBaseUrl
-            | ProviderAddField::CodexOAuthAccount
+            | ProviderAddField::ManagedAccount
             | ProviderAddField::CodexApiKey
             | ProviderAddField::CodexBaseUrl
             | ProviderAddField::GeminiApiKey
             | ProviderAddField::GeminiBaseUrl
+            | ProviderAddField::GrokBaseUrl
+            | ProviderAddField::GrokApiKey
             | ProviderAddField::HermesApiKey
             | ProviderAddField::HermesBaseUrl
             | ProviderAddField::OpenCodeApiKey

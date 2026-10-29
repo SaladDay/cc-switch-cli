@@ -482,6 +482,19 @@ impl ProviderService {
                 .and_then(Value::as_str)
                 .ok_or_else(|| AppError::InvalidInput("Pi provider API key is missing".to_string()))
                 .map(str::to_string),
+            AppType::GrokBuild => provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .and_then(crate::grok_config::extract_credentials)
+                .map(|(_, api_key)| api_key)
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.grokbuild.api_key.missing",
+                        "缺少 API Key（内联 api_key 或可解析的 env_key）",
+                        "API key is missing (inline api_key or resolvable env_key)",
+                    )
+                }),
         }
     }
 
@@ -563,6 +576,21 @@ impl ProviderService {
                 .unwrap_or_default()
                 .to_string()),
             AppType::Pi => crate::pi_config::provider_base_url(&provider.settings_config),
+            AppType::GrokBuild => {
+                let config_toml = provider
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+
+                crate::grok_config::extract_base_url(config_toml).ok_or_else(|| {
+                    AppError::localized(
+                        "provider.grokbuild.base_url.missing",
+                        "config.toml 中缺少 base_url 配置",
+                        "base_url is missing from config.toml",
+                    )
+                })
+            }
         }
     }
 

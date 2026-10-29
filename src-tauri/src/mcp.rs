@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::app_config::{AppType, McpConfig, MultiAppConfig};
+use crate::app_config::{AppType, McpApps, McpConfig, McpServer, MultiAppConfig};
 use crate::error::AppError;
 
 /// 基础校验：允许 stdio/http/sse；或省略 type（视为 stdio）。对应必填字段存在
@@ -393,6 +393,7 @@ pub fn import_from_claude(config: &mut MultiAppConfig) -> Result<usize, AppError
                         claude: true,
                         codex: false,
                         gemini: false,
+                        grokbuild: false,
                         opencode: false,
                         hermes: false,
                     },
@@ -621,6 +622,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                             claude: false,
                             codex: true,
                             gemini: false,
+                            grokbuild: false,
                             opencode: false,
                             hermes: false,
                         },
@@ -784,6 +786,7 @@ pub fn import_from_gemini(config: &mut MultiAppConfig) -> Result<usize, AppError
                         claude: false,
                         codex: false,
                         gemini: true,
+                        grokbuild: false,
                         opencode: false,
                         hermes: false,
                     },
@@ -953,6 +956,7 @@ pub fn import_from_opencode(config: &mut MultiAppConfig) -> Result<usize, AppErr
                         claude: false,
                         codex: false,
                         gemini: false,
+                        grokbuild: false,
                         opencode: true,
                         hermes: false,
                     },
@@ -1366,6 +1370,172 @@ pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Grok Build 的 MCP 投影沿用 Codex 的 `[mcp_servers]` 布局，但字段命名是
+/// Grok 自己的：传输方式从 `command`/`url` 推断（不写 `type`），请求头叫
+/// `headers`（Codex 是 `http_headers`）。
+fn json_server_to_grokbuild_toml_table(server_spec: &Value) -> Result<toml_edit::Table, AppError> {
+    let mut table = json_server_to_toml_table(server_spec)?;
+    table.remove("type");
+    if let Some(headers) = table.remove("http_headers") {
+        table.insert("headers", headers);
+    }
+    Ok(table)
+}
+
+fn toml_server_to_json(entry: &toml::value::Table) -> Value {
+    fn convert(value: &toml::Value) -> Option<Value> {
+        match value {
+            toml::Value::String(value) => Some(json!(value)),
+            toml::Value::Integer(value) => Some(json!(value)),
+            toml::Value::Float(value) => Some(json!(value)),
+            toml::Value::Boolean(value) => Some(json!(value)),
+            toml::Value::Datetime(value) => Some(json!(value.to_string())),
+            toml::Value::Array(values) => Some(Value::Array(
+                values.iter().filter_map(convert).collect::<Vec<_>>(),
+            )),
+            toml::Value::Table(values) => Some(Value::Object(
+                values
+                    .iter()
+                    .filter_map(|(key, value)| convert(value).map(|value| (key.clone(), value)))
+                    .collect(),
+            )),
+        }
+    }
+
+    let mut spec = serde_json::Map::new();
+    for (key, value) in entry {
+        let output_key = if key == "http_headers" {
+            "headers"
+        } else {
+            key
+        };
+        if let Some(value) = convert(value) {
+            spec.insert(output_key.to_string(), value);
+        }
+    }
+    let default_type = if spec.contains_key("url") {
+        "http"
+    } else {
+        "stdio"
+    };
+    spec.entry("type".to_string())
+        .or_insert_with(|| json!(default_type));
+    Value::Object(spec)
+}
+
+fn read_grok_config_text() -> Result<String, AppError> {
+    let path = crate::grok_config::get_grok_config_path();
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    std::fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))
+}
+
+/// 从 Grok Build live 配置导入 MCP 服务器。
+pub fn import_from_grokbuild(config: &mut MultiAppConfig) -> Result<usize, AppError> {
+    let text = read_grok_config_text()?;
+    if text.trim().is_empty() {
+        return Ok(0);
+    }
+    let root: toml::Table = toml::from_str(&text)
+        .map_err(|e| AppError::McpValidation(format!("解析 ~/.grok/config.toml 失败: {e}")))?;
+    let Some(entries) = root.get("mcp_servers").and_then(toml::Value::as_table) else {
+        return Ok(0);
+    };
+
+    let servers = config
+        .mcp
+        .servers
+        .get_or_insert_with(std::collections::HashMap::new);
+    let mut changed = 0;
+    for (id, entry) in entries {
+        let Some(entry) = entry.as_table() else {
+            continue;
+        };
+        let spec = toml_server_to_json(entry);
+        if let Err(error) = validate_server_spec(&spec) {
+            log::warn!("跳过无效 Grok Build MCP 项 '{id}': {error}");
+            continue;
+        }
+
+        if let Some(existing) = servers.get_mut(id) {
+            if !existing.apps.grokbuild {
+                existing.apps.grokbuild = true;
+                changed += 1;
+            }
+        } else {
+            servers.insert(
+                id.clone(),
+                McpServer {
+                    id: id.clone(),
+                    name: id.clone(),
+                    server: spec,
+                    apps: McpApps {
+                        grokbuild: true,
+                        ..Default::default()
+                    },
+                    description: None,
+                    homepage: None,
+                    docs: None,
+                    tags: Vec::new(),
+                },
+            );
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
+/// 将单个 MCP 服务器同步到 Grok Build live 配置
+pub fn sync_single_server_to_grokbuild(
+    _config: &MultiAppConfig,
+    id: &str,
+    server_spec: &Value,
+) -> Result<(), AppError> {
+    if !crate::sync_policy::should_sync_live(&AppType::GrokBuild) {
+        return Ok(());
+    }
+
+    let config_path = crate::grok_config::get_grok_config_path();
+    let text = read_grok_config_text()?;
+    let mut doc = if text.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        text.parse::<toml_edit::DocumentMut>().map_err(|e| {
+            AppError::McpValidation(format!("解析 Grok Build config.toml 失败: {e}"))
+        })?
+    };
+
+    let toml_table = json_server_to_grokbuild_toml_table(server_spec)?;
+    upsert_mcp_server_table(&mut doc, id, toml_table)?;
+
+    crate::config::write_text_file(&config_path, &doc.to_string())
+}
+
+/// 从 Grok Build live 配置中移除单个 MCP 服务器
+pub fn remove_server_from_grokbuild(id: &str) -> Result<(), AppError> {
+    if !crate::sync_policy::should_sync_live(&AppType::GrokBuild) {
+        return Ok(());
+    }
+    let config_path = crate::grok_config::get_grok_config_path();
+    if !config_path.exists() {
+        return Ok(());
+    }
+
+    let text = read_grok_config_text()?;
+    let mut doc = match text.parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc,
+        Err(e) => {
+            log::warn!("解析 Grok Build config.toml 失败: {e}，跳过删除操作");
+            return Ok(());
+        }
+    };
+
+    remove_mcp_server_from_doc(&mut doc, id);
+
+    crate::config::write_text_file(&config_path, &doc.to_string())
+}
+
 /// 将单个 MCP 服务器同步到 Gemini live 配置
 pub fn sync_single_server_to_gemini(
     _config: &MultiAppConfig,
@@ -1688,6 +1858,7 @@ pub fn import_from_hermes(config: &mut MultiAppConfig) -> Result<usize, AppError
                         claude: false,
                         codex: false,
                         gemini: false,
+                        grokbuild: false,
                         opencode: false,
                         hermes: true,
                     },

@@ -25,6 +25,7 @@ pub(super) fn populate_form_from_provider(
         AppType::Claude => populate_claude_form(form, provider),
         AppType::Codex => populate_codex_form(form, provider),
         AppType::Gemini => populate_gemini_form(form, provider),
+        AppType::GrokBuild => populate_grokbuild_form(form, provider),
         AppType::OpenCode => populate_opencode_form(form, provider),
         AppType::Hermes => populate_hermes_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
@@ -151,17 +152,18 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
     form.claude_effort_max = claude_effort_max_enabled(&provider.settings_config);
     form.claude_disable_auto_upgrade =
         claude_disable_auto_upgrade_enabled(&provider.settings_config);
-    if provider
+    let provider_type = provider
         .meta
         .as_ref()
-        .and_then(|meta| meta.provider_type.as_deref())
-        == Some("codex_oauth")
-    {
+        .and_then(|meta| meta.provider_type.as_deref());
+    if let Some(auth_provider @ ("codex_oauth" | "xai_oauth")) = provider_type {
         form.claude_api_format = ClaudeApiFormat::OpenAiResponses;
-        form.codex_oauth_account_id = provider
+        form.managed_account_id = provider
             .meta
             .as_ref()
-            .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
+            .and_then(|meta| meta.managed_account_id_for(auth_provider));
+    }
+    if provider_type == Some("codex_oauth") {
         form.codex_fast_mode = provider
             .meta
             .as_ref()
@@ -229,6 +231,11 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
 }
 
 fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    form.managed_account_id = provider
+        .meta
+        .as_ref()
+        .filter(|meta| meta.provider_type.as_deref() == Some("xai_oauth"))
+        .and_then(|meta| meta.managed_account_id_for("xai_oauth"));
     if let Some(config) = provider
         .settings_config
         .get("config")
@@ -430,6 +437,23 @@ fn populate_hermes_form(form: &mut ProviderAddFormState, provider: &Provider) {
             form.hermes_rate_limit_delay.set(delay.to_string());
         }
     }
+}
+
+fn populate_grokbuild_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    let config_text = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let Some(model_config) = crate::grok_config::extract_model_config(config_text) else {
+        return;
+    };
+    form.grok_base_url.set(&model_config.base_url);
+    if let Some(api_key) = model_config.api_key {
+        form.grok_api_key.set(&api_key);
+    }
+    form.grok_model.set(&model_config.model);
+    form.grok_api_backend.set(&model_config.api_backend);
 }
 
 fn populate_openclaw_form(form: &mut ProviderAddFormState, provider: &Provider) {

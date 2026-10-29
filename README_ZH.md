@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw 和 Pi。**
+**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、Grok Build、OpenCode、Hermes、OpenClaw 和 Pi。**
 
 [![Version](https://img.shields.io/badge/version-5.11.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -140,6 +140,7 @@ cc-switch --app codex mcp sync          # 同步 Codex MCP 服务器
 cc-switch --app gemini prompts list     # 列出 Gemini 提示词
 cc-switch --app hermes provider list    # 管理 Hermes 供应商
 cc-switch --app openclaw provider list  # 管理 OpenClaw 供应商
+cc-switch --app grokbuild provider list # 管理 Grok Build 供应商
 cc-switch --app pi provider list        # 管理 Pi 供应商
 
 # 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`、`pi`
@@ -278,7 +279,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 供应商管理
 
-管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes**、**OpenClaw** 与 **Pi** 的 API 配置。
+管理 **Claude Code**、**Codex**、**Gemini**、**Grok Build**、**OpenCode**、**Hermes**、**OpenClaw** 与 **Pi** 的 API 配置。Grok Build (xAI) 遵循相同的切换语义：Grok Official 条目保持 `grok login` 的原生 xAI OAuth 不受影响；第三方供应商只把选中的 `[model."<name>"]` 档案和 `[models].default` 写入 `~/.grok/config.toml`，保留全局设置、其它自定义模型和 `[mcp_servers]`。
 
 Pi 供应商遵循原生的增量管理模型：是否启用完全取决于 `models.json.providers` 中的成员关系。CC-Switch 不会修改 Pi 的登录凭据或全局默认供应商/模型。
 Pi TUI 延续其他应用的表格、表单与快捷键交互，并将预设、系统提示词和 Prompt Templates 分为独立页面。
@@ -314,13 +315,56 @@ cc-switch auth login --account-id <id> # 重新认证已有账号，保留供应
 cc-switch auth list                  # 列出已登录账号
 cc-switch auth default <account-id>  # 设置默认账号
 cc-switch auth remove <account-id>   # 移除账号
+cc-switch auth logout                # 清除全部 ChatGPT/Codex 认证数据
+```
+
+不带供应商的 `auth` 子命令管理 ChatGPT/Codex 账号，保持向后兼容。相同的操作也按供应商对称提供：
+
+```bash
+cc-switch auth codex login           # 等价于 `auth login`（别名：auth openai ...）
+cc-switch auth xai login             # 通过设备码流程登录 xAI (Grok)
+cc-switch auth xai status
+cc-switch auth xai logout            # 清除全部 xAI 认证数据
 ```
 
 同一 ChatGPT workspace 的不同成员使用独立的本地账号 ID。旧版托管账号升级后需要重新认证：运行 `cc-switch auth list` 获取 ID，再执行 `cc-switch auth login --account-id <id>`；也可以在 TUI 的账号操作菜单选择「重新认证」。请登录原账号对应的 workspace 和用户，原有供应商绑定会保留。
 
+### xAI / Grok OAuth 路由
+
+用一个托管 xAI 账号同时服务 Claude Code 与 Codex，无需把真实 OAuth 凭据写进任何客户端配置：
+
+```bash
+cc-switch auth xai login               # 在浏览器中完成设备授权
+cc-switch auth xai status
+
+cc-switch --app claude provider add --name "xAI Grok" --id xai-claude --template xai-oauth
+cc-switch --app claude provider switch xai-claude
+cc-switch --app claude proxy enable    # 启动托管 worker 并接管 live 配置
+
+cc-switch --app codex provider add --name "xAI Grok" --id xai-codex --template xai-oauth
+cc-switch --app codex provider switch xai-codex
+cc-switch --app codex proxy enable
+
+cc-switch --app claude provider quota xai-claude
+cc-switch --app codex provider quota xai-codex
+```
+
+两个模板默认模型均为 `grok-4.7`。Codex 模板会发布 Grok 模型目录，且不要求 ChatGPT 登录。额度查询使用同一个绑定的托管账号，只返回周窗口（不虚构 5 小时窗口），也不需要再执行一次 `grok login`。Grok Build Official 在其代理路由开启时也可使用这一托管登录；关闭路由会移除仅在 live 生效的私有模型档案，恢复原生登录状态，且不触碰 `~/.grok/auth.json`。没有托管账号时，原生态官方额度查询可以只读方式读取 Grok 自己的凭据文件。
+
+```bash
+cc-switch --app grokbuild provider switch grokbuild-official
+cc-switch --app grokbuild proxy enable
+grok -p "Reply with exactly GROK-OK; do not use tools."  # 使用路由后的默认模型档案
+cc-switch --app grokbuild proxy disable                # 恢复原生配置
+```
+
+单独的 `proxy serve` 只启动调试服务器，**不会**改写客户端配置。请优先使用 `proxy enable`；在没有托管会话时也可显式使用 `proxy serve --takeover claude` / `--takeover codex`。真实 OAuth token 只保存在 CC-Switch 的账号存储中（0600）；各 worker 在跨进程锁下刷新。即使修改了供应商中可编辑的 URL 或 API 格式，API 请求也固定发往 xAI 官方地址。更新二进制后，请重启旧的 TUI 会话并先关闭再开启托管路由，让已有 worker 加载新版本。
+
+额度耗尽的账号预期返回 HTTP 403 `personal-team-blocked:spending-limit`。这说明请求已携带凭据到达 xAI，但不代表模型生成成功；等周额度重置后再用客户端重试即可。
+
 ### 🛠️ MCP 服务器管理
 
-跨 Claude、Codex、Gemini、OpenCode 与 Hermes 管理模型上下文协议服务器。
+跨 Claude、Codex、Gemini、Grok Build、OpenCode 与 Hermes 管理模型上下文协议服务器。
 
 **功能：** 统一管理、多应用支持、stdio/http/sse 传输、远程服务器认证 headers、自动同步，以及 TOML/JSON live 配置适配。
 
@@ -340,7 +384,7 @@ cc-switch mcp import --app claude    # 从实时配置导入
 
 管理 AI 编码助手的系统提示词预设。
 
-**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)、Hermes (`AGENTS.md`)、OpenClaw (`AGENTS.md`)、Pi（`AGENTS.md`、原生系统提示词和 prompt templates）。
+**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、Grok Build (`AGENTS.md`)、OpenCode (`AGENTS.md`)、Hermes (`AGENTS.md`)、OpenClaw (`AGENTS.md`)、Pi（`AGENTS.md`、原生系统提示词和 prompt templates）。
 
 ```bash
 cc-switch prompts list               # 列出提示词预设

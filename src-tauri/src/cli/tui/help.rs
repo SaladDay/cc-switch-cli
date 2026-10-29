@@ -131,7 +131,7 @@ fn current_help_target(app: &App) -> HelpTarget {
                 provider_field_overlay_target(app, ProviderAddField::HermesModels)
             }
             Overlay::ManagedAccountPicker { .. } | Overlay::ManagedAccountActionPicker { .. } => {
-                provider_field_overlay_target(app, ProviderAddField::CodexOAuthAccount)
+                provider_field_overlay_target(app, ProviderAddField::ManagedAccount)
             }
             Overlay::FailoverQueueManager { .. } => HelpTarget::FailoverQueue,
             Overlay::SessionProjectPicker(_) => HelpTarget::Sessions,
@@ -828,11 +828,11 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Disables Claude Code's auto-upgrade by writing env.DISABLE_AUTOUPDATER=1; turning it off removes the variable.",
             ),
         ),
-        ProviderAddField::CodexOAuthAccount => HelpContent::new(
-            texts::tui_label_chatgpt_account(),
+        ProviderAddField::ManagedAccount => HelpContent::new(
+            tr("登录账号", "Signed-in Account"),
             help_lines(
-                "绑定 ChatGPT/Codex 官方登录账号。官方账号可用于 Codex 插件、移动端远程操作等官方能力。订阅额度通过绑定账号的内置查询显示，无需余额模板；可在供应商列表按 r 刷新。",
-                "Binds an official ChatGPT/Codex account. Official login can keep Codex plugins, mobile remote control, and other official app features available. Subscription quota uses the bound account's built-in query without a balance template; press r in the provider list to refresh.",
+                "绑定一个已登录的官方账号，而不是 API Key：Codex 供应商用 ChatGPT 账号（cc-switch auth codex login），xAI (Grok) 供应商用 Grok 订阅账号（cc-switch auth xai login）。选择“跟随默认”时使用该登录类型的默认账号。请求经本地代理按需注入该账号的令牌，因此必须开启路由。订阅额度通过绑定账号的内置查询显示，无需用量查询模板；可在供应商列表按 r 刷新。\nChatGPT 官方登录还可保留 Codex 插件、移动端远程操作等官方能力。",
+                "Binds a signed-in official account instead of an API key: a ChatGPT account for the Codex provider (cc-switch auth codex login), or a Grok subscription account for xAI (Grok) providers (cc-switch auth xai login). Follow default uses that login type's default account. The local proxy adds the account's token to each request, so routing must be on. Subscription quota uses the bound account's built-in query without a usage template; press r in the provider list to refresh.\nA ChatGPT login also keeps Codex plugins, mobile remote control, and other official app features available.",
             ),
         ),
         ProviderAddField::CodexFastMode => HelpContent::new(
@@ -878,6 +878,34 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
             help_lines(
                 "供应商请求时使用的模型名称。应与供应商文档或模型列表中的 ID 保持一致。",
                 "Model name sent to the provider. Keep it aligned with the provider docs or model list.",
+            ),
+        ),
+        ProviderAddField::GrokBaseUrl => HelpContent::new(
+            texts::tui_label_base_url(),
+            help_lines(
+                "供应商 API 的基础地址，写入 Grok Build config.toml 的 base_url。",
+                "Provider API base URL written to Grok Build config.toml base_url.",
+            ),
+        ),
+        ProviderAddField::GrokApiKey => HelpContent::new(
+            texts::tui_label_api_key(),
+            help_lines(
+                "写入 config.toml 的内联 api_key。如需通过环境变量提供密钥（env_key），请直接编辑生成的 config.toml。",
+                "Inline api_key written to config.toml. To supply the key via environment variable (env_key), edit the generated config.toml directly.",
+            ),
+        ),
+        ProviderAddField::GrokModel => HelpContent::new(
+            texts::model_label(),
+            help_lines(
+                "发送给供应商的上游模型 ID，同时作为 [models] default 的配置名。聚焦此项时按 f 可拉取该端点的模型列表。",
+                "Upstream model ID sent to the provider; also used as the [models] default profile name. Press f while focused to fetch the model list.",
+            ),
+        ),
+        ProviderAddField::GrokApiBackend => HelpContent::new(
+            "API Backend",
+            help_lines(
+                "Grok Build 的 API 协议：responses（OpenAI Responses）、chat_completions（OpenAI Chat）或 messages（Anthropic Messages）。留空使用 responses。",
+                "Grok Build API protocol: responses (OpenAI Responses), chat_completions (OpenAI Chat), or messages (Anthropic Messages). Defaults to responses when empty.",
             ),
         ),
         ProviderAddField::OpenClawApiProtocol => HelpContent::new(

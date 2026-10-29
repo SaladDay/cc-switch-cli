@@ -111,6 +111,7 @@ impl ProviderAddFormState {
             Self::snippet_has_effective_common_config(&app_type, common_snippet);
         let is_codex = matches!(app_type, AppType::Codex);
         let is_gemini = matches!(app_type, AppType::Gemini);
+        let is_grok = app_type == AppType::GrokBuild;
         let openclaw_api_default = match app_type {
             AppType::OpenClaw | AppType::Pi => OPENCLAW_DEFAULT_API_PROTOCOL,
             _ => "@ai-sdk/openai-compatible",
@@ -193,7 +194,7 @@ impl ProviderAddFormState {
             codex_remote_compaction: false,
             codex_remote_compaction_touched: false,
             codex_quick_config_idx: 0,
-            codex_oauth_account_id: None,
+            managed_account_id: None,
             codex_fast_mode: false,
             codex_impersonate_claude_code: false,
             codex_max_output_tokens: TextInput::new(""),
@@ -214,6 +215,14 @@ impl ProviderAddFormState {
             gemini_api_key: TextInput::new(""),
             gemini_base_url: TextInput::new("https://generativelanguage.googleapis.com"),
             gemini_model: TextInput::new(if is_gemini { GEMINI_DEFAULT_MODEL } else { "" }),
+            grok_api_backend: TextInput::new(""),
+            grok_api_key: TextInput::new(""),
+            grok_base_url: TextInput::new(""),
+            grok_model: TextInput::new(if is_grok {
+                crate::grok_config::DEFAULT_MODEL
+            } else {
+                ""
+            }),
             openclaw_user_agent: false,
             openclaw_models: Vec::new(),
             usage_query_enabled: false,
@@ -369,6 +378,7 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
+            | AppType::GrokBuild
             | AppType::Pi => false,
         }
     }
@@ -426,6 +436,7 @@ impl ProviderAddFormState {
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
+            | AppType::GrokBuild
             | AppType::Pi => false,
         }
     }
@@ -495,8 +506,15 @@ impl ProviderAddFormState {
         match self.app_type {
             AppType::Claude => {
                 if self.is_claude_codex_oauth_provider() {
-                    fields.push(ProviderAddField::CodexOAuthAccount);
+                    fields.push(ProviderAddField::ManagedAccount);
                     fields.push(ProviderAddField::CodexFastMode);
+                    fields.push(ProviderAddField::ClaudeAdvancedDivider);
+                    fields.push(ProviderAddField::ClaudeModelConfig);
+                    fields.push(ProviderAddField::ClaudeFallbackModel);
+                    fields.push(ProviderAddField::ClaudeFallbackOneM);
+                    fields.push(ProviderAddField::LocalProxySettings);
+                } else if self.is_xai_oauth_provider() {
+                    fields.push(ProviderAddField::ManagedAccount);
                     fields.push(ProviderAddField::ClaudeAdvancedDivider);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
@@ -516,7 +534,14 @@ impl ProviderAddFormState {
                 }
             }
             AppType::Codex => {
-                if !self.is_codex_official_provider() {
+                if self.is_xai_oauth_provider() {
+                    // Endpoint and token come from the signed-in xAI account;
+                    // only the model catalog stays editable.
+                    fields.push(ProviderAddField::ManagedAccount);
+                    fields.push(ProviderAddField::CodexAdvancedDivider);
+                    fields.push(ProviderAddField::CodexLocalRouting);
+                    fields.push(ProviderAddField::LocalProxySettings);
+                } else if !self.is_codex_official_provider() {
                     fields.push(ProviderAddField::CodexBaseUrl);
                     fields.push(ProviderAddField::CodexApiKey);
                     // No standalone model field (matches upstream): the model is
@@ -545,6 +570,13 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::GeminiBaseUrl);
                     fields.push(ProviderAddField::GeminiModel);
                 }
+            }
+            AppType::GrokBuild if self.is_grok_official_provider() => {}
+            AppType::GrokBuild => {
+                fields.push(ProviderAddField::GrokBaseUrl);
+                fields.push(ProviderAddField::GrokApiKey);
+                fields.push(ProviderAddField::GrokModel);
+                fields.push(ProviderAddField::GrokApiBackend);
             }
             AppType::OpenCode => {
                 fields.push(ProviderAddField::OpenCodeNpmPackage);
@@ -595,9 +627,9 @@ impl ProviderAddFormState {
             AppType::Codex => fields.push(ProviderAddField::CodexQuickConfig),
             _ => {}
         }
-        // Managed Codex OAuth uses the bound account's native quota, like the
-        // desktop provider card; generic usage templates do not apply.
-        if !self.is_claude_codex_oauth_provider() {
+        // Managed OAuth (Codex, xAI) and Grok Official use built-in quota, like
+        // the desktop provider card; generic usage templates do not apply.
+        if !self.uses_native_quota() {
             fields.push(ProviderAddField::UsageQueryDivider);
             fields.push(ProviderAddField::UsageQuery);
         }
@@ -696,7 +728,7 @@ impl ProviderAddFormState {
     }
 
     pub fn usage_query_script_validation_error(&self) -> Option<&'static str> {
-        if self.is_claude_codex_oauth_provider()
+        if self.uses_native_quota()
             || !self.usage_query_enabled
             || matches!(
                 self.usage_query_template,
@@ -737,6 +769,10 @@ impl ProviderAddFormState {
             ProviderAddField::GeminiApiKey => Some(&self.gemini_api_key),
             ProviderAddField::GeminiBaseUrl => Some(&self.gemini_base_url),
             ProviderAddField::GeminiModel => Some(&self.gemini_model),
+            ProviderAddField::GrokApiBackend => Some(&self.grok_api_backend),
+            ProviderAddField::GrokApiKey => Some(&self.grok_api_key),
+            ProviderAddField::GrokBaseUrl => Some(&self.grok_base_url),
+            ProviderAddField::GrokModel => Some(&self.grok_model),
             ProviderAddField::OpenCodeNpmPackage => Some(&self.opencode_npm_package),
             ProviderAddField::OpenCodeApiKey => Some(&self.opencode_api_key),
             ProviderAddField::OpenCodeBaseUrl => Some(&self.opencode_base_url),
@@ -747,7 +783,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesApiKey => Some(&self.hermes_api_key),
             ProviderAddField::HermesBaseUrl => Some(&self.hermes_base_url),
             ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
-            ProviderAddField::CodexOAuthAccount
+            ProviderAddField::ManagedAccount
             | ProviderAddField::CodexFastMode
             | ProviderAddField::CodexAnthropicApiKeyField
             | ProviderAddField::CodexImpersonateClaudeCode
@@ -805,6 +841,10 @@ impl ProviderAddFormState {
             ProviderAddField::GeminiApiKey => Some(&mut self.gemini_api_key),
             ProviderAddField::GeminiBaseUrl => Some(&mut self.gemini_base_url),
             ProviderAddField::GeminiModel => Some(&mut self.gemini_model),
+            ProviderAddField::GrokApiBackend => Some(&mut self.grok_api_backend),
+            ProviderAddField::GrokApiKey => Some(&mut self.grok_api_key),
+            ProviderAddField::GrokBaseUrl => Some(&mut self.grok_base_url),
+            ProviderAddField::GrokModel => Some(&mut self.grok_model),
             ProviderAddField::OpenCodeNpmPackage => Some(&mut self.opencode_npm_package),
             ProviderAddField::OpenCodeApiKey => Some(&mut self.opencode_api_key),
             ProviderAddField::OpenCodeBaseUrl => Some(&mut self.opencode_base_url),
@@ -819,7 +859,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesApiKey => Some(&mut self.hermes_api_key),
             ProviderAddField::HermesBaseUrl => Some(&mut self.hermes_base_url),
             ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
-            ProviderAddField::CodexOAuthAccount
+            ProviderAddField::ManagedAccount
             | ProviderAddField::CodexFastMode
             | ProviderAddField::CodexAnthropicApiKeyField
             | ProviderAddField::CodexImpersonateClaudeCode
@@ -1198,6 +1238,7 @@ impl ProviderAddFormState {
                         crate::codex_config::is_codex_remote_compaction_enabled(config);
                 }
             }
+            AppType::GrokBuild => {}
             AppType::Gemini
             | AppType::OpenCode
             | AppType::Hermes
@@ -1431,6 +1472,7 @@ impl ProviderAddFormState {
             }
             AppType::Codex => !self.is_codex_official_provider(),
             AppType::Gemini
+            | AppType::GrokBuild
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
@@ -1540,7 +1582,7 @@ impl ProviderAddFormState {
     }
 
     pub fn open_usage_query_page(&mut self) {
-        if self.is_claude_codex_oauth_provider() {
+        if self.uses_native_quota() {
             return;
         }
         self.refresh_usage_query_provider_kind();
@@ -2243,6 +2285,7 @@ impl ProviderAddFormState {
             AppType::Claude => self.claude_base_url.value.clone(),
             AppType::Codex => self.codex_base_url.value.clone(),
             AppType::Gemini => self.gemini_base_url.value.clone(),
+            AppType::GrokBuild => self.grok_base_url.value.clone(),
             AppType::Hermes => self.hermes_base_url.value.clone(),
             AppType::OpenCode | AppType::OpenClaw => self.opencode_base_url.value.clone(),
             AppType::Pi => {
@@ -2272,6 +2315,7 @@ impl ProviderAddFormState {
             AppType::Claude => (&self.claude_api_key.value, &self.claude_base_url.value),
             AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
             AppType::Gemini => (&self.gemini_api_key.value, &self.gemini_base_url.value),
+            AppType::GrokBuild => (&self.grok_api_key.value, &self.grok_base_url.value),
             AppType::Hermes => (&self.hermes_api_key.value, &self.hermes_base_url.value),
             AppType::OpenCode | AppType::OpenClaw => {
                 (&self.opencode_api_key.value, &self.opencode_base_url.value)
@@ -2556,10 +2600,11 @@ impl ProviderAddFormState {
     pub fn supports_full_url_mode(&self) -> bool {
         match self.app_type {
             AppType::Claude => {
-                !self.is_claude_official_provider() && !self.is_claude_codex_oauth_provider()
+                !self.is_claude_official_provider() && self.managed_auth_provider().is_none()
             }
-            AppType::Codex => !self.is_codex_official_provider(),
+            AppType::Codex => !self.is_codex_official_provider() && !self.is_xai_oauth_provider(),
             AppType::Gemini
+            | AppType::GrokBuild
             | AppType::OpenCode
             | AppType::Hermes
             | AppType::OpenClaw
@@ -2590,8 +2635,8 @@ impl ProviderAddFormState {
         }
     }
 
-    pub fn set_codex_oauth_account_id(&mut self, account_id: Option<String>) {
-        self.codex_oauth_account_id = account_id
+    pub fn set_managed_account_id(&mut self, account_id: Option<String>) {
+        self.managed_account_id = account_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
     }
@@ -2606,6 +2651,43 @@ impl ProviderAddFormState {
             .and_then(|meta| meta.get("providerType"))
             .and_then(|value| value.as_str())
             .is_some_and(|value| value == "codex_oauth")
+    }
+
+    /// xAI (Grok) subscription sign-in. Like Codex OAuth it binds a managed
+    /// account instead of an API key, for both Claude and Codex.
+    pub fn is_xai_oauth_provider(&self) -> bool {
+        matches!(self.app_type, AppType::Claude | AppType::Codex)
+            && self
+                .extra
+                .get("meta")
+                .and_then(|meta| meta.get("providerType"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value == "xai_oauth")
+    }
+
+    /// Managed-account auth provider bound by this form, if any.
+    pub fn managed_auth_provider(&self) -> Option<&'static str> {
+        if self.is_claude_codex_oauth_provider() {
+            Some("codex_oauth")
+        } else if self.is_xai_oauth_provider() {
+            Some("xai_oauth")
+        } else {
+            None
+        }
+    }
+
+    /// Grok Build official sign-in. Its weekly quota comes from the Grok
+    /// login itself, so a usage template has nothing to configure.
+    pub fn is_grok_official_provider(&self) -> bool {
+        self.app_type == AppType::GrokBuild
+            && self.extra.get("category").and_then(Value::as_str) == Some("official")
+    }
+
+    /// Providers whose quota is built in (managed OAuth accounts and Grok
+    /// Official). The generic Usage Query entry is hidden for them, like the
+    /// desktop provider card.
+    pub fn uses_native_quota(&self) -> bool {
+        self.managed_auth_provider().is_some() || self.is_grok_official_provider()
     }
 
     pub fn is_claude_github_copilot_provider(&self) -> bool {

@@ -501,6 +501,8 @@ fn prompt_and_apply_provider_api_format(
         AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
             Ok(())
         }
+        // Grok Build 的 api_backend 写在 config.toml 里，不走独立的 API 格式提示。
+        AppType::GrokBuild => Ok(()),
     }
 }
 
@@ -1409,6 +1411,25 @@ fn build_add_settings_config(
                 provider_name,
             ))
         }
+        AppType::GrokBuild => {
+            let base_url = non_empty(args.base_url.clone())
+                .ok_or_else(|| add_missing_field_error("--base-url"))?;
+            let api_key = non_empty(args.api_key.clone())
+                .ok_or_else(|| add_missing_field_error("--api-key"))?;
+            let model = non_empty(args.model.clone())
+                .unwrap_or_else(|| crate::grok_config::DEFAULT_MODEL.to_string());
+            let api_backend = match args.api_format.as_deref() {
+                Some(raw) => crate::grok_config::normalize_api_backend(raw)?.to_string(),
+                None => String::new(),
+            };
+            Ok(crate::grok_config::build_provider_settings_config(
+                provider_name,
+                &base_url,
+                &api_key,
+                model.trim(),
+                &api_backend,
+            ))
+        }
         AppType::Gemini => match non_empty(args.api_key.clone()) {
             Some(api_key) => {
                 let base_url = non_empty(args.base_url.clone())
@@ -1543,6 +1564,8 @@ fn apply_add_provider_api_format(
         }
         AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
         }
+        // Grok Build 的 api_backend 在 config.toml 内，由模板/add 参数直接给定。
+        AppType::GrokBuild => {}
     }
     Ok(())
 }

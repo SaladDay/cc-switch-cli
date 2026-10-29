@@ -1757,26 +1757,27 @@ pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
         AppType::Claude => 0,
         AppType::Codex => 1,
         AppType::Gemini => 2,
-        AppType::OpenCode => 3,
-        AppType::Hermes => 4,
-        AppType::OpenClaw => 5,
-        AppType::Pi => 6,
+        AppType::GrokBuild => 3,
+        AppType::OpenCode => 4,
+        AppType::Hermes => 5,
+        AppType::OpenClaw => 6,
+        AppType::Pi => 7,
     }
 }
 
 pub(crate) fn four_app_picker_index(app_type: &AppType) -> usize {
-    app_type_picker_index(app_type).min(4)
+    app_type_picker_index(app_type).min(5)
 }
 
 pub(crate) fn skills_app_picker_index(app_type: &AppType) -> usize {
     match app_type {
-        AppType::Pi | AppType::OpenClaw => 5,
+        AppType::Pi | AppType::OpenClaw => 6,
         _ => app_type_picker_index(app_type),
     }
 }
 
 pub(crate) fn skill_app_type_for_picker_index(index: usize) -> AppType {
-    if index == 5 {
+    if index == 6 {
         AppType::Pi
     } else {
         app_type_for_picker_index(index)
@@ -1787,10 +1788,11 @@ pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
     match index {
         1 => AppType::Codex,
         2 => AppType::Gemini,
-        3 => AppType::OpenCode,
-        4 => AppType::Hermes,
-        5 => AppType::OpenClaw,
-        6 => AppType::Pi,
+        3 => AppType::GrokBuild,
+        4 => AppType::OpenCode,
+        5 => AppType::Hermes,
+        6 => AppType::OpenClaw,
+        7 => AppType::Pi,
         _ => AppType::Claude,
     }
 }

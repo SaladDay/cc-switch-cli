@@ -146,7 +146,7 @@ fn provider_json_preview_source_fits(
 
     for text in [
         provider.copy_source_id.as_deref(),
-        provider.codex_oauth_account_id.as_deref(),
+        provider.managed_account_id.as_deref(),
         provider.opencode_model_original_id(),
     ]
     .into_iter()
@@ -217,9 +217,9 @@ fn provider_api_format_label(provider: &super::form::ProviderAddFormState) -> St
     }
 }
 
-fn codex_oauth_account_for_display(provider: &super::form::ProviderAddFormState) -> String {
+fn managed_account_for_display(provider: &super::form::ProviderAddFormState) -> String {
     provider
-        .codex_oauth_account_id
+        .managed_account_id
         .as_deref()
         .map(bounded_trimmed_text_for_display)
         .filter(|value| !value.is_empty())
@@ -237,6 +237,7 @@ fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option
             .map(|env| json!({ "env": env })),
         AppType::Claude
         | AppType::Codex
+        | AppType::GrokBuild
         | AppType::OpenCode
         | AppType::Hermes
         | AppType::OpenClaw
@@ -1958,7 +1959,10 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::ClaudeDisableAutoUpgrade => {
             texts::tui_label_claude_disable_auto_upgrade().to_string()
         }
-        ProviderAddField::CodexOAuthAccount => texts::tui_label_chatgpt_account().to_string(),
+        ProviderAddField::ManagedAccount => {
+            texts::tui_label_managed_account(provider.managed_auth_provider().unwrap_or_default())
+                .to_string()
+        }
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::CodexAnthropicApiKeyField => {
@@ -1992,6 +1996,10 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::GeminiApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::GeminiBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::GeminiModel => texts::model_label().to_string(),
+        ProviderAddField::GrokBaseUrl => texts::tui_label_base_url().to_string(),
+        ProviderAddField::GrokApiKey => texts::tui_label_api_key().to_string(),
+        ProviderAddField::GrokModel => texts::model_label().to_string(),
+        ProviderAddField::GrokApiBackend => "API Backend".to_string(),
         ProviderAddField::OpenClawApiProtocol => texts::tui_label_openclaw_api().to_string(),
         ProviderAddField::OpenClawUserAgent => texts::tui_label_openclaw_user_agent().to_string(),
         ProviderAddField::OpenClawModels => texts::tui_label_openclaw_models().to_string(),
@@ -2118,7 +2126,7 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
-        ProviderAddField::CodexOAuthAccount => codex_oauth_account_for_display(provider),
+        ProviderAddField::ManagedAccount => managed_account_for_display(provider),
         ProviderAddField::CodexFastMode => {
             if provider.codex_fast_mode {
                 format!("[{}]", texts::tui_marker_active())

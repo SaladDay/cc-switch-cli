@@ -4157,6 +4157,7 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             claude: true,
             codex: false,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             pi: false,
@@ -4653,6 +4654,7 @@ fn header_only_renders_selected_visible_apps() {
         claude: false,
         codex: true,
         gemini: false,
+        grokbuild: false,
         opencode: false,
         hermes: false,
         openclaw: true,
@@ -4683,6 +4685,7 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
         claude: true,
         codex: true,
         gemini: true,
+        grokbuild: false,
         opencode: true,
         hermes: false,
         openclaw: true,
@@ -4713,6 +4716,7 @@ fn settings_page_shows_visible_apps_row_value() {
         claude: true,
         codex: false,
         gemini: true,
+        grokbuild: false,
         opencode: false,
         hermes: false,
         openclaw: true,
@@ -5387,6 +5391,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
             claude: false,
             codex: false,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -5427,6 +5432,7 @@ fn visible_apps_picker_uses_space_toggle_key() {
             claude: true,
             codex: false,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -5459,6 +5465,7 @@ fn visible_apps_picker_auto_mode_does_not_append_auto_suffix_to_apps() {
             claude: true,
             codex: true,
             gemini: true,
+            grokbuild: false,
             opencode: true,
             hermes: true,
             openclaw: true,
@@ -5617,6 +5624,7 @@ fn header_centers_tabs_when_room_allows() {
         claude: true,
         codex: true,
         gemini: true,
+        grokbuild: false,
         opencode: true,
         hermes: true,
         openclaw: true,
@@ -5663,6 +5671,7 @@ fn header_keeps_title_and_right_badges_visible_without_large_gap_in_chinese() {
         claude: true,
         codex: true,
         gemini: true,
+        grokbuild: false,
         opencode: true,
         hermes: true,
         openclaw: true,
@@ -6183,6 +6192,7 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 claude: true,
                 codex: false,
                 gemini: false,
+                grokbuild: false,
                 opencode: false,
                 hermes: false,
                 pi: false,
@@ -6268,7 +6278,13 @@ fn home_shows_local_env_check_section() {
 
     assert!(all.contains("Local environment check"));
     for tool_name in [
-        "Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw",
+        "Claude",
+        "Codex",
+        "Gemini",
+        "Grok Build",
+        "OpenCode",
+        "Hermes",
+        "OpenClaw",
     ] {
         assert!(all.contains(tool_name), "missing {tool_name} in:\n{all}");
     }
@@ -7224,6 +7240,7 @@ fn skills_page_shows_opencode_summary() {
         claude: false,
         codex: false,
         gemini: false,
+        grokbuild: false,
         opencode: true,
         hermes: false,
         pi: false,
@@ -7251,6 +7268,7 @@ fn skills_page_shows_hermes_column_and_summary() {
         claude: false,
         codex: false,
         gemini: false,
+        grokbuild: false,
         opencode: false,
         hermes: true,
         pi: false,
@@ -7281,6 +7299,7 @@ fn skill_detail_page_shows_opencode_enabled_state() {
         claude: false,
         codex: false,
         gemini: false,
+        grokbuild: false,
         opencode: true,
         hermes: false,
         pi: false,
@@ -7312,6 +7331,7 @@ fn skill_detail_page_shows_hermes_enabled_state() {
         claude: false,
         codex: false,
         gemini: false,
+        grokbuild: false,
         opencode: false,
         hermes: true,
         pi: false,
@@ -7376,6 +7396,7 @@ fn mcp_page_renders_opencode_column() {
                 claude: false,
                 codex: false,
                 gemini: false,
+                grokbuild: false,
                 opencode: true,
                 hermes: false,
             },
@@ -7413,6 +7434,7 @@ fn mcp_page_renders_hermes_column() {
                 claude: false,
                 codex: false,
                 gemini: false,
+                grokbuild: false,
                 opencode: false,
                 hermes: true,
             },
@@ -7469,6 +7491,7 @@ fn mcp_page_uses_space_toggle_key() {
                 claude: true,
                 codex: false,
                 gemini: false,
+                grokbuild: false,
                 opencode: false,
                 hermes: false,
             },
@@ -7766,6 +7789,7 @@ fn mcp_page_shows_summary_bar() {
                     claude: true,
                     codex: false,
                     gemini: false,
+                    grokbuild: false,
                     opencode: true,
                     hermes: false,
                 },
@@ -7786,6 +7810,7 @@ fn mcp_page_shows_summary_bar() {
                     claude: false,
                     codex: true,
                     gemini: false,
+                    grokbuild: false,
                     opencode: false,
                     hermes: false,
                 },
@@ -13871,9 +13896,10 @@ fn home_usage_chart_degrades_on_small_terminals_without_panicking() {
     data.usage =
         usage_with_daily_models(&[("claude-opus", 5_000, 6.0), ("claude-haiku", 1_000, 1.0)]);
 
-    // 80x23 leaves the card two body rows: the top pad plus one content row.
+    // 80x25 leaves the card two body rows: the top pad plus one content row.
+    // (The local-env card grew by one tool row when Grok Build joined the grid.)
     // The list header survives; the graph disappears first.
-    let small_buf = render_with_size(&app, &data, 80, 23);
+    let small_buf = render_with_size(&app, &data, 80, 25);
     let small = all_text(&small_buf);
     assert!(small.contains("Usage · 30d"), "{small}");
     assert!(small.contains("Models by Cost"), "{small}");

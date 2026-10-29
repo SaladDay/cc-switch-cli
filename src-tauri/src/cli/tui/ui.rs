@@ -114,6 +114,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App, data: &UiData) {
     }
 }
 
+/// Short app name for tabs and summaries. Grok Build is shortened to "grok",
+/// like Claude Code is shown as "claude".
+pub(super) fn app_short_label(app_type: &AppType) -> &'static str {
+    match app_type {
+        AppType::GrokBuild => "grok",
+        other => other.as_str(),
+    }
+}
+
 pub(super) fn proxy_open_flash_effect(area: Rect) -> tachyonfx::Effect {
     let fg_shift = [-330.0, 20.0, 20.0];
     let timer = (500, Interpolation::SineInOut);

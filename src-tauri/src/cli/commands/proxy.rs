@@ -99,7 +99,10 @@ fn show_proxy() -> Result<(), AppError> {
 }
 
 fn set_proxy_enabled(app_type: AppType, enabled: bool) -> Result<(), AppError> {
-    if !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
+    if !matches!(
+        app_type,
+        AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild
+    ) {
         return Err(AppError::InvalidInput(format!(
             "proxy takeover is not supported for {}",
             app_type.as_str()
@@ -148,7 +151,10 @@ fn configure_proxy(
         validate_proxy_listen_port(port)?;
     }
     if listen_port.is_some()
-        && !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+        && !matches!(
+            app_type,
+            AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild
+        )
     {
         return Err(AppError::InvalidInput(format!(
             "proxy takeover is not supported for {}",
@@ -403,7 +409,7 @@ async fn apply_takeovers(
 ) -> Result<(), String> {
     for app in takeovers {
         match app {
-            AppType::Claude | AppType::Codex | AppType::Gemini => {
+            AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild => {
                 service.set_takeover_for_app(app.as_str(), true).await?;
             }
             _ => {
@@ -434,15 +440,20 @@ fn apply_overrides(
 }
 
 fn load_proxy_app_ports(state: &AppState) -> Result<Vec<(AppType, u16)>, AppError> {
-    [AppType::Claude, AppType::Codex, AppType::Gemini]
-        .into_iter()
-        .map(|app| {
-            state
-                .db
-                .get_app_proxy_preferred_port(app.as_str())
-                .map(|port| (app, port))
-        })
-        .collect()
+    [
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ]
+    .into_iter()
+    .map(|app| {
+        state
+            .db
+            .get_app_proxy_preferred_port(app.as_str())
+            .map(|port| (app, port))
+    })
+    .collect()
 }
 
 fn build_proxy_route_lines(
@@ -455,6 +466,7 @@ fn build_proxy_route_lines(
         (AppType::Claude, "Claude", takeovers.claude),
         (AppType::Codex, "Codex", takeovers.codex),
         (AppType::Gemini, "Gemini", takeovers.gemini),
+        (AppType::GrokBuild, "Grok Build", takeovers.grokbuild),
     ]
     .into_iter()
     .map(|(app, label, enabled)| {
@@ -537,7 +549,7 @@ fn build_proxy_overview_lines(
             }
         ),
         format!(
-            "{}: Claude={}, Codex={}, Gemini={}",
+            "{}: Claude={}, Codex={}, Gemini={}, Grok Build={}",
             crate::t!("Active routes", "活动路由"),
             if takeovers.claude {
                 crate::t!("on", "开启")
@@ -550,6 +562,11 @@ fn build_proxy_overview_lines(
                 crate::t!("off", "关闭")
             },
             if takeovers.gemini {
+                crate::t!("on", "开启")
+            } else {
+                crate::t!("off", "关闭")
+            },
+            if takeovers.grokbuild {
                 crate::t!("on", "开启")
             } else {
                 crate::t!("off", "关闭")
@@ -754,6 +771,7 @@ mod tests {
             claude: true,
             codex: false,
             gemini: true,
+            grokbuild: false,
         };
 
         let lines = build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeover);

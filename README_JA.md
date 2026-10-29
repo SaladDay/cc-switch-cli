@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**対話型 TUI またはスクリプトで利用できる CLI から、Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw、Pi を一元管理できます。**
+**対話型 TUI またはスクリプトで利用できる CLI から、Claude Code、Codex、Gemini、Grok Build、OpenCode、Hermes、OpenClaw、Pi を一元管理できます。**
 
 [![バージョン](https://img.shields.io/badge/version-5.11.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![対応プラットフォーム](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -148,6 +148,7 @@ cc-switch --app codex mcp sync          # Codex の MCP サーバーを同期
 cc-switch --app gemini prompts list     # Gemini のプロンプトを一覧表示
 cc-switch --app hermes provider list    # Hermes のプロバイダーを管理
 cc-switch --app openclaw provider list  # OpenClaw のプロバイダーを管理
+cc-switch --app grokbuild provider list # Grok Build のプロバイダーを管理
 cc-switch --app pi provider list        # Pi のプロバイダーを管理
 
 # 対応アプリ：`claude`（デフォルト）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`、`pi`
@@ -289,7 +290,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 プロバイダー管理
 
-**Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes**、**OpenClaw**、**Pi** の API 設定を管理します。
+**Claude Code**、**Codex**、**Gemini**、**Grok Build**、**OpenCode**、**Hermes**、**OpenClaw**、**Pi** の API 設定を管理します。Grok Build (xAI) は同じ切り替えセマンティクスに従います。Grok Official エントリーは `grok login` によるネイティブな xAI OAuth をそのまま維持し、サードパーティープロバイダーは選択された `[model."<name>"]` プロファイルと `[models].default` だけを `~/.grok/config.toml` に書き込み、グローバル設定・他のカスタムモデル・`[mcp_servers]` を保持します。
 
 Pi のプロバイダー管理は、Pi 本来の追加型の構成モデルに従い、`models.json.providers` の登録内容を基準にします。CC-Switch は、Pi のログイン認証情報やグローバルのデフォルトプロバイダー・モデルを変更しません。
 Pi の TUI は、他のアプリと同じテーブル、フォーム、ショートカットの操作体系を採用し、Presets、System Prompts、Prompt Templates をそれぞれ独立したページとして提供します。
@@ -325,13 +326,56 @@ cc-switch auth login --account-id <id> # 既存のアカウントを再認証し
 cc-switch auth list                  # ログイン済みアカウントを一覧表示
 cc-switch auth default <account-id>  # デフォルトアカウントを設定
 cc-switch auth remove <account-id>   # アカウントを削除
+cc-switch auth logout                # ChatGPT/Codex の認証データをすべて削除
+```
+
+プロバイダー指定のない `auth` サブコマンドは ChatGPT/Codex アカウントを管理します（後方互換）。同じ操作はプロバイダーごとにも対称的に用意されています：
+
+```bash
+cc-switch auth codex login           # `auth login` と同じ（別名: auth openai ...）
+cc-switch auth xai login             # デバイスフローで xAI (Grok) にサインイン
+cc-switch auth xai status
+cc-switch auth xai logout            # xAI の認証データをすべて削除
 ```
 
 同じ ChatGPT ワークスペースのメンバーにも、それぞれ独立したローカルアカウント ID が割り当てられます。旧バージョンで保存された管理対象アカウントは再認証が必要です。`cc-switch auth list` で ID を確認し、`cc-switch auth login --account-id <id>` を実行するか、TUI のアカウントメニューで **Reauthenticate（再認証）** を選択してください。既存のプロバイダーの紐付けを維持するには、元のユーザーとして同じワークスペースにサインインしてください。
 
+### xAI / Grok OAuth ルーティング
+
+管理対象の xAI アカウントを 1 つで Claude Code と Codex の両方に使い、実際の OAuth 認証情報をクライアントの設定に書き込まずに済ませられます：
+
+```bash
+cc-switch auth xai login               # ブラウザでデバイス認証を完了
+cc-switch auth xai status
+
+cc-switch --app claude provider add --name "xAI Grok" --id xai-claude --template xai-oauth
+cc-switch --app claude provider switch xai-claude
+cc-switch --app claude proxy enable    # 管理 worker の起動と live 設定の引き取り
+
+cc-switch --app codex provider add --name "xAI Grok" --id xai-codex --template xai-oauth
+cc-switch --app codex provider switch xai-codex
+cc-switch --app codex proxy enable
+
+cc-switch --app claude provider quota xai-claude
+cc-switch --app codex provider quota xai-codex
+```
+
+両テンプレートの既定モデルは `grok-4.7` です。Codex テンプレートは Grok のモデルカタログを公開し、ChatGPT ログインを要求しません。クォータ照会は同じ紐付け済み管理アカウントを使い、週次ウィンドウのみを返し（5 時間ウィンドウは生成しない）、`grok login` の再実行も不要です。Grok Build Official もプロキシルート有効時はこの管理ログインを利用でき、ルート無効化時は live 専用の非公開モデルプロファイルを削除してネイティブのログイン状態に戻します（`~/.grok/auth.json` には触れません）。管理アカウントがない場合、ネイティブの公式クォータ照会は Grok 自身の認証ファイルを読み取り専用で参照できます。
+
+```bash
+cc-switch --app grokbuild provider switch grokbuild-official
+cc-switch --app grokbuild proxy enable
+grok -p "Reply with exactly GROK-OK; do not use tools."  # ルーティングされた既定プロファイルを使用
+cc-switch --app grokbuild proxy disable                # ネイティブ設定に戻す
+```
+
+単体の `proxy serve` はデバッグ用サーバーを起動するだけで、クライアントの設定は書き換え**ません**。通常は `proxy enable` を使い、管理セッションがない場合に限り `proxy serve --takeover claude` / `--takeover codex` を明示的に指定してください。実際の OAuth トークンは CC-Switch のアカウントストア（0600）にのみ保存され、各 worker はプロセス間ロック下で更新します。プロバイダーの URL や API フォーマットを編集しても、API リクエストは xAI の公式オリジンに固定されます。バイナリ更新後は古い TUI セッションを再起動し、管理ルートを一度無効化→有効化して既存 worker に新版本を読み込ませてください。
+
+クォータを使い切ったアカウントは HTTP 403 `personal-team-blocked:spending-limit` を返します。これはリクエストが認証情報付きで xAI に到達した証拠であり、モデル生成の成功を示すものではありません。週次クォータのリセット後に再度クライアントから実行してください。
+
 ### 🛠️ MCP サーバー管理
 
-Claude、Codex、Gemini、OpenCode、Hermes の Model Context Protocol サーバーをまとめて管理します。
+Claude、Codex、Gemini、Grok Build、OpenCode、Hermes の Model Context Protocol サーバーをまとめて管理します。
 
 **主な機能：** 一元管理、複数アプリへの対応、stdio/http/sse トランスポート、リモートサーバー認証用ヘッダー、自動同期、TOML/JSON 形式の実設定ファイルへの対応。
 
@@ -351,7 +395,7 @@ cc-switch mcp import --app claude    # 実設定ファイルからインポー�
 
 AI コーディングアシスタントのシステムプロンプトのプリセットを管理します。
 
-**対応アプリ：** Claude（`CLAUDE.md`）、Codex（`AGENTS.md`）、Gemini（`GEMINI.md`）、OpenCode（`AGENTS.md`）、Hermes（`AGENTS.md`）、OpenClaw（`AGENTS.md`）、Pi（`AGENTS.md`、ネイティブのシステムプロンプト、プロンプトテンプレート）。
+**対応アプリ：** Claude（`CLAUDE.md`）、Codex（`AGENTS.md`）、Gemini（`GEMINI.md`）、Grok Build（`AGENTS.md`）、OpenCode（`AGENTS.md`）、Hermes（`AGENTS.md`）、OpenClaw（`AGENTS.md`）、Pi（`AGENTS.md`、ネイティブのシステムプロンプト、プロンプトテンプレート）。
 
 ```bash
 cc-switch prompts list               # プロンプトのプリセットを一覧表示

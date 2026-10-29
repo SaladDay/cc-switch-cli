@@ -34,6 +34,9 @@ pub(super) enum LiveSnapshot {
     OpenClaw {
         config_source: Option<String>,
     },
+    GrokBuild {
+        config: Option<String>,
+    },
 }
 
 impl LiveSnapshot {
@@ -117,6 +120,14 @@ impl LiveSnapshot {
                     delete_file(&path)?;
                 }
             }
+            LiveSnapshot::GrokBuild { config } => {
+                let path = crate::grok_config::get_grok_config_path();
+                if let Some(text) = config {
+                    crate::config::write_text_file(&path, text)?;
+                } else if path.exists() {
+                    delete_file(&path)?;
+                }
+            }
         }
         Ok(())
     }
@@ -188,6 +199,18 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
         AppType::OpenClaw => {
             let config_source = crate::openclaw_config::read_openclaw_config_source()?;
             Ok(LiveSnapshot::OpenClaw { config_source })
+        }
+        AppType::GrokBuild => {
+            let path = crate::grok_config::get_grok_config_path();
+            let config = if path.exists() {
+                let text =
+                    std::fs::read_to_string(&path).map_err(|error| AppError::io(&path, error))?;
+                crate::grok_config::validate_config_toml_syntax(&text)?;
+                Some(text)
+            } else {
+                None
+            };
+            Ok(LiveSnapshot::GrokBuild { config })
         }
         AppType::Pi => Err(AppError::Config(
             "Pi providers use the Pi provider service".to_string(),

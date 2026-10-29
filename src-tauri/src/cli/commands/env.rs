@@ -96,7 +96,11 @@ fn run_app_doctor(app_type: &AppType) -> Result<(), AppError> {
         AppType::Claude => check_claude_doctor(),
         AppType::Codex => check_codex_doctor(),
         AppType::Gemini => check_gemini_doctor(),
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
+        AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::GrokBuild
+        | AppType::Pi => {
             println!(
                 "{}",
                 info(&format!(

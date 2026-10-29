@@ -16,6 +16,7 @@ mod common_config;
 mod endpoints;
 mod gemini;
 mod gemini_auth;
+mod grok;
 mod live;
 pub(crate) mod live_merge;
 mod models;
@@ -317,6 +318,7 @@ impl PreparedPostCommitAction {
             PreparedPostCommitEffect::Live(live) => matches!(
                 live,
                 PreparedLiveWrite::Codex { .. }
+                    | PreparedLiveWrite::GrokBuild { .. }
                     | PreparedLiveWrite::Claude { .. }
                     | PreparedLiveWrite::Gemini { .. }
             ),
@@ -367,6 +369,9 @@ enum PreparedLiveWrite {
     },
     OpenClaw {
         models: Value,
+    },
+    GrokBuild {
+        inputs: crate::grok_config::GrokPatchInputs,
     },
 }
 
@@ -874,6 +879,7 @@ impl ProviderService {
                     prepared.effect,
                     PreparedPostCommitEffect::Live(
                         PreparedLiveWrite::Codex { .. }
+                            | PreparedLiveWrite::GrokBuild { .. }
                             | PreparedLiveWrite::Claude { .. }
                             | PreparedLiveWrite::Gemini { .. }
                     )
@@ -882,7 +888,12 @@ impl ProviderService {
             {
                 state.save_config_snapshot_preserving_current_providers(
                     &candidate,
-                    &[AppType::Claude, AppType::Codex, AppType::Gemini],
+                    &[
+                        AppType::Claude,
+                        AppType::Codex,
+                        AppType::Gemini,
+                        AppType::GrokBuild,
+                    ],
                 )
             }
             None => state.save_config_snapshot(&candidate),
@@ -1119,6 +1130,7 @@ impl ProviderService {
             effect,
             PreparedPostCommitEffect::Live(
                 PreparedLiveWrite::Codex { .. }
+                    | PreparedLiveWrite::GrokBuild { .. }
                     | PreparedLiveWrite::Claude { .. }
                     | PreparedLiveWrite::Gemini { .. }
             )
@@ -1197,6 +1209,11 @@ impl ProviderService {
                         config.model_catalog.as_ref(),
                         Some((&state.db, Some(prepared.action.provider.id.as_str()))),
                     )?;
+                } else if matches!(live, PreparedLiveWrite::GrokBuild { .. }) {
+                    grok::apply_grok_live_write(
+                        live,
+                        Some((&state.db, Some(&prepared.action.provider.id))),
+                    )?;
                 } else if matches!(
                     live,
                     PreparedLiveWrite::Claude { .. } | PreparedLiveWrite::Gemini { .. }
@@ -1250,6 +1267,13 @@ impl ProviderService {
                                     state
                                         .proxy_service
                                         .sync_gemini_live_from_provider_while_proxy_active(
+                                            &prepared.action.provider,
+                                        ),
+                                ),
+                                AppType::GrokBuild => futures::executor::block_on(
+                                    state
+                                        .proxy_service
+                                        .sync_grok_live_from_provider_while_proxy_active(
                                             &prepared.action.provider,
                                         ),
                                 ),
@@ -1361,6 +1385,7 @@ impl ProviderService {
         provider_id: &str,
     ) -> Result<(), AppError> {
         match app_type {
+            AppType::GrokBuild => {}
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
                 if !settings_path.exists() {
@@ -1725,7 +1750,11 @@ impl ProviderService {
                 strict_current_provider_id,
                 old_snippet,
             ),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => Ok(()),
+            AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::GrokBuild
+            | AppType::Pi => Ok(()),
         };
 
         match result {
@@ -1856,6 +1885,10 @@ impl ProviderService {
     ) -> bool {
         match app_type {
             AppType::Codex => {
+                live_settings.get("config").and_then(Value::as_str)
+                    != provider_settings.get("config").and_then(Value::as_str)
+            }
+            AppType::GrokBuild => {
                 live_settings.get("config").and_then(Value::as_str)
                     != provider_settings.get("config").and_then(Value::as_str)
             }
@@ -2019,7 +2052,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
             AppType::Hermes => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
-            AppType::Pi => Ok(String::new()),
+            AppType::GrokBuild | AppType::Pi => Ok(String::new()),
         }
     }
 
@@ -2727,6 +2760,7 @@ impl ProviderService {
                     "config": config_obj
                 })
             }
+            AppType::GrokBuild => crate::grok_config::read_grok_live_settings()?,
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
             AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
             AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
@@ -2740,7 +2774,22 @@ impl ProviderService {
             None,
         );
         provider.category = Some(
-            if matches!(app_type, AppType::Codex) {
+            if app_type == AppType::GrokBuild {
+                let config_text = provider
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str);
+                // 没有选中任何自定义模型表时，Grok CLI 走自带的 xAI 登录（官方态）；
+                // 未被选中的用户模型表只是本机偏好，不能让导入行被当成自定义供应商。
+                if config_text.is_none_or(|text| {
+                    crate::grok_config::is_official_live_config(text)
+                        || crate::grok_config::selected_model_profile(text).is_none()
+                }) {
+                    "official"
+                } else {
+                    "custom"
+                }
+            } else if matches!(app_type, AppType::Codex) {
                 let config_text = provider
                     .settings_config
                     .get("config")
@@ -2793,6 +2842,7 @@ impl ProviderService {
     pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
         match app_type {
             AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog(),
+            AppType::GrokBuild => crate::grok_config::read_grok_live_settings(),
             AppType::Claude => {
                 let path = get_claude_settings_path();
                 if !path.exists() {
@@ -3284,6 +3334,9 @@ impl ProviderService {
             AppType::Gemini => {
                 Self::prepare_switch_gemini(config, provider_id, effective_current_provider)?
             }
+            AppType::GrokBuild => {
+                grok::prepare_switch_grokbuild(config, provider_id, effective_current_provider)?
+            }
             AppType::OpenCode => unreachable!("additive mode handled above"),
             AppType::Hermes => unreachable!("additive mode handled above"),
             AppType::OpenClaw => unreachable!("additive mode handled above"),
@@ -3517,6 +3570,7 @@ impl ProviderService {
                     .map_err(Self::normalize_openclaw_live_write_error)?;
                 Ok(PreparedLiveWrite::OpenClaw { models })
             }
+            AppType::GrokBuild => grok::prepare_grok_live_write(provider),
             AppType::Pi => Ok(PreparedLiveWrite::Noop),
         }
     }
@@ -3538,6 +3592,7 @@ impl ProviderService {
                     .map(|_| ())
                     .map_err(Self::normalize_openclaw_live_write_error)
             }
+            PreparedLiveWrite::GrokBuild { .. } => grok::apply_grok_live_write(prepared, None),
         }
     }
 
@@ -3745,6 +3800,26 @@ impl ProviderService {
                     "config": config_value,
                 }))
             }
+            AppType::GrokBuild => {
+                let effective = common_config::build_effective_settings_with_common_config(
+                    app_type,
+                    provider,
+                    common_config_snippet,
+                    apply_common_config,
+                )?;
+                let cfg_text = effective
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+
+                if provider.category.as_deref() == Some("official") {
+                    crate::grok_config::validate_config_toml_syntax(cfg_text)?;
+                } else if !cfg_text.trim().is_empty() {
+                    crate::grok_config::validate_config_toml(cfg_text)?;
+                }
+
+                Ok(json!({ "config": cfg_text }))
+            }
             AppType::OpenCode => Err(AppError::Config(
                 "OpenCode does not support proxy takeover backups".into(),
             )),
@@ -3828,6 +3903,32 @@ impl ProviderService {
             AppType::Gemini => {
                 use crate::gemini_config::validate_gemini_settings;
                 validate_gemini_settings(&provider.settings_config)?
+            }
+            AppType::GrokBuild => {
+                let settings = provider.settings_config.as_object().ok_or_else(|| {
+                    AppError::localized(
+                        "provider.grokbuild.settings.not_object",
+                        "Grok Build 配置必须是 JSON 对象",
+                        "Grok Build configuration must be a JSON object",
+                    )
+                })?;
+
+                match settings.get("config") {
+                    Some(Value::String(cfg_text)) => {
+                        if provider.category.as_deref() == Some("official") {
+                            crate::grok_config::validate_config_toml_syntax(cfg_text)?;
+                        } else {
+                            crate::grok_config::validate_config_toml(cfg_text)?;
+                        }
+                    }
+                    _ => {
+                        return Err(AppError::localized(
+                            "provider.grokbuild.config.missing",
+                            "Grok Build 配置缺少 config 字段",
+                            "Grok Build configuration is missing the config field",
+                        ))
+                    }
+                }
             }
             AppType::OpenCode => {
                 if !provider.settings_config.is_object() {
@@ -4071,6 +4172,9 @@ impl ProviderService {
             }
             AppType::Gemini => {
                 // Gemini 使用单一的 .env 文件，不需要删除单独的供应商配置文件
+            }
+            AppType::GrokBuild => {
+                // Grok Build 使用单一的 config.toml，没有按供应商拆分的遗留文件
             }
             AppType::OpenCode => {
                 let _ = provider_snapshot;

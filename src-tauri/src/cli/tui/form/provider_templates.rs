@@ -18,8 +18,8 @@ use serde_json::json;
 
 use super::provider_state_loading::{populate_form_from_provider, populate_usage_query_form};
 use super::{
-    ClaudeApiFormat, CodexModelCatalogField, CodexWireApi, FormMode, GeminiAuthType,
-    PromptCacheRoutingMode, ProviderAddFormState, HERMES_DEFAULT_API_MODE,
+    ClaudeApiFormat, CodexModelCatalogField, CodexModelCatalogRow, CodexWireApi, FormMode,
+    GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState, HERMES_DEFAULT_API_MODE,
     OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
@@ -31,6 +31,7 @@ enum ProviderTemplateId {
     OpenAiOfficial,
     Builtin(BuiltinProviderPresetId),
     GoogleOAuth,
+    XaiOauth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +122,7 @@ impl SponsorProviderPreset {
     }
 }
 
-static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [
+static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 4] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -134,9 +135,13 @@ static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [
         id: ProviderTemplateId::CodexOAuth,
         label: "Codex",
     },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::XaiOauth,
+        label: "xAI (Grok)",
+    },
 ];
 
-static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
+static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 3] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -144,6 +149,10 @@ static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::OpenAiOfficial,
         label: "OpenAI Official",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::XaiOauth,
+        label: "xAI (Grok) OAuth",
     },
 ];
 
@@ -251,6 +260,11 @@ static PROVIDER_TEMPLATE_DEFS_OPENCLAW: [ProviderTemplateDef; 1] = [ProviderTemp
     label: "Custom",
 }];
 
+static PROVIDER_TEMPLATE_DEFS_CUSTOM_ONLY: [ProviderTemplateDef; 1] = [ProviderTemplateDef {
+    id: ProviderTemplateId::Custom,
+    label: "Custom",
+}];
+
 pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [ProviderTemplateDef] {
     match app_type {
         AppType::Claude => &PROVIDER_TEMPLATE_DEFS_CLAUDE,
@@ -260,6 +274,9 @@ pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [Pr
         AppType::Hermes => &PROVIDER_TEMPLATE_DEFS_HERMES,
         AppType::OpenClaw => &PROVIDER_TEMPLATE_DEFS_OPENCLAW,
         AppType::Pi => &PROVIDER_TEMPLATE_DEFS_OPENCLAW,
+        // Grok Build 暂无独立内置模板目录（赞助商目录同样未收录），
+        // 与上方通用 CUSTOM-only 路径保持一致。
+        AppType::GrokBuild => &PROVIDER_TEMPLATE_DEFS_CUSTOM_ONLY,
     }
 }
 
@@ -281,9 +298,12 @@ pub(super) fn provider_after_sponsor_template_defs(
     match app_type {
         AppType::Claude => &PROVIDER_TEMPLATE_DEFS_CLAUDE_AFTER_SPONSORS,
         AppType::Codex => &PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS,
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            &[]
-        }
+        AppType::Gemini
+        | AppType::GrokBuild
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi => &[],
     }
 }
 
@@ -317,7 +337,7 @@ impl ProviderAddFormState {
         self.claude_disable_auto_upgrade = false;
         self.claude_disable_auto_upgrade_touched = false;
         self.claude_quick_config_idx = 0;
-        self.codex_oauth_account_id = None;
+        self.managed_account_id = None;
         self.codex_fast_mode = false;
     }
 
@@ -579,7 +599,7 @@ impl ProviderAddFormState {
                     self.claude_tool_search = defaults.claude_tool_search;
                     self.claude_effort_max = defaults.claude_effort_max;
                     self.claude_disable_auto_upgrade = defaults.claude_disable_auto_upgrade;
-                    self.codex_oauth_account_id = defaults.codex_oauth_account_id;
+                    self.managed_account_id = defaults.managed_account_id;
                     self.codex_fast_mode = defaults.codex_fast_mode;
                     self.codex_impersonate_claude_code = defaults.codex_impersonate_claude_code;
                     self.codex_max_output_tokens = defaults.codex_max_output_tokens;
@@ -683,6 +703,61 @@ impl ProviderAddFormState {
                 }
                 ProviderTemplateId::Builtin(preset) => {
                     self.apply_builtin_provider_preset(preset);
+                }
+                ProviderTemplateId::XaiOauth => {
+                    // 表单字段必须同步填充：Codex/Claude 的保存路径以表单字段为
+                    // 源，只写 extra 快照会在提交时报缺少 base URL。
+                    match self.app_type {
+                        AppType::Codex => {
+                            self.codex_base_url.set("https://api.x.ai/v1");
+                            self.codex_model.set("grok-4.7");
+                            self.codex_wire_api = CodexWireApi::Responses;
+                            self.codex_requires_openai_auth = false;
+                            self.codex_api_key.set("");
+                            self.codex_env_key.set("");
+                            self.codex_model_catalog = vec![CodexModelCatalogRow {
+                                model: "grok-4.7".into(),
+                                display_name: "Grok 4.7".into(),
+                                context_window: "500000".into(),
+                                supports_parallel_tool_calls: Some(true),
+                                input_modalities: vec!["text".into(), "image".into()],
+                                base_instructions: String::new(),
+                                reasoning_levels: vec![
+                                    "low".into(),
+                                    "medium".into(),
+                                    "high".into(),
+                                    "xhigh".into(),
+                                ],
+                                default_reasoning_level: String::new(),
+                            }];
+                            self.codex_local_routing_enabled = true;
+                        }
+                        AppType::Claude => {
+                            // The proxy pins xAI OAuth to the Responses wire format.
+                            self.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+                            self.claude_base_url.set("https://api.x.ai/v1");
+                            self.claude_model.set("grok-4.7");
+                            self.claude_haiku_model.set("grok-4.7");
+                            self.claude_sonnet_model.set("grok-4.7");
+                            self.claude_opus_model.set("grok-4.7");
+                        }
+                        _ => {}
+                    }
+                    let app_type = self.app_type.clone();
+                    let seed = crate::cli::commands::provider_input::build_provider_template_seed(
+                        &app_type,
+                        crate::cli::commands::provider_input::ProviderAddTemplate::XaiOauth,
+                        &[],
+                    )
+                    .expect("xai oauth template seed");
+                    self.extra = serde_json::json!({
+                        "category": seed.category,
+                        "meta": seed.meta,
+                        "settingsConfig": seed.settings_config,
+                    });
+                    self.managed_account_id = None;
+                    self.name.set(&seed.name);
+                    self.website_url.set("https://x.ai/grok");
                 }
                 ProviderTemplateId::GoogleOAuth => {
                     self.extra = json!({
@@ -902,6 +977,13 @@ impl ProviderAddFormState {
                 }
             }
             AppType::Pi => {}
+            AppType::GrokBuild => {
+                self.grok_base_url.set(preset.codex_base_url);
+                self.grok_api_key.set("");
+                self.grok_model.set(crate::grok_config::DEFAULT_MODEL);
+                self.grok_api_backend
+                    .set(crate::grok_config::DEFAULT_API_BACKEND);
+            }
         }
 
         if matches!(self.app_type, AppType::Codex) {
