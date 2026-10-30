@@ -718,6 +718,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_symmetric_auth_provider_groups() {
+        for args in [
+            &["cc-switch", "auth", "codex", "login"][..],
+            &["cc-switch", "auth", "openai", "status"][..],
+            &["cc-switch", "auth", "xai", "login"][..],
+            &["cc-switch", "auth", "xai", "logout"][..],
+        ] {
+            let cli = Cli::try_parse_from(args)
+                .unwrap_or_else(|e| panic!("expected {:?} to parse: {e}", args));
+            let Some(Commands::Auth(command)) = cli.command else {
+                panic!("expected auth command for {args:?}");
+            };
+            assert!(
+                matches!(
+                    command,
+                    super::commands::auth::AuthCommand::Codex { .. }
+                        | super::commands::auth::AuthCommand::Xai { .. }
+                ),
+                "expected provider group for {args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_auth_login_no_poll_dead_end() {
         let result = Cli::try_parse_from(["cc-switch", "auth", "login", "--no-poll"]);
 

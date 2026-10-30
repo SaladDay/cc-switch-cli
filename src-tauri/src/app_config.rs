@@ -14,6 +14,8 @@ pub struct McpApps {
     #[serde(default)]
     pub gemini: bool,
     #[serde(default)]
+    pub grokbuild: bool,
+    #[serde(default)]
     pub opencode: bool,
     #[serde(default)]
     pub hermes: bool,
@@ -26,6 +28,7 @@ impl McpApps {
             AppType::Claude => self.claude,
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
+            AppType::GrokBuild => self.grokbuild,
             AppType::OpenCode => self.opencode,
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false,
@@ -39,6 +42,7 @@ impl McpApps {
             AppType::Claude => self.claude = enabled,
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
+            AppType::GrokBuild => self.grokbuild = enabled,
             AppType::OpenCode => self.opencode = enabled,
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {}
@@ -58,6 +62,9 @@ impl McpApps {
         if self.gemini {
             apps.push(AppType::Gemini);
         }
+        if self.grokbuild {
+            apps.push(AppType::GrokBuild);
+        }
         if self.opencode {
             apps.push(AppType::OpenCode);
         }
@@ -69,7 +76,12 @@ impl McpApps {
 
     /// 检查是否所有应用都未启用
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
+        !self.claude
+            && !self.codex
+            && !self.gemini
+            && !self.grokbuild
+            && !self.opencode
+            && !self.hermes
     }
 }
 
@@ -82,6 +94,8 @@ pub struct SkillApps {
     pub codex: bool,
     #[serde(default)]
     pub gemini: bool,
+    #[serde(default)]
+    pub grokbuild: bool,
     #[serde(default)]
     pub opencode: bool,
     #[serde(default)]
@@ -96,6 +110,7 @@ impl SkillApps {
             AppType::Claude => self.claude,
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
+            AppType::GrokBuild => self.grokbuild,
             AppType::OpenCode => self.opencode,
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false,
@@ -108,6 +123,7 @@ impl SkillApps {
             AppType::Claude => self.claude = enabled,
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
+            AppType::GrokBuild => self.grokbuild = enabled,
             AppType::OpenCode => self.opencode = enabled,
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {}
@@ -116,7 +132,13 @@ impl SkillApps {
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes && !self.pi
+        !self.claude
+            && !self.codex
+            && !self.gemini
+            && !self.grokbuild
+            && !self.opencode
+            && !self.hermes
+            && !self.pi
     }
 
     pub fn only(app: &AppType) -> Self {
@@ -139,6 +161,7 @@ impl SkillApps {
         self.claude |= other.claude;
         self.codex |= other.codex;
         self.gemini |= other.gemini;
+        self.grokbuild |= other.grokbuild;
         self.opencode |= other.opencode;
         self.hermes |= other.hermes;
         self.pi |= other.pi;
@@ -253,6 +276,8 @@ pub struct McpRoot {
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub openclaw: McpConfig,
     #[serde(skip)]
+    pub grokbuild: McpConfig,
+    #[serde(skip)]
     pub pi: McpConfig,
 }
 
@@ -268,6 +293,7 @@ impl Default for McpRoot {
             opencode: McpConfig::default(),
             hermes: McpConfig::default(),
             openclaw: McpConfig::default(),
+            grokbuild: McpConfig::default(),
             pi: McpConfig::default(),
         }
     }
@@ -290,6 +316,8 @@ pub struct PromptRoot {
     #[serde(default)]
     pub gemini: PromptConfig,
     #[serde(default)]
+    pub grokbuild: PromptConfig,
+    #[serde(default)]
     pub opencode: PromptConfig,
     #[serde(default)]
     pub hermes: PromptConfig,
@@ -311,6 +339,8 @@ pub enum AppType {
     Claude,
     Codex,
     Gemini,
+    #[cfg_attr(feature = "cli", value(name = "grokbuild", aliases = ["grok", "grok-build", "grok_build"]))]
+    GrokBuild,
     OpenCode,
     Hermes,
     OpenClaw,
@@ -323,6 +353,7 @@ impl AppType {
             AppType::Claude => "claude",
             AppType::Codex => "codex",
             AppType::Gemini => "gemini",
+            AppType::GrokBuild => "grokbuild",
             AppType::OpenCode => "opencode",
             AppType::Hermes => "hermes",
             AppType::OpenClaw => "openclaw",
@@ -338,7 +369,10 @@ impl AppType {
     }
 
     pub fn supports_failover(&self) -> bool {
-        matches!(self, AppType::Claude | AppType::Codex | AppType::Gemini)
+        matches!(
+            self,
+            AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild
+        )
     }
 
     pub fn all() -> impl Iterator<Item = AppType> {
@@ -346,6 +380,7 @@ impl AppType {
             AppType::Claude,
             AppType::Codex,
             AppType::Gemini,
+            AppType::GrokBuild,
             AppType::OpenCode,
             AppType::Hermes,
             AppType::OpenClaw,
@@ -370,6 +405,7 @@ impl FromStr for AppType {
             "claude" => Ok(AppType::Claude),
             "codex" => Ok(AppType::Codex),
             "gemini" => Ok(AppType::Gemini),
+            "grokbuild" | "grok-build" | "grok_build" | "grok" => Ok(AppType::GrokBuild),
             "opencode" => Ok(AppType::OpenCode),
             "hermes" => Ok(AppType::Hermes),
             "openclaw" => Ok(AppType::OpenClaw),
@@ -377,10 +413,10 @@ impl FromStr for AppType {
             other => Err(AppError::localized(
                 "unsupported_app",
                 format!(
-                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, hermes, openclaw, pi。"
+                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, grokbuild, opencode, hermes, openclaw, pi。"
                 ),
                 format!(
-                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, hermes, openclaw, pi."
+                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, grokbuild, opencode, hermes, openclaw, pi."
                 ),
             )),
         }
@@ -416,6 +452,7 @@ impl CommonConfigSnippets {
             AppType::Claude => self.claude.as_ref(),
             AppType::Codex => self.codex.as_ref(),
             AppType::Gemini => self.gemini.as_ref(),
+            AppType::GrokBuild => None,
             AppType::OpenCode => self.opencode.as_ref(),
             AppType::Hermes => self.hermes.as_ref(),
             AppType::OpenClaw => self.openclaw.as_ref(),
@@ -429,6 +466,7 @@ impl CommonConfigSnippets {
             AppType::Claude => self.claude = snippet,
             AppType::Codex => self.codex = snippet,
             AppType::Gemini => self.gemini = snippet,
+            AppType::GrokBuild => {}
             AppType::OpenCode => self.opencode = snippet,
             AppType::Hermes => self.hermes = snippet,
             AppType::OpenClaw => self.openclaw = snippet,
@@ -472,6 +510,7 @@ impl Default for MultiAppConfig {
         apps.insert("claude".to_string(), ProviderManager::default());
         apps.insert("codex".to_string(), ProviderManager::default());
         apps.insert("gemini".to_string(), ProviderManager::default());
+        apps.insert("grokbuild".to_string(), ProviderManager::default());
         apps.insert("opencode".to_string(), ProviderManager::default());
         apps.insert("hermes".to_string(), ProviderManager::default());
         apps.insert("openclaw".to_string(), ProviderManager::default());
@@ -583,6 +622,7 @@ impl MultiAppConfig {
             updated = true;
         }
 
+        config.ensure_app(&AppType::GrokBuild);
         if !config.apps.contains_key("pi") {
             config
                 .apps
@@ -656,6 +696,7 @@ impl MultiAppConfig {
             AppType::OpenCode => &self.mcp.opencode,
             AppType::Hermes => &self.mcp.hermes,
             AppType::OpenClaw => &self.mcp.openclaw,
+            AppType::GrokBuild => &self.mcp.grokbuild,
             AppType::Pi => &self.mcp.pi,
         }
     }
@@ -669,6 +710,7 @@ impl MultiAppConfig {
             AppType::OpenCode => &mut self.mcp.opencode,
             AppType::Hermes => &mut self.mcp.hermes,
             AppType::OpenClaw => &mut self.mcp.openclaw,
+            AppType::GrokBuild => &mut self.mcp.grokbuild,
             AppType::Pi => &mut self.mcp.pi,
         }
     }
@@ -707,6 +749,8 @@ impl MultiAppConfig {
                 AppType::OpenCode => &self.mcp.opencode.servers,
                 AppType::Hermes => &self.mcp.hermes.servers,
                 AppType::OpenClaw => continue,
+                // grokbuild / pi 的分应用桶是 #[serde(skip)] 的占位，没有旧数据。
+                AppType::GrokBuild => continue,
                 AppType::Pi => continue,
             };
 

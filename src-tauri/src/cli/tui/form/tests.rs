@@ -117,6 +117,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Claude Official",
             "Codex",
+            "xAI (Grok)",
             "88API",
             "APIMart",
             "Cubence",
@@ -147,6 +148,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "OpenAI Official",
+            "xAI (Grok) OAuth",
             "88API",
             "APIMart",
             "Cubence",
@@ -817,7 +819,7 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
     assert!(form.claude_hide_attribution);
 
     let fields = form.fields();
-    assert!(fields.contains(&ProviderAddField::CodexOAuthAccount));
+    assert!(fields.contains(&ProviderAddField::ManagedAccount));
     assert!(fields.contains(&ProviderAddField::CodexFastMode));
     assert!(fields.contains(&ProviderAddField::ClaudeModelConfig));
     assert!(fields.contains(&ProviderAddField::ClaudeQuickConfig));
@@ -888,7 +890,7 @@ fn provider_edit_form_codex_oauth_loads_account_and_fast_mode() {
     let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
 
     assert!(form.is_claude_codex_oauth_provider());
-    assert_eq!(form.codex_oauth_account_id.as_deref(), Some("acc-123"));
+    assert_eq!(form.managed_account_id.as_deref(), Some("acc-123"));
     assert!(form.codex_fast_mode);
     assert!(
         !form.is_full_url,
@@ -8082,4 +8084,180 @@ fn claude_editor_context_and_global_values_survive_json_and_template_changes() {
         .fields()
         .contains(&ProviderAddField::IncludeCommonConfig));
     assert!(!form.fields().contains(&ProviderAddField::CommonSnippet));
+}
+
+#[test]
+fn grok_form_edit_preserves_profile_environment_headers_and_context() {
+    let provider = Provider::with_id(
+        "grok".into(),
+        "Grok".into(),
+        json!({"config": r#"
+[models]
+default = "my-profile"
+[model.my-profile]
+model = "grok-4.5"
+name = "Grok"
+base_url = "https://example.test/v1"
+env_key = "MY_GROK_KEY"
+api_backend = "responses"
+context_window = 128000
+extra_headers = { "x-tenant" = "tenant" }
+"#}),
+        None,
+    );
+    let mut form = ProviderAddFormState::from_provider(AppType::GrokBuild, &provider);
+    form.grok_base_url.set("https://new.example.test/v1");
+    let value = form.to_provider_json_value();
+    let doc: toml::Value = value["settingsConfig"]["config"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(doc["models"]["default"].as_str(), Some("my-profile"));
+    let model = &doc["model"]["my-profile"];
+    assert_eq!(model["env_key"].as_str(), Some("MY_GROK_KEY"));
+    assert_eq!(model["context_window"].as_integer(), Some(128000));
+    assert_eq!(model["extra_headers"]["x-tenant"].as_str(), Some("tenant"));
+    assert_eq!(
+        model["base_url"].as_str(),
+        Some("https://new.example.test/v1")
+    );
+}
+
+#[test]
+fn grok_official_form_never_creates_custom_model_tables() {
+    let mut provider = Provider::with_id(
+        "grokbuild-official".into(),
+        "Grok Official".into(),
+        json!({"config":""}),
+        None,
+    );
+    provider.category = Some("official".into());
+    let form = ProviderAddFormState::from_provider(AppType::GrokBuild, &provider);
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["config"],
+        ""
+    );
+}
+
+#[test]
+fn grok_official_form_uses_built_in_quota_without_usage_query() {
+    let mut provider = Provider::with_id(
+        "grokbuild-official".into(),
+        "Grok Official".into(),
+        json!({"config":""}),
+        None,
+    );
+    provider.category = Some("official".into());
+    let mut form = ProviderAddFormState::from_provider(AppType::GrokBuild, &provider);
+    assert!(form.uses_native_quota());
+    assert!(!form.fields().contains(&ProviderAddField::UsageQuery));
+    assert!(!form.fields().contains(&ProviderAddField::UsageQueryDivider));
+    form.open_usage_query_page();
+    assert!(!matches!(form.page, ProviderFormPage::UsageQuery));
+
+    let custom = ProviderAddFormState::new(AppType::GrokBuild);
+    assert!(!custom.uses_native_quota());
+    assert!(custom.fields().contains(&ProviderAddField::UsageQuery));
+}
+
+#[test]
+fn grok_xai_oauth_template_fills_codex_form_for_submission() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    let idx = template_index_by_label(AppType::Codex, "xAI (Grok) OAuth");
+    form.apply_template(idx, &[]);
+    assert_eq!(form.codex_base_url.value, "https://api.x.ai/v1");
+    assert_eq!(form.codex_model.value, "grok-4.7");
+    assert!(!form.codex_requires_openai_auth);
+    assert_eq!(form.codex_model_catalog.len(), 1);
+    assert_eq!(form.codex_model_catalog[0].model, "grok-4.7");
+    // 保存路径必须产出非空 config（提交校验按非空 base_url/config 判定）。
+    let value = form.to_provider_json_value();
+    let config = value["settingsConfig"]["config"].as_str().unwrap();
+    assert!(config.contains("requires_openai_auth = false"), "{config}");
+    assert!(config.contains("grok-4.7"), "{config}");
+    assert!(value["settingsConfig"]["modelCatalog"].is_object());
+}
+
+#[test]
+fn grok_xai_oauth_template_fills_claude_form_for_submission() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    let idx = template_index_by_label(AppType::Claude, "xAI (Grok)");
+    form.apply_template(idx, &[]);
+    assert_eq!(form.claude_base_url.value, "https://api.x.ai/v1");
+    assert_eq!(form.claude_model.value, "grok-4.7");
+    let value = form.to_provider_json_value();
+    let env = &value["settingsConfig"]["env"];
+    assert_eq!(env["ANTHROPIC_BASE_URL"], "https://api.x.ai/v1");
+    assert_eq!(env["ANTHROPIC_MODEL"], "grok-4.7");
+    assert_eq!(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "500000");
+    assert_eq!(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "450000");
+    assert_eq!(
+        value["meta"]["providerType"], "xai_oauth",
+        "managed marker must survive serialization: {}",
+        value["meta"]
+    );
+}
+
+#[test]
+fn xai_oauth_form_binds_an_account_instead_of_an_api_key() {
+    for app_type in [AppType::Claude, AppType::Codex] {
+        let mut form = ProviderAddFormState::new(app_type.clone());
+        let idx = template_index_by_label(
+            app_type.clone(),
+            if app_type == AppType::Codex {
+                "xAI (Grok) OAuth"
+            } else {
+                "xAI (Grok)"
+            },
+        );
+        form.apply_template(idx, &[]);
+        let expected_name = if app_type == AppType::Codex {
+            "xAI (Grok) OAuth"
+        } else {
+            "xAI (Grok)"
+        };
+        assert_eq!(form.name.value, expected_name);
+        assert_eq!(form.managed_auth_provider(), Some("xai_oauth"));
+
+        let fields = form.fields();
+        assert!(
+            fields.contains(&ProviderAddField::ManagedAccount),
+            "{app_type:?}"
+        );
+        for hidden in [
+            ProviderAddField::ClaudeBaseUrl,
+            ProviderAddField::ClaudeApiKey,
+            ProviderAddField::ClaudeApiFormat,
+            ProviderAddField::CodexBaseUrl,
+            ProviderAddField::CodexApiKey,
+            ProviderAddField::UsageQueryDivider,
+            ProviderAddField::UsageQuery,
+        ] {
+            assert!(!fields.contains(&hidden), "{app_type:?} shows {hidden:?}");
+        }
+        assert!(!form.supports_full_url_mode(), "{app_type:?}");
+
+        form.set_managed_account_id(Some("acc-xai".to_string()));
+        let value = form.to_provider_json_value();
+        assert_eq!(value["meta"]["providerType"], "xai_oauth");
+        assert_eq!(value["meta"]["apiFormat"], "openai_responses");
+        assert_eq!(
+            value["meta"]["authBinding"],
+            json!({
+                "source": "managed_account",
+                "authProvider": "xai_oauth",
+                "accountId": "acc-xai",
+            })
+        );
+        assert!(value["meta"].get("codexFastMode").is_none(), "{app_type:?}");
+
+        let provider: Provider = serde_json::from_value(value).expect("provider json");
+        let reloaded = ProviderAddFormState::from_provider(app_type.clone(), &provider);
+        assert_eq!(reloaded.managed_account_id.as_deref(), Some("acc-xai"));
+
+        form.set_managed_account_id(None);
+        let value = form.to_provider_json_value();
+        assert!(value["meta"]["authBinding"].get("accountId").is_none());
+    }
 }

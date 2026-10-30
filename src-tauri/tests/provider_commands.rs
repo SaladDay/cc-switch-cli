@@ -1429,6 +1429,7 @@ command = "echo"
                 claude: false,
                 codex: true,
                 gemini: false,
+                grokbuild: false,
                 opencode: false,
                 hermes: false,
             },

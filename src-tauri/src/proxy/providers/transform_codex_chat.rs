@@ -1293,7 +1293,7 @@ fn collect_input_declared_tools(value: &Value, context: &mut CodexToolContext) {
     }
 }
 
-fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
+pub(super) fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
     let full_name = format!("{namespace}__{name}");
     if full_name.len() <= CHAT_TOOL_NAME_MAX_LEN {
         return full_name;

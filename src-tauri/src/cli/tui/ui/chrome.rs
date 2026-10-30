@@ -154,7 +154,10 @@ pub(super) fn render_header(
                 if idx > 0 {
                     spans.push(Span::raw(" "));
                 }
-                spans.push(Span::styled(format!(" {} ", app_type.as_str()), style));
+                spans.push(Span::styled(
+                    format!(" {} ", super::app_short_label(&app_type)),
+                    style,
+                ));
                 spans
             })
             .collect::<Vec<_>>(),

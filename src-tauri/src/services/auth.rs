@@ -2,6 +2,7 @@ use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
 use crate::services::CodexOAuthService;
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
+const AUTH_PROVIDER_XAI_OAUTH: &str = "xai_oauth";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ManagedAuthAccount {
@@ -37,7 +38,38 @@ pub struct ManagedAuthDeviceCodeResponse {
 fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
     match auth_provider {
         AUTH_PROVIDER_CODEX_OAUTH => Ok(AUTH_PROVIDER_CODEX_OAUTH),
+        AUTH_PROVIDER_XAI_OAUTH => Ok(AUTH_PROVIDER_XAI_OAUTH),
         _ => Err(format!("Unsupported auth provider: {auth_provider}")),
+    }
+}
+
+fn map_xai_account(
+    provider: &str,
+    account: crate::proxy::providers::xai_oauth_auth::XaiOAuthAccount,
+    default_account_id: Option<&str>,
+) -> ManagedAuthAccount {
+    ManagedAuthAccount {
+        is_default: default_account_id == Some(account.id.as_str()),
+        id: account.id,
+        provider: provider.to_string(),
+        login: account.login,
+        avatar_url: account.avatar_url,
+        authenticated_at: account.authenticated_at,
+        reauth_required: account.requires_reauth,
+    }
+}
+
+fn map_xai_device_code_response(
+    provider: &str,
+    response: crate::proxy::providers::xai_oauth_auth::XaiDeviceCodeResponse,
+) -> ManagedAuthDeviceCodeResponse {
+    ManagedAuthDeviceCodeResponse {
+        provider: provider.to_string(),
+        device_code: response.device_code,
+        user_code: response.user_code,
+        verification_uri: response.verification_uri,
+        expires_in: response.expires_in,
+        interval: response.interval,
     }
 }
 
@@ -88,6 +120,13 @@ impl AuthService {
                 .await
                 .map(|response| map_device_code_response(auth_provider, response))
                 .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_XAI_OAUTH => {
+                crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                    .start_device_flow()
+                    .await
+                    .map(|response| map_xai_device_code_response(auth_provider, response))
+                    .map_err(|error| error.to_string())
+            }
             _ => unreachable!(),
         }
     }
@@ -114,6 +153,25 @@ impl AuthService {
                 ),
                 Err(error) => Err(error.to_string()),
             },
+            AUTH_PROVIDER_XAI_OAUTH => {
+                match crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                    .poll_for_token(device_code)
+                    .await
+                {
+                    Ok(account) => {
+                        let default_account_id = crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                            .default_account_id()
+                            .await;
+                        Ok(account.map(|account| {
+                            map_xai_account(auth_provider, account, default_account_id.as_deref())
+                        }))
+                    }
+                    Err(
+                        crate::proxy::providers::xai_oauth_auth::XaiOAuthError::AuthorizationPending,
+                    ) => Ok(None),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -129,6 +187,18 @@ impl AuthService {
                     .into_iter()
                     .map(|account| {
                         map_account(auth_provider, account, default_account_id.as_deref())
+                    })
+                    .collect())
+            }
+            AUTH_PROVIDER_XAI_OAUTH => {
+                let manager = crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared();
+                let default_account_id = manager.default_account_id().await;
+                Ok(manager
+                    .list_accounts()
+                    .await
+                    .into_iter()
+                    .map(|account| {
+                        map_xai_account(auth_provider, account, default_account_id.as_deref())
                     })
                     .collect())
             }
@@ -156,6 +226,24 @@ impl AuthService {
                         .collect(),
                 })
             }
+            AUTH_PROVIDER_XAI_OAUTH => {
+                let manager = crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared();
+                let default_account_id = manager.default_account_id().await;
+                let accounts = manager.list_accounts().await;
+                Ok(ManagedAuthStatus {
+                    provider: auth_provider.to_string(),
+                    authenticated: default_account_id.is_some(),
+                    default_account_id: default_account_id.clone(),
+                    // 存储损坏 ≠ 未登录：显式呈现，避免误导用户重新登录。
+                    migration_error: manager.store_load_error().await,
+                    accounts: accounts
+                        .into_iter()
+                        .map(|account| {
+                            map_xai_account(auth_provider, account, default_account_id.as_deref())
+                        })
+                        .collect(),
+                })
+            }
             _ => unreachable!(),
         }
     }
@@ -166,6 +254,12 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::remove_account(account_id)
                 .await
                 .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_XAI_OAUTH => {
+                crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                    .remove_account(account_id)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
             _ => unreachable!(),
         }
     }
@@ -176,6 +270,12 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::set_default_account(account_id)
                 .await
                 .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_XAI_OAUTH => {
+                crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                    .set_default_account(account_id)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
             _ => unreachable!(),
         }
     }
@@ -187,6 +287,20 @@ impl AuthService {
         let auth_provider = ensure_auth_provider(auth_provider)?;
         match auth_provider {
             AUTH_PROVIDER_CODEX_OAUTH => Ok(CodexOAuthService::get_quota(account_id).await),
+            AUTH_PROVIDER_XAI_OAUTH => {
+                let manager = crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared();
+                let token = match account_id {
+                    Some(id) => manager.get_valid_token_for_account(id).await,
+                    None => manager.get_valid_token().await,
+                }
+                .map_err(|error| format!("xAI OAuth authentication failed: {error}"))?;
+                crate::services::subscription_grok::query_grok_quota(
+                    &token,
+                    AUTH_PROVIDER_XAI_OAUTH,
+                    "Sign in again with `cc-switch auth xai login`.",
+                )
+                .await
+            }
             _ => unreachable!(),
         }
     }
@@ -211,6 +325,12 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::clear_auth()
                 .await
                 .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_XAI_OAUTH => {
+                crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                    .clear_auth()
+                    .await
+                    .map_err(|error| error.to_string())
+            }
             _ => unreachable!(),
         }
     }

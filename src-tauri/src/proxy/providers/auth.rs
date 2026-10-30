@@ -71,6 +71,7 @@ pub enum AuthStrategy {
     GoogleOAuth,
     GitHubCopilot,
     CodexOAuth,
+    XaiOAuth,
 }
 
 #[cfg(test)]

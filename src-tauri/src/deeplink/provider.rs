@@ -139,6 +139,7 @@ fn build_provider_from_request(
         AppType::Claude => build_claude_settings(request),
         AppType::Codex => build_codex_settings(request),
         AppType::Gemini => build_gemini_settings(request),
+        AppType::GrokBuild => build_grokbuild_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
         AppType::Hermes => build_hermes_settings(request),
         AppType::OpenClaw => build_openclaw_settings(request),
@@ -340,6 +341,32 @@ fn build_gemini_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
     json!({ "env": env })
 }
 
+fn build_grokbuild_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    let model = request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(crate::grok_config::DEFAULT_MODEL);
+    let name = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("custom");
+    let endpoint = get_primary_endpoint(request);
+    let api_key = request.api_key.as_deref().unwrap_or("").trim();
+
+    // A merged inline config carries its own profile; keep its protocol and
+    // options verbatim rather than rebuilding with CLI defaults.
+    if let Some(config) = request.openclaw_config.as_ref() {
+        if let Some(config_toml) = config.get("config").and_then(Value::as_str) {
+            return serde_json::json!({ "config": config_toml });
+        }
+    }
+    crate::grok_config::build_provider_settings_config(name, &endpoint, api_key, model, "")
+}
+
 fn build_opencode_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
     let endpoint = get_primary_endpoint(request);
 
@@ -492,6 +519,7 @@ pub fn parse_and_merge_config(
         "claude" => merge_claude_config(&mut merged, &config_value)?,
         "codex" => merge_codex_config(&mut merged, &config_value)?,
         "gemini" => merge_gemini_config(&mut merged, &config_value)?,
+        "grokbuild" | "grok" => merge_grokbuild_config(&mut merged, &config_value)?,
         "opencode" => merge_additive_config(&mut merged, &config_value)?,
         "hermes" => merge_additive_config(&mut merged, &config_value)?,
         "openclaw" => merge_openclaw_config(&mut merged, &config_value)?,
@@ -647,6 +675,125 @@ fn merge_gemini_config(
         }
     }
 
+    Ok(())
+}
+
+fn merge_grokbuild_config(
+    request: &mut DeepLinkImportRequest,
+    config: &serde_json::Value,
+) -> Result<(), AppError> {
+    let config_toml = if let Some(config_toml) = config.get("config").and_then(|v| v.as_str()) {
+        config_toml.to_string()
+    } else {
+        let toml_value: toml::Value = serde_json::from_value(config.clone()).map_err(|error| {
+            AppError::InvalidInput(format!("Invalid Grok Build config: {error}"))
+        })?;
+        toml::to_string(&toml_value).map_err(|error| {
+            AppError::InvalidInput(format!("Invalid Grok Build config: {error}"))
+        })?
+    };
+    // Keep the link's own profile document. Only the credential is lifted into
+    // the request, and env_key stays a name (never a resolved secret).
+    let doc: toml::Value = toml::from_str(&config_toml)
+        .map_err(|error| AppError::InvalidInput(format!("Invalid Grok Build config: {error}")))?;
+    let profile = crate::grok_config::selected_model_profile(&config_toml).ok_or_else(|| {
+        AppError::InvalidInput("Invalid Grok Build config.toml model profile".into())
+    })?;
+    let model = doc
+        .get("model")
+        .and_then(|v| v.get(&profile))
+        .cloned()
+        .unwrap_or(toml::Value::Table(Default::default()));
+    let inline_api_key = model
+        .get("api_key")
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned);
+    let env_key = model
+        .get("env_key")
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned);
+
+    if request
+        .api_key
+        .as_ref()
+        .is_none_or(|value| value.is_empty())
+    {
+        // 只内联显式声明的 `api_key`。绝不把 `env_key`（或任何进程环境变量）
+        // 解析成明文带进来：deeplink 是不可信输入，解析+内联会把受害者环境的
+        // 密钥静默持久化进导入供应商的 config.toml，并送到链接声明的任意
+        // `base_url`。`env_key` 是间接引用，导入时必须保持为名字而不是已解析的密钥。
+        request.api_key = inline_api_key;
+        if request
+            .api_key
+            .as_ref()
+            .is_none_or(|value| value.is_empty())
+            && env_key.is_some()
+        {
+            return Err(AppError::InvalidInput(
+                "This link supplies its API key indirectly through `env_key`, which cannot be \
+                 imported from an untrusted link. Add the provider manually and enter the key \
+                 yourself."
+                    .to_string(),
+            ));
+        }
+    }
+    if request
+        .endpoint
+        .as_ref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        let base_url = model
+            .get("base_url")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                AppError::InvalidInput("Invalid Grok Build config.toml model profile".into())
+            })?;
+        request.endpoint = Some(base_url.to_string());
+    }
+    if request.model.is_none() {
+        let upstream = model
+            .get("model")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                AppError::InvalidInput("Invalid Grok Build config.toml model profile".into())
+            })?;
+        request.model = Some(upstream.to_string());
+    }
+    if request
+        .homepage
+        .as_ref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        if let Some(endpoint) = request.endpoint.as_ref().filter(|value| !value.is_empty()) {
+            request.homepage = infer_homepage_from_endpoint(endpoint);
+        }
+    }
+
+    // 写回实际保存的文档：URL 参数优先于内联配置，且不可信链接永远不保留
+    // `env_key` 间接引用（否则切换后会把本机环境变量里的密钥发往链接指定的地址）。
+    let mut edited: toml_edit::DocumentMut = config_toml
+        .parse()
+        .map_err(|error| AppError::InvalidInput(format!("Invalid Grok Build config: {error}")))?;
+    if let Some(table) = edited
+        .get_mut("model")
+        .and_then(|models| models.get_mut(&profile))
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        table.remove("env_key");
+        let primary_endpoint = get_primary_endpoint(request);
+        let overrides = [
+            ("api_key", request.api_key.as_deref()),
+            ("base_url", Some(primary_endpoint.as_str())),
+            ("model", request.model.as_deref()),
+        ];
+        for (key, value) in overrides {
+            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                table.insert(key, toml_edit::value(value));
+            }
+        }
+    }
+
+    request.openclaw_config = Some(serde_json::json!({ "config": edited.to_string() }));
     Ok(())
 }
 

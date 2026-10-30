@@ -288,11 +288,12 @@ pub(super) fn render_main(
         .constraints([Constraint::Min(0), Constraint::Length(bottom_hero_height)])
         .split(content);
 
+    let local_env_card_height = local_env_check_card_height();
     let top_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(connection_card_height),
-            Constraint::Length(8),
+            Constraint::Length(local_env_card_height),
             Constraint::Min(0),
         ])
         .split(chunks[0]);
@@ -545,6 +546,14 @@ fn render_connection_card(
     );
 }
 
+/// Card height for the local-env grid: two tool cells per row (2 rows each)
+/// plus the two border rows.
+fn local_env_check_card_height() -> u16 {
+    use crate::services::local_env_check::LocalTool;
+    let rows = LocalTool::all().len().div_ceil(2) as u16;
+    rows.saturating_mul(2).saturating_add(2)
+}
+
 fn render_local_env_check_card(
     frame: &mut Frame<'_>,
     app: &App,
@@ -562,13 +571,10 @@ fn render_local_env_check_card(
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
+    let tool_rows = LocalTool::all().len().div_ceil(2);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-        ])
+        .constraints(std::iter::repeat_n(Constraint::Length(2), tool_rows).collect::<Vec<_>>())
         .split(inner);
 
     let row_columns = rows

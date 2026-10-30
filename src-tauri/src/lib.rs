@@ -19,6 +19,7 @@ mod deeplink;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
+mod grok_config;
 pub mod hermes_config;
 mod import_export;
 #[allow(dead_code)]
@@ -72,6 +73,8 @@ pub use deeplink::{
     import_skill_from_deeplink, parse_deeplink_url, DeepLinkImportRequest, McpImportResult,
 };
 pub use error::AppError;
+pub use grok_config::{get_grok_config_path, read_grok_live_settings, write_grok_live_settings};
+
 pub use import_export::export_config_to_file;
 pub use mcp::{
     import_from_claude, import_from_codex, import_from_gemini, remove_server_from_claude,

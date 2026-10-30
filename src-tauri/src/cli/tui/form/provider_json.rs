@@ -296,6 +296,8 @@ impl ProviderAddFormState {
 
         self.update_provider_meta(&mut provider_obj);
 
+        let provider_obj_category_is_official =
+            provider_obj.get("category").and_then(Value::as_str) == Some("official");
         let settings_value = provider_obj
             .entry("settingsConfig".to_string())
             .or_insert_with(|| json!({}));
@@ -447,6 +449,22 @@ impl ProviderAddFormState {
                             auth_obj.insert("OPENAI_API_KEY".to_string(), json!(api_key));
                         }
                     }
+                }
+            }
+            AppType::GrokBuild => {
+                if provider_obj_category_is_official {
+                    settings_obj.insert("config".into(), Value::String(String::new()));
+                } else {
+                    let settings = Value::Object(settings_obj.clone());
+                    let updated = crate::grok_config::update_provider_settings_config(
+                        Some(&settings),
+                        self.name.value.trim(),
+                        self.grok_base_url.value.trim(),
+                        self.grok_api_key.value.trim(),
+                        self.grok_model.value.trim(),
+                        self.grok_api_backend.value.trim(),
+                    );
+                    settings_obj.insert("config".into(), updated["config"].clone());
                 }
             }
             AppType::Gemini => {
@@ -860,9 +878,10 @@ impl ProviderAddFormState {
             );
         let should_write_claude_api_key_field = matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider()
-            && !self.is_claude_codex_oauth_provider()
+            && self.managed_auth_provider().is_none()
             && self.claude_api_key_field == ClaudeApiKeyField::ApiKey;
-        let is_codex_oauth = self.is_claude_codex_oauth_provider();
+        let managed_auth_provider = self.managed_auth_provider();
+        let is_codex_oauth = managed_auth_provider == Some("codex_oauth");
         let local_proxy_body_override = self
             .local_proxy_body_override
             .as_ref()
@@ -878,7 +897,7 @@ impl ProviderAddFormState {
             && !should_write_codex_api_format
             && !should_write_prompt_cache_routing
             && !should_write_claude_api_key_field
-            && !is_codex_oauth
+            && managed_auth_provider.is_none()
             && !should_write_local_proxy_settings
             && !self.has_usage_script_meta()
             && !self.usage_query_touched
@@ -923,10 +942,10 @@ impl ProviderAddFormState {
 
         if matches!(self.app_type, AppType::Claude) {
             match self.claude_api_format {
-                _ if self.is_claude_official_provider() && !is_codex_oauth => {
+                _ if self.is_claude_official_provider() && managed_auth_provider.is_none() => {
                     meta_obj.remove("apiFormat");
                 }
-                ClaudeApiFormat::Anthropic if is_codex_oauth => {
+                ClaudeApiFormat::Anthropic if managed_auth_provider.is_some() => {
                     meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
                 }
                 ClaudeApiFormat::Anthropic => {
@@ -1065,30 +1084,27 @@ impl ProviderAddFormState {
             meta_obj.remove("localProxyRequestOverrides");
         }
 
-        if is_codex_oauth {
-            meta_obj.insert("providerType".to_string(), json!("codex_oauth"));
-            meta_obj.insert(
-                "authBinding".to_string(),
-                json!({
-                    "source": "managed_account",
-                    "authProvider": "codex_oauth",
-                    "accountId": self.codex_oauth_account_id.as_deref(),
-                }),
-            );
-            if self.codex_oauth_account_id.is_none() {
-                if let Some(auth_binding) = meta_obj
-                    .get_mut("authBinding")
-                    .and_then(|value| value.as_object_mut())
-                {
-                    auth_binding.remove("accountId");
-                }
+        if let Some(auth_provider) = managed_auth_provider {
+            meta_obj.insert("providerType".to_string(), json!(auth_provider));
+            let mut auth_binding = json!({
+                "source": "managed_account",
+                "authProvider": auth_provider,
+            });
+            if let Some(account_id) = self.managed_account_id.as_deref() {
+                auth_binding["accountId"] = json!(account_id);
             }
-            meta_obj.insert("codexFastMode".to_string(), json!(self.codex_fast_mode));
+            meta_obj.insert("authBinding".to_string(), auth_binding);
+            if is_codex_oauth {
+                meta_obj.insert("codexFastMode".to_string(), json!(self.codex_fast_mode));
+            } else {
+                meta_obj.remove("codexFastMode");
+            }
         } else {
+            let is_managed = |value: &str| matches!(value, "codex_oauth" | "xai_oauth");
             if meta_obj
                 .get("providerType")
                 .and_then(Value::as_str)
-                .is_some_and(|value| value == "codex_oauth")
+                .is_some_and(is_managed)
             {
                 meta_obj.remove("providerType");
             }
@@ -1096,7 +1112,7 @@ impl ProviderAddFormState {
                 .get("authBinding")
                 .and_then(|value| value.get("authProvider"))
                 .and_then(Value::as_str)
-                .is_some_and(|value| value == "codex_oauth")
+                .is_some_and(is_managed)
             {
                 meta_obj.remove("authBinding");
             }
@@ -1420,8 +1436,12 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::Claude | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-        }
+        AppType::Claude
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::GrokBuild
+        | AppType::Pi => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

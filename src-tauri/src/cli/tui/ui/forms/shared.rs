@@ -41,7 +41,7 @@ pub(crate) fn add_form_key_items(
                         ProviderAddField::ClaudeModelConfig
                         | ProviderAddField::ClaudeQuickConfig
                         | ProviderAddField::CodexQuickConfig
-                        | ProviderAddField::CodexOAuthAccount
+                        | ProviderAddField::ManagedAccount
                         | ProviderAddField::CodexLocalRouting
                         | ProviderAddField::LocalProxySettings
                         | ProviderAddField::ClaudeInactiveFields

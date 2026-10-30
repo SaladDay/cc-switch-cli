@@ -389,12 +389,18 @@ impl App {
         })
     }
 
-    pub(crate) fn clear_codex_oauth_binding_if_removed(&mut self, account_id: &str) {
+    pub(crate) fn clear_managed_account_binding_if_removed(
+        &mut self,
+        auth_provider: &str,
+        account_id: &str,
+    ) {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
             return;
         };
-        if provider.codex_oauth_account_id.as_deref() == Some(account_id) {
-            provider.set_codex_oauth_account_id(None);
+        if provider.managed_auth_provider() == Some(auth_provider)
+            && provider.managed_account_id.as_deref() == Some(account_id)
+        {
+            provider.set_managed_account_id(None);
         }
     }
 

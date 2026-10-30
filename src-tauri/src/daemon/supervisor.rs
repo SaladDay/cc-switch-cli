@@ -410,7 +410,8 @@ impl Supervisor {
         }
 
         let takeovers = self.read_takeover_flags().await;
-        let has_active_takeover = takeovers.claude || takeovers.codex || takeovers.gemini;
+        let has_active_takeover =
+            takeovers.claude || takeovers.codex || takeovers.gemini || takeovers.grokbuild;
         if !has_active_takeover {
             if let Err(err) = self.proxy.set_global_enabled(false).await {
                 log::warn!(
@@ -527,9 +528,12 @@ impl Supervisor {
         if teardown_in_progress {
             inner.teardown_in_progress = true;
         }
-        inner
-            .cancelled_apps
-            .extend([AppType::Claude, AppType::Codex, AppType::Gemini]);
+        inner.cancelled_apps.extend([
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::GrokBuild,
+        ]);
 
         let workers = inner
             .workers
@@ -621,7 +625,8 @@ impl Supervisor {
             return Response::Error { message: err };
         }
         let takeovers = self.read_takeover_flags().await;
-        let has_active_takeover = takeovers.claude || takeovers.codex || takeovers.gemini;
+        let has_active_takeover =
+            takeovers.claude || takeovers.codex || takeovers.gemini || takeovers.grokbuild;
         let mut global_disable_error = None;
         if !has_active_takeover {
             if let Err(err) = self.proxy.set_global_enabled(false).await {
@@ -728,7 +733,12 @@ impl Supervisor {
         // the inner lock so we don't hold it while running per-app restores
         // (which acquire the file-level state mutation guard).
         let mut active = Vec::new();
-        for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+        for app in [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::GrokBuild,
+        ] {
             match self.db.get_proxy_config_for_app(app.as_str()).await {
                 Ok(config) if config.enabled => active.push(app),
                 Ok(_) => {}
@@ -921,6 +931,7 @@ impl Supervisor {
             claude: status.claude,
             codex: status.codex,
             gemini: status.gemini,
+            grokbuild: status.grokbuild,
         }
     }
 
@@ -1174,6 +1185,7 @@ fn parse_app_type(s: &str) -> Option<AppType> {
         "claude" => Some(AppType::Claude),
         "codex" => Some(AppType::Codex),
         "gemini" => Some(AppType::Gemini),
+        "grokbuild" => Some(AppType::GrokBuild),
         _ => None,
     }
 }
@@ -1910,5 +1922,16 @@ mod tests {
             Some(pending_pid)
         );
         assert!(inner.stopping_workers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod grokbuild_worker_tests {
+    #[test]
+    fn daemon_accepts_grokbuild_workers() {
+        assert_eq!(
+            super::parse_app_type("grokbuild"),
+            Some(crate::AppType::GrokBuild)
+        );
     }
 }

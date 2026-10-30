@@ -357,6 +357,7 @@ pub struct ProxySnapshot {
     pub claude_takeover: bool,
     pub codex_takeover: bool,
     pub gemini_takeover: bool,
+    pub grokbuild_takeover: bool,
     #[allow(dead_code)]
     pub default_cost_multiplier: Option<String>,
     pub configured_listen_address: String,
@@ -405,6 +406,7 @@ impl ProxySnapshot {
             AppType::Claude => Some(self.claude_takeover),
             AppType::Codex => Some(self.codex_takeover),
             AppType::Gemini => Some(self.gemini_takeover),
+            AppType::GrokBuild => Some(self.grokbuild_takeover),
             AppType::OpenCode => None,
             AppType::Hermes => None,
             AppType::OpenClaw => None,
@@ -1741,6 +1743,10 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .or_else(|| settings_config.get("base_url"))?
             .as_str()
             .map(|s| s.to_string()),
+        AppType::GrokBuild => settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(crate::grok_config::extract_base_url),
         AppType::Pi => crate::pi_config::provider_base_url(settings_config).ok(),
     }
 }
@@ -3589,6 +3595,11 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
         .get_proxy_config_for_app_or_default("gemini")
         .await?
         .enabled;
+    let grokbuild_takeover = state
+        .db
+        .get_proxy_config_for_app_or_default("grokbuild")
+        .await?
+        .enabled;
 
     let current_app_target = proxy_target_snapshot_for_app(&runtime_status, &current_app);
     let provider_health = Arc::new(
@@ -3644,6 +3655,7 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
         claude_takeover,
         codex_takeover,
         gemini_takeover,
+        grokbuild_takeover,
         default_cost_multiplier,
         configured_listen_address: config.listen_address.clone(),
         configured_listen_port,

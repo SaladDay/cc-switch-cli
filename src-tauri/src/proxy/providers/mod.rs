@@ -12,6 +12,7 @@ pub mod copilot_model_map;
 mod gemini;
 pub(crate) mod gemini_schema;
 pub mod gemini_shadow;
+mod grokbuild;
 pub mod streaming;
 pub mod streaming_codex_anthropic;
 pub mod streaming_codex_chat;
@@ -20,8 +21,11 @@ pub mod streaming_responses;
 pub mod transform;
 pub mod transform_codex_anthropic;
 pub mod transform_codex_chat;
+pub mod transform_codex_responses_namespace;
+pub mod transform_codex_responses_xai_sanitize;
 pub mod transform_gemini;
 pub mod transform_responses;
+pub mod xai_oauth_auth;
 
 use crate::app_config::AppType;
 use crate::provider::Provider;
@@ -47,6 +51,10 @@ pub use codex::{
 };
 pub use gemini::GeminiAdapter;
 
+/// Managed xAI (Grok) OAuth providers always call the xAI API origin; the
+/// editable base_url in a provider snapshot is ignored for them.
+pub const XAI_API_BASE_URL: &str = "https://api.x.ai/v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderType {
@@ -58,6 +66,13 @@ pub enum ProviderType {
     OpenRouter,
     GitHubCopilot,
     CodexOAuth,
+    XaiOAuth,
+}
+
+/// 仅 Codex 的托管 xAI 供应商需要命名空间展平/字段清理；原生 Grok Build 是
+/// xAI 自家客户端，路由时原样透传，保持与直连一致。请求与响应两侧共用此判定。
+pub fn rewrites_codex_requests_for_xai(app: &AppType, provider: &Provider) -> bool {
+    *app == AppType::Codex && provider.is_xai_oauth()
 }
 
 impl ProviderType {
@@ -81,6 +96,7 @@ impl ProviderType {
             ProviderType::OpenRouter => "https://openrouter.ai/api",
             ProviderType::GitHubCopilot => "https://api.githubcopilot.com",
             ProviderType::CodexOAuth => "https://chatgpt.com/backend-api/codex",
+            ProviderType::XaiOAuth => XAI_API_BASE_URL,
         }
     }
 
@@ -102,6 +118,9 @@ impl ProviderType {
                     }
                     if meta.provider_type.as_deref() == Some("codex_oauth") {
                         return ProviderType::CodexOAuth;
+                    }
+                    if meta.provider_type.as_deref() == Some("xai_oauth") {
+                        return ProviderType::XaiOAuth;
                     }
                 }
 
@@ -146,6 +165,8 @@ impl ProviderType {
                 }
                 ProviderType::Gemini
             }
+            // grokbuild 走 OpenAI Responses/Chat 协议，复用 Codex 适配路径。
+            AppType::GrokBuild => ProviderType::Codex,
             AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
                 ProviderType::Codex
             }
@@ -162,6 +183,7 @@ impl ProviderType {
             ProviderType::OpenRouter => "openrouter",
             ProviderType::GitHubCopilot => "github_copilot",
             ProviderType::CodexOAuth => "codex_oauth",
+            ProviderType::XaiOAuth => "xai_oauth",
         }
     }
 }
@@ -187,6 +209,7 @@ impl std::str::FromStr for ProviderType {
                 Ok(ProviderType::GitHubCopilot)
             }
             "codex_oauth" | "codex-oauth" | "codexoauth" => Ok(ProviderType::CodexOAuth),
+            "xai_oauth" | "xai-oauth" | "xaioauth" => Ok(ProviderType::XaiOAuth),
             _ => Err(format!("Invalid provider type: {s}")),
         }
     }
@@ -196,6 +219,7 @@ pub fn get_adapter(app_type: &AppType) -> Option<Box<dyn ProviderAdapter>> {
     Some(match app_type {
         AppType::Claude => Box::new(ClaudeAdapter::new()),
         AppType::Codex => Box::new(CodexAdapter::new()),
+        AppType::GrokBuild => Box::new(grokbuild::GrokBuildAdapter),
         AppType::Gemini => Box::new(GeminiAdapter::new()),
         AppType::OpenCode => Box::new(CodexAdapter::new()),
         AppType::Hermes => Box::new(CodexAdapter::new()),
@@ -211,7 +235,8 @@ pub fn get_adapter_for_provider_type(provider_type: &ProviderType) -> Box<dyn Pr
         | ProviderType::ClaudeAuth
         | ProviderType::OpenRouter
         | ProviderType::GitHubCopilot
-        | ProviderType::CodexOAuth => Box::new(ClaudeAdapter::new()),
+        | ProviderType::CodexOAuth
+        | ProviderType::XaiOAuth => Box::new(ClaudeAdapter::new()),
         ProviderType::Codex => Box::new(CodexAdapter::new()),
         ProviderType::Gemini | ProviderType::GeminiCli => Box::new(GeminiAdapter::new()),
     }

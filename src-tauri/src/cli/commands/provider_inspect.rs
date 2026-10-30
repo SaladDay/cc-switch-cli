@@ -177,10 +177,14 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
             "  Base URL: {}",
             config.base_url.unwrap_or_else(|| "N/A".to_string())
         );
-        println!(
-            "  API Key:  {}",
-            config.api_key.unwrap_or_else(|| "N/A".to_string())
-        );
+        if provider.is_codex_oauth() || provider.is_xai_oauth() {
+            super::provider_input::print_managed_account_binding(provider);
+        } else {
+            println!(
+                "  API Key:  {}",
+                config.api_key.unwrap_or_else(|| "N/A".to_string())
+            );
+        }
 
         println!("\n{}", highlight(texts::model_config_section_header()));
         println!(
@@ -214,12 +218,16 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
         println!("\n{}", highlight("API 配置 / API Configuration"));
         let api_url = extract_api_url(provider, &app_type).unwrap_or_else(|| "N/A".to_string());
         println!("  API URL:  {}", api_url);
-        println!(
-            "  API Key:  {}",
-            provider
-                .configured_api_key(&app_type)
-                .unwrap_or_else(|| "N/A".to_string())
-        );
+        if provider.is_codex_oauth() || provider.is_xai_oauth() {
+            super::provider_input::print_managed_account_binding(provider);
+        } else {
+            println!(
+                "  API Key:  {}",
+                provider
+                    .configured_api_key(&app_type)
+                    .unwrap_or_else(|| "N/A".to_string())
+            );
+        }
     }
 
     println!("\n{}", "─".repeat(60));
@@ -1069,6 +1077,21 @@ fn model_fetch_target(
                 strategy,
             })
         }
+        AppType::GrokBuild => Ok(ModelFetchTarget {
+            base_url,
+            is_full_url,
+            auth_value: Some(
+                provider
+                    .configured_api_key(app_type)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        AppError::Message(format!("Missing API key for provider '{}'", provider.id))
+                    })?,
+            ),
+            custom_user_agent,
+            request_headers: None,
+            strategy: ProviderModelFetchStrategy::Bearer,
+        }),
         AppType::OpenCode => Ok(ModelFetchTarget {
             base_url,
             is_full_url,
@@ -1212,9 +1235,12 @@ fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetc
     match app_type {
         AppType::Claude => ProviderModelFetchStrategy::Anthropic,
         AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
-            ProviderModelFetchStrategy::Bearer
-        }
+        AppType::Codex
+        | AppType::GrokBuild
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::Pi => ProviderModelFetchStrategy::Bearer,
     }
 }
 

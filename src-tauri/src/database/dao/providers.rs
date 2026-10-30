@@ -224,17 +224,24 @@ impl Database {
 
     /// 启动时补齐上游官方预设供应商（Claude / Codex / Gemini）。
     pub fn init_default_official_providers(&self) -> Result<usize, AppError> {
-        if self
+        let seeded = self
             .get_bool_flag("official_providers_seeded")
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let grok_seeded = self
+            .get_bool_flag("grokbuild_official_seeded")
+            .unwrap_or(false);
+        if seeded && grok_seeded {
             return Ok(0);
         }
-
+        // Existing users need the new app's seed, but deliberately deleted
+        // providers for previously initialized apps must stay deleted.
         let mut inserted = 0usize;
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         for seed in OFFICIAL_SEEDS {
+            if seeded && (seed.app_type != crate::app_config::AppType::GrokBuild || grok_seeded) {
+                continue;
+            }
             let app_type = seed.app_type.as_str();
             if self.get_provider_by_id(seed.id, app_type)?.is_some() {
                 continue;
@@ -263,6 +270,7 @@ impl Database {
         }
 
         self.set_setting("official_providers_seeded", "true")?;
+        self.set_setting("grokbuild_official_seeded", "true")?;
         Ok(inserted)
     }
 

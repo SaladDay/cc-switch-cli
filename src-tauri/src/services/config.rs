@@ -275,6 +275,7 @@ impl ConfigService {
         Self::sync_current_provider_for_app(config, &AppType::Claude)?;
         Self::sync_current_provider_for_app(config, &AppType::Codex)?;
         Self::sync_current_provider_for_app(config, &AppType::Gemini)?;
+        Self::sync_current_provider_for_app(config, &AppType::GrokBuild)?;
         Self::sync_current_provider_for_app(config, &AppType::OpenCode)?;
         Self::sync_current_provider_for_app(config, &AppType::Hermes)?;
         Self::sync_current_provider_for_app(config, &AppType::OpenClaw)?;
@@ -312,6 +313,9 @@ impl ConfigService {
             AppType::Codex => Self::sync_codex_live(config, &current_id, &provider)?,
             AppType::Claude => Self::sync_claude_live(config, &current_id, &provider)?,
             AppType::Gemini => Self::sync_gemini_live(config, &current_id, &provider)?,
+            // Grok Build 的快照就是完整 config.toml 文本，原样写回即是切换；
+            // MCP 投影随后由各自的同步流程补写。
+            AppType::GrokBuild => crate::grok_config::write_grok_provider_live(&provider)?,
             AppType::OpenCode => {}
             AppType::Hermes => {}
             AppType::OpenClaw => {}

@@ -4,7 +4,7 @@
 
 ## CC-Switch CLI
 
-**Manage Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, and Pi from one interactive TUI or scriptable CLI.**
+**Manage Claude Code, Codex, Gemini, Grok Build, OpenCode, Hermes, OpenClaw, and Pi from one interactive TUI or scriptable CLI.**
 
 [![Version](https://img.shields.io/badge/version-5.11.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
@@ -142,9 +142,10 @@ cc-switch --app codex mcp sync          # Sync Codex MCP servers
 cc-switch --app gemini prompts list     # List Gemini prompts
 cc-switch --app hermes provider list    # Manage Hermes providers
 cc-switch --app openclaw provider list  # Manage OpenClaw providers
+cc-switch --app grokbuild provider list # Manage Grok Build providers
 cc-switch --app pi provider list        # Manage Pi providers
 
-# Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `hermes`, `openclaw`, `pi`
+# Supported apps: `claude` (default), `codex`, `gemini`, `grokbuild`, `opencode`, `hermes`, `openclaw`, `pi`
 ```
 
 Use `cc-switch start` when you want different providers in multiple terminals. It only affects the Claude or Codex session launched by that command; `provider switch` and `use` still change the global provider. In the TUI, select a provider on the Providers page and press `o` for the same behavior.
@@ -276,7 +277,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 Provider Management
 
-Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, **Hermes**, **OpenClaw**, and **Pi**.
+Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **Grok Build**, **OpenCode**, **Hermes**, **OpenClaw**, and **Pi**. Grok Build (xAI) follows the same switch semantics: the Grok Official entry keeps `grok login`'s native xAI OAuth untouched, and third-party providers write only the selected `[model."<name>"]` profile plus `[models].default` into `~/.grok/config.toml`, preserving your global settings, other custom models, and `[mcp_servers]`.
 
 Pi provider management follows Pi's native additive model: membership comes from `models.json.providers`. CC-Switch does not modify Pi login credentials or its global default provider/model.
 The Pi TUI keeps the same table/form/shortcut conventions as the other apps and exposes Presets, System Prompts, and Prompt Templates as separate pages.
@@ -306,19 +307,80 @@ Manage ChatGPT/Codex OAuth accounts locally and reuse them across provider profi
 **Features:** device-flow login, account listing, default account selection, account removal, and provider binding without copying long-lived tokens into each provider.
 
 ```bash
-cc-switch auth status                # Show managed account status
+cc-switch auth status                # Show ChatGPT/Codex account status
 cc-switch auth login                 # Sign in with ChatGPT/Codex OAuth
 cc-switch auth login --account-id <id> # Reauthenticate an existing account, preserving bindings
 cc-switch auth list                  # List signed-in accounts
 cc-switch auth default <account-id>  # Set the default account
 cc-switch auth remove <account-id>   # Remove an account
+cc-switch auth logout                # Remove all ChatGPT/Codex auth data
+```
+
+The bare `auth` subcommands manage ChatGPT/Codex accounts and stay backward
+compatible. The same operations are available symmetrically per provider:
+
+```bash
+cc-switch auth codex login           # Same as `auth login` (alias: auth openai ...)
+cc-switch auth xai login             # Sign in to xAI (Grok) with the device flow
+cc-switch auth xai status
+cc-switch auth xai logout            # Remove all xAI auth data
 ```
 
 Members of the same ChatGPT workspace have separate local account IDs. Managed accounts saved by older versions require reauthentication: find the ID with `cc-switch auth list`, then run `cc-switch auth login --account-id <id>`, or choose **Reauthenticate** in the TUI account menu. Sign in as the original user in the same workspace to preserve provider bindings.
 
+### xAI / Grok OAuth routing
+
+Use one managed xAI account for Claude Code and Codex without placing real OAuth
+credentials in either client's configuration:
+
+```bash
+cc-switch auth xai login               # Complete device authorization in your browser
+cc-switch auth xai status
+
+cc-switch --app claude provider add --name "xAI Grok" --id xai-claude --template xai-oauth
+cc-switch --app claude provider switch xai-claude
+cc-switch --app claude proxy enable    # Starts the managed worker AND takes over live config
+
+cc-switch --app codex provider add --name "xAI Grok" --id xai-codex --template xai-oauth
+cc-switch --app codex provider switch xai-codex
+cc-switch --app codex proxy enable
+
+cc-switch --app claude provider quota xai-claude
+cc-switch --app codex provider quota xai-codex
+```
+
+Both templates default to `grok-4.7`. The Codex template publishes a Grok model
+catalog and does not require ChatGPT login. Quota queries use the same bound
+managed account, return the weekly window only (no synthetic five-hour window),
+and do not require a second `grok login`. Grok Build Official can also use this managed login when its proxy route is enabled;
+a private live-only model profile is removed when routing is disabled, restoring
+the native login state without touching `~/.grok/auth.json`. If no managed account
+is available, native official quota queries can read Grok's own auth file read-only.
+
+```bash
+cc-switch --app grokbuild provider switch grokbuild-official
+cc-switch --app grokbuild proxy enable
+grok -p "Reply with exactly GROK-OK; do not use tools."  # Uses the routed default profile
+cc-switch --app grokbuild proxy disable                # Restores native config
+```
+
+`proxy serve` alone only starts a debugging server; it does **not** rewrite the
+client's configuration. Prefer `proxy enable`, or explicitly use
+`proxy serve --takeover claude` / `--takeover codex` when no managed session is
+active. Real OAuth tokens remain in the CC-Switch account store (0600); each
+worker refreshes under a cross-process lock. API requests are pinned to the xAI
+origin even if a provider's editable URL or API format is changed. After updating
+the binary, restart old TUI sessions and disable/re-enable managed routes so
+existing workers load the update.
+
+A quota-exhausted account is expected to return HTTP 403 with
+`personal-team-blocked:spending-limit`. This proves the request reached xAI with
+credentials, but it does not verify successful model generation; repeat the
+client prompt after the weekly quota resets.
+
 ### 🛠️ MCP Server Management
 
-Manage Model Context Protocol servers across Claude, Codex, Gemini, OpenCode, and Hermes.
+Manage Model Context Protocol servers across Claude, Codex, Gemini, Grok Build, OpenCode, and Hermes.
 
 **Features:** Unified management, multi-app support, stdio/http/sse transports, authenticated remote-server headers, automatic sync, and TOML/JSON live-config adapters.
 
@@ -338,7 +400,7 @@ cc-switch mcp import --app claude    # Import from live config
 
 Manage system prompt presets for AI coding assistants.
 
-**Cross-app support:** Claude (`CLAUDE.md`), Codex (`AGENTS.md`), Gemini (`GEMINI.md`), OpenCode (`AGENTS.md`), Hermes (`AGENTS.md`), OpenClaw (`AGENTS.md`), Pi (`AGENTS.md`, native system prompts, and prompt templates).
+**Cross-app support:** Claude (`CLAUDE.md`), Codex (`AGENTS.md`), Gemini (`GEMINI.md`), Grok Build (`AGENTS.md`), OpenCode (`AGENTS.md`), Hermes (`AGENTS.md`), OpenClaw (`AGENTS.md`), Pi (`AGENTS.md`, native system prompts, and prompt templates).
 
 ```bash
 cc-switch prompts list               # List prompt presets
@@ -356,7 +418,7 @@ cc-switch --app pi prompts templates list     # List Pi prompt templates
 
 ### 🎯 Skills Management
 
-Manage and extend Claude Code/Codex/Gemini/OpenCode/Hermes/Pi capabilities with community skills.
+Manage and extend Claude Code/Codex/Gemini/Grok Build/OpenCode/Hermes/Pi capabilities with community skills.
 
 **Features:** SSOT-based skills store, multi-app enable/disable, sync to app directories, manual update checks/updates, unmanaged scan/import, repo discovery, skills.sh marketplace search.
 
@@ -459,6 +521,7 @@ cc-switch proxy show                              # Show proxy configuration, ro
 cc-switch proxy enable                            # Enable the Claude proxy route (default app)
 cc-switch --app codex proxy enable                # Enable the Codex proxy route
 cc-switch --app gemini proxy disable              # Disable the Gemini proxy route
+cc-switch --app grokbuild proxy disable           # Disable the Grok Build proxy route
 cc-switch --app claude proxy config --listen-port 15721
 cc-switch --app codex proxy config --listen-port 15722
 cc-switch proxy serve --takeover claude           # Foreground debug mode; refused while daemon-managed routes are active
@@ -481,7 +544,7 @@ Inspect environment conflicts and whether required local CLIs are installed.
 ```bash
 cc-switch env check                  # Check environment conflicts
 cc-switch env list                   # List relevant environment variables
-cc-switch env tools                  # Check Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw/Pi CLIs
+cc-switch env tools                  # Check Claude/Codex/Gemini/Grok/OpenCode/Hermes/OpenClaw/Pi CLIs
 ```
 
 ### 🌐 Multi-language Support
@@ -523,7 +586,7 @@ Automated install/activation currently targets `bash` and `zsh` only. Other shel
 
 - **SQLite-backed state**: Core data lives in `~/.cc-switch/cc-switch.db` by default (or under `$CC_SWITCH_CONFIG_DIR/` when set); legacy `config.json` is kept only for older import and migration paths
 - **Skills SSOT**: Skill source files live in `~/.cc-switch/skills/` by default (or under `$CC_SWITCH_CONFIG_DIR/skills/` when set), while install state and app enablement stay in the database
-- **Safe Live Sync (Default)**: Skip writing live files for apps that haven't been initialized yet (prevents creating `~/.claude`, `~/.codex`, `~/.gemini`, `~/.config/opencode`, `~/.hermes`, or `~/.openclaw` unexpectedly)
+- **Safe Live Sync (Default)**: Skip writing live files for apps that haven't been initialized yet (prevents creating `~/.claude`, `~/.codex`, `~/.gemini`, `~/.grok`, `~/.config/opencode`, `~/.hermes`, or `~/.openclaw` unexpectedly)
 - **Atomic Writes**: Temp file + rename pattern prevents corruption
 - **Service Layer Reuse**: 100% reused from original GUI version
 - **Concurrency Safe**: RwLock with scoped guards

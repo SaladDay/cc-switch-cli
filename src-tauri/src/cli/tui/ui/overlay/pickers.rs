@@ -740,18 +740,23 @@ pub(super) fn render_external_editor_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_managed_account_picker_overlay(
     frame: &mut Frame<'_>,
     app: &App,
     content_area: Rect,
     theme: &theme::Theme,
+    auth_provider: &str,
     selected: usize,
     binding: bool,
     selected_account_id: Option<&str>,
 ) {
-    let height = app
+    // A status loaded for the other auth provider is not this picker's data.
+    let status = app
         .managed_auth_status
         .as_ref()
+        .filter(|status| status.provider == auth_provider);
+    let height = status
         .map(|status| status.accounts.len())
         .unwrap_or(0)
         .saturating_add(if binding { 6 } else { 5 })
@@ -761,7 +766,7 @@ pub(super) fn render_managed_account_picker_overlay(
         frame,
         centered_rect_fixed(62, height.max(8), content_area),
         theme,
-        texts::tui_label_chatgpt_account(),
+        texts::tui_label_managed_account(auth_provider),
         &[
             ("↑↓", texts::tui_key_select()),
             ("Enter", texts::tui_key_apply()),
@@ -770,7 +775,7 @@ pub(super) fn render_managed_account_picker_overlay(
         overlay_border_style(theme, false),
     );
 
-    let Some(status) = app.managed_auth_status.as_ref() else {
+    let Some(status) = status else {
         frame.render_widget(
             Paragraph::new(Line::styled(
                 texts::tui_managed_accounts_not_loaded(),
@@ -2343,6 +2348,7 @@ pub(super) fn render_mcp_apps_picker_overlay(
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
+            crate::app_config::AppType::GrokBuild,
             crate::app_config::AppType::OpenCode,
             crate::app_config::AppType::Hermes,
         ],
@@ -2410,6 +2416,7 @@ pub(super) fn render_visible_apps_picker_overlay(
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
+            crate::app_config::AppType::GrokBuild,
             crate::app_config::AppType::OpenCode,
             crate::app_config::AppType::Hermes,
             crate::app_config::AppType::OpenClaw,
@@ -2438,6 +2445,7 @@ pub(super) fn render_skills_apps_picker_overlay(
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
+            crate::app_config::AppType::GrokBuild,
             crate::app_config::AppType::OpenCode,
             crate::app_config::AppType::Hermes,
             crate::app_config::AppType::Pi,

@@ -47,6 +47,7 @@ pub enum ProviderAddTemplate {
     Qiniu,
     Fenno,
     Deepseek,
+    XaiOauth,
 }
 
 impl ProviderAddTemplate {
@@ -57,6 +58,7 @@ impl ProviderAddTemplate {
             Self::CodexOauth => "codex-oauth",
             Self::OpenaiOfficial => "openai-official",
             Self::GoogleOauth => "google-oauth",
+            Self::XaiOauth => "xai-oauth",
             Self::Claudeapi => "claudeapi",
             Self::Packycode => "packycode",
             Self::Runapi => "runapi",
@@ -151,7 +153,11 @@ pub fn common_snippet_has_effective_config(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|obj| !obj.is_empty()),
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+        AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::GrokBuild
+        | AppType::Pi => false,
     }
 }
 
@@ -195,6 +201,10 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
                 template: ProviderAddTemplate::CodexOauth,
                 label: "Codex",
             },
+            ProviderAddTemplateChoice {
+                template: ProviderAddTemplate::XaiOauth,
+                label: "xAI (Grok)",
+            },
         ],
         AppType::Codex => vec![
             ProviderAddTemplateChoice {
@@ -204,6 +214,10 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
             ProviderAddTemplateChoice {
                 template: ProviderAddTemplate::OpenaiOfficial,
                 label: "OpenAI Official",
+            },
+            ProviderAddTemplateChoice {
+                template: ProviderAddTemplate::XaiOauth,
+                label: "xAI (Grok) OAuth",
             },
         ],
         AppType::Gemini => vec![
@@ -216,6 +230,10 @@ pub fn provider_add_template_choices(app_type: &AppType) -> Vec<ProviderAddTempl
                 label: "Google OAuth",
             },
         ],
+        AppType::GrokBuild => vec![ProviderAddTemplateChoice {
+            template: ProviderAddTemplate::Custom,
+            label: "Custom",
+        }],
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => {
             vec![ProviderAddTemplateChoice {
                 template: ProviderAddTemplate::Custom,
@@ -322,7 +340,12 @@ pub fn build_provider_template_seed(
         ));
     }
 
-    let name = template_default_name(template)?;
+    // Match the desktop presets: Codex names the managed xAI template
+    // "xAI (Grok) OAuth" to tell it apart from an API-key preset.
+    let name = match (app_type, template) {
+        (AppType::Codex, ProviderAddTemplate::XaiOauth) => "xAI (Grok) OAuth",
+        _ => template_default_name(template)?,
+    };
     let id = generate_provider_id(name, existing_ids);
     let website_url = template_default_website_url(template).map(str::to_string);
     let category = template_default_category(template).map(str::to_string);
@@ -353,6 +376,7 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         ProviderAddTemplate::CodexOauth => "Codex",
         ProviderAddTemplate::OpenaiOfficial => "OpenAI Official",
         ProviderAddTemplate::GoogleOauth => "Google OAuth",
+        ProviderAddTemplate::XaiOauth => "xAI (Grok)",
         ProviderAddTemplate::Deepseek => "DeepSeek",
         ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
@@ -378,6 +402,7 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         ProviderAddTemplate::CodexOauth => Some("https://openai.com/chatgpt/pricing"),
         ProviderAddTemplate::OpenaiOfficial => Some("https://chatgpt.com/codex"),
         ProviderAddTemplate::GoogleOauth => Some("https://ai.google.dev"),
+        ProviderAddTemplate::XaiOauth => Some("https://x.ai/grok"),
         ProviderAddTemplate::Deepseek => Some("https://platform.deepseek.com"),
         ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
@@ -408,6 +433,7 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         | ProviderAddTemplate::Fenno => Some("aggregator"),
         ProviderAddTemplate::Custom
         | ProviderAddTemplate::CodexOauth
+        | ProviderAddTemplate::XaiOauth
         | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
@@ -444,6 +470,16 @@ fn template_default_meta(
         }),
         ProviderAddTemplate::GoogleOauth => Some(ProviderMeta {
             partner_promotion_key: Some("google-official".to_string()),
+            ..Default::default()
+        }),
+        ProviderAddTemplate::XaiOauth => Some(ProviderMeta {
+            provider_type: Some("xai_oauth".to_string()),
+            api_format: Some("openai_responses".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("xai_oauth".to_string()),
+                account_id: None,
+            }),
             ..Default::default()
         }),
         ProviderAddTemplate::Claudeapi
@@ -496,7 +532,8 @@ fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> 
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
-        | ProviderAddTemplate::Dds => None,
+        | ProviderAddTemplate::Dds
+        | ProviderAddTemplate::XaiOauth => None,
     }
 }
 
@@ -519,7 +556,8 @@ fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static
         | ProviderAddTemplate::Openmodel
         | ProviderAddTemplate::Dds
         | ProviderAddTemplate::Qiniu
-        | ProviderAddTemplate::Fenno => None,
+        | ProviderAddTemplate::Fenno
+        | ProviderAddTemplate::XaiOauth => None,
     }
 }
 
@@ -539,6 +577,40 @@ fn build_provider_template_settings_config(
         ProviderAddTemplate::OpenaiOfficial => build_codex_official_settings_config(None),
         ProviderAddTemplate::Deepseek => Ok(build_codex_deepseek_settings_config()),
         ProviderAddTemplate::GoogleOauth => Ok(json!({ "env": {} })),
+        ProviderAddTemplate::XaiOauth => match app_type {
+            AppType::Claude => Ok(json!({
+                "env": {
+                    // The proxy enforces this origin and the Responses wire
+                    // format; the managed token carries the credentials.
+                    "ANTHROPIC_BASE_URL": "https://api.x.ai/v1",
+                    "ANTHROPIC_MODEL": "grok-4.7",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "grok-4.7",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "grok-4.7",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "grok-4.7",
+                    // Grok 4.7 windows are 500K or 256K; Claude defaults to
+                    // 100K when this is unset, so leaving it out makes Grok
+                    // auto-compact far below its window. Compact at 90%.
+                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "500000",
+                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "450000"
+                }
+            })),
+            AppType::Codex => Ok(json!({
+                "auth": { "OPENAI_API_KEY": "" },
+                // requires_openai_auth 必须为 false：托管 token 由本地代理按请求
+                // 注入，auth.json 里没有 ChatGPT 登录；true 会让 Codex 卡在登录墙。
+                // 接管路径只改写 base_url、不重投影，所以模板里就要写 false。
+                "config": "model_provider = \"custom\"\nmodel = \"grok-4.7\"\nmodel_reasoning_effort = \"high\"\n\n[model_providers.custom]\nname = \"xai\"\nbase_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n",
+                "modelCatalog": { "models": [{
+                    "model": "grok-4.7",
+                    "displayName": "Grok 4.7",
+                    "contextWindow": 500000,
+                    "supportsParallelToolCalls": true,
+                    "inputModalities": ["text", "image"],
+                    "reasoningLevels": ["low", "medium", "high", "xhigh"]
+                }] }
+            })),
+            _ => Err(unsupported_template_error(template)),
+        },
         ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
@@ -683,6 +755,13 @@ fn build_sponsor_template_settings_config(
                 })
             }
         }
+        AppType::GrokBuild => Ok(crate::grok_config::build_provider_settings_config(
+            preset.provider_name,
+            preset.codex_base_url,
+            "",
+            crate::grok_config::DEFAULT_MODEL,
+            "",
+        )),
         AppType::Pi => Err(unsupported_template_error(ProviderAddTemplate::Custom)),
     }
 }
@@ -755,10 +834,12 @@ pub fn apply_additive_template_field_overrides(
             }
             Ok(updated)
         }
-        AppType::Claude | AppType::Codex | AppType::Gemini => Err(AppError::InvalidInput(format!(
-            "{} does not use additive provider settings",
-            app_type.as_str()
-        ))),
+        AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild => {
+            Err(AppError::InvalidInput(format!(
+                "{} does not use additive provider settings",
+                app_type.as_str()
+            )))
+        }
     }
 }
 
@@ -804,6 +885,41 @@ fn unsupported_template_error(template: ProviderAddTemplate) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xai_oauth_templates_bind_managed_account_for_both_apps() {
+        for app in [AppType::Claude, AppType::Codex] {
+            let provider =
+                build_provider_template_seed(&app, ProviderAddTemplate::XaiOauth, &[]).unwrap();
+            let meta = provider.meta.as_ref().unwrap();
+            assert_eq!(meta.provider_type.as_deref(), Some("xai_oauth"));
+            assert_eq!(
+                meta.auth_binding.as_ref().unwrap().auth_provider.as_deref(),
+                Some("xai_oauth")
+            );
+            if app == AppType::Codex {
+                let config = provider.settings_config["config"].as_str().unwrap();
+                assert!(config.contains("requires_openai_auth = false"));
+                assert_eq!(
+                    provider.settings_config["modelCatalog"]["models"][0]["model"],
+                    "grok-4.7"
+                );
+                // codex >=0.165 explicitly ignores `disable_response_storage`; do not emit it.
+                assert!(!config.contains("disable_response_storage"));
+            } else {
+                // Grok 4.7 only offers 500K and 256K windows; Claude's 100K
+                // default would compact long before the window is reached.
+                assert_eq!(
+                    provider.settings_config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+                    "500000"
+                );
+                assert_eq!(
+                    provider.settings_config["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+                    "450000"
+                );
+            }
+        }
+    }
 
     #[test]
     fn codex_official_settings_config_uses_upstream_seed_shape() {
@@ -1192,6 +1308,7 @@ requires_openai_auth = true
                 "Custom",
                 "Claude Official",
                 "Codex",
+                "xAI (Grok)",
                 "* 88API",
                 "* APIMart",
                 "* Cubence",
@@ -1211,6 +1328,7 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "OpenAI Official",
+                "xAI (Grok) OAuth",
                 "* 88API",
                 "* APIMart",
                 "* Cubence",
@@ -3950,6 +4068,9 @@ pub fn prompt_settings_config(
             }
         }
         AppType::Gemini => prompt_gemini_config(current).map(SettingsConfigPromptResult::new),
+        AppType::GrokBuild => {
+            prompt_grokbuild_config(current, provider_name).map(SettingsConfigPromptResult::new)
+        }
         AppType::OpenCode => prompt_opencode_config(current).map(SettingsConfigPromptResult::new),
         AppType::Hermes => prompt_hermes_config(current).map(SettingsConfigPromptResult::new),
         AppType::OpenClaw => prompt_openclaw_config(current).map(SettingsConfigPromptResult::new),
@@ -4357,6 +4478,95 @@ fn prompt_codex_official_config(current: Option<&Value>) -> Result<Value, AppErr
     build_codex_official_settings_config(current)
 }
 
+/// Grok Build 配置输入：密钥（或 env_key 变量名）、端点、模型与 API 后端。
+fn prompt_grokbuild_config(
+    current: Option<&Value>,
+    provider_name: &str,
+) -> Result<Value, AppError> {
+    println!("\n{}", "Grok Build configuration".bright_cyan().bold());
+
+    let current_config_str = current
+        .and_then(|v| v.get("config"))
+        .and_then(|c| c.as_str());
+    let current_model_config =
+        current_config_str.and_then(crate::grok_config::extract_model_config);
+    let current_api_key = current.and_then(|v| {
+        crate::grok_config::extract_inline_api_key(
+            v.get("config").and_then(|c| c.as_str()).unwrap_or(""),
+        )
+    });
+    let current_base_url = current_model_config.as_ref().map(|c| c.base_url.clone());
+    let current_model = current_model_config.as_ref().map(|c| c.model.clone());
+    let current_backend = current_model_config.as_ref().map(|c| c.api_backend.clone());
+
+    let prompt_text = |label: &str| -> Result<String, AppError> {
+        Text::new(label)
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))
+    };
+
+    let api_key = match current_api_key.as_deref() {
+        Some(existing) => Text::new("API key:")
+            .with_initial_value(existing)
+            .with_help_message(
+                "Inline API key; environment references can be set in the raw configuration",
+            )
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?,
+        None => prompt_text("API key:")?,
+    };
+    let api_key = api_key.trim().to_string();
+
+    let base_url = match current_base_url.as_deref() {
+        Some(existing) => Text::new("Base URL:")
+            .with_initial_value(existing)
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?,
+        None => Text::new("Base URL:")
+            .with_placeholder("https://api.example.com/v1")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?,
+    };
+    let base_url = base_url.trim().to_string();
+    if base_url.is_empty() {
+        return Err(AppError::InvalidInput(
+            texts::base_url_empty_error().to_string(),
+        ));
+    }
+
+    let model = match current_model.as_deref() {
+        Some(existing) => Text::new("Model:")
+            .with_initial_value(existing)
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?,
+        None => Text::new("Model:")
+            .with_placeholder(crate::grok_config::DEFAULT_MODEL)
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?,
+    };
+
+    let backend = match current_backend.as_deref() {
+        Some(existing) => Text::new("API backend (responses/chat_completions/messages):")
+            .with_initial_value(existing)
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?,
+        None => Text::new("API backend (responses/chat_completions/messages):")
+            .with_placeholder(crate::grok_config::DEFAULT_API_BACKEND)
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?,
+    };
+    let backend = crate::grok_config::normalize_api_backend(&backend)?.to_string();
+
+    Ok(crate::grok_config::update_provider_settings_config(
+        current,
+        provider_name,
+        &base_url,
+        &api_key,
+        model.trim(),
+        &backend,
+    ))
+}
+
 /// Gemini 配置输入（含认证类型选择）
 fn prompt_gemini_config(current: Option<&Value>) -> Result<Value, AppError> {
     println!("\n{}", texts::config_gemini_header().bright_cyan().bold());
@@ -4506,6 +4716,28 @@ pub fn prompt_optional_fields(current: Option<&Provider>) -> Result<OptionalFiel
 }
 
 /// 显示供应商配置摘要
+/// Prints the signed-in account a managed OAuth provider (Codex / xAI) uses in
+/// place of an API key.
+pub(crate) fn print_managed_account_binding(provider: &Provider) {
+    let auth_provider = if provider.is_codex_oauth() {
+        "codex_oauth"
+    } else if provider.is_xai_oauth() {
+        "xai_oauth"
+    } else {
+        return;
+    };
+    let account_id = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.managed_account_id_for(auth_provider))
+        .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string());
+    println!(
+        "  {}: {}",
+        texts::tui_label_managed_account(auth_provider),
+        account_id
+    );
+}
+
 pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
     println!(
         "\n{}",
@@ -4543,12 +4775,9 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 .category
                 .as_deref()
                 .is_some_and(|category| category.eq_ignore_ascii_case("official"));
-            let is_codex_oauth = provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.provider_type.as_deref())
-                == Some("codex_oauth");
-            if !is_official && !is_codex_oauth {
+            let is_codex_oauth = provider.is_codex_oauth();
+            let is_managed = is_codex_oauth || provider.is_xai_oauth();
+            if !is_official && !is_managed {
                 let api_format = crate::proxy::providers::get_claude_api_format(provider);
                 println!(
                     "  {}: {}",
@@ -4556,13 +4785,8 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                     texts::tui_claude_api_format_value(api_format)
                 );
             }
+            print_managed_account_binding(provider);
             if is_codex_oauth {
-                let account_id = provider
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
-                    .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string());
-                println!("  {}: {}", texts::tui_label_chatgpt_account(), account_id);
                 println!(
                     "  {}: {}",
                     texts::tui_label_codex_fast_mode(),
@@ -4570,7 +4794,7 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 );
             }
             if let Some(env) = provider.settings_config.get("env") {
-                if !is_codex_oauth {
+                if !is_managed {
                     if let Some(api_key) = provider.configured_api_key(app_type) {
                         println!("  {}: {}", texts::api_key_display_label(), api_key);
                     }
@@ -4599,6 +4823,21 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                     texts::tui_codex_api_format_value(api_format)
                 );
             }
+            print_managed_account_binding(provider);
+            if !provider.is_xai_oauth() {
+                if let Some(api_key) = provider.configured_api_key(app_type) {
+                    println!("  {}: {}", texts::api_key_display_label(), api_key);
+                }
+            }
+            if let Some(config) = provider
+                .settings_config
+                .get("config")
+                .and_then(|v| v.as_str())
+            {
+                println!("  {}", texts::config_toml_lines(config.lines().count()));
+            }
+        }
+        AppType::GrokBuild => {
             if let Some(api_key) = provider.configured_api_key(app_type) {
                 println!("  {}: {}", texts::api_key_display_label(), api_key);
             }
