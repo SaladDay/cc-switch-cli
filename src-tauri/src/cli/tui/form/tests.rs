@@ -138,6 +138,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Xiaomi MiMo Token Plan (China)",
             "OpenCode Go",
             "OpenRouter",
+            "Runcrate",
         ]
     );
 
@@ -167,6 +168,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Xiaomi MiMo Token Plan (China)",
             "OpenCode Go",
             "OpenRouter",
+            "Runcrate",
         ]
     );
 
@@ -443,6 +445,15 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "anthropic/claude-opus-5",
             ClaudeApiKeyField::AuthToken,
         ),
+        (
+            "Runcrate",
+            "https://api.runcrate.ai",
+            "moonshotai/Kimi-K2.6",
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+            "moonshotai/Kimi-K2.6",
+            "zai-org/GLM-5.3",
+            ClaudeApiKeyField::AuthToken,
+        ),
     ];
 
     for (label, base_url, model, haiku, sonnet, opus, key_field) in cases {
@@ -552,6 +563,14 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "gpt-5.6-sol",
             "openai_responses",
             0,
+        ),
+        (
+            "Runcrate",
+            "runcrate",
+            "https://api.runcrate.ai/v1",
+            "moonshotai/Kimi-K2.6",
+            "openai_responses",
+            3,
         ),
     ];
 
@@ -736,7 +755,7 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
     let labels = ProviderAddFormState::new(AppType::Codex).template_labels();
     assert_eq!(
         labels.last().copied(),
-        Some("OpenRouter"),
+        Some("Runcrate"),
         "migrated built-ins should stay after all partner presets in flat order"
     );
 

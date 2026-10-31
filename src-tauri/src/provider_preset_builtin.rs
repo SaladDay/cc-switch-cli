@@ -12,6 +12,7 @@ pub(crate) enum BuiltinProviderPresetId {
     XiaomiMimoTokenPlan,
     OpenCodeGo,
     OpenRouter,
+    Runcrate,
 }
 
 pub(crate) fn builtin_provider_preset_value(
@@ -222,6 +223,20 @@ fn claude_provider_preset(preset: BuiltinProviderPresetId) -> Value {
             "aggregator",
             "openrouter",
             "#6566F1",
+            None,
+        ),
+        Runcrate => claude_provider(
+            "Runcrate",
+            "https://runcrate.ai",
+            "https://api.runcrate.ai",
+            "ANTHROPIC_AUTH_TOKEN",
+            "moonshotai/Kimi-K2.6",
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+            "moonshotai/Kimi-K2.6",
+            "zai-org/GLM-5.3",
+            "aggregator",
+            "runcrate",
+            "#2F4FE0",
             None,
         ),
     }
@@ -490,6 +505,23 @@ fn codex_provider_preset(preset: BuiltinProviderPresetId) -> Value {
             "#6566F1",
             None,
             Vec::new(),
+            None,
+        ),
+        Runcrate => codex_provider(
+            "Runcrate",
+            "https://runcrate.ai",
+            "runcrate",
+            "https://api.runcrate.ai/v1",
+            "moonshotai/Kimi-K2.6",
+            "aggregator",
+            "runcrate",
+            "#2F4FE0",
+            Some("openai_responses"),
+            vec![
+                json!({ "model": "moonshotai/Kimi-K2.6", "displayName": "Kimi K2.6", "contextWindow": 262_144, "inputModalities": ["text", "image"] }),
+                json!({ "model": "deepseek-ai/DeepSeek-V4.1-Flash", "displayName": "DeepSeek V4.1 Flash", "contextWindow": 1_048_576, "inputModalities": ["text", "image"] }),
+                json!({ "model": "zai-org/GLM-5.3", "displayName": "GLM 5.3", "contextWindow": 1_048_576, "inputModalities": ["text"] }),
+            ],
             None,
         ),
     }

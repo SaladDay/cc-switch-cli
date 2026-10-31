@@ -147,7 +147,7 @@ static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
     },
 ];
 
-static PROVIDER_TEMPLATE_DEFS_CLAUDE_AFTER_SPONSORS: [ProviderTemplateDef; 9] = [
+static PROVIDER_TEMPLATE_DEFS_CLAUDE_AFTER_SPONSORS: [ProviderTemplateDef; 10] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::DeepSeek),
         label: "DeepSeek",
@@ -183,10 +183,14 @@ static PROVIDER_TEMPLATE_DEFS_CLAUDE_AFTER_SPONSORS: [ProviderTemplateDef; 9] = 
     ProviderTemplateDef {
         id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::OpenRouter),
         label: "OpenRouter",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::Runcrate),
+        label: "Runcrate",
     },
 ];
 
-static PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS: [ProviderTemplateDef; 9] = [
+static PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS: [ProviderTemplateDef; 10] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::DeepSeek),
         label: "DeepSeek",
@@ -222,6 +226,10 @@ static PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS: [ProviderTemplateDef; 9] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::OpenRouter),
         label: "OpenRouter",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::Builtin(BuiltinProviderPresetId::Runcrate),
+        label: "Runcrate",
     },
 ];
 

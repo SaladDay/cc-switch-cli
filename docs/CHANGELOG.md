@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Providers / Built-In Presets**: Add Runcrate presets for Claude (Anthropic Messages at `https://api.runcrate.ai`) and Codex (Responses at `https://api.runcrate.ai/v1`), defaulting to `moonshotai/Kimi-K2.6` with DeepSeek V4.1 Flash and GLM 5.3 in the model catalog.
+
 ## [5.11.3] - 2026-10-22
 
 ### Fixed
