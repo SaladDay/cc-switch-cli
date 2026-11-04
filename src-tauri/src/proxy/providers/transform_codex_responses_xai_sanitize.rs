@@ -31,6 +31,8 @@ const RECURSIVE_UNSUPPORTED_FIELDS: &[&str] = &["external_web_access"];
 /// Top-level request fields xAI rejects regardless of model.
 const TOP_LEVEL_UNSUPPORTED_FIELDS: &[&str] = &["prompt_cache_retention", "safety_identifier"];
 
+const XAI_UNSUPPORTED_INCLUDE_MARKERS: &[&str] = &["output.encrypted_content"];
+
 /// Top-level sampling fields rejected specifically by grok-4.5.
 const GROK_45_UNSUPPORTED_FIELDS: &[&str] = &[
     "presence_penalty",
@@ -74,6 +76,9 @@ pub(crate) fn sanitize_xai_responses_request(body: &mut Value) -> bool {
         changed |= remove_top_level_field(body, field);
     }
 
+    // Codex can request an output token marker unsupported by xAI.
+    changed |= filter_unsupported_include_markers(body);
+
     // 2. grok-4.5 additionally rejects these sampling knobs.
     if request_targets_grok_45(body) {
         for field in GROK_45_UNSUPPORTED_FIELDS {
@@ -97,6 +102,32 @@ pub(crate) fn sanitize_xai_responses_request(body: &mut Value) -> bool {
 
     // 6. Whitelist the tool types and clean a now-dangling `tool_choice`.
     changed |= filter_unsupported_tools(body);
+
+    changed
+}
+
+fn filter_unsupported_include_markers(body: &mut Value) -> bool {
+    let mut remove_empty_include = false;
+    let changed = match body.get_mut("include").and_then(Value::as_array_mut) {
+        Some(include) => {
+            let original_len = include.len();
+            include.retain(|item| {
+                !item
+                    .as_str()
+                    .is_some_and(|marker| XAI_UNSUPPORTED_INCLUDE_MARKERS.contains(&marker))
+            });
+            let changed = include.len() != original_len;
+            remove_empty_include = changed && include.is_empty();
+            changed
+        }
+        None => false,
+    };
+
+    if remove_empty_include {
+        if let Some(body) = body.as_object_mut() {
+            body.remove("include");
+        }
+    }
 
     changed
 }
@@ -535,5 +566,35 @@ mod tests {
         assert!(sanitize_xai_responses_request(&mut body));
         // second pass finds nothing left to change
         assert!(!sanitize_xai_responses_request(&mut body));
+    }
+
+    #[test]
+    fn filters_only_unsupported_include_marker_and_is_idempotent() {
+        for (include, expected) in [
+            (
+                serde_json::json!([
+                    "reasoning.encrypted_content",
+                    "output.encrypted_content",
+                    "other"
+                ]),
+                Some(serde_json::json!(["reasoning.encrypted_content", "other"])),
+            ),
+            (serde_json::json!(["output.encrypted_content"]), None),
+            (
+                serde_json::json!(["reasoning.encrypted_content"]),
+                Some(serde_json::json!(["reasoning.encrypted_content"])),
+            ),
+            (serde_json::json!([]), Some(serde_json::json!([]))),
+        ] {
+            let mut body = serde_json::json!({"model": "grok-4.7", "include": include});
+            sanitize_xai_responses_request(&mut body);
+            assert_eq!(body.get("include"), expected.as_ref());
+            let once = body.clone();
+            assert!(!sanitize_xai_responses_request(&mut body));
+            assert_eq!(body, once);
+        }
+        let mut absent = serde_json::json!({"model": "grok-4.7"});
+        assert!(!sanitize_xai_responses_request(&mut absent));
+        assert!(absent.get("include").is_none());
     }
 }

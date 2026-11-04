@@ -7,6 +7,10 @@ use crate::proxy::{
 };
 use serde_json::{json, Value};
 
+use super::reasoning_bridge::{
+    anthropic_block_from_openai_reasoning_item, openai_reasoning_item_from_anthropic_block,
+};
+
 pub(crate) const TOOL_RESULT_ERROR_MARKER: &str = "[cc-switch:tool-result-error]";
 
 fn anthropic_image_to_responses_part(block: &Value) -> Option<Value> {
@@ -523,6 +527,7 @@ fn convert_messages_to_input(messages: &[Value]) -> Result<Vec<Value>, ProxyErro
     for msg in messages {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
         let content = msg.get("content");
+        let message_input_start = input.len();
 
         match content {
             Some(Value::String(text)) => {
@@ -615,7 +620,17 @@ fn convert_messages_to_input(messages: &[Value]) -> Result<Vec<Value>, ProxyErro
                                 "output": output
                             }));
                         }
-                        "thinking" => {}
+                        "thinking" | "redacted_thinking" => {
+                            if let Some(reasoning_item) =
+                                openai_reasoning_item_from_anthropic_block(block)
+                            {
+                                if !message_content.is_empty() {
+                                    input.push(json!({"role": role, "content": message_content}));
+                                    message_content = Vec::new();
+                                }
+                                input.push(reasoning_item);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -629,6 +644,27 @@ fn convert_messages_to_input(messages: &[Value]) -> Result<Vec<Value>, ProxyErro
             }
             _ => {
                 input.push(json!({ "role": role }));
+            }
+        }
+        // A replayed reasoning item is only valid when the same assistant
+        // generation also contains a following message/function call item.
+        // Reasoning-only incomplete turns otherwise brick the next request with
+        // "reasoning item ... without its required following item".
+        if role == "assistant" {
+            let mut has_generated_follower = false;
+            for index in (message_input_start..input.len()).rev() {
+                let item_type = input[index].get("type").and_then(Value::as_str);
+                let is_assistant_message =
+                    input[index].get("role").and_then(Value::as_str) == Some("assistant");
+                if item_type == Some("reasoning") {
+                    if !has_generated_follower {
+                        input.remove(index);
+                    }
+                } else if matches!(item_type, Some("function_call" | "web_search_call"))
+                    || is_assistant_message
+                {
+                    has_generated_follower = true;
+                }
             }
         }
     }
@@ -688,27 +724,11 @@ pub fn responses_to_anthropic(body: Value) -> Result<Value, ProxyError> {
                 has_tool_use = true;
             }
             "reasoning" => {
-                if let Some(summary) = item.get("summary").and_then(|s| s.as_array()) {
-                    let thinking_text: String = summary
-                        .iter()
-                        .filter_map(|s| {
-                            if s.get("type").and_then(|t| t.as_str()) == Some("summary_text") {
-                                s.get("text").and_then(|t| t.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-
-                    if !thinking_text.is_empty() {
-                        content.push(json!({
-                            "type": "thinking",
-                            "thinking": thinking_text
-                        }));
-                    }
+                if let Some(block) = anthropic_block_from_openai_reasoning_item(item) {
+                    content.push(block);
                 }
             }
+
             _ => {}
         }
     }
@@ -1202,5 +1222,126 @@ mod tests {
             anthropic_to_responses(input, None, false, false).expect("transform responses");
 
         assert_eq!(result["input"][0]["arguments"], "{\"a\":1,\"b\":2}");
+    }
+    #[test]
+    fn test_encrypted_reasoning_round_trips_through_anthropic_history() {
+        let original = json!({
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": [{"type": "summary_text", "text": "Need a tool."}],
+            "encrypted_content": "opaque-ciphertext"
+        });
+        let response = json!({
+            "id": "resp_123",
+            "status": "completed",
+            "model": "gpt-5.6",
+            "output": [original.clone()],
+            "usage": {"input_tokens": 10, "output_tokens": 2}
+        });
+
+        let anthropic = responses_to_anthropic(response).unwrap();
+        let thinking = anthropic["content"][0].clone();
+        assert_eq!(thinking["type"], "thinking");
+        assert!(thinking["signature"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("ccswitch-openai-reasoning-v1:")));
+
+        let replay = anthropic_to_responses(
+            json!({
+                "model": "gpt-5.6",
+                "messages": [{"role": "assistant", "content": [
+                    thinking,
+                    {"type": "tool_use", "id": "call_1", "name": "lookup", "input": {}}
+                ]}]
+            }),
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(replay["input"][0], original);
+        assert_eq!(replay["input"][1]["type"], "function_call");
+    }
+
+    #[test]
+    fn test_replayed_legacy_envelope_omits_output_only_fields() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        // A pre-whitelist envelope keeps the backend output item verbatim,
+        // including the `status` field the official Codex backend started
+        // emitting on 2026-10-03 and rejects as an unknown input parameter.
+        let legacy = json!({
+            "id": "rs_legacy",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "prior turn"}],
+            "encrypted_content": "opaque",
+            "status": "completed"
+        });
+        let signature = format!(
+            "ccswitch-openai-reasoning-v1:{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&legacy).unwrap())
+        );
+        let replay = anthropic_to_responses(
+            json!({
+                "model": "gpt-5.6",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "prior turn", "signature": signature},
+                        {"type": "tool_use", "id": "call_9", "name": "lookup", "input": {}}
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "call_9", "content": "ok"}
+                    ]}
+                ]
+            }),
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        let reasoning_items: Vec<&Value> = replay["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+            .collect();
+        assert_eq!(reasoning_items.len(), 1);
+        assert_eq!(
+            reasoning_items[0],
+            &json!({
+                "id": "rs_legacy",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "prior turn"}],
+                "encrypted_content": "opaque"
+            })
+        );
+    }
+
+    #[test]
+    fn test_reasoning_only_assistant_turn_is_not_replayed() {
+        let item = json!({
+            "type": "reasoning",
+            "id": "rs_orphan",
+            "summary": [],
+            "encrypted_content": "opaque"
+        });
+        let block = anthropic_block_from_openai_reasoning_item(&item).unwrap();
+        let replay = anthropic_to_responses(
+            json!({
+                "model": "gpt-5.6",
+                "messages": [
+                    {"role": "assistant", "content": [block]},
+                    {"role": "user", "content": "continue"}
+                ]
+            }),
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(replay["input"].as_array().unwrap().len(), 1);
+        assert_eq!(replay["input"][0]["role"], "user");
     }
 }
