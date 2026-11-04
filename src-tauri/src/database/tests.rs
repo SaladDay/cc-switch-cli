@@ -3482,11 +3482,11 @@ fn model_pricing_seeds_gpt_5_6_family_and_aliases() {
     let conn = db.conn.lock().expect("lock conn");
 
     let expected = [
-        ("gpt-5.6-sol", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6-sol", "4", "20", "0.40", "5"),
         ("gpt-5.6-terra", "2", "12", "0.20", "2.50"),
         ("gpt-5.6-luna", "0.20", "1.20", "0.02", "0.25"),
-        ("gpt-5.6", "5", "30", "0.50", "6.25"),
-        ("gpt-5.6-high", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6", "4", "20", "0.40", "5"),
+        ("gpt-5.6-high", "4", "20", "0.40", "5"),
     ];
 
     for (model_id, input, output, cache_read, cache_write) in expected {
@@ -3519,6 +3519,14 @@ fn model_pricing_seeds_synced_upstream_catalog() {
 
     let expected = [
         ("gpt-6-astra", "10", "50", "1", "12.5"),
+        ("gpt-6.1-sol", "2", "10", "0.10", "2.50"),
+        ("gpt-6.1-terra", "1", "5", "0.05", "1.25"),
+        ("gpt-6-sol", "2", "10", "0.20", "2.50"),
+        ("gpt-6-luna", "0.10", "0.50", "0.01", "0.125"),
+        ("claude-opus-5-5", "4", "20", "0.20", "5"),
+        ("claude-sonnet-5-5", "2", "10", "0.10", "2.50"),
+        ("claude-haiku-5-5", "0.10", "0.50", "0.01", "0.125"),
+        ("gemini-3.8-flash", "0.75", "3.75", "0.075", "0"),
         ("claude-fable-5", "10", "50", "1.00", "12.50"),
         ("claude-opus-4-6", "5", "25", "0.50", "6.25"),
         ("claude-sonnet-4-6", "3", "15", "0.30", "3.75"),
@@ -3709,7 +3717,11 @@ fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
     {
         let conn = db.conn.lock().expect("lock conn");
         conn.execute(
-            "UPDATE model_pricing SET cache_creation_cost_per_million = '0'
+            "UPDATE model_pricing
+             SET input_cost_per_million = '5',
+                 output_cost_per_million = '30',
+                 cache_read_cost_per_million = '0.50',
+                 cache_creation_cost_per_million = '0'
              WHERE model_id = 'gpt-5.6-sol'",
             [],
         )
@@ -3740,15 +3752,24 @@ fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
         .expect("ensure pricing seeded");
 
     let conn = db.conn.lock().expect("lock conn");
-    let sol_cache_write: String = conn
+    let sol: (String, String, String, String) = conn
         .query_row(
-            "SELECT cache_creation_cost_per_million FROM model_pricing
-             WHERE model_id = 'gpt-5.6-sol'",
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'gpt-5.6-sol'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("query repaired Sol pricing");
-    assert_eq!(sol_cache_write, "6.25");
+    assert_eq!(
+        sol,
+        (
+            "4".to_string(),
+            "20".to_string(),
+            "0.40".to_string(),
+            "5".to_string()
+        )
+    );
 
     let terra: (String, String, String, String) = conn
         .query_row(

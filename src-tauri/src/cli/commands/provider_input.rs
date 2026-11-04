@@ -924,7 +924,7 @@ env_key = "OLD_API_KEY"
             .get("config")
             .and_then(Value::as_str)
             .expect("config should be present");
-        assert!(config.contains("model = \"gpt-5.6-sol\""));
+        assert!(config.contains("model = \"gpt-6.1-sol\""));
         assert!(config.contains("base_url = \"https://api.example.com/v1\""));
     }
 
@@ -1384,19 +1384,19 @@ requires_openai_auth = true
         );
         assert_eq!(
             provider.settings_config["env"]["ANTHROPIC_MODEL"],
-            "gpt-5.6-sol"
+            "gpt-6.1-sol"
         );
         assert_eq!(
             provider.settings_config["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
-            "gpt-5.6-luna"
+            "gpt-6-luna"
         );
         assert_eq!(
             provider.settings_config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
-            "372000"
+            "272000"
         );
         assert_eq!(
             provider.settings_config["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
-            "372000"
+            "272000"
         );
         assert!(
             provider.settings_config["env"]
@@ -1479,7 +1479,7 @@ requires_openai_auth = true
         let config = codex.settings_config["config"]
             .as_str()
             .expect("PatewayAI Codex config should be TOML");
-        assert!(config.contains("model = \"gpt-5.6-sol\""));
+        assert!(config.contains("model = \"gpt-6.1-sol\""));
         assert!(config.contains("base_url = \"https://api.pateway.ai/v1\""));
         assert!(config.contains("name = \"patewayai\""));
         assert!(config.contains("wire_api = \"responses\""));
@@ -1878,7 +1878,7 @@ requires_openai_auth = true
             .and_then(Value::as_str)
             .expect("DeepSeek Codex config should be TOML string");
         assert!(config.contains("model_provider = \"custom\""));
-        assert!(config.contains("model = \"deepseek-v4-flash\""));
+        assert!(config.contains("model = \"deepseek-flash\""));
         assert!(config.contains("disable_response_storage = true"));
         assert!(config.contains("[model_providers.custom]"));
         assert!(config.contains("name = \"deepseek\""));
@@ -1895,15 +1895,10 @@ requires_openai_auth = true
             json!({
                 "models": [
                     {
-                        "model": "deepseek-v4-flash",
-                        "displayName": "DeepSeek V4 Flash",
+                        "model": "deepseek-flash",
+                        "displayName": "DeepSeek V4.1 Flash",
                         "contextWindow": 1048576,
-                        "reasoningLevels": ["low", "high", "max"],
-                    },
-                    {
-                        "model": "deepseek-v4-pro",
-                        "displayName": "DeepSeek V4 Pro",
-                        "contextWindow": 1048576,
+                        "inputModalities": ["text", "image"],
                         "reasoningLevels": ["low", "high", "max"],
                     },
                 ],
@@ -1927,7 +1922,7 @@ requires_openai_auth = true
             .expect("Codex sponsor config should be TOML string");
         assert_eq!(codex.name, "PackyCode");
         assert!(codex_config.contains("base_url = \"https://www.packyapi.ai/v1\""));
-        assert!(codex_config.contains("model = \"gpt-5.6-sol\""));
+        assert!(codex_config.contains("model = \"gpt-6.1-sol\""));
         assert!(codex_config.contains("wire_api = \"responses\""));
         assert_eq!(
             codex
@@ -1960,8 +1955,8 @@ requires_openai_auth = true
             "https://api.aicodemirror.ai/api/claudecode"
         );
         assert_eq!(
-            opencode.settings_config["models"]["claude-opus-5"]["name"],
-            "Claude Opus 5"
+            opencode.settings_config["models"]["claude-opus-5-5"]["name"],
+            "Claude Opus 5.5"
         );
         assert_eq!(
             opencode
@@ -1983,9 +1978,9 @@ requires_openai_auth = true
         assert_eq!(
             hermes.settings_config["models"],
             json!([
-                { "id": "claude-opus-5", "name": "Claude Opus 5" },
-                { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
-                { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5" },
+                { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+                { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
+                { "id": "claude-haiku-5-5", "name": "Claude Haiku 5.5" },
             ])
         );
 
@@ -2001,16 +1996,22 @@ requires_openai_auth = true
             openclaw.settings_config["models"],
             json!([
                 {
-                    "id": "claude-opus-5",
-                    "name": "Claude Opus 5",
+                    "id": "claude-opus-5-5",
+                    "name": "Claude Opus 5.5",
+                    "reasoning": true,
+                    "input": ["text", "image"],
                     "contextWindow": 1000000,
-                    "cost": { "input": 5, "output": 25 },
+                    "maxTokens": 128000,
+                    "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
                 },
                 {
-                    "id": "claude-sonnet-5",
-                    "name": "Claude Sonnet 5",
+                    "id": "claude-sonnet-5-5",
+                    "name": "Claude Sonnet 5.5",
+                    "reasoning": true,
+                    "input": ["text", "image"],
                     "contextWindow": 1000000,
-                    "cost": { "input": 3, "output": 15 },
+                    "maxTokens": 128000,
+                    "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
                 },
             ])
         );
@@ -2073,7 +2074,7 @@ requires_openai_auth = true
         let codex_config = codex.settings_config["config"]
             .as_str()
             .expect("OpenModel Codex config should be TOML");
-        assert!(codex_config.contains("model = \"gpt-5.6-sol\""));
+        assert!(codex_config.contains("model = \"gpt-6.1-sol\""));
         assert!(codex_config.contains("base_url = \"https://api.openmodel.ai/v1\""));
         assert!(codex_config.contains("wire_api = \"responses\""));
         assert!(codex_config.contains("requires_openai_auth = true"));
@@ -2090,7 +2091,7 @@ requires_openai_auth = true
             json!({
                 "env": {
                     "GOOGLE_GEMINI_BASE_URL": "https://api.openmodel.ai",
-                    "GEMINI_MODEL": "gemini-3.6-flash",
+                    "GEMINI_MODEL": "gemini-3.8-flash",
                 },
             })
         );
@@ -2106,8 +2107,8 @@ requires_openai_auth = true
         assert_eq!(
             opencode.settings_config["models"],
             json!({
-                "claude-sonnet-5": { "name": "Claude Sonnet 5" },
-                "claude-opus-5": { "name": "Claude Opus 5" },
+                "claude-sonnet-5-5": { "name": "Claude Sonnet 5.5" },
+                "claude-opus-5-5": { "name": "Claude Opus 5.5" },
             })
         );
 
@@ -2122,9 +2123,9 @@ requires_openai_auth = true
         assert_eq!(
             hermes.settings_config["models"],
             json!([
-                { "id": "claude-opus-5", "name": "Claude Opus 5" },
-                { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
-                { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5" },
+                { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+                { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
+                { "id": "claude-haiku-5-5", "name": "Claude Haiku 5.5" },
             ])
         );
 
@@ -2140,16 +2141,22 @@ requires_openai_auth = true
             openclaw.settings_config["models"],
             json!([
                 {
-                    "id": "claude-opus-5",
-                    "name": "Claude Opus 5",
+                    "id": "claude-opus-5-5",
+                    "name": "Claude Opus 5.5",
+                    "reasoning": true,
+                    "input": ["text", "image"],
                     "contextWindow": 1000000,
-                    "cost": { "input": 5, "output": 25 },
+                    "maxTokens": 128000,
+                    "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
                 },
                 {
-                    "id": "claude-sonnet-5",
-                    "name": "Claude Sonnet 5",
+                    "id": "claude-sonnet-5-5",
+                    "name": "Claude Sonnet 5.5",
+                    "reasoning": true,
+                    "input": ["text", "image"],
                     "contextWindow": 1000000,
-                    "cost": { "input": 3, "output": 15 },
+                    "maxTokens": 128000,
+                    "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
                 },
             ])
         );
@@ -4327,7 +4334,7 @@ fn prompt_codex_config(current: Option<&Value>, provider_name: &str) -> Result<V
     let model = if let Some(current) = current_model.as_deref() {
         Text::new(&format!("{}:", texts::model_label()))
             .with_initial_value(current)
-            .with_help_message("Model name (e.g., gpt-5.6-sol, o3)")
+            .with_help_message("Model name (e.g., gpt-6.1-sol, o3)")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     } else {
