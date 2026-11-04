@@ -1,12 +1,12 @@
 # 88API preset data
 
 `88api.json` mirrors the native settings in `farion1231/cc-switch` at
-`df40d53c36b604e044b4d5b9091aeb961aa56990`, from
+`e217bfcbbbbbf82f4619ab62f08fb002635b7858`, from
 `src/config/{claude,gemini,opencode,openclaw,hermes,pi}ProviderPresets.ts`.
 Pi model capabilities are expanded from `src/config/piModelCatalog.ts`;
 TypeScript-only model catalog references are not native configuration fields.
 Codex uses the existing shared TOML builder with `88api`,
-`https://api.88api.ai/v1`, and `gpt-5.6-sol`, matching the upstream preset.
+`https://api.88api.ai/v1`, and `gpt-6.1-sol`, matching the upstream preset.
 
 The CLI uses its existing native configuration writers and form serialization.
 OpenClaw's separate suggested-defaults metadata is not a provider settings field;

@@ -212,52 +212,55 @@ pub(crate) static PI_SPONSOR_PROVIDER_PRESETS: [PiProviderPreset; 8] = [
     },
 ];
 
-fn claude_sonnet(id: &str) -> Value {
+fn claude_model(name: &str, id: &str) -> Value {
     json!({
-        "name": "Claude Sonnet 5",
+        "name": name,
         "reasoning": true,
         "input": ["text", "image"],
         "contextWindow": 1_000_000,
         "maxTokens": 128_000,
         "id": id,
-        "thinkingLevelMap": { "xhigh": "xhigh", "max": "max" },
-        "compat": { "forceAdaptiveThinking": true },
-    })
-}
-
-fn claude_opus(id: &str) -> Value {
-    json!({
-        "name": "Claude Opus 5",
-        "reasoning": true,
-        "input": ["text", "image"],
-        "contextWindow": 1_000_000,
-        "maxTokens": 128_000,
-        "id": id,
-        "thinkingLevelMap": { "xhigh": "xhigh", "max": "max" },
-        "compat": { "forceAdaptiveThinking": true },
-    })
-}
-
-fn gpt_5_6_sol() -> Value {
-    json!({
-        "name": "GPT-5.6 Sol",
-        "reasoning": true,
-        "input": ["text", "image"],
-        "contextWindow": 272_000,
-        "maxTokens": 128_000,
-        "id": "gpt-5.6-sol",
         "thinkingLevelMap": {},
     })
 }
 
-fn glm_5_1() -> Value {
+/// Opus and Fable run adaptive thinking with no "off" level; Sonnet and Haiku
+/// keep Pi's defaults. Mirrors the upstream pi thinking bindings.
+fn claude_adaptive(name: &str, id: &str) -> Value {
+    let mut model = claude_model(name, id);
+    model["thinkingLevelMap"] = json!({ "off": null, "xhigh": "xhigh", "max": "max" });
+    model["compat"] = json!({ "forceAdaptiveThinking": true });
+    model
+}
+
+fn claude_sonnet(id: &str) -> Value {
+    claude_model("Claude Sonnet 5.5", id)
+}
+
+fn claude_opus(id: &str) -> Value {
+    claude_adaptive("Claude Opus 5.5", id)
+}
+
+fn gpt_6_1_sol() -> Value {
     json!({
-        "name": "GLM-5.1",
+        "name": "GPT-6.1 Sol",
+        "reasoning": true,
+        "input": ["text", "image"],
+        "contextWindow": 272_000,
+        "maxTokens": 128_000,
+        "id": "gpt-6.1-sol",
+        "thinkingLevelMap": {},
+    })
+}
+
+fn glm_5_3() -> Value {
+    json!({
+        "name": "GLM-5.3",
         "reasoning": true,
         "input": ["text"],
-        "contextWindow": 200_000,
+        "contextWindow": 1_000_000,
         "maxTokens": 131_072,
-        "id": "glm-5.1",
+        "id": "glm-5.3",
         "thinkingLevelMap": {},
     })
 }
@@ -269,8 +272,8 @@ fn anthropic_settings(name: &str, base_url: &str) -> Value {
         "api": "anthropic-messages",
         "apiKey": "",
         "models": [
-            claude_sonnet("claude-sonnet-5"),
-            claude_opus("claude-opus-5"),
+            claude_sonnet("claude-sonnet-5-5"),
+            claude_opus("claude-opus-5-5"),
         ],
     })
 }
@@ -281,7 +284,7 @@ fn openai_gpt_settings(name: &str, base_url: &str) -> Value {
         "baseUrl": base_url,
         "api": "openai-completions",
         "apiKey": "",
-        "models": [gpt_5_6_sol()],
+        "models": [gpt_6_1_sol()],
     })
 }
 
@@ -302,20 +305,55 @@ fn runapi_settings() -> Value {
     settings["models"]
         .as_array_mut()
         .expect("Pi RunAPI models are an array")
-        .push(json!({
-            "name": "Claude Haiku 4.5 (latest)",
-            "reasoning": true,
-            "input": ["text", "image"],
-            "contextWindow": 200_000,
-            "maxTokens": 64_000,
-            "id": "claude-haiku-4-5",
-            "thinkingLevelMap": {},
-        }));
+        .push(claude_model("Claude Haiku 5.5", "claude-haiku-5-5"));
     settings
 }
 
 fn qiniu_settings() -> Value {
-    openai_gpt_settings("Qiniu", "https://api.qnaigc.com/v1")
+    json!({
+        "name": "Qiniu",
+        "baseUrl": "https://api.qnaigc.com/v1",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [
+            {
+                "name": "GPT-6 Astra",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 272_000,
+                "maxTokens": 128_000,
+                "id": "gpt-6-astra",
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "Kimi K3",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "moonshotai/kimi-k3",
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "GLM-5.3",
+                "reasoning": true,
+                "input": ["text"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "z-ai/glm-5.3",
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "GLM-5.3 Flash",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "z-ai/glm-5.3-flash",
+                "thinkingLevelMap": {},
+            },
+        ],
+    })
 }
 
 fn cubence_settings() -> Value {
@@ -326,7 +364,7 @@ fn deepseek_model(name: &str, id: &str) -> Value {
     json!({
         "name": name,
         "reasoning": true,
-        "input": ["text"],
+        "input": ["text", "image"],
         "contextWindow": 1_000_000,
         "maxTokens": 384_000,
         "id": id,
@@ -346,10 +384,7 @@ fn deepseek_settings() -> Value {
         "baseUrl": "https://api.deepseek.com/v1",
         "api": "openai-completions",
         "apiKey": "",
-        "models": [
-            deepseek_model("DeepSeek V4 Pro", "deepseek-v4-pro"),
-            deepseek_model("DeepSeek V4 Flash", "deepseek-v4-flash"),
-        ],
+        "models": [deepseek_model("DeepSeek V4.1 Flash", "deepseek-flash")],
     })
 }
 
@@ -359,7 +394,7 @@ fn zhipu_glm_settings() -> Value {
         "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
         "api": "openai-completions",
         "apiKey": "",
-        "models": [glm_5_1()],
+        "models": [glm_5_3()],
     })
 }
 
@@ -369,7 +404,7 @@ fn zhipu_glm_en_settings() -> Value {
         "baseUrl": "https://api.z.ai/api/coding/paas/v4",
         "api": "openai-completions",
         "apiKey": "",
-        "models": [glm_5_1()],
+        "models": [glm_5_3()],
     })
 }
 
@@ -398,13 +433,21 @@ fn minimax_settings() -> Value {
         "api": "openai-completions",
         "apiKey": "",
         "models": [{
-            "name": "MiniMax-M2.7",
+            "name": "MiniMax-M3.1-Flash",
             "reasoning": true,
-            "input": ["text"],
-            "contextWindow": 204_800,
+            "input": ["text", "image"],
+            "contextWindow": 1_000_000,
             "maxTokens": 131_072,
-            "id": "MiniMax-M2.7",
-            "thinkingLevelMap": {},
+            "id": "MiniMax-M3.1-Flash",
+            "thinkingLevelMap": {
+                "off": null,
+                "minimal": null,
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "xhigh": "xhigh",
+                "max": "max",
+            },
         }],
     })
 }
@@ -435,8 +478,24 @@ fn xiaomi_mimo_settings() -> Value {
         "api": "openai-completions",
         "apiKey": "",
         "models": [
-            xiaomi_model("MiMo-V2.5-Pro", "mimo-v2.5-pro", &["text"], true),
-            xiaomi_model("MiMo-V2.5", "mimo-v2.5", &["text", "image"], true),
+            xiaomi_model(
+                "MiMo V2.6 Pro",
+                "mimo-v2.6-pro",
+                &["text", "image"],
+                true,
+            ),
+            xiaomi_model(
+                "MiMo V2.6 Flash",
+                "mimo-v2.6-flash",
+                &["text", "image"],
+                true,
+            ),
+            xiaomi_model(
+                "MiMo V2.6 Pro UltraSpeed",
+                "mimo-v2.6-pro-ultraspeed",
+                &["text", "image"],
+                true,
+            ),
         ],
     })
 }
@@ -448,8 +507,8 @@ fn xiaomi_mimo_token_plan_settings() -> Value {
         "api": "openai-completions",
         "apiKey": "",
         "models": [
-            xiaomi_model("MiMo-V2.5-Pro", "mimo-v2.5-pro", &["text"], false),
-            xiaomi_model("MiMo-V2.5", "mimo-v2.5", &["text", "image"], false),
+            xiaomi_model("MiMo V2.6 Pro", "mimo-v2.6-pro", &["text", "image"], true),
+            xiaomi_model("MiMo V2.6 Flash", "mimo-v2.6-flash", &["text", "image"], true),
         ],
     })
 }
@@ -481,12 +540,12 @@ fn opencode_go_settings() -> Value {
         "apiKey": "",
         "models": [
             {
-                "name": "GLM 5.2",
+                "name": "GLM-5.3",
                 "reasoning": true,
                 "input": ["text"],
-                "contextWindow": 1_000_000,
+                "contextWindow": 1_048_576,
                 "maxTokens": 131_072,
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "compat": opencode_compat(json!({})),
                 "thinkingLevelMap": {
                     "off": null,
@@ -499,35 +558,32 @@ fn opencode_go_settings() -> Value {
                 },
             },
             {
-                "name": "Kimi K2.7 Code",
+                "name": "GLM-5.3 Flash",
                 "reasoning": true,
                 "input": ["text", "image"],
-                "contextWindow": 262_144,
-                "maxTokens": 262_144,
-                "id": "kimi-k2.7-code",
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "glm-5.3-flash",
                 "compat": opencode_compat(json!({})),
                 "thinkingLevelMap": {},
             },
             {
-                "name": "DeepSeek V4 Pro",
+                "name": "Kimi K3.1 Pro",
                 "reasoning": true,
-                "input": ["text"],
-                "contextWindow": 1_000_000,
-                "maxTokens": 384_000,
-                "id": "deepseek-v4-pro",
-                "compat": opencode_compat(json!({
-                    "requiresReasoningContentOnAssistantMessages": true,
-                    "thinkingFormat": "deepseek",
-                })),
-                "thinkingLevelMap": thinking_levels.clone(),
+                "input": ["text", "image"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "kimi-k3.1-pro",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {},
             },
             {
-                "name": "DeepSeek V4 Flash",
+                "name": "DeepSeek V4.1 Flash",
                 "reasoning": true,
-                "input": ["text"],
+                "input": ["text", "image"],
                 "contextWindow": 1_000_000,
                 "maxTokens": 384_000,
-                "id": "deepseek-v4-flash",
+                "id": "deepseek-v4.1-flash",
                 "compat": opencode_compat(json!({
                     "requiresReasoningContentOnAssistantMessages": true,
                     "thinkingFormat": "deepseek",
@@ -535,12 +591,32 @@ fn opencode_go_settings() -> Value {
                 "thinkingLevelMap": thinking_levels,
             },
             {
-                "name": "MiMo-V2.5-Pro",
+                "name": "MiMo V2.6 Pro",
                 "reasoning": true,
-                "input": ["text"],
+                "input": ["text", "image"],
                 "contextWindow": 1_048_576,
                 "maxTokens": 131_072,
-                "id": "mimo-v2.5-pro",
+                "id": "mimo-v2.6-pro",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "Qwen3.8 Max",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 983_616,
+                "maxTokens": 131_072,
+                "id": "qwen3.8-max",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "MiniMax-M3.1-Flash",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_000_000,
+                "maxTokens": 128_000,
+                "id": "minimax-m3.1-flash",
                 "compat": opencode_compat(json!({})),
                 "thinkingLevelMap": {},
             },
@@ -555,8 +631,10 @@ fn openrouter_settings() -> Value {
         "api": "anthropic-messages",
         "apiKey": "",
         "models": [
-            claude_sonnet("anthropic/claude-sonnet-5"),
-            claude_opus("anthropic/claude-opus-5"),
+            claude_opus("anthropic/claude-opus-5.5"),
+            claude_sonnet("anthropic/claude-sonnet-5.5"),
+            claude_model("Claude Haiku 5.5", "anthropic/claude-haiku-5.5"),
+            claude_adaptive("Claude Fable 5.1", "anthropic/claude-fable-5.1"),
         ],
     })
 }

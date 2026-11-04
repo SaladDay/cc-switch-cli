@@ -365,82 +365,82 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
         (
             "DeepSeek",
             "https://api.deepseek.com/anthropic",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek-flash[1M]",
+            "deepseek-flash[1M]",
+            "deepseek-flash[1M]",
+            "deepseek-flash[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "Zhipu GLM",
             "https://open.bigmodel.cn/api/anthropic",
-            "glm-5.1",
-            "glm-5.1",
-            "glm-5.1",
-            "glm-5.1",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "Zhipu GLM en",
             "https://api.z.ai/api/anthropic",
-            "glm-5.1",
-            "glm-5.1",
-            "glm-5.1",
-            "glm-5.1",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "ModelScope",
             "https://api-inference.modelscope.cn",
-            "ZhipuAI/GLM-5.2",
-            "ZhipuAI/GLM-5.2",
-            "ZhipuAI/GLM-5.2",
-            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2[1M]",
+            "ZhipuAI/GLM-5.2[1M]",
+            "ZhipuAI/GLM-5.2[1M]",
+            "ZhipuAI/GLM-5.2[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "MiniMax",
             "https://api.minimaxi.com/anthropic",
-            "MiniMax-M2.7",
-            "MiniMax-M2.7",
-            "MiniMax-M2.7",
-            "MiniMax-M2.7",
+            "MiniMax-M3.1-Flash[1M]",
+            "MiniMax-M3.1-Flash[1M]",
+            "MiniMax-M3.1-Flash[1M]",
+            "MiniMax-M3[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "Xiaomi MiMo",
             "https://api.xiaomimimo.com/anthropic",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "Xiaomi MiMo Token Plan (China)",
             "https://token-plan-cn.xiaomimimo.com/anthropic",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "OpenCode Go",
             "https://opencode.ai/zen/go",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
+            "deepseek-v4.1-flash[1M]",
+            "deepseek-v4.1-flash[1M]",
+            "deepseek-v4.1-flash[1M]",
+            "deepseek-v4.1-flash[1M]",
             ClaudeApiKeyField::ApiKey,
         ),
         (
             "OpenRouter",
             "https://openrouter.ai/api",
-            "anthropic/claude-sonnet-5",
-            "anthropic/claude-haiku-4.5",
-            "anthropic/claude-sonnet-5",
-            "anthropic/claude-opus-5",
+            "anthropic/claude-sonnet-5.5",
+            "anthropic/claude-haiku-5.5",
+            "anthropic/claude-sonnet-5.5",
+            "anthropic/claude-opus-5.5",
             ClaudeApiKeyField::AuthToken,
         ),
     ];
@@ -485,15 +485,15 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "DeepSeek",
             "deepseek",
             "https://api.deepseek.com",
-            "deepseek-v4-flash",
+            "deepseek-flash",
             "openai_responses",
-            2,
+            1,
         ),
         (
             "Zhipu GLM",
             "zhipu_glm",
             "https://open.bigmodel.cn/api/coding/paas/v4",
-            "glm-5.2",
+            "glm-5.3",
             "openai_chat",
             1,
         ),
@@ -501,7 +501,7 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "Zhipu GLM en",
             "zhipu_glm_en",
             "https://api.z.ai/api/coding/paas/v4",
-            "glm-5.2",
+            "glm-5.3",
             "openai_chat",
             1,
         ),
@@ -517,23 +517,23 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "MiniMax",
             "minimax",
             "https://api.minimaxi.com/v1",
-            "MiniMax-M3",
+            "MiniMax-M3.1-Flash",
             "openai_responses",
-            1,
+            2,
         ),
         (
             "Xiaomi MiMo",
             "xiaomi_mimo",
             "https://api.xiaomimimo.com/v1",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro",
             "openai_responses",
-            2,
+            3,
         ),
         (
             "Xiaomi MiMo Token Plan (China)",
             "xiaomi_mimo_token_plan",
             "https://token-plan-cn.xiaomimimo.com/v1",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro",
             "openai_responses",
             2,
         ),
@@ -541,15 +541,15 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "OpenCode Go",
             "opencode_go",
             "https://opencode.ai/zen/go/v1",
-            "glm-5.2",
+            "glm-5.3",
             "openai_chat",
-            6,
+            5,
         ),
         (
             "OpenRouter",
             "openrouter",
             "https://openrouter.ai/api/v1",
-            "gpt-5.6-sol",
+            "openai/gpt-6.1-sol",
             "openai_responses",
             0,
         ),
@@ -607,7 +607,7 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
         "zen"
     );
     assert_eq!(
-        opencode["settingsConfig"]["modelCatalog"]["models"][4]["reasoningLevels"],
+        opencode["settingsConfig"]["modelCatalog"]["models"][3]["reasoningLevels"],
         json!(["low", "high", "max"])
     );
 
@@ -619,8 +619,48 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
     assert_eq!(minimax_model["inputModalities"], json!(["text", "image"]));
     assert_eq!(
         minimax_model["baseInstructions"],
-        "You are Codex, a coding agent based on MiniMax-M3. You and the user share the same workspace and collaborate to achieve the user's goals."
+        "You are Codex, a coding agent based on MiniMax-M3.1-Flash. You and the user share the same workspace and collaborate to achieve the user's goals."
     );
+    let m3 = &minimax["settingsConfig"]["modelCatalog"]["models"][1];
+    assert_eq!(m3["model"], "MiniMax-M3");
+    assert_eq!(m3["reasoningLevels"], json!(["none", "high"]));
+    assert_eq!(m3["contextWindow"], 1_000_000);
+    assert_eq!(m3["inputModalities"], json!(["text", "image"]));
+    assert_eq!(m3["supportsParallelToolCalls"], true);
+}
+
+#[test]
+fn qiniu_and_fenno_templates_keep_distinct_models_in_cli_and_tui() {
+    for (label, template, model) in [
+        ("Qiniu", ProviderAddTemplate::Qiniu, "gpt-6-astra"),
+        ("FennoAI", ProviderAddTemplate::Fenno, "gpt-6.1-sol"),
+    ] {
+        for app in [
+            AppType::Codex,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            let cli = build_provider_template_seed(&app, template, &[]).expect("CLI template");
+            let mut form = ProviderAddFormState::new(app.clone());
+            form.apply_template(template_index_by_label(app.clone(), label), &[]);
+            let tui = form.to_provider_json_value();
+            for settings in [&cli.settings_config, &tui["settingsConfig"]] {
+                match app {
+                    AppType::Codex => {
+                        let config: toml::Value =
+                            settings["config"].as_str().unwrap().parse().unwrap();
+                        assert_eq!(config["model"].as_str(), Some(model), "{label}");
+                    }
+                    AppType::OpenCode => {
+                        assert!(settings["models"].get(model).is_some(), "{label}");
+                        assert_eq!(settings["models"].as_object().unwrap().len(), 1);
+                    }
+                    _ => assert_eq!(settings["models"][0]["id"], model, "{label}"),
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -729,7 +769,7 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
     assert_eq!(form.name.value, "DeepSeek");
     assert_eq!(form.website_url.value, "https://platform.deepseek.com");
     assert_eq!(form.codex_base_url.value, "https://api.deepseek.com");
-    assert_eq!(form.codex_model.value, "deepseek-v4-flash");
+    assert_eq!(form.codex_model.value, "deepseek-flash");
     assert_eq!(form.codex_wire_api, CodexWireApi::Responses);
     assert!(form.codex_requires_openai_auth);
 
@@ -758,7 +798,7 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
         .as_str()
         .expect("settingsConfig.config should be TOML string");
     assert!(cfg.contains("model_provider = \"custom\""));
-    assert!(cfg.contains("model = \"deepseek-v4-flash\""));
+    assert!(cfg.contains("model = \"deepseek-flash\""));
     assert!(cfg.contains("disable_response_storage = true"));
     assert!(cfg.contains("[model_providers.custom]"));
     assert!(cfg.contains("name = \"deepseek\""));
@@ -774,15 +814,10 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
         json!({
             "models": [
                 {
-                    "model": "deepseek-v4-flash",
-                    "displayName": "DeepSeek V4 Flash",
+                    "model": "deepseek-flash",
+                    "displayName": "DeepSeek V4.1 Flash",
                     "contextWindow": 1048576,
-                    "reasoningLevels": ["low", "high", "max"],
-                },
-                {
-                    "model": "deepseek-v4-pro",
-                    "displayName": "DeepSeek V4 Pro",
-                    "contextWindow": 1048576,
+                    "inputModalities": ["text", "image"],
                     "reasoningLevels": ["low", "high", "max"],
                 },
             ],
@@ -809,10 +844,10 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
         form.claude_api_format,
         crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses
     );
-    assert_eq!(form.claude_model.value, "gpt-5.6-sol");
-    assert_eq!(form.claude_haiku_model.value, "gpt-5.6-luna");
-    assert_eq!(form.claude_sonnet_model.value, "gpt-5.6-sol");
-    assert_eq!(form.claude_opus_model.value, "gpt-5.6-sol");
+    assert_eq!(form.claude_model.value, "gpt-6.1-sol");
+    assert_eq!(form.claude_haiku_model.value, "gpt-6-luna");
+    assert_eq!(form.claude_sonnet_model.value, "gpt-6.1-sol");
+    assert_eq!(form.claude_opus_model.value, "gpt-6.1-sol");
     assert!(!form.codex_fast_mode);
     assert!(form.claude_hide_attribution);
 
@@ -845,11 +880,11 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
     );
     assert_eq!(
         provider["settingsConfig"]["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
-        "372000"
+        "272000"
     );
     assert_eq!(
         provider["settingsConfig"]["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
-        "372000"
+        "272000"
     );
     assert!(
         provider["settingsConfig"]["env"]
@@ -1087,7 +1122,7 @@ fn provider_add_form_dds_template_codex_sets_base_url_and_partner_meta() {
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://www.ddshub.cc\""));
-    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
+    assert!(cfg.contains("model = \"gpt-6.1-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     let meta = provider["meta"]
@@ -1183,7 +1218,7 @@ fn provider_add_form_cubence_template_gemini_sets_base_url_and_partner_meta() {
     );
     assert_eq!(
         provider["settingsConfig"]["env"]["GEMINI_MODEL"],
-        "gemini-3.6-flash"
+        "gemini-3.8-flash"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
@@ -1204,12 +1239,12 @@ fn provider_add_form_cubence_template_opencode_sets_base_url_and_partner_meta() 
         "https://api.cubence.com/v1"
     );
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
-        "Claude Sonnet 5"
+        provider["settingsConfig"]["models"]["claude-sonnet-5-5"]["name"],
+        "Claude Sonnet 5.5"
     );
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-opus-5"]["name"],
-        "Claude Opus 5"
+        provider["settingsConfig"]["models"]["claude-opus-5-5"]["name"],
+        "Claude Opus 5.5"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
@@ -1233,11 +1268,11 @@ fn provider_add_form_cubence_template_hermes_sets_base_url_and_partner_meta() {
     assert_eq!(
         settings.get("models"),
         Some(&json!([
-            { "id": "claude-opus-5", "name": "Claude Opus 5" },
-            { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
+            { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+            { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
             {
-                "id": "claude-haiku-4-5-20251001",
-                "name": "Claude Haiku 4.5"
+                "id": "claude-haiku-5-5",
+                "name": "Claude Haiku 5.5"
             },
         ]))
     );
@@ -1263,16 +1298,22 @@ fn provider_add_form_cubence_template_openclaw_sets_base_url_and_partner_meta() 
         provider["settingsConfig"]["models"],
         json!([
             {
-                "id": "claude-opus-5",
-                "name": "Claude Opus 5",
+                "id": "claude-opus-5-5",
+                "name": "Claude Opus 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
-                "cost": { "input": 5, "output": 25 },
+                "maxTokens": 128000,
+                "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
             },
             {
-                "id": "claude-sonnet-5",
-                "name": "Claude Sonnet 5",
+                "id": "claude-sonnet-5-5",
+                "name": "Claude Sonnet 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
-                "cost": { "input": 3, "output": 15 },
+                "maxTokens": 128000,
+                "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
             },
         ])
     );
@@ -1348,7 +1389,7 @@ fn provider_add_form_runapi_template_codex_sets_v1_base_url() {
     assert!(cfg.contains("[model_providers.custom]"));
     assert!(cfg.contains("name = \"RunAPI\""));
     assert!(cfg.contains("base_url = \"https://runapi.co/v1\""));
-    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
+    assert!(cfg.contains("model = \"gpt-6.1-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert_eq!(provider["meta"]["partnerPromotionKey"], "runapi");
 }
@@ -1373,13 +1414,16 @@ fn provider_add_form_runapi_template_opencode_matches_upstream_anthropic_shape()
         "blank OpenCode API keys should be omitted on save"
     );
     assert_eq!(
-        settings["models"]["claude-sonnet-5"]["name"],
-        "Claude Sonnet 5"
+        settings["models"]["claude-sonnet-5-5"]["name"],
+        "Claude Sonnet 5.5"
     );
-    assert_eq!(settings["models"]["claude-opus-5"]["name"], "Claude Opus 5");
     assert_eq!(
-        settings["models"]["claude-haiku-4-5"]["name"],
-        "Claude Haiku 4.5"
+        settings["models"]["claude-opus-5-5"]["name"],
+        "Claude Opus 5.5"
+    );
+    assert_eq!(
+        settings["models"]["claude-haiku-5-5"]["name"],
+        "Claude Haiku 5.5"
     );
     assert_eq!(provider["meta"]["partnerPromotionKey"], "runapi");
 }
@@ -1405,9 +1449,9 @@ fn provider_add_form_runapi_template_hermes_matches_upstream_anthropic_shape() {
     assert_eq!(
         settings["models"],
         json!([
-            { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
-            { "id": "claude-opus-5", "name": "Claude Opus 5" },
-            { "id": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },
+            { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
+            { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+            { "id": "claude-haiku-5-5", "name": "Claude Haiku 5.5" },
         ])
     );
     assert_eq!(provider["meta"]["partnerPromotionKey"], "runapi");
@@ -1434,19 +1478,31 @@ fn provider_add_form_runapi_template_openclaw_matches_upstream_anthropic_shape()
         settings["models"],
         json!([
             {
-                "id": "claude-sonnet-5",
-                "name": "Claude Sonnet 5",
+                "id": "claude-sonnet-5-5",
+                "name": "Claude Sonnet 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
             },
             {
-                "id": "claude-opus-5",
-                "name": "Claude Opus 5",
+                "id": "claude-opus-5-5",
+                "name": "Claude Opus 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
             },
             {
-                "id": "claude-haiku-4-5",
-                "name": "Claude Haiku 4.5",
-                "contextWindow": 200000,
+                "id": "claude-haiku-5-5",
+                "name": "Claude Haiku 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 },
             },
         ])
     );
@@ -2809,7 +2865,7 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://api.aicodemirror.ai/api/codex/backend-api/codex\""));
-    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
+    assert!(cfg.contains("model = \"gpt-6.1-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     assert!(form.codex_api_key.value.is_empty());
@@ -2834,7 +2890,7 @@ fn provider_add_form_codex_custom_defaults_to_upstream_model() {
     let form = ProviderAddFormState::new(AppType::Codex);
 
     assert_eq!(form.codex_base_url.value, "");
-    assert_eq!(form.codex_model.value, "gpt-5.6-sol");
+    assert_eq!(form.codex_model.value, "gpt-6.1-sol");
 }
 
 #[test]
@@ -5830,14 +5886,14 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
         .keys()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    assert_eq!(model_ids, ["claude-sonnet-5", "claude-opus-5"]);
+    assert_eq!(model_ids, ["claude-sonnet-5-5", "claude-opus-5-5"]);
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
-        "Claude Sonnet 5"
+        provider["settingsConfig"]["models"]["claude-sonnet-5-5"]["name"],
+        "Claude Sonnet 5.5"
     );
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-opus-5"]["name"],
-        "Claude Opus 5"
+        provider["settingsConfig"]["models"]["claude-opus-5-5"]["name"],
+        "Claude Opus 5.5"
     );
 
     let mut parsed = Provider::with_id(
@@ -5862,8 +5918,8 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
         roundtrip_form.opencode_base_url.value,
         "https://api.aicodemirror.ai/api/claudecode"
     );
-    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5");
-    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5");
+    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5-5");
+    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5.5");
 
     let roundtrip = roundtrip_form.to_provider_json_value();
     assert!(
@@ -5873,12 +5929,12 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
         "OpenCode roundtrip should still omit blank API keys"
     );
     assert_eq!(
-        roundtrip["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
-        "Claude Sonnet 5"
+        roundtrip["settingsConfig"]["models"]["claude-sonnet-5-5"]["name"],
+        "Claude Sonnet 5.5"
     );
     assert_eq!(
-        roundtrip["settingsConfig"]["models"]["claude-opus-5"]["name"],
-        "Claude Opus 5"
+        roundtrip["settingsConfig"]["models"]["claude-opus-5-5"]["name"],
+        "Claude Opus 5.5"
     );
 }
 
@@ -6185,21 +6241,31 @@ fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loade
         provider["settingsConfig"]["models"],
         json!([
             {
-                "id": "claude-opus-5",
-                "name": "Claude Opus 5",
+                "id": "claude-opus-5-5",
+                "name": "Claude Opus 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
                 "cost": {
-                    "input": 5,
-                    "output": 25
+                    "input": 4,
+                    "output": 20,
+                    "cacheRead": 0.2,
+                    "cacheWrite": 5
                 }
             },
             {
-                "id": "claude-sonnet-5",
-                "name": "Claude Sonnet 5",
+                "id": "claude-sonnet-5-5",
+                "name": "Claude Sonnet 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
                 "cost": {
-                    "input": 3,
-                    "output": 15
+                    "input": 2,
+                    "output": 10,
+                    "cacheRead": 0.1,
+                    "cacheWrite": 2.5
                 }
             }
         ])
@@ -6227,8 +6293,8 @@ fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loade
         roundtrip_form.opencode_base_url.value,
         "https://api.aicodemirror.ai/api/claudecode"
     );
-    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5");
-    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5");
+    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5-5");
+    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5.5");
     assert_eq!(roundtrip_form.opencode_model_context_limit.value, "1000000");
 
     let roundtrip = roundtrip_form.to_provider_json_value();
