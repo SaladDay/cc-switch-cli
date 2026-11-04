@@ -12,8 +12,9 @@ use crate::error::AppError;
 use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
 use crate::provider_preset_builtin::{builtin_provider_preset_value, BuiltinProviderPresetId};
 use crate::provider_preset_models::{
-    codex_oauth_claude_env, sponsor_hermes_models, sponsor_model_family, sponsor_openclaw_models,
-    sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL, GEMINI_DEFAULT_MODEL,
+    codex_oauth_claude_env, sponsor_codex_model, sponsor_hermes_models, sponsor_model_family,
+    sponsor_openclaw_models, sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL,
+    GEMINI_DEFAULT_MODEL,
 };
 use crate::provider_preset_sponsors::{
     sponsor_provider_preset, sponsor_provider_presets_for_app, SponsorProviderPreset,
@@ -586,7 +587,7 @@ fn build_sponsor_template_settings_config(
             Ok(build_codex_settings_config(
                 None,
                 preset.codex_base_url,
-                CODEX_DEFAULT_MODEL,
+                sponsor_codex_model(preset.id),
                 "responses",
                 provider_name,
             ))
@@ -628,7 +629,9 @@ fn build_sponsor_template_settings_config(
                         SponsorModelFamily::Claude | SponsorModelFamily::RunApiClaude => {
                             "anthropic_messages"
                         }
-                        SponsorModelFamily::Gpt => crate::hermes_config::HERMES_DEFAULT_API_MODE,
+                        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
+                            crate::hermes_config::HERMES_DEFAULT_API_MODE
+                        }
                     },
                     preset.hermes_base_url,
                     "",
@@ -655,7 +658,7 @@ fn build_sponsor_template_settings_config(
                         SponsorModelFamily::Claude | SponsorModelFamily::RunApiClaude => {
                             "anthropic-messages"
                         }
-                        SponsorModelFamily::Gpt => {
+                        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
                             crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
                         }
                     },

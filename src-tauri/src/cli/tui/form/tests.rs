@@ -366,7 +366,7 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "DeepSeek",
             "https://api.deepseek.com/anthropic",
             "deepseek-flash[1M]",
-            "deepseek-flash",
+            "deepseek-flash[1M]",
             "deepseek-flash[1M]",
             "deepseek-flash[1M]",
             ClaudeApiKeyField::AuthToken,
@@ -375,7 +375,7 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "Zhipu GLM",
             "https://open.bigmodel.cn/api/anthropic",
             "glm-5.3[1M]",
-            "glm-5.3-flash",
+            "glm-5.3[1M]",
             "glm-5.3[1M]",
             "glm-5.3[1M]",
             ClaudeApiKeyField::AuthToken,
@@ -384,7 +384,7 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "Zhipu GLM en",
             "https://api.z.ai/api/anthropic",
             "glm-5.3[1M]",
-            "glm-5.3-flash",
+            "glm-5.3[1M]",
             "glm-5.3[1M]",
             "glm-5.3[1M]",
             ClaudeApiKeyField::AuthToken,
@@ -393,7 +393,7 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "ModelScope",
             "https://api-inference.modelscope.cn",
             "ZhipuAI/GLM-5.2[1M]",
-            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2[1M]",
             "ZhipuAI/GLM-5.2[1M]",
             "ZhipuAI/GLM-5.2[1M]",
             ClaudeApiKeyField::AuthToken,
@@ -402,7 +402,7 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "MiniMax",
             "https://api.minimaxi.com/anthropic",
             "MiniMax-M3.1-Flash[1M]",
-            "MiniMax-M3.1-Flash",
+            "MiniMax-M3.1-Flash[1M]",
             "MiniMax-M3.1-Flash[1M]",
             "MiniMax-M3[1M]",
             ClaudeApiKeyField::AuthToken,
@@ -411,7 +411,7 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "Xiaomi MiMo",
             "https://api.xiaomimimo.com/anthropic",
             "mimo-v2.6-pro[1M]",
-            "mimo-v2.6-pro",
+            "mimo-v2.6-pro[1M]",
             "mimo-v2.6-pro[1M]",
             "mimo-v2.6-pro[1M]",
             ClaudeApiKeyField::AuthToken,
@@ -420,7 +420,7 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "Xiaomi MiMo Token Plan (China)",
             "https://token-plan-cn.xiaomimimo.com/anthropic",
             "mimo-v2.6-pro[1M]",
-            "mimo-v2.6-pro",
+            "mimo-v2.6-pro[1M]",
             "mimo-v2.6-pro[1M]",
             "mimo-v2.6-pro[1M]",
             ClaudeApiKeyField::AuthToken,
@@ -429,7 +429,7 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
             "OpenCode Go",
             "https://opencode.ai/zen/go",
             "deepseek-v4.1-flash[1M]",
-            "deepseek-v4.1-flash",
+            "deepseek-v4.1-flash[1M]",
             "deepseek-v4.1-flash[1M]",
             "deepseek-v4.1-flash[1M]",
             ClaudeApiKeyField::ApiKey,
@@ -519,7 +519,7 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "https://api.minimaxi.com/v1",
             "MiniMax-M3.1-Flash",
             "openai_responses",
-            1,
+            2,
         ),
         (
             "Xiaomi MiMo",
@@ -621,6 +621,46 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
         minimax_model["baseInstructions"],
         "You are Codex, a coding agent based on MiniMax-M3.1-Flash. You and the user share the same workspace and collaborate to achieve the user's goals."
     );
+    let m3 = &minimax["settingsConfig"]["modelCatalog"]["models"][1];
+    assert_eq!(m3["model"], "MiniMax-M3");
+    assert_eq!(m3["reasoningLevels"], json!(["none", "high"]));
+    assert_eq!(m3["contextWindow"], 1_000_000);
+    assert_eq!(m3["inputModalities"], json!(["text", "image"]));
+    assert_eq!(m3["supportsParallelToolCalls"], true);
+}
+
+#[test]
+fn qiniu_and_fenno_templates_keep_distinct_models_in_cli_and_tui() {
+    for (label, template, model) in [
+        ("Qiniu", ProviderAddTemplate::Qiniu, "gpt-6-astra"),
+        ("FennoAI", ProviderAddTemplate::Fenno, "gpt-6.1-sol"),
+    ] {
+        for app in [
+            AppType::Codex,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            let cli = build_provider_template_seed(&app, template, &[]).expect("CLI template");
+            let mut form = ProviderAddFormState::new(app.clone());
+            form.apply_template(template_index_by_label(app.clone(), label), &[]);
+            let tui = form.to_provider_json_value();
+            for settings in [&cli.settings_config, &tui["settingsConfig"]] {
+                match app {
+                    AppType::Codex => {
+                        let config: toml::Value =
+                            settings["config"].as_str().unwrap().parse().unwrap();
+                        assert_eq!(config["model"].as_str(), Some(model), "{label}");
+                    }
+                    AppType::OpenCode => {
+                        assert!(settings["models"].get(model).is_some(), "{label}");
+                        assert_eq!(settings["models"].as_object().unwrap().len(), 1);
+                    }
+                    _ => assert_eq!(settings["models"][0]["id"], model, "{label}"),
+                }
+            }
+        }
+    }
 }
 
 #[test]
