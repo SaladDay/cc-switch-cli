@@ -1,5 +1,5 @@
 -- MCP/Skills DDL from farion1231/cc-switch at
--- e4873bc8aa2555225d4867ec2f04b1290f1d21d9 (schema 22).
+-- ca58c0313360eae7c851fbd7553c1614c7af03e7 (schema 24).
 CREATE TABLE IF NOT EXISTS mcp_servers (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, server_config TEXT NOT NULL,
             description TEXT, homepage TEXT, docs TEXT, tags TEXT NOT NULL DEFAULT '[]',
@@ -9,8 +9,10 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
             enabled_mcode BOOLEAN NOT NULL DEFAULT 0,
             enabled_agy BOOLEAN NOT NULL DEFAULT 0,
             enabled_kimi BOOLEAN NOT NULL DEFAULT 0,
+            enabled_dsh BOOLEAN NOT NULL DEFAULT 0,
             enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
-            enabled_pi BOOLEAN NOT NULL DEFAULT 0
+            enabled_pi BOOLEAN NOT NULL DEFAULT 0,
+            enabled_omp BOOLEAN NOT NULL DEFAULT 0
         );
 
 CREATE TABLE IF NOT EXISTS skills (
@@ -30,6 +32,7 @@ CREATE TABLE IF NOT EXISTS skills (
             enabled_mcode BOOLEAN NOT NULL DEFAULT 0,
             enabled_agy BOOLEAN NOT NULL DEFAULT 0,
             enabled_kimi BOOLEAN NOT NULL DEFAULT 0,
+            enabled_dsh BOOLEAN NOT NULL DEFAULT 0,
             enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
             installed_at INTEGER NOT NULL DEFAULT 0,
             content_hash TEXT,
