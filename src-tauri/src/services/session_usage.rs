@@ -633,9 +633,11 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
 /// 收集目录下所有 .jsonl 文件（含子 agent 文件），返回 `(路径, mtime 纳秒)`
 /// 并按 mtime 降序排序（最近修改的文件最先返回）。
 ///
-/// 扫描三层固定深度，不使用递归，避免死循环：
+/// 按固定深度展开目录，不使用递归，避免死循环：
 ///   projects_dir/项目目录/*.jsonl                          (主会话)
 ///   projects_dir/项目目录/SESSION_ID/subagents/*.jsonl      (子 agent)
+///   projects_dir/项目目录/SESSION_ID/subagents/workflows/wf_<ID>/*.jsonl
+///                                                          (Workflow 子 agent)
 ///
 /// walk 阶段顺带取 mtime，既用于排序也传给后续 `sync_single_file`，避免二次
 /// stat（无法读取 metadata 时记 0，交由 `sync_single_file` 回退处理）。
@@ -663,12 +665,19 @@ fn collect_jsonl_files(projects_dir: &Path) -> Vec<(PathBuf, i64)> {
                     // 扫描子 agent 目录: 项目/SESSION_ID/subagents/*.jsonl
                     let subagents_dir = sub_path.join("subagents");
                     if subagents_dir.is_dir() {
-                        if let Ok(agent_entries) = fs::read_dir(&subagents_dir) {
-                            for agent_entry in agent_entries.flatten() {
-                                let agent_path = agent_entry.path();
-                                if agent_path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-                                {
-                                    push_jsonl_file(&mut files, agent_path);
+                        push_jsonl_children(&subagents_dir, &mut files);
+
+                        // Workflow 子 agent 深一层:
+                        // 项目/SESSION_ID/subagents/workflows/wf_<ID>/*.jsonl
+                        // 少扫这一层会让 Workflow agent 的用量完全不进统计。
+                        let workflows_dir = subagents_dir.join("workflows");
+                        if workflows_dir.is_dir() {
+                            if let Ok(wf_entries) = fs::read_dir(&workflows_dir) {
+                                for wf_entry in wf_entries.flatten() {
+                                    let wf_path = wf_entry.path();
+                                    if wf_path.is_dir() {
+                                        push_jsonl_children(&wf_path, &mut files);
+                                    }
                                 }
                             }
                         }
@@ -689,6 +698,18 @@ fn push_jsonl_file(files: &mut Vec<(PathBuf, i64)>, path: PathBuf) {
         .map(|m| metadata_modified_nanos(&m))
         .unwrap_or(0);
     files.push((path, mtime));
+}
+
+/// 将 `dir` 下直接子层的所有 `.jsonl` 文件追加到 `files`（不递归）。
+fn push_jsonl_children(dir: &Path, files: &mut Vec<(PathBuf, i64)>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                push_jsonl_file(files, path);
+            }
+        }
+    }
 }
 
 /// Claude 的驱动状态机：只需跨行携带 session id（序列化进 sidecar 提示）。
@@ -1794,6 +1815,39 @@ mod tests {
             .collect();
         assert!(paths.iter().any(|p| p.contains("main.jsonl")));
         assert!(paths.iter().any(|p| p.contains("agent-abc.jsonl")));
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_collect_jsonl_files_includes_workflow_subagents() {
+        // Claude Code Workflow 把子 agent transcript 嵌在
+        // 项目/SESSION_ID/subagents/workflows/wf_<ID>/ 下，比普通子 agent 深一层。
+        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let project = tmp.join("project");
+        let session_dir = project.join("test-session");
+        let subagents_dir = session_dir.join("subagents");
+        let wf_dir = subagents_dir.join("workflows").join("wf_test123");
+        fs::create_dir_all(&wf_dir).unwrap();
+
+        fs::write(project.join("main.jsonl"), "{}").unwrap();
+        fs::write(subagents_dir.join("agent-plain.jsonl"), "{}").unwrap();
+        fs::write(wf_dir.join("agent-wf.jsonl"), "{}").unwrap();
+        // journal.jsonl 也会被收集，但解析时因无 assistant 行而产出 0 条
+        fs::write(wf_dir.join("journal.jsonl"), "{}").unwrap();
+
+        let files = collect_jsonl_files(&tmp);
+        assert_eq!(files.len(), 4);
+        let paths: Vec<String> = files
+            .iter()
+            .map(|(p, _mtime)| p.to_string_lossy().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.contains("main.jsonl")));
+        assert!(paths.iter().any(|p| p.contains("agent-plain.jsonl")));
+        assert!(
+            paths.iter().any(|p| p.contains("agent-wf.jsonl")),
+            "Workflow 子 agent transcript 必须被收集"
+        );
 
         fs::remove_dir_all(&tmp).ok();
     }
