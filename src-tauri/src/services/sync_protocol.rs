@@ -570,8 +570,8 @@ mod tests {
     }
 
     #[test]
-    fn upstream_v19_through_v22_database_schemas_are_accepted() {
-        for version in 19..=22 {
+    fn upstream_v19_through_current_database_schemas_are_accepted() {
+        for version in 19..=SCHEMA_VERSION {
             let sql = format!("PRAGMA user_version={version};\n");
             assert!(validate_sql_user_version_for_import(&sql).is_ok());
         }

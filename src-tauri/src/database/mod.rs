@@ -57,10 +57,11 @@ const USAGE_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
 ///
-/// 注意：本库 schema 与上游项目同步（WebDAV 亦会整库同步），本仓库不得自行
-/// 加表/加列或提升版本号；本地新增的持久化需求一律放独立 sidecar 存储
-/// （如 session_manager::scan_cache_store）。
-pub(crate) const SCHEMA_VERSION: i32 = 22;
+/// 注意：本库 schema 与上游项目保持一致（WebDAV 亦会整库同步），只跟随上游
+/// 已发布的迁移推进版本（v23: enabled_omp；v24: enabled_dsh / parser_state），
+/// 本仓库不得自行加表/加列或提升版本号；本地新增的持久化需求一律放独立
+/// sidecar 存储（如 session_manager::scan_cache_store）。
+pub(crate) const SCHEMA_VERSION: i32 = 24;
 
 fn database_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE

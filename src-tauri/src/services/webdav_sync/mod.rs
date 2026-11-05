@@ -807,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_snapshot_accepts_current_schema_v13_sync_export() -> Result<(), AppError> {
+    fn apply_snapshot_accepts_current_schema_sync_export() -> Result<(), AppError> {
         let temp = tempfile::tempdir().expect("create temp dir");
         let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
 
@@ -825,7 +825,7 @@ mod tests {
         }
         let db_sql = remote_db
             .export_sql_string_for_sync()
-            .expect("export v13 sync sql");
+            .expect("export current-schema sync sql");
 
         let zip_path = temp.path().join("remote-skills.zip");
         {
@@ -855,6 +855,17 @@ mod tests {
             )
             .expect("count imported provider");
         assert_eq!(provider_count, 1);
+        for (table, column) in [
+            ("mcp_servers", "enabled_omp"),
+            ("mcp_servers", "enabled_dsh"),
+            ("skills", "enabled_dsh"),
+            ("session_log_sync", "parser_state"),
+        ] {
+            assert!(
+                Database::has_column(&conn, table, column).unwrap(),
+                "restored upstream v{SCHEMA_VERSION} snapshot should keep {table}.{column}"
+            );
+        }
         assert!(
             crate::services::skill::SkillService::get_ssot_dir()
                 .expect("ssot dir")
