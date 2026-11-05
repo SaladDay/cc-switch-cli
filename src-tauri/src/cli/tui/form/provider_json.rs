@@ -406,7 +406,7 @@ impl ProviderAddFormState {
                     let auth_value = settings_obj
                         .entry("auth".to_string())
                         .or_insert_with(|| json!({}));
-                    if !auth_value.is_object() {
+                    if self.codex_oauth_account_id.is_some() || !auth_value.is_object() {
                         *auth_value = json!({});
                     }
                     settings_obj.remove("modelCatalog");
@@ -1065,7 +1065,9 @@ impl ProviderAddFormState {
             meta_obj.remove("localProxyRequestOverrides");
         }
 
-        if is_codex_oauth {
+        if is_codex_oauth
+            || (self.is_codex_official_provider() && self.codex_oauth_account_id.is_some())
+        {
             meta_obj.insert("providerType".to_string(), json!("codex_oauth"));
             meta_obj.insert(
                 "authBinding".to_string(),
@@ -1083,7 +1085,9 @@ impl ProviderAddFormState {
                     auth_binding.remove("accountId");
                 }
             }
-            meta_obj.insert("codexFastMode".to_string(), json!(self.codex_fast_mode));
+            if is_codex_oauth {
+                meta_obj.insert("codexFastMode".to_string(), json!(self.codex_fast_mode));
+            }
         } else {
             if meta_obj
                 .get("providerType")

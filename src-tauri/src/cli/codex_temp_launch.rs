@@ -204,6 +204,18 @@ struct CodexLaunchSettings<'a> {
 }
 
 fn parse_launch_settings(provider: &Provider) -> Result<CodexLaunchSettings<'_>, AppError> {
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+        .is_some()
+    {
+        return Err(AppError::localized(
+            "codex.temp_launch_managed_account",
+            "托管 ChatGPT 账号暂不支持独立目录启动。请先切换到该供应商，再运行 codex。",
+            "Managed ChatGPT accounts do not support isolated launches. Switch to this provider first, then run codex.",
+        ));
+    }
     let settings = provider.settings_config.as_object().ok_or_else(|| {
         AppError::localized(
             "codex.temp_launch_settings_not_object",
@@ -622,5 +634,26 @@ mod tests {
         .expect_err("missing binary should fail");
 
         assert!(err.to_string().contains("codex"));
+    }
+    #[test]
+    fn codex_managed_binding_rejects_isolated_launches_before_writing_files() {
+        let temp = TempDir::new().unwrap();
+        let mut provider = provider_with("", Some(serde_json::json!({})));
+        provider.meta = Some(
+            serde_json::from_value(serde_json::json!({
+                "codexOfficial": true, "authBinding": {
+                    "source": "managed_account", "authProvider": "codex_oauth", "accountId": "alice"
+                }
+            }))
+            .unwrap(),
+        );
+        // Shared-session launches also call preview_launch_with before preparing their home.
+        let preview =
+            preview_launch_with(&provider, temp.path(), || Ok(PathBuf::from("/bin/true")));
+        assert!(preview.err().unwrap().to_string().contains("codex"));
+        assert!(
+            prepare_launch_with(&provider, temp.path(), || Ok(PathBuf::from("/bin/true"))).is_err()
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
     }
 }

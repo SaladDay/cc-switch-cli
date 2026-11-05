@@ -1842,6 +1842,16 @@ impl ProviderService {
         provider: &mut Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Codex)
+            && provider.is_codex_official()
+            && provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+                .is_some()
+        {
+            provider.settings_config["auth"] = json!({});
+        }
         common_config::normalize_provider_common_config_for_storage(
             app_type,
             provider,

@@ -799,3 +799,104 @@ fn malformed_or_unreadable_auth_does_not_block_upstream_route_switching() {
         }
     }
 }
+
+fn managed_official(id: &str, account: Option<&str>) -> Provider {
+    serde_json::from_value(json!({
+        "id": id, "name": id, "category": "official",
+        "settingsConfig": {"auth": {}, "config": ""},
+        "meta": {"codexOfficial": true, "authBinding": account.map(|account| json!({
+            "source": "managed_account", "authProvider": "codex_oauth", "accountId": account
+        }))}
+    }))
+    .unwrap()
+}
+
+#[test]
+#[serial]
+fn codex_managed_accounts_switch_and_restore_native_login_without_storing_tokens() {
+    let temp = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(temp.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let manager = crate::services::codex_oauth::CodexOAuthService::manager();
+    for account in ["alice", "bob"] {
+        runtime
+            .block_on(manager.add_test_account_with_user_identity(
+                account,
+                &format!("access-{account}"),
+                account,
+            ))
+            .unwrap();
+    }
+    let native = json!({"auth_mode": "chatgpt", "tokens": {
+        "account_id": "native", "id_token": crate::codex_config::test_codex_id_token("native"),
+        "access_token": "native-access", "refresh_token": "native-refresh"
+    }});
+    write_json_file(&get_codex_auth_path(), &native).unwrap();
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    for (id, account) in [
+        ("native", None),
+        ("alice", Some("alice")),
+        ("bob", Some("bob")),
+    ] {
+        config
+            .get_manager_mut(&AppType::Codex)
+            .unwrap()
+            .providers
+            .insert(id.into(), managed_official(id, account));
+    }
+    let state = state_from_config(config);
+    for account in ["alice", "bob", "alice"] {
+        ProviderService::switch(&state, AppType::Codex, account).unwrap();
+        let live: Value = read_json_file(&get_codex_auth_path()).unwrap();
+        assert_eq!(live["tokens"]["account_id"], account);
+        assert_eq!(live["tokens"]["access_token"], format!("access-{account}"));
+        assert!(live["tokens"]["refresh_token"].is_string());
+        assert!(live["last_refresh"].is_string());
+        assert!(crate::codex_config::codex_live_auth_is_managed_chatgpt_login(&live, account));
+        assert_eq!(
+            state.db.get_all_providers("codex").unwrap()[account].settings_config["auth"],
+            json!({})
+        );
+    }
+    ProviderService::switch(&state, AppType::Codex, "native").unwrap();
+    assert_eq!(
+        read_json_file::<Value>(&get_codex_auth_path()).unwrap(),
+        native
+    );
+    // Upstream may keep the marker after restoring a different native login;
+    // ownership must no longer match the managed account.
+    assert!(!crate::codex_config::codex_live_auth_is_managed_chatgpt_login(&native, "alice"));
+}
+
+#[test]
+#[serial]
+fn codex_managed_missing_target_leaves_login_and_selection_unchanged() {
+    let temp = TempDir::new().unwrap();
+    let _env = TestEnvGuard::isolated(temp.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir()).unwrap();
+    let native = json!({"OPENAI_API_KEY": "native-key"});
+    write_json_file(&get_codex_auth_path(), &native).unwrap();
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    let providers = &mut config.get_manager_mut(&AppType::Codex).unwrap().providers;
+    providers.insert("native".into(), managed_official("native", None));
+    providers.insert(
+        "missing".into(),
+        managed_official("missing", Some("removed")),
+    );
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Codex, "native").unwrap();
+    let before = std::fs::read(get_codex_config_path()).unwrap();
+    assert!(ProviderService::switch(&state, AppType::Codex, "missing").is_err());
+    assert_eq!(
+        ProviderService::current(&state, AppType::Codex).unwrap(),
+        "native"
+    );
+    assert_eq!(
+        read_json_file::<Value>(&get_codex_auth_path()).unwrap(),
+        native
+    );
+    assert_eq!(std::fs::read(get_codex_config_path()).unwrap(), before);
+}
