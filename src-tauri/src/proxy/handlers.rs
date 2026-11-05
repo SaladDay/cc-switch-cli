@@ -518,7 +518,7 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
                     output_items.push(item.clone());
                 }
             }
-            "response.completed" => {
+            "response.completed" | "response.incomplete" => {
                 completed_response = Some(data.get("response").cloned().unwrap_or(data));
             }
             "response.failed" => {
@@ -533,13 +533,15 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     }
 
     let mut response = completed_response.ok_or_else(|| {
-        ProxyError::TransformError("No response.completed event in upstream SSE".to_string())
+        ProxyError::TransformError(
+            "No response.completed or response.incomplete event in upstream SSE".to_string(),
+        )
     })?;
 
     if !output_items.is_empty() {
         let Some(response) = response.as_object_mut() else {
             return Err(ProxyError::TransformError(
-                "response.completed payload is not an object".to_string(),
+                "terminal response payload is not an object".to_string(),
             ));
         };
         response.insert("output".to_string(), Value::Array(output_items));
@@ -1911,5 +1913,21 @@ data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstr
 data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n\n";
 
         assert!(responses_sse_to_response_value(sse).is_err());
+    }
+
+    #[test]
+    fn responses_sse_to_response_value_accepts_incomplete_terminal_event() {
+        let sse = "event: response.output_item.done\n\
+data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}}\n\n\
+event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_inc\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n";
+
+        let response = responses_sse_to_response_value(sse).unwrap();
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(
+            response["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
+        assert_eq!(response["output"][0]["content"][0]["text"], "partial");
     }
 }
