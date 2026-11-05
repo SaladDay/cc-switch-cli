@@ -831,8 +831,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::CodexOAuthAccount => HelpContent::new(
             texts::tui_label_chatgpt_account(),
             help_lines(
-                "绑定 ChatGPT/Codex 官方登录账号。官方账号可用于 Codex 插件、移动端远程操作等官方能力。订阅额度通过绑定账号的内置查询显示，无需余额模板；可在供应商列表按 r 刷新。",
-                "Binds an official ChatGPT/Codex account. Official login can keep Codex plugins, mobile remote control, and other official app features available. Subscription quota uses the bound account's built-in query without a balance template; press r in the provider list to refresh.",
+                "Codex 的 OpenAI Official 可选择托管账号，直接写入本机登录，无需开启路由；选择“不托管”则使用 Codex 原生登录。Claude 下的 Codex 模板仍通过本地代理使用绑定账号。官方账号可用于 Codex 插件、移动端远程操作等官方能力。订阅额度通过绑定账号的内置查询显示，无需余额模板；可在供应商列表按 r 刷新。",
+                "Codex OpenAI Official writes the selected managed account to the local login without requiring routing. Choose unmanaged to use the native Codex login. The Codex template under Claude uses the bound account through the local proxy. Official login can keep Codex plugins, mobile remote control, and other official app features available. Subscription quota uses the bound account's built-in query without a balance template; press r in the provider list to refresh.",
             ),
         ),
         ProviderAddField::CodexFastMode => HelpContent::new(

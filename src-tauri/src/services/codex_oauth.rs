@@ -156,7 +156,11 @@ impl CodexOAuthService {
     }
 
     pub async fn remove_account(account_id: &str) -> Result<(), CodexOAuthError> {
-        Self::manager().remove_account(account_id).await
+        let _guard = super::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .map_err(CodexOAuthError::TokenFetchFailed)?;
+        Self::manager().remove_account(account_id).await?;
+        Self::unbind_deleted_accounts(&[account_id.to_string()])
     }
 
     pub async fn set_default_account(account_id: &str) -> Result<(), CodexOAuthError> {
@@ -164,7 +168,32 @@ impl CodexOAuthService {
     }
 
     pub async fn clear_auth() -> Result<(), CodexOAuthError> {
-        Self::manager().clear_auth().await
+        let _guard = super::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .map_err(CodexOAuthError::TokenFetchFailed)?;
+        let manager = Self::manager();
+        let accounts = manager
+            .list_accounts()
+            .await
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        manager.clear_auth().await?;
+        Self::unbind_deleted_accounts(&accounts)
+    }
+
+    fn unbind_deleted_accounts(accounts: &[String]) -> Result<(), CodexOAuthError> {
+        if accounts.is_empty() {
+            return Ok(());
+        }
+        crate::Database::init()
+            .and_then(|db| db.unbind_codex_managed_accounts(accounts))
+            .map(|_| ())
+            .map_err(|error| {
+                CodexOAuthError::TokenFetchFailed(format!(
+                    "账号已删除，但 Codex 供应商解绑失败；请编辑供应商重新选择账号: {error}"
+                ))
+            })
     }
 
     pub async fn get_status() -> CodexOAuthStatus {
@@ -292,5 +321,92 @@ impl CodexOAuthService {
                 expires_at_ms,
             )
             .await
+    }
+}
+
+#[cfg(test)]
+mod managed_removal_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn codex_removal_clears_owned_login_and_detaches_only_deleted_accounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let db = crate::Database::init().unwrap();
+        let manager = CodexOAuthService::manager();
+        for account in ["alice", "bob"] {
+            runtime
+                .block_on(manager.add_test_account_with_workspace_and_access_token(
+                    account,
+                    "workspace",
+                    "access",
+                    Some(&crate::codex_config::test_codex_id_token(account)),
+                ))
+                .unwrap();
+            let provider = serde_json::from_value(json!({
+                "id": account, "name": account, "category": "official",
+                "settingsConfig": {"auth": {}, "config": ""},
+                "meta": {"codexOfficial": true, "providerType": "codex_oauth", "authBinding": {
+                    "source": "managed_account", "authProvider": "codex_oauth", "accountId": account
+                }}
+            }))
+            .unwrap();
+            db.save_provider("codex", &provider).unwrap();
+        }
+        let alice = crate::codex_config::codex_managed_oauth_auth_value(
+            "workspace",
+            "access",
+            Some(&crate::codex_config::test_codex_id_token("alice")),
+            "refresh",
+            "2026-11-05T00:00:00Z",
+        );
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &alice)
+            .unwrap();
+        crate::codex_config::record_codex_managed_oauth_live_auth(&alice, "alice").unwrap();
+        runtime
+            .block_on(CodexOAuthService::remove_account("alice"))
+            .unwrap();
+        assert!(!crate::codex_config::get_codex_auth_path().exists());
+        assert!(!crate::codex_config::get_codex_managed_oauth_live_auth_marker_path().exists());
+        let rows = db.get_all_providers("codex").unwrap();
+        assert!(rows["alice"].meta.as_ref().unwrap().auth_binding.is_none());
+        assert!(!rows["alice"].is_codex_oauth());
+        assert_eq!(
+            rows["bob"]
+                .meta
+                .as_ref()
+                .unwrap()
+                .managed_account_id_for("codex_oauth")
+                .as_deref(),
+            Some("bob")
+        );
+        // A native login of another member in the same workspace survives logout.
+        let bob = crate::codex_config::codex_managed_oauth_auth_value(
+            "workspace",
+            "access",
+            Some(&crate::codex_config::test_codex_id_token("bob")),
+            "refresh",
+            "2026-11-05T00:00:00Z",
+        );
+        crate::codex_config::record_codex_managed_oauth_live_auth(&bob, "bob").unwrap();
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &alice)
+            .unwrap();
+        runtime.block_on(CodexOAuthService::clear_auth()).unwrap();
+        assert_eq!(
+            crate::config::read_json_file::<serde_json::Value>(
+                &crate::codex_config::get_codex_auth_path()
+            )
+            .unwrap(),
+            alice
+        );
+        assert!(!crate::codex_config::get_codex_managed_oauth_live_auth_marker_path().exists());
+        assert!(db.get_all_providers("codex").unwrap()["bob"]
+            .meta
+            .as_ref()
+            .unwrap()
+            .auth_binding
+            .is_none());
     }
 }

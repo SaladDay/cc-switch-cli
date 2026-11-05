@@ -516,7 +516,9 @@ impl ProviderAddFormState {
                 }
             }
             AppType::Codex => {
-                if !self.is_codex_official_provider() {
+                if self.is_codex_official_provider() {
+                    fields.push(ProviderAddField::CodexOAuthAccount);
+                } else {
                     fields.push(ProviderAddField::CodexBaseUrl);
                     fields.push(ProviderAddField::CodexApiKey);
                     // No standalone model field (matches upstream): the model is

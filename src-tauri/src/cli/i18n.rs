@@ -4946,6 +4946,15 @@ pub mod texts {
         }
     }
 
+    /// Native Codex keeps its own login when no managed account is bound.
+    pub fn tui_codex_native_login() -> &'static str {
+        if is_chinese() {
+            "使用 Codex 原生登录（不托管）"
+        } else {
+            "Use native Codex login (unmanaged)"
+        }
+    }
+
     pub fn tui_managed_accounts_follow_default() -> &'static str {
         if is_chinese() {
             "跟随默认账号"

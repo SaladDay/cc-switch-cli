@@ -1,3 +1,6 @@
+mod managed_auth;
+pub(crate) use managed_auth::*;
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use std::path::PathBuf;
 
@@ -1204,6 +1207,7 @@ pub(crate) fn write_codex_provider_live_with_catalog_and_db(
         &prepared.config_text,
         &rows,
         None,
+        None,
     )?;
     plan.config.catalog = prepared.model_catalog.is_some();
     crate::services::provider::codex_live::apply(
@@ -1577,6 +1581,7 @@ pub fn write_codex_live_for_provider(
         auth,
         config_text.unwrap_or_default(),
         &[],
+        None,
         None,
     )?;
     crate::services::provider::codex_live::apply(&plan, None, None)
