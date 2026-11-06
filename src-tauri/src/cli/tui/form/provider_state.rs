@@ -505,6 +505,7 @@ impl ProviderAddFormState {
                 } else if !self.is_claude_official_provider() {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
                     fields.push(ProviderAddField::ClaudeApiKey);
+                    fields.push(ProviderAddField::ClaudeAnthropicApiKeyField);
                     fields.push(ProviderAddField::ClaudeAdvancedDivider);
                     fields.push(ProviderAddField::ClaudeApiFormat);
                     fields.push(ProviderAddField::ClaudeModelConfig);
@@ -751,6 +752,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::ClaudeAnthropicApiKeyField
             | ProviderAddField::CodexAnthropicApiKeyField
             | ProviderAddField::CodexImpersonateClaudeCode
             | ProviderAddField::CodexPromptCacheRouting
@@ -823,6 +825,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::ClaudeAnthropicApiKeyField
             | ProviderAddField::CodexAnthropicApiKeyField
             | ProviderAddField::CodexImpersonateClaudeCode
             | ProviderAddField::CodexPromptCacheRouting
