@@ -408,7 +408,7 @@ impl ProviderAddFormState {
                     let auth_value = settings_obj
                         .entry("auth".to_string())
                         .or_insert_with(|| json!({}));
-                    if !auth_value.is_object() {
+                    if self.managed_account_id.is_some() || !auth_value.is_object() {
                         *auth_value = json!({});
                     }
                     settings_obj.remove("modelCatalog");
@@ -1099,6 +1099,18 @@ impl ProviderAddFormState {
             } else {
                 meta_obj.remove("codexFastMode");
             }
+        } else if self.is_codex_official_provider() && self.managed_account_id.is_some() {
+            // Codex official providers bind a managed ChatGPT account that the
+            // switch flow writes to the local login; routing is not required.
+            meta_obj.insert("providerType".to_string(), json!("codex_oauth"));
+            meta_obj.insert(
+                "authBinding".to_string(),
+                json!({
+                    "source": "managed_account",
+                    "authProvider": "codex_oauth",
+                    "accountId": self.managed_account_id.as_deref(),
+                }),
+            );
         } else {
             let is_managed = |value: &str| matches!(value, "codex_oauth" | "xai_oauth");
             if meta_obj

@@ -3482,11 +3482,11 @@ fn model_pricing_seeds_gpt_5_6_family_and_aliases() {
     let conn = db.conn.lock().expect("lock conn");
 
     let expected = [
-        ("gpt-5.6-sol", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6-sol", "4", "20", "0.40", "5"),
         ("gpt-5.6-terra", "2", "12", "0.20", "2.50"),
         ("gpt-5.6-luna", "0.20", "1.20", "0.02", "0.25"),
-        ("gpt-5.6", "5", "30", "0.50", "6.25"),
-        ("gpt-5.6-high", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6", "4", "20", "0.40", "5"),
+        ("gpt-5.6-high", "4", "20", "0.40", "5"),
     ];
 
     for (model_id, input, output, cache_read, cache_write) in expected {
@@ -3519,6 +3519,24 @@ fn model_pricing_seeds_synced_upstream_catalog() {
 
     let expected = [
         ("gpt-6-astra", "10", "50", "1", "12.5"),
+        ("gpt-6.1-sol", "2", "10", "0.10", "2.50"),
+        ("gpt-6.1-terra", "1", "5", "0.05", "1.25"),
+        ("gpt-6-sol", "2", "10", "0.20", "2.50"),
+        ("gpt-6-luna", "0.10", "0.50", "0.01", "0.125"),
+        ("claude-opus-5-5", "4", "20", "0.20", "5"),
+        ("claude-sonnet-5-5", "2", "10", "0.10", "2.50"),
+        ("claude-haiku-5-5", "0.10", "0.50", "0.01", "0.125"),
+        ("gemini-3.8-flash", "0.75", "3.75", "0.075", "0"),
+        ("claude-fable-5-1", "10", "50", "0.25", "12.50"),
+        ("deepseek-flash", "0.3", "1.2", "0.006", "0"),
+        ("deepseek-v4.1-flash", "0.3", "1.2", "0.006", "0"),
+        ("kimi-k3.1-pro", "2.00", "10.00", "0.20", "2.00"),
+        ("minimax-m3.1-flash", "0.15", "0.60", "0.015", "0"),
+        ("glm-5.3", "1.4", "4.4", "0.26", "0"),
+        ("glm-5.3-flash", "0.15", "0.50", "0.03", "0"),
+        ("mimo-v2.6-pro", "0.435", "0.87", "0.0036", "0"),
+        ("mimo-v2.6-flash", "0.14", "0.28", "0.0028", "0"),
+        ("mimo-v2.6-pro-ultraspeed", "4.35", "8.7", "0.036", "0"),
         ("claude-fable-5", "10", "50", "1.00", "12.50"),
         ("claude-opus-4-6", "5", "25", "0.50", "6.25"),
         ("claude-sonnet-4-6", "3", "15", "0.30", "3.75"),
@@ -3566,6 +3584,59 @@ fn model_pricing_seeds_synced_upstream_catalog() {
                 cache_write.to_string(),
             ),
             "unexpected pricing for {model_id}"
+        );
+    }
+}
+
+#[test]
+fn model_pricing_refreshed_presets_resolve_and_preserve_custom_prices() {
+    use crate::proxy::usage::calculator::lookup_model_pricing;
+
+    let db = Database::memory().expect("create memory db");
+    for model in [
+        "claude-fable-5-1",
+        "deepseek-flash",
+        "deepseek-v4.1-flash",
+        "kimi-k3.1-pro",
+        "MiniMax-M3.1-Flash",
+        "glm-5.3",
+        "glm-5.3-flash",
+        "mimo-v2.6-pro",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro-ultraspeed",
+    ] {
+        let decorated = format!("vendor/{model}[1M]");
+        let pricing = lookup_model_pricing(&db, &decorated).expect(model);
+        assert!(pricing.input_cost_per_million > rust_decimal::Decimal::ZERO);
+        assert!(pricing.output_cost_per_million > rust_decimal::Decimal::ZERO);
+
+        let custom = ModelPricingUpdate::new(
+            &model.to_ascii_lowercase(),
+            "Custom",
+            "123",
+            "456",
+            "7",
+            "8",
+        )
+        .unwrap();
+        db.upsert_model_pricing(&custom).unwrap();
+        db.ensure_model_pricing_seeded().unwrap();
+        let pricing = lookup_model_pricing(&db, &decorated).unwrap();
+        assert_eq!(
+            pricing.input_cost_per_million,
+            rust_decimal::Decimal::from(123)
+        );
+        assert_eq!(
+            pricing.output_cost_per_million,
+            rust_decimal::Decimal::from(456)
+        );
+        assert_eq!(
+            pricing.cache_read_cost_per_million,
+            rust_decimal::Decimal::from(7)
+        );
+        assert_eq!(
+            pricing.cache_creation_cost_per_million,
+            rust_decimal::Decimal::from(8)
         );
     }
 }
@@ -3709,7 +3780,11 @@ fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
     {
         let conn = db.conn.lock().expect("lock conn");
         conn.execute(
-            "UPDATE model_pricing SET cache_creation_cost_per_million = '0'
+            "UPDATE model_pricing
+             SET input_cost_per_million = '5',
+                 output_cost_per_million = '30',
+                 cache_read_cost_per_million = '0.50',
+                 cache_creation_cost_per_million = '0'
              WHERE model_id = 'gpt-5.6-sol'",
             [],
         )
@@ -3740,15 +3815,24 @@ fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
         .expect("ensure pricing seeded");
 
     let conn = db.conn.lock().expect("lock conn");
-    let sol_cache_write: String = conn
+    let sol: (String, String, String, String) = conn
         .query_row(
-            "SELECT cache_creation_cost_per_million FROM model_pricing
-             WHERE model_id = 'gpt-5.6-sol'",
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'gpt-5.6-sol'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("query repaired Sol pricing");
-    assert_eq!(sol_cache_write, "6.25");
+    assert_eq!(
+        sol,
+        (
+            "4".to_string(),
+            "20".to_string(),
+            "0.40".to_string(),
+            "5".to_string()
+        )
+    );
 
     let terra: (String, String, String, String) = conn
         .query_row(

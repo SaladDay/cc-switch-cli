@@ -2718,7 +2718,7 @@ fn codex_oauth_backfill_strips_only_injected_context_defaults() {
     let live = json!({
         "env": {
             "ANTHROPIC_MODEL": "gpt-5.6-sol",
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "372000",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "272000",
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "360000"
         }
     });

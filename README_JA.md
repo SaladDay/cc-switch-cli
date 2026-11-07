@@ -79,6 +79,18 @@
   </tr>
   <tr>
     <td width="180">
+      <a href="https://www.ipwo.net/?ref=githubswitchcli">
+        <img src="assets/partners/logos/ipwo.png" alt="IPWO" width="150">
+      </a>
+    </td>
+    <td>
+      本プロジェクトをご支援いただいている <b>IPWO</b> に感謝します！IPWO は無料でお試しいただける住宅用プロキシサービスで、<b>195 以上の国と地域にわたる 9,000 万以上のアクティブな住宅用 IP</b> を提供しています。ローテーション型、固定型、通信量無制限の住宅用プロキシに対応し、HTTP(S) と SOCKS5 を利用できます。<br/>
+      AI ツールの開発、地域をまたぐネットワークアクセス、API のデバッグ、データ収集など、さまざまな地域でのアプリケーション開発に向けて、柔軟な住宅用プロキシの選択肢を提供します。<br/>
+      <a href="https://www.ipwo.net/?ref=githubswitchcli">こちらのリンク</a>から IPWO にアクセスし、クーポンコード <code>0200</code> を入力すると、<b>10% オフ</b>になります。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://ddshub.short.gy/ccscli">
         <img src="assets/partners/logos/DDSHub.png" alt="DDS" width="150">
       </a>

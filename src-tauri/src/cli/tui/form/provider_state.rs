@@ -541,7 +541,11 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::CodexAdvancedDivider);
                     fields.push(ProviderAddField::CodexLocalRouting);
                     fields.push(ProviderAddField::LocalProxySettings);
-                } else if !self.is_codex_official_provider() {
+                } else if self.is_codex_official_provider() {
+                    // Codex official providers bind a managed ChatGPT account
+                    // that switching writes to the local login.
+                    fields.push(ProviderAddField::ManagedAccount);
+                } else {
                     fields.push(ProviderAddField::CodexBaseUrl);
                     fields.push(ProviderAddField::CodexApiKey);
                     // No standalone model field (matches upstream): the model is

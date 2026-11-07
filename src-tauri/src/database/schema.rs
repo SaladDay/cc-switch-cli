@@ -1734,6 +1734,14 @@ impl Database {
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_data = [
+            (
+                "claude-fable-5-1",
+                "Claude Fable 5.1",
+                "10",
+                "50",
+                "0.25",
+                "12.50",
+            ),
             // Claude Fable 5（Opus 之上的新档）
             (
                 "claude-fable-5",
@@ -1751,8 +1759,19 @@ impl Database {
                 "1.00",
                 "12.50",
             ),
+            // Claude Opus 5.5（2026-09-23 发布；缓存读为 0.05x = $0.20，非常规 0.1x）
+            ("claude-opus-5-5", "Claude Opus 5.5", "4", "20", "0.20", "5"),
             // Claude Opus 5（与 Opus 4.8 同价位；fast mode $10/$50 不入表）
             ("claude-opus-5", "Claude Opus 5", "5", "25", "0.50", "6.25"),
+            // Claude Sonnet 5.5（缓存读 0.05x = $0.10，非 Sonnet 5 的 $0.20）
+            (
+                "claude-sonnet-5-5",
+                "Claude Sonnet 5.5",
+                "2",
+                "10",
+                "0.10",
+                "2.50",
+            ),
             // Claude 4.8 系列
             (
                 "claude-opus-4-8",
@@ -1838,6 +1857,16 @@ impl Database {
                 "0.10",
                 "1.25",
             ),
+            // Claude Haiku 5.5（2026-10-07 发布；按提示词长度分档，表内只存
+            // 10 万 token 以内的标准档）
+            (
+                "claude-haiku-5-5",
+                "Claude Haiku 5.5",
+                "0.10",
+                "0.50",
+                "0.01",
+                "0.125",
+            ),
             // Claude 4 系列 (Legacy Models)
             (
                 "claude-opus-4-20250514",
@@ -1883,9 +1912,20 @@ impl Database {
             // GPT-6 Astra 标准价（USD / 1M tokens），与上游一致；不含长上下文和服务档位倍率。
             // https://developers.openai.com/api/docs/models/gpt-6-astra
             ("gpt-6-astra", "GPT-6 Astra", "10", "50", "1", "12.5"),
+            // GPT-6.1 Sol（2026-09 发布）：Standard 短上下文价，cached input 0.05×。
+            // https://developers.openai.com/api/docs/models/gpt-6.1-sol
+            ("gpt-6.1-sol", "GPT-6.1 Sol", "2", "10", "0.10", "2.50"),
+            // GPT-6.1 Terra（2026-10-26 发布）：Standard 短上下文价，cache write 取
+            // 30 分钟档（12 小时档为 2 倍）。
+            // https://developers.openai.com/api/docs/models/gpt-6.1-terra
+            ("gpt-6.1-terra", "GPT-6.1 Terra", "1", "5", "0.05", "1.25"),
+            ("gpt-6-sol", "GPT-6 Sol", "2", "10", "0.20", "2.50"),
+            ("gpt-6-luna", "GPT-6 Luna", "0.10", "0.50", "0.01", "0.125"),
             // GPT-5.6 系列（Sol / Terra / Luna，2026-06 发布）
             // 5.6 家族起 cache write 收 1.25× 输入价（此前 GPT 模型写缓存免费，勿回填旧系列）
-            ("gpt-5.6-sol", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
+            // 2026-09-06 审计：Sol 改促销价 4/20/0.40/5（OpenAI 价页原文"至少持续到
+            // 2026-11-21"），挂牌价 5/30/0.50/6.25。
+            ("gpt-5.6-sol", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
             // 2026-07-30 OpenAI 降价：luna -80%、terra -20%，sol 不变。
             ("gpt-5.6-terra", "GPT-5.6 Terra", "2", "12", "0.20", "2.50"),
             (
@@ -1896,13 +1936,14 @@ impl Database {
                 "0.02",
                 "0.25",
             ),
-            // 裸名 gpt-5.6 是 Sol 的官方别名；effort 后缀与现有 GPT 系列保持一致。
-            ("gpt-5.6", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-low", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-medium", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-high", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-xhigh", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-minimal", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
+            // 裸名 gpt-5.6 是 Sol 的官方别名；effort 后缀与现有 GPT 系列保持一致，
+            // 必须与 sol 同步改价，否则旧价会压过基础行。
+            ("gpt-5.6", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-low", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-medium", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-high", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-xhigh", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-minimal", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
             // GPT-5.5 系列
             ("gpt-5.5", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-low", "GPT-5.5", "5", "30", "0.50", "0"),
@@ -2089,6 +2130,16 @@ impl Database {
             ("gpt-4.1", "GPT-4.1", "2", "8", "0.50", "0"),
             ("gpt-4.1-mini", "GPT-4.1 Mini", "0.40", "1.60", "0.10", "0"),
             ("gpt-4.1-nano", "GPT-4.1 Nano", "0.10", "0.40", "0.025", "0"),
+            // Gemini 3.8 Flash introduction pricing, valid through 2026-12-31;
+            // list price from 2027-01-01 is 1.50/7.50/0.15.
+            (
+                "gemini-3.8-flash",
+                "Gemini 3.8 Flash",
+                "0.75",
+                "3.75",
+                "0.075",
+                "0",
+            ),
             // Gemini 3.7 Flash introduction pricing, valid through 2026-12-31.
             (
                 "gemini-3.7-flash",
@@ -2295,6 +2346,22 @@ impl Database {
                 "0.0056",
                 "0",
             ),
+            (
+                "deepseek-flash",
+                "DeepSeek V4.1 Flash",
+                "0.3",
+                "1.2",
+                "0.006",
+                "0",
+            ),
+            (
+                "deepseek-v4.1-flash",
+                "DeepSeek V4.1 Flash",
+                "0.3",
+                "1.2",
+                "0.006",
+                "0",
+            ),
             // DeepSeek 系列
             (
                 "deepseek-v3.2",
@@ -2392,6 +2459,14 @@ impl Database {
                 "0",
             ),
             ("kimi-k3", "Kimi K3", "3.00", "15.00", "0.30", "0"),
+            (
+                "kimi-k3.1-pro",
+                "Kimi K3.1 Pro",
+                "2.00",
+                "10.00",
+                "0.20",
+                "2.00",
+            ),
             // Kimi For Coding 套餐里 K3 的裸名（无 kimi- 前缀），同标准 list 价
             ("k3", "Kimi K3", "3.00", "15.00", "0.30", "0"),
             // 腾讯混元 (Tencent Hunyuan)（官方 CNY 1/4/0.25 按 1 USD ≈ 7.14 折算；Hy3 阶梯计价取最低档）
@@ -2435,6 +2510,14 @@ impl Database {
             ),
             // MiniMax 官方 PAYG 标准档（≤512K）；长上下文阶梯价格暂不由静态目录表达。
             ("minimax-m3", "MiniMax M3", "0.30", "1.20", "0.06", "0"),
+            (
+                "minimax-m3.1-flash",
+                "MiniMax M3.1 Flash",
+                "0.15",
+                "0.60",
+                "0.015",
+                "0",
+            ),
             // GLM (智谱)
             ("glm-4.7", "GLM-4.7", "0.6", "2.2", "0.11", "0"),
             ("glm-4.6", "GLM-4.6", "0.6", "2.2", "0.11", "0"),
@@ -2443,6 +2526,15 @@ impl Database {
             ("glm-5.2", "GLM-5.2", "1.4", "4.4", "0.26", "0"),
             ("glm-5-turbo", "GLM-5-Turbo", "1.2", "4", "0.24", "0"),
             ("glm-5v-turbo", "GLM-5V-Turbo", "1.2", "4", "0.24", "0"),
+            ("glm-5.3", "GLM-5.3", "1.4", "4.4", "0.26", "0"),
+            (
+                "glm-5.3-flash",
+                "GLM-5.3-Flash",
+                "0.15",
+                "0.50",
+                "0.03",
+                "0",
+            ),
             // MiMo (小米)
             (
                 "mimo-v2-flash",
@@ -2460,6 +2552,30 @@ impl Database {
                 "0.435",
                 "0.87",
                 "0.0036",
+                "0",
+            ),
+            (
+                "mimo-v2.6-pro",
+                "MiMo V2.6 Pro",
+                "0.435",
+                "0.87",
+                "0.0036",
+                "0",
+            ),
+            (
+                "mimo-v2.6-flash",
+                "MiMo V2.6 Flash",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+            ),
+            (
+                "mimo-v2.6-pro-ultraspeed",
+                "MiMo V2.6 Pro UltraSpeed",
+                "4.35",
+                "8.7",
+                "0.036",
                 "0",
             ),
             // Qwen 系列 (阿里巴巴)
@@ -2779,6 +2895,92 @@ impl Database {
                 "30",
                 "0.50",
                 "0",
+            ),
+            // GPT-5.6 Sol 促销价 4/20/0.40/5（至少到 2026-11-21）；裸名与 effort
+            // 后缀行同步，否则旧价会压过基础行。
+            (
+                "gpt-5.6-sol",
+                "GPT-5.6 Sol",
+                "4",
+                "20",
+                "0.40",
+                "5",
+                "5",
+                "30",
+                "0.50",
+                "6.25",
+            ),
+            (
+                "gpt-5.6",
+                "GPT-5.6 Sol",
+                "4",
+                "20",
+                "0.40",
+                "5",
+                "5",
+                "30",
+                "0.50",
+                "6.25",
+            ),
+            (
+                "gpt-5.6-low",
+                "GPT-5.6 Sol",
+                "4",
+                "20",
+                "0.40",
+                "5",
+                "5",
+                "30",
+                "0.50",
+                "6.25",
+            ),
+            (
+                "gpt-5.6-medium",
+                "GPT-5.6 Sol",
+                "4",
+                "20",
+                "0.40",
+                "5",
+                "5",
+                "30",
+                "0.50",
+                "6.25",
+            ),
+            (
+                "gpt-5.6-high",
+                "GPT-5.6 Sol",
+                "4",
+                "20",
+                "0.40",
+                "5",
+                "5",
+                "30",
+                "0.50",
+                "6.25",
+            ),
+            (
+                "gpt-5.6-xhigh",
+                "GPT-5.6 Sol",
+                "4",
+                "20",
+                "0.40",
+                "5",
+                "5",
+                "30",
+                "0.50",
+                "6.25",
+            ),
+            (
+                "gpt-5.6-minimal",
+                "GPT-5.6 Sol",
+                "4",
+                "20",
+                "0.40",
+                "5",
+                "5",
+                "30",
+                "0.50",
+                "6.25",
             ),
             (
                 "gpt-5.6-terra",

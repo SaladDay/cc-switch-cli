@@ -223,7 +223,13 @@ fn managed_account_for_display(provider: &super::form::ProviderAddFormState) -> 
         .as_deref()
         .map(bounded_trimmed_text_for_display)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string())
+        .unwrap_or_else(|| {
+            if provider.is_codex_official_provider() {
+                texts::tui_codex_native_login().to_string()
+            } else {
+                texts::tui_managed_accounts_follow_default().to_string()
+            }
+        })
 }
 
 fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option<Value> {

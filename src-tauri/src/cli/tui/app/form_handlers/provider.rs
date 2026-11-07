@@ -604,7 +604,14 @@ impl App {
                     let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
                         return Action::None;
                     };
-                    let Some(auth_provider) = provider.managed_auth_provider() else {
+                    // Codex official providers bind a ChatGPT account that is
+                    // written to the local login; managed templates use their
+                    // own login type.
+                    let auth_provider = if provider.is_codex_official_provider() {
+                        "codex_oauth"
+                    } else if let Some(auth_provider) = provider.managed_auth_provider() {
+                        auth_provider
+                    } else {
                         return Action::None;
                     };
                     let selected = provider.managed_account_id.clone();

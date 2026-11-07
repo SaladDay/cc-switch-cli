@@ -2349,10 +2349,14 @@ mod tests {
             &mut prompt_result,
         )
         .expect("build Codex settings");
+        let default_model = format!(
+            "model = \"{}\"",
+            crate::provider_preset_models::CODEX_DEFAULT_MODEL
+        );
         assert!(codex["config"]
             .as_str()
             .expect("Codex config should be TOML")
-            .contains("model = \"gpt-5.6-sol\""));
+            .contains(&default_model));
 
         let gemini = build_add_settings_config(
             &AppType::Gemini,

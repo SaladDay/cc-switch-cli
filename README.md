@@ -76,6 +76,18 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
   </tr>
   <tr>
     <td width="180">
+      <a href="https://www.ipwo.net/?ref=githubswitchcli">
+        <img src="assets/partners/logos/ipwo.png" alt="IPWO" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>IPWO</b> for sponsoring this project! IPWO offers a free trial and access to over <b>90 million active residential IPs across 195+ countries and regions</b>. It supports rotating, static, and unlimited-bandwidth residential proxies, with HTTP(S) and SOCKS5 compatibility.<br/>
+      From AI tool development and cross-region network access to API debugging and data collection, IPWO gives developers flexible residential proxy options for applications in different regions.<br/>
+      Visit <a href="https://www.ipwo.net/?ref=githubswitchcli">IPWO</a> and use promo code <code>0200</code> for <b>10% off</b>.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://ddshub.short.gy/ccscli">
         <img src="assets/partners/logos/DDSHub.png" alt="DDS" width="150">
       </a>

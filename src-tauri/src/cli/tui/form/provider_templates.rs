@@ -4,9 +4,9 @@ use crate::provider_preset_builtin::{
     builtin_provider_preset_value, with_opencode_go_usage_script, BuiltinProviderPresetId,
 };
 use crate::provider_preset_models::{
-    codex_oauth_claude_env, sponsor_hermes_models, sponsor_model_family, sponsor_openclaw_models,
-    sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL, CODEX_OAUTH_FAST_MODEL,
-    GEMINI_DEFAULT_MODEL,
+    codex_oauth_claude_env, sponsor_codex_model, sponsor_hermes_models, sponsor_model_family,
+    sponsor_openclaw_models, sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL,
+    CODEX_OAUTH_FAST_MODEL, GEMINI_DEFAULT_MODEL,
 };
 use crate::provider_preset_pi::{
     PiProviderPreset, PI_BUILTIN_PROVIDER_PRESETS, PI_SPONSOR_PROVIDER_PRESETS,
@@ -873,6 +873,7 @@ impl ProviderAddFormState {
             AppType::Codex => {
                 self.reset_codex_template_state();
                 self.codex_base_url.set(preset.codex_base_url);
+                self.codex_model.set(sponsor_codex_model(preset.id));
                 if preset.id == "patewayai" {
                     self.extra["settingsConfig"] = json!({
                         "config": crate::codex_config::build_codex_third_party_config_toml(
@@ -902,7 +903,9 @@ impl ProviderAddFormState {
                         SponsorModelFamily::Claude | SponsorModelFamily::RunApiClaude => {
                             "@ai-sdk/anthropic"
                         }
-                        SponsorModelFamily::Gpt => "@ai-sdk/openai-compatible",
+                        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
+                            "@ai-sdk/openai-compatible"
+                        }
                     });
                     self.opencode_api_key.set("");
                     self.opencode_base_url.set(preset.opencode_base_url);
@@ -932,7 +935,9 @@ impl ProviderAddFormState {
                         SponsorModelFamily::Claude | SponsorModelFamily::RunApiClaude => {
                             "anthropic_messages"
                         }
-                        SponsorModelFamily::Gpt => HERMES_DEFAULT_API_MODE,
+                        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
+                            HERMES_DEFAULT_API_MODE
+                        }
                     }
                     .to_string();
                     self.hermes_models = sponsor_hermes_models(family);
@@ -953,7 +958,9 @@ impl ProviderAddFormState {
                         SponsorModelFamily::Claude | SponsorModelFamily::RunApiClaude => {
                             "anthropic-messages"
                         }
-                        SponsorModelFamily::Gpt => OPENCLAW_DEFAULT_API_PROTOCOL,
+                        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
+                            OPENCLAW_DEFAULT_API_PROTOCOL
+                        }
                     });
                     self.openclaw_user_agent = false;
                     self.openclaw_models = sponsor_openclaw_models(family);

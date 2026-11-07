@@ -397,7 +397,8 @@ impl App {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
             return;
         };
-        if provider.managed_auth_provider() == Some(auth_provider)
+        if (provider.managed_auth_provider() == Some(auth_provider)
+            || (provider.is_codex_official_provider() && auth_provider == "codex_oauth"))
             && provider.managed_account_id.as_deref() == Some(account_id)
         {
             provider.set_managed_account_id(None);

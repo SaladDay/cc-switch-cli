@@ -1219,16 +1219,20 @@ wire_api = "chat"
         .expect("OpenCode Go preset");
         let provider: Provider = serde_json::from_value(value).expect("valid provider preset");
 
-        let glm = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "GLM-5.2" }))
+        let glm = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "glm-5.3" }))
             .expect("GLM reasoning config");
         assert_eq!(
             glm.effort_levels,
-            Some(vec!["high".to_string(), "max".to_string()])
+            Some(vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
         );
 
         let flash = resolve_codex_chat_reasoning_config(
             &provider,
-            &json!({ "model": "deepseek-v4-flash" }),
+            &json!({ "model": "deepseek-v4.1-flash" }),
         )
         .expect("DeepSeek reasoning config");
         assert_eq!(
@@ -1240,8 +1244,9 @@ wire_api = "chat"
             ])
         );
 
-        let toggle = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "glm-5.1" }))
-            .expect("toggle-only reasoning config");
+        let toggle =
+            resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "mimo-v2.6-pro" }))
+                .expect("toggle-only reasoning config");
         assert!(toggle.effort_levels.is_none());
     }
 
