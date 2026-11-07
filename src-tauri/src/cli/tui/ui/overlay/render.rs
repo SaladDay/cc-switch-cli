@@ -135,15 +135,16 @@ pub(crate) fn render_overlay(
             *selected,
         ),
         Overlay::ManagedAccountPicker {
+            auth_provider,
             selected,
             binding,
             selected_account_id,
-            ..
         } => super::pickers::render_managed_account_picker_overlay(
             frame,
             app,
             content_area,
             theme,
+            auth_provider,
             *selected,
             *binding,
             selected_account_id.as_deref(),

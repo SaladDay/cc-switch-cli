@@ -25,6 +25,7 @@ pub enum LocalTool {
     Claude,
     Codex,
     Gemini,
+    GrokBuild,
     OpenCode,
     Hermes,
     OpenClaw,
@@ -32,10 +33,11 @@ pub enum LocalTool {
 }
 
 impl LocalTool {
-    pub const ALL: [LocalTool; 7] = [
+    pub const ALL: [LocalTool; 8] = [
         LocalTool::Claude,
         LocalTool::Codex,
         LocalTool::Gemini,
+        LocalTool::GrokBuild,
         LocalTool::OpenCode,
         LocalTool::Hermes,
         LocalTool::OpenClaw,
@@ -51,6 +53,7 @@ impl LocalTool {
             LocalTool::Claude => "Claude",
             LocalTool::Codex => "Codex",
             LocalTool::Gemini => "Gemini",
+            LocalTool::GrokBuild => "Grok Build",
             LocalTool::OpenCode => "OpenCode",
             LocalTool::Hermes => "Hermes",
             LocalTool::OpenClaw => "OpenClaw",
@@ -63,6 +66,7 @@ impl LocalTool {
             LocalTool::Claude => "claude",
             LocalTool::Codex => "codex",
             LocalTool::Gemini => "gemini",
+            LocalTool::GrokBuild => "grok",
             LocalTool::OpenCode => "opencode",
             LocalTool::Hermes => "hermes",
             LocalTool::OpenClaw => "openclaw",
@@ -75,6 +79,7 @@ impl LocalTool {
             LocalTool::Claude => &["--version", "version"],
             LocalTool::Codex => &["--version"],
             LocalTool::Gemini => &["--version", "-v"],
+            LocalTool::GrokBuild => &["--version"],
             LocalTool::OpenCode => &["--version", "version"],
             LocalTool::Hermes => &["--version", "version"],
             LocalTool::OpenClaw => &["--version", "version"],
@@ -97,11 +102,33 @@ impl LocalTool {
             .unwrap_or(Self::ALL.len())
     }
 
+    /// PATH 之外的已知安装位置。
+    ///
+    /// Grok 官方安装器把启动器写到 `~/.grok/bin`，不一定在 PATH 上；其余工具
+    /// 均依赖 PATH 查找。
+    fn fallback_executable(self) -> Option<std::path::PathBuf> {
+        match self {
+            LocalTool::GrokBuild => Some(
+                crate::grok_config::get_grok_config_dir()
+                    .join("bin")
+                    .join("grok"),
+            ),
+            _ => None,
+        }
+    }
+
+    fn resolve_executable(self) -> Option<std::path::PathBuf> {
+        which::which(self.binary_name())
+            .ok()
+            .or_else(|| self.fallback_executable().filter(|path| path.is_file()))
+    }
+
     pub fn from_app_type(app_type: &AppType) -> Self {
         match app_type {
             AppType::Claude => LocalTool::Claude,
             AppType::Codex => LocalTool::Codex,
             AppType::Gemini => LocalTool::Gemini,
+            AppType::GrokBuild => LocalTool::GrokBuild,
             AppType::OpenCode => LocalTool::OpenCode,
             AppType::Hermes => LocalTool::Hermes,
             AppType::OpenClaw => LocalTool::OpenClaw,
@@ -221,11 +248,11 @@ async fn check_local_environment_progressive_with<F, P, ProbeFuture>(
 
 pub fn check_tool_installed(app_type: &AppType) -> bool {
     let tool = LocalTool::from_app_type(app_type);
-    is_tool_installed(tool.binary_name())
+    is_tool_installed(tool)
 }
 
-fn is_tool_installed(bin: &str) -> bool {
-    which::which(bin).is_ok()
+fn is_tool_installed(tool: LocalTool) -> bool {
+    tool.resolve_executable().is_some()
 }
 
 async fn check_tool(
@@ -236,9 +263,9 @@ async fn check_tool(
         return None;
     }
 
-    let executable = match which::which(tool.binary_name()) {
-        Ok(path) => path,
-        Err(_) => {
+    let executable = match tool.resolve_executable() {
+        Some(path) => path,
+        None => {
             return Some(ToolCheckResult {
                 tool,
                 display_name: tool.display_name(),
@@ -859,8 +886,18 @@ mod tests {
 
         assert_eq!(
             display_names,
-            vec!["Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw", "Pi"]
+            vec![
+                "Claude",
+                "Codex",
+                "Gemini",
+                "Grok Build",
+                "OpenCode",
+                "Hermes",
+                "OpenClaw",
+                "Pi",
+            ]
         );
+        assert_eq!(LocalTool::GrokBuild.binary_name(), "grok");
         assert_eq!(LocalTool::Hermes.binary_name(), "hermes");
         assert_eq!(LocalTool::OpenClaw.binary_name(), "openclaw");
         assert_eq!(LocalTool::Pi.binary_name(), "pi");
@@ -954,9 +991,8 @@ mod tests {
         let (temp_dir, tool_path) = fake_tool("#!/bin/sh\nprintf ran > \"$0.executed\"\n");
         let marker_path = temp_dir.path().join("fake-tool.executed");
 
-        assert!(is_tool_installed(
-            tool_path.to_str().expect("fake tool path should be utf-8")
-        ));
+        let fake_path = tool_path.to_str().expect("fake tool path should be utf-8");
+        assert!(which::which(fake_path).is_ok());
         assert!(
             !marker_path.exists(),
             "visibility detection must not execute version commands"

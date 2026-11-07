@@ -43,6 +43,16 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         icon_color: "#4285F4",
         settings_config_json: r#"{"env":{},"config":{}}"#,
     },
+    OfficialProviderSeed {
+        id: "grokbuild-official",
+        app_type: AppType::GrokBuild,
+        name: "Grok Official",
+        website_url: "https://x.ai/grok",
+        icon: "grok",
+        icon_color: "currentColor",
+        // 空 config = 不写自定义模型表，Grok CLI 回落到自带的 xAI OAuth 登录
+        settings_config_json: r#"{"config":""}"#,
+    },
 ];
 
 pub(crate) fn is_official_seed_id(id: &str) -> bool {

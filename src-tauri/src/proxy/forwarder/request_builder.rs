@@ -93,6 +93,9 @@ struct CopilotOptimization {
 }
 
 fn provider_uses_full_url(provider: &Provider) -> bool {
+    if provider.is_xai_oauth() {
+        return false;
+    }
     provider
         .meta
         .as_ref()
@@ -146,11 +149,12 @@ impl RequestForwarder {
         let is_copilot = is_claude_request
             && (provider.is_github_copilot() || base_url.contains("githubcopilot.com"));
         let (mut mapped_body, _, _) = apply_model_mapping(body.clone(), provider);
+        // Grok Build 接管后 live 固定为 Responses；按供应商的 api_backend 转换上游协议。
         let codex_responses_to_chat = should_convert_codex_responses_to_chat(provider, endpoint)
-            && matches!(app_type, AppType::Codex);
+            && matches!(app_type, AppType::Codex | AppType::GrokBuild);
         let codex_responses_to_anthropic =
             should_convert_codex_responses_to_anthropic(provider, endpoint)
-                && matches!(app_type, AppType::Codex);
+                && matches!(app_type, AppType::Codex | AppType::GrokBuild);
 
         if is_claude_request && self.optimizer_config.enabled && is_bedrock_provider(provider) {
             if self.optimizer_config.thinking_optimizer {
@@ -281,7 +285,7 @@ impl RequestForwarder {
         }
 
         let mut codex_anthropic_one_m = false;
-        let request_body = if codex_responses_to_chat {
+        let mut request_body = if codex_responses_to_chat {
             let explicit_prompt_cache_key = mapped_body
                 .get("prompt_cache_key")
                 .and_then(|value| value.as_str())
@@ -356,6 +360,29 @@ impl RequestForwarder {
         } else {
             mapped_body
         };
+
+        // Native Responses passthrough to a strict third-party gateway (xAI):
+        // flatten Codex's private `namespace`/plugin tool declarations into
+        // top-level function tools, then scrub OpenAI-backend-private fields
+        // xAI's strict serde parser rejects. Only fires on the managed xAI
+        // OAuth path; the Chat/Anthropic conversions already unwrap
+        // namespaces on their own.
+        if !codex_responses_to_chat
+            && !codex_responses_to_anthropic
+            && super::super::providers::rewrites_codex_requests_for_xai(app_type, provider)
+        {
+            if super::super::providers::transform_codex_responses_namespace::flatten_request_namespaces(
+                &mut request_body,
+            )? {
+                log::debug!(
+                    "[Codex] Flattened namespace tools for native Responses upstream (provider={})",
+                    provider.id
+                );
+            }
+            super::super::providers::transform_codex_responses_xai_sanitize::sanitize_xai_responses_request(
+                &mut request_body,
+            );
+        }
         let mut filtered_body = prepare_upstream_request_body(request_body);
         if !is_copilot {
             if let Some(overrides) = provider
@@ -674,6 +701,36 @@ async fn build_request(
                 Err(error) => {
                     return Err(ProxyError::AuthError(format!(
                         "Codex OAuth 认证失败: {error}"
+                    )));
+                }
+            }
+        } else if auth.strategy == AuthStrategy::XaiOAuth {
+            // xAI OAuth: resolve a managed account token immediately before
+            // sending. Invalid refresh credentials persist as requiring re-auth.
+            let account_id = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.managed_account_id_for("xai_oauth"));
+            let token_result = match &account_id {
+                Some(id) => {
+                    crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                        .get_valid_token_for_account(id)
+                        .await
+                }
+                None => {
+                    crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                        .get_valid_token()
+                        .await
+                }
+            };
+            match token_result {
+                Ok(token) => {
+                    effective_auth.api_key = token;
+                    request = adapter.add_auth_headers(request, &effective_auth);
+                }
+                Err(error) => {
+                    return Err(ProxyError::AuthError(format!(
+                        "xAI OAuth 认证失败: {error}"
                     )));
                 }
             }

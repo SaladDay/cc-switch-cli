@@ -76,6 +76,8 @@ pub struct TakeoverFlags {
     pub claude: bool,
     pub codex: bool,
     pub gemini: bool,
+    #[serde(default)]
+    pub grokbuild: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -231,6 +233,7 @@ mod tests {
                 claude: true,
                 codex: false,
                 gemini: true,
+                grokbuild: false,
             },
             restart_count: 2,
             last_restart_at: Some("2026-05-15T12:34:56Z".to_string()),
