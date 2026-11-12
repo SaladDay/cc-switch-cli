@@ -480,14 +480,27 @@ mod tests {
         let mut archive = zip_test_dir(&temp.path().join("skills"), &temp.path().join("s.zip"));
         assert_eq!(archive.len(), 5);
         for name in ["00-alias.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
+            let mut entry = archive.by_name(&format!("example/{name}")).unwrap();
             let mut content = String::new();
-            archive
-                .by_name(&format!("example/{name}"))
-                .unwrap()
-                .read_to_string(&mut content)
-                .unwrap();
+            entry.read_to_string(&mut content).unwrap();
             assert_eq!(content, "shared instructions");
+            assert!(!entry.is_symlink());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_skips_file_symlinks_outside_root() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("skills");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("inside.md"), "included").unwrap();
+        fs::write(temp.path().join("outside.md"), "excluded").unwrap();
+        std::os::unix::fs::symlink("../outside.md", source.join("outside.md")).unwrap();
+
+        let mut archive = zip_test_dir(&source, &temp.path().join("s.zip"));
+        assert_eq!(archive.len(), 1);
+        assert_eq!(archive.by_index(0).unwrap().name(), "inside.md");
     }
 
     #[cfg(unix)]
@@ -504,7 +517,13 @@ mod tests {
         let mut archive = zip_test_dir(&source, &temp.path().join("s.zip"));
         assert_eq!(archive.len(), 2);
         assert!(archive.by_name("target/").unwrap().is_dir());
-        assert!(archive.by_name("target/AGENTS.md").is_ok());
+        let mut content = String::new();
+        archive
+            .by_name("target/AGENTS.md")
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+        assert_eq!(content, "instructions");
     }
 
     #[test]
