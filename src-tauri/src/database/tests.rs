@@ -314,12 +314,14 @@ fn schema_migration_sets_user_version_when_missing() {
 fn seed_upstream_mcp_skills(conn: &Connection, version: i32) {
     conn.execute_batch("DROP TABLE IF EXISTS mcp_servers; DROP TABLE IF EXISTS skills;")
         .expect("remove CLI tables");
-    conn.execute_batch(include_str!("fixtures/upstream_v24_mcp_skills.sql"))
+    conn.execute_batch(include_str!("fixtures/upstream_v26_mcp_skills.sql"))
         .expect("create upstream tables");
     for (introduced, column) in [
         (21, "enabled_agy"),
         (22, "enabled_kimi"),
         (24, "enabled_dsh"),
+        (25, "enabled_copilot"),
+        (26, "enabled_workbuddy"),
     ] {
         if version < introduced {
             for table in ["mcp_servers", "skills"] {
@@ -365,6 +367,8 @@ fn seed_upstream_mcp_skills(conn: &Connection, version: i32) {
         (21, "enabled_agy"),
         (22, "enabled_kimi"),
         (24, "enabled_dsh"),
+        (25, "enabled_copilot"),
+        (26, "enabled_workbuddy"),
     ] {
         if version >= introduced {
             for table in ["mcp_servers", "skills"] {
@@ -393,6 +397,10 @@ fn assert_upstream_mcp_skills(conn: &Connection, original_version: i32) {
         ("mcp_servers", "enabled_omp"),
         ("mcp_servers", "enabled_dsh"),
         ("skills", "enabled_dsh"),
+        ("mcp_servers", "enabled_copilot"),
+        ("skills", "enabled_copilot"),
+        ("mcp_servers", "enabled_workbuddy"),
+        ("skills", "enabled_workbuddy"),
     ] {
         let info = get_column_info(conn, table, column);
         assert_eq!(info.r#type, "BOOLEAN");
@@ -411,6 +419,8 @@ fn assert_upstream_mcp_skills(conn: &Connection, original_version: i32) {
             "enabled_kimi" => 22,
             "enabled_omp" => 23,
             "enabled_dsh" => 24,
+            "enabled_copilot" => 25,
+            "enabled_workbuddy" => 26,
             _ => 19,
         };
         assert_eq!(flags, (1, i64::from(original_version >= introduced)));
@@ -418,8 +428,8 @@ fn assert_upstream_mcp_skills(conn: &Connection, original_version: i32) {
 }
 
 #[test]
-fn schema_migration_upstream_v18_through_v24_preserves_data_and_is_idempotent() {
-    for version in 18..=24 {
+fn schema_migration_upstream_v18_through_v26_preserves_data_and_is_idempotent() {
+    for version in 18..=26 {
         let conn = Connection::open_in_memory().unwrap();
         seed_upstream_mcp_skills(&conn, version);
         Database::apply_schema_migrations_on_conn(&conn).expect("migrate upstream schema");
@@ -431,14 +441,49 @@ fn schema_migration_upstream_v18_through_v24_preserves_data_and_is_idempotent() 
     let conn = Connection::open_in_memory().unwrap();
     Database::set_user_version(&conn, 18).unwrap();
     Database::apply_schema_migrations_on_conn(&conn).expect("migrate absent tables");
-    seed_upstream_mcp_skills(&conn, 24);
+    seed_upstream_mcp_skills(&conn, 26);
     Database::set_user_version(&conn, 18).unwrap();
     Database::apply_schema_migrations_on_conn(&conn).expect("migrate existing columns");
-    assert_upstream_mcp_skills(&conn, 24);
+    assert_upstream_mcp_skills(&conn, 26);
 }
 
 #[test]
-fn schema_create_tables_matches_upstream_v24_flags() {
+fn schema_migration_repairs_legacy_workbuddy_versions() {
+    for version in 23..=25 {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_upstream_mcp_skills(&conn, 26);
+        conn.execute_batch("ALTER TABLE mcp_servers DROP COLUMN enabled_omp;")
+            .unwrap();
+        for table in ["mcp_servers", "skills"] {
+            for column in ["enabled_dsh", "enabled_copilot"] {
+                conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))
+                    .unwrap();
+            }
+        }
+        Database::set_user_version(&conn, version).unwrap();
+        for _ in 0..2 {
+            Database::apply_schema_migrations_on_conn(&conn).unwrap();
+            assert_eq!(Database::get_user_version(&conn).unwrap(), 26);
+            for table in ["mcp_servers", "skills"] {
+                let flags: (i64, i64, i64, i64) = conn
+                    .query_row(
+                        &format!("SELECT enabled_codex, enabled_dsh, enabled_copilot, enabled_workbuddy FROM {table}"),
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .unwrap();
+                assert_eq!(flags, (1, 0, 0, 1), "legacy v{version}: {table}");
+            }
+            let omp: i64 = conn
+                .query_row("SELECT enabled_omp FROM mcp_servers", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(omp, 0);
+        }
+    }
+}
+
+#[test]
+fn schema_create_tables_matches_upstream_v26_flags() {
     let conn = Connection::open_in_memory().unwrap();
     Database::create_tables_on_conn(&conn).unwrap();
     for (table, column) in [
@@ -452,6 +497,10 @@ fn schema_create_tables_matches_upstream_v24_flags() {
         ("mcp_servers", "enabled_omp"),
         ("mcp_servers", "enabled_dsh"),
         ("skills", "enabled_dsh"),
+        ("mcp_servers", "enabled_copilot"),
+        ("skills", "enabled_copilot"),
+        ("mcp_servers", "enabled_workbuddy"),
+        ("skills", "enabled_workbuddy"),
     ] {
         let info = get_column_info(&conn, table, column);
         assert_eq!(info.r#type, "BOOLEAN");
@@ -464,12 +513,12 @@ fn schema_create_tables_matches_upstream_v24_flags() {
 }
 
 #[test]
-fn init_and_sync_import_accept_upstream_v18_through_v24() {
+fn init_and_sync_import_accept_upstream_v18_through_v26() {
     let home = tempfile::tempdir().unwrap();
     let _env = crate::test_support::TestEnvGuard::isolated(home.path());
     let config_dir = home.path().join(".cc-switch");
     std::fs::create_dir_all(&config_dir).unwrap();
-    for version in 18..=24 {
+    for version in 18..=26 {
         let conn = Connection::open(config_dir.join("cc-switch.db")).unwrap();
         Database::create_tables_on_conn(&conn).unwrap();
         seed_upstream_mcp_skills(&conn, version);
@@ -2407,8 +2456,8 @@ fn mcp_dao_roundtrip_preserves_upstream_enablement() {
                 id, name, server_config, tags,
                 enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild,
                 enabled_opencode, enabled_hermes, enabled_mcode, enabled_pi, enabled_agy, enabled_kimi,
-                enabled_omp, enabled_dsh
-            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1)",
+                enabled_omp, enabled_dsh, enabled_copilot, enabled_workbuddy
+            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1)",
             params![
                 "remote-hermes",
                 "Remote Hermes",
@@ -2449,19 +2498,19 @@ fn mcp_dao_roundtrip_preserves_upstream_enablement() {
         (1, 1, 1, 1, 1, 1),
         "save should preserve hidden flags"
     );
-    let upstream_v23_v24_flags: (i64, i64) = {
+    let upstream_flags: (i64, i64, i64, i64) = {
         let conn = db.conn.lock().expect("lock conn");
         conn.query_row(
-            "SELECT enabled_omp, enabled_dsh FROM mcp_servers WHERE id = 'remote-hermes'",
+            "SELECT enabled_omp, enabled_dsh, enabled_copilot, enabled_workbuddy FROM mcp_servers WHERE id = 'remote-hermes'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .expect("read v23/v24 enablement after save")
+        .expect("read upstream enablement after save")
     };
     assert_eq!(
-        upstream_v23_v24_flags,
-        (1, 1),
-        "save should preserve v23/v24 flags"
+        upstream_flags,
+        (1, 1, 1, 1),
+        "save should preserve upstream flags"
     );
 }
 
@@ -2472,8 +2521,8 @@ fn skill_dao_save_preserves_upstream_enablement() {
         let conn = db.conn.lock().expect("lock conn");
         conn.execute(
             "INSERT INTO skills (
-                id, name, directory, enabled_grokbuild, enabled_hermes, enabled_mcode, enabled_agy, enabled_kimi, enabled_dsh, installed_at
-             ) VALUES ('remote-skill', 'Remote Skill', 'remote-skill', 1, 1, 1, 1, 1, 1, 42)",
+                id, name, directory, enabled_grokbuild, enabled_hermes, enabled_mcode, enabled_agy, enabled_kimi, enabled_dsh, enabled_copilot, enabled_workbuddy, installed_at
+             ) VALUES ('remote-skill', 'Remote Skill', 'remote-skill', 1, 1, 1, 1, 1, 1, 1, 1, 42)",
             [],
         )
         .expect("seed grokbuild-enabled Skill");
@@ -2500,16 +2549,20 @@ fn skill_dao_save_preserves_upstream_enablement() {
         (1, 1, 1, 1, 1),
         "save should preserve hidden flags"
     );
-    let enabled_dsh: i64 = {
+    let upstream_flags: (i64, i64, i64) = {
         let conn = db.conn.lock().expect("lock conn");
         conn.query_row(
-            "SELECT enabled_dsh FROM skills WHERE id = 'remote-skill'",
+            "SELECT enabled_dsh, enabled_copilot, enabled_workbuddy FROM skills WHERE id = 'remote-skill'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .expect("read v24 enablement after save")
+        .expect("read upstream enablement after save")
     };
-    assert_eq!(enabled_dsh, 1, "save should preserve v24 flags");
+    assert_eq!(
+        upstream_flags,
+        (1, 1, 1),
+        "save should preserve upstream flags"
+    );
 }
 
 #[test]

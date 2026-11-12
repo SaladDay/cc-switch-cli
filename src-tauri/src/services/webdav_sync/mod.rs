@@ -859,6 +859,10 @@ mod tests {
             ("mcp_servers", "enabled_omp"),
             ("mcp_servers", "enabled_dsh"),
             ("skills", "enabled_dsh"),
+            ("mcp_servers", "enabled_copilot"),
+            ("skills", "enabled_copilot"),
+            ("mcp_servers", "enabled_workbuddy"),
+            ("skills", "enabled_workbuddy"),
             ("session_log_sync", "parser_state"),
         ] {
             assert!(
