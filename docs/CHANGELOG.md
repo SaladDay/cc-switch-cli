@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Database / Compatibility**: Support database schemas 23 through 26 from upstream, fixing WebDAV/S3 restore failures with `Remote database schema is too new (24); this app supports up to 22`. Align the migration steps, MCP/Skills enablement columns, and session-log parser state with the shared schema while preserving upstream flags and parser state through upgrades, edits, runtime cursor updates, and sync round-trips.
+
+### Upgrade notes
+
+- Databases newer than schema 26 are still rejected. After migrating to schema 26, older CLI versions (v5.11.3 and earlier) cannot open the upgraded database.
+- This release adds database compatibility, not CLI management for Oh My Pi, DeepSeek Harness, GitHub Copilot CLI, or WorkBuddy.
+
 ## [5.11.3] - 2026-10-22
 
 ### Fixed
