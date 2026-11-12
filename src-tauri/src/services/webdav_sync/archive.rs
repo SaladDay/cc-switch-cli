@@ -205,19 +205,20 @@ pub fn zip_dir_recursive(
             Err(_) => path.clone(),
         };
 
-        let rel = real_path
-            .strip_prefix(root)
-            .or_else(|_| path.strip_prefix(root))
-            .map_err(|e| {
-                localized(
-                    "webdav.sync.zip_relative_path_failed",
-                    format!("生成 ZIP 相对路径失败: {e}"),
-                    format!("Failed to build relative ZIP path: {e}"),
-                )
-            })?;
+        let is_dir = real_path.is_dir();
+        // File aliases keep their own names while their contents come from real_path.
+        // Directories keep canonical names to match traversal and deduplication.
+        let archive_path = if is_dir { &real_path } else { &path };
+        let rel = archive_path.strip_prefix(root).map_err(|e| {
+            localized(
+                "webdav.sync.zip_relative_path_failed",
+                format!("生成 ZIP 相对路径失败: {e}"),
+                format!("Failed to build relative ZIP path: {e}"),
+            )
+        })?;
         let rel_str = rel.to_string_lossy().replace('\\', "/");
 
-        if real_path.is_dir() {
+        if is_dir {
             // 跳过已访问的目录（符号链接循环检测）
             if !mark_visited_dir(&real_path, visited)? {
                 log::warn!(
@@ -452,6 +453,59 @@ mod tests {
     use super::*;
     use crate::settings::{update_settings, AppSettings};
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    fn zip_test_dir(source: &Path, destination: &Path) -> zip::ZipArchive<fs::File> {
+        let root = fs::canonicalize(source).unwrap();
+        let mut writer = zip::ZipWriter::new(fs::File::create(destination).unwrap());
+        let mut visited = HashSet::new();
+        mark_visited_dir(&root, &mut visited).unwrap();
+        zip_dir_recursive(&root, &root, &mut writer, zip_file_options(), &mut visited).unwrap();
+        writer.finish().unwrap();
+        zip::ZipArchive::new(fs::File::open(destination).unwrap()).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_preserves_file_symlink_names_and_contents() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skills").join("example");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("AGENTS.md"), "shared instructions").unwrap();
+        // Aliases sorted both before and after the target file.
+        for name in ["00-alias.md", "CLAUDE.md", "GEMINI.md"] {
+            std::os::unix::fs::symlink("AGENTS.md", skill.join(name)).unwrap();
+        }
+
+        let mut archive = zip_test_dir(&temp.path().join("skills"), &temp.path().join("s.zip"));
+        assert_eq!(archive.len(), 5);
+        for name in ["00-alias.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
+            let mut content = String::new();
+            archive
+                .by_name(&format!("example/{name}"))
+                .unwrap()
+                .read_to_string(&mut content)
+                .unwrap();
+            assert_eq!(content, "shared instructions");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_keeps_canonical_directory_names_and_skips_cycles() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("skills");
+        let target = source.join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("AGENTS.md"), "instructions").unwrap();
+        std::os::unix::fs::symlink("target", source.join("alias")).unwrap();
+        std::os::unix::fs::symlink("..", target.join("loop")).unwrap();
+
+        let mut archive = zip_test_dir(&source, &temp.path().join("s.zip"));
+        assert_eq!(archive.len(), 2);
+        assert!(archive.by_name("target/").unwrap().is_dir());
+        assert!(archive.by_name("target/AGENTS.md").is_ok());
+    }
 
     #[test]
     fn zip_output_is_stable_for_same_content() {
