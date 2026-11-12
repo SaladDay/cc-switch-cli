@@ -35,11 +35,6 @@ const PROXY_RUNTIME_SESSION_KEY: &str = "proxy_runtime_session";
 const PROXY_RUNTIME_KIND_ENV_KEY: &str = "CC_SWITCH_PROXY_RUNTIME_KIND";
 const PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY: &str = "CC_SWITCH_PROXY_SESSION_TOKEN";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeTakeoverAuthPolicy {
-    PreserveExistingOrAuthToken,
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 struct EnableTakeoverOptions {
     runtime_already_known: bool,
@@ -234,15 +229,6 @@ impl ProxyService {
         runtime
     }
 
-    #[cfg(test)]
-    fn apply_claude_takeover_fields(config: &mut Value, proxy_url: &str) {
-        Self::apply_claude_takeover_fields_with_policy(
-            config,
-            proxy_url,
-            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
-        );
-    }
-
     fn apply_claude_takeover_fields_for_provider(
         config: &mut Value,
         proxy_url: &str,
@@ -256,7 +242,7 @@ impl ProxyService {
                 auth_token: !provider.is_github_copilot() || !provider.claude_uses_api_key_field(),
             }
         } else {
-            ProxyAuth::FollowRow
+            ProxyAuth::AuthToken
         };
         let target = proxy_projection(
             &ClaudeProjection::of(&provider.settings_config),
@@ -267,18 +253,16 @@ impl ProxyService {
         *config = store_into_row(config, &target);
     }
 
-    fn apply_claude_takeover_fields_with_policy(
-        config: &mut Value,
-        proxy_url: &str,
-        auth_policy: ClaudeTakeoverAuthPolicy,
-    ) {
+    fn apply_claude_takeover_fields(config: &mut Value, proxy_url: &str) {
         use crate::live::project::claude::{
             proxy_projection, store_into_row, ClaudeProjection, ProxyAuth,
         };
-        let auth = match auth_policy {
-            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken => ProxyAuth::FollowRow,
-        };
-        let target = proxy_projection(&ClaudeProjection::of(config), proxy_url, auth, None);
+        let target = proxy_projection(
+            &ClaudeProjection::of(config),
+            proxy_url,
+            ProxyAuth::AuthToken,
+            None,
+        );
         *config = store_into_row(config, &target);
     }
 
@@ -3339,11 +3323,7 @@ impl ProxyService {
                         &effective_provider,
                     );
                 } else {
-                    Self::apply_claude_takeover_fields_with_policy(
-                        live,
-                        proxy_url,
-                        ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
-                    );
+                    Self::apply_claude_takeover_fields(live, proxy_url);
                 }
             }
             AppType::Codex => {
@@ -4622,6 +4602,24 @@ mod tests {
             "env": {
                 "ANTHROPIC_BASE_URL": "https://api.example.com",
                 "ANTHROPIC_MODEL": "claude-haiku-4.5"
+            }
+        });
+
+        ProxyService::apply_claude_takeover_fields(&mut live_config, "http://127.0.0.1:15721");
+
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
+    }
+
+    #[test]
+    fn normal_claude_takeover_keeps_api_key_rows_off_the_local_hop() {
+        // #554：live 里只有 `ANTHROPIC_API_KEY` 时，占位符写进 `ANTHROPIC_AUTH_TOKEN`，
+        // 原来的 `ANTHROPIC_API_KEY` 一并清掉，否则 Claude Code 弹自定义 key 确认框。
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go",
+                "ANTHROPIC_API_KEY": "sk-go"
             }
         });
 
@@ -9402,7 +9400,10 @@ requires_openai_auth = true
             "ANTHROPIC_BASE_URL",
             Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
         );
-        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        // 行里只配了 `ANTHROPIC_API_KEY`（供上游跳用 x-api-key），本地占位符仍落在
+        // `ANTHROPIC_AUTH_TOKEN`，且本地不出现 `ANTHROPIC_API_KEY`（#554）。
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
         assert_env_str(env, "LOCAL_ONLY", Some("kept"));
     }
 

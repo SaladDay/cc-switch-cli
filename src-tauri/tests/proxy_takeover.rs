@@ -189,10 +189,17 @@ async fn manual_takeover_can_rewrite_and_restore_claude_live_config() {
     assert_eq!(
         taken_over
             .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
             .and_then(|value| value.as_str()),
         Some("PROXY_MANAGED"),
         "takeover should replace the live Claude token with a managed placeholder"
+    );
+    assert!(
+        taken_over
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .is_none(),
+        "route mode must not present the placeholder as a custom API key"
     );
 
     let app_proxy = db
@@ -743,10 +750,17 @@ async fn disabling_managed_proxy_session_restores_current_app_takeover_state() {
     assert_eq!(
         taken_over
             .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
             .and_then(|value| value.as_str()),
         Some("PROXY_MANAGED"),
         "managed proxy start should rewrite Claude live config into takeover mode"
+    );
+    assert!(
+        taken_over
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .is_none(),
+        "route mode must not present the placeholder as a custom API key"
     );
 
     state

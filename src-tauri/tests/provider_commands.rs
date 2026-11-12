@@ -1906,10 +1906,17 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
     assert_eq!(
         live_during_takeover
             .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
             .and_then(|value| value.as_str()),
         Some("PROXY_MANAGED"),
         "provider switch under takeover should keep the managed placeholder in Claude live config"
+    );
+    assert!(
+        live_during_takeover
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .is_none(),
+        "route mode must not present the placeholder as a custom API key"
     );
 
     let backup_after_switch = state
