@@ -356,6 +356,9 @@ impl Drop for NamespaceCleanup {
                 // namespace. Leave it intact; the next CLI startup will retry.
                 return Ok(None);
             };
+            // The root lock prevents new namespace leases until retirement is
+            // complete. Close the child handle before moving its directory on Windows.
+            drop(namespace_lock);
             let mut batch = None;
             let mut sequence = 0usize;
             quarantine_into_batch(
@@ -364,7 +367,6 @@ impl Drop for NamespaceCleanup {
                 &mut batch,
                 &mut sequence,
             );
-            drop(namespace_lock);
             if self.namespace_root.exists() {
                 return Err(ManifestError::Corrupt(
                     "namespace quarantine rename did not complete".to_string(),
@@ -1238,8 +1240,9 @@ impl PagedManifestStore {
                 let Ok(Some(lease)) = FileLock::try_exclusive(&lease_path) else {
                     continue;
                 };
-                quarantine_into_batch(&from, &scope_dir, &mut batch, &mut sequence);
+                // New reader leases require the scope lock held above.
                 drop(lease);
+                quarantine_into_batch(&from, &scope_dir, &mut batch, &mut sequence);
             }
             batch
         };
@@ -1705,6 +1708,9 @@ impl PagedManifestBuilder {
                 }
             }
 
+            // The scope lock now protects staging from cleanup through pointer
+            // publication. Windows requires closing its child handles before rename.
+            self.owner_lock.take();
             fs::rename(&self.staging_dir, &final_dir)
                 .map_err(|error| ManifestError::io(&self.staging_dir, error))?;
             let mut pointer_updated = false;
@@ -1737,7 +1743,6 @@ impl PagedManifestBuilder {
             let reader = match publication {
                 Ok(reader) => reader,
                 Err(error) => {
-                    self.owner_lock.take();
                     if !pointer_updated {
                         fs::remove_dir_all(&final_dir)
                             .map_err(|cleanup| ManifestError::io(&final_dir, cleanup))?;
@@ -1771,7 +1776,6 @@ impl PagedManifestBuilder {
             }
             reader
         };
-        self.owner_lock.take();
         self.store
             .collect_old_generations(&self.scope, &self.generation);
         Ok(PublishedManifest {
@@ -2522,8 +2526,9 @@ fn cleanup_cli_namespaces_locked(cli_root: &Path, active_namespace: &str) -> Vec
         let lease_path = entry.path().join(NAMESPACE_LOCK_FILE);
         match FileLock::try_exclusive(&lease_path) {
             Ok(Some(lease)) => {
-                quarantine_into_batch(&entry.path(), cli_root, &mut batch, &mut sequence);
+                // The caller holds the root lock, excluding new namespace leases.
                 drop(lease);
+                quarantine_into_batch(&entry.path(), cli_root, &mut batch, &mut sequence);
             }
             Ok(None) => {}
             Err(error) => log::debug!(
@@ -2580,8 +2585,9 @@ fn cleanup_leased_namespaces_locked(
         let lease_path = entry.path().join(NAMESPACE_LOCK_FILE);
         match FileLock::try_exclusive(&lease_path) {
             Ok(Some(lease)) => {
-                quarantine_into_batch(&entry.path(), namespace_root, &mut batch, &mut sequence);
+                // The caller holds the root lock, excluding new namespace leases.
                 drop(lease);
+                quarantine_into_batch(&entry.path(), namespace_root, &mut batch, &mut sequence);
             }
             Ok(None) => {}
             Err(error) => log::debug!(
@@ -3545,6 +3551,19 @@ mod tests {
         let old_second = old_reader.load_page(1).expect("leased old page");
         assert_eq!(old_second.rows.len(), 1);
         assert_eq!(old_second.generation, old_generation);
+
+        drop(first_publication);
+        drop(old_reader);
+        let current = store.open_reader("claude").expect("current reader");
+        store.collect_old_generations("claude", current.generation());
+        assert!(
+            !store.generation_dir("claude", &old_generation).exists(),
+            "an old generation must be retired once its last reader releases it"
+        );
+        assert_eq!(
+            current.load_page(0).expect("current page").rows[0].session_id,
+            "new-2"
+        );
     }
 
     #[test]
@@ -3806,6 +3825,36 @@ mod tests {
         assert!(
             !namespace_root.exists(),
             "the last query reader must retire the namespace immediately"
+        );
+    }
+
+    #[test]
+    fn query_startup_cleans_only_unleased_namespaces() {
+        let temp = tempdir().expect("tempdir");
+        let query_root = temp.path().join(QUERY_ROOT_DIR);
+        let abandoned_root = query_root.join("tui-abandoned");
+        create_private_dir(&abandoned_root).expect("namespace");
+        let lease = FileLock::shared(&abandoned_root.join(NAMESPACE_LOCK_FILE)).expect("lease");
+
+        let active = QueryManifestStore::open_at(
+            temp.path(),
+            &QueryManifestNamespace::for_test("tui-active"),
+        )
+        .expect("active query store");
+        assert!(abandoned_root.is_dir(), "a live lease must prevent cleanup");
+
+        // Model a crashed process: its lease is released without namespace cleanup.
+        drop(lease);
+        let _next =
+            QueryManifestStore::open_at(temp.path(), &QueryManifestNamespace::for_test("tui-next"))
+                .expect("next query store");
+        assert!(
+            !abandoned_root.exists(),
+            "the abandoned namespace must retire"
+        );
+        assert!(
+            active.inner.root.is_dir(),
+            "the active namespace must remain"
         );
     }
 

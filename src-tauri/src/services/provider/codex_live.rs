@@ -1,8 +1,7 @@
 use super::codex_login::*;
 use serde_json::Value;
 // CLI entry-point adapter for upstream codex_login, CodexProjection and the
-// durable live-file engine. Upstream managed accounts and Stack are not exposed
-// by this CLI. Credential decisions and file recovery use upstream code.
+// durable live-file engine. Credential decisions and file recovery use upstream code.
 pub(crate) fn stash_path() -> std::path::PathBuf {
     crate::live::engine::DeviceStore::for_device().file(STASH_FILENAME)
 }
@@ -31,6 +30,7 @@ pub(crate) fn prepare(
     config: &str,
     rows: &[crate::provider::Provider],
     previous: Option<&crate::provider::Provider>,
+    target: Option<&crate::provider::Provider>,
 ) -> Result<Prepared, crate::error::AppError> {
     use super::ProviderService;
     use crate::codex_config::*;
@@ -77,6 +77,62 @@ pub(crate) fn prepare(
             false,
         ),
     };
+    // Resolve credentials before taking the live-file lock, as upstream does.
+    let account_id = |p: &crate::provider::Provider| {
+        p.meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+    };
+    let target_account = target.filter(|_| official).and_then(account_id);
+    let outgoing_account = previous
+        .and_then(account_id)
+        .filter(|account| Some(account) != target_account.as_ref());
+    let target_id = target_account.clone();
+    let outgoing_id = outgoing_account.clone();
+    let (target_auth, outgoing) = if target_id.is_some() || outgoing_id.is_some() {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| crate::error::AppError::Message(error.to_string()))?;
+            runtime.block_on(async move {
+                let manager = crate::services::codex_oauth::CodexOAuthService::manager();
+                let target_auth = if let Some(id) = target_id {
+                    let bundle = manager
+                        .get_valid_token_bundle_for_account(&id)
+                        .await
+                        .map_err(|error| crate::error::AppError::Message(error.to_string()))?;
+                    Some(codex_managed_oauth_auth_value(
+                        &bundle.chatgpt_account_id,
+                        &bundle.access_token,
+                        bundle.id_token.as_deref(),
+                        &bundle.refresh_token,
+                        &bundle.last_refresh,
+                    ))
+                } else {
+                    None
+                };
+                let outgoing = if let Some(id) = outgoing_id {
+                    Some(
+                        manager
+                            .prepare_live_auth_for_account_switch_away(&id)
+                            .await
+                            .map_err(|error| crate::error::AppError::Message(error.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+                Ok::<_, crate::error::AppError>((target_auth, outgoing))
+            })
+        })
+        .join()
+        .map_err(|_| crate::error::AppError::Message("Codex OAuth worker failed".into()))??
+    } else {
+        (None, None)
+    };
+    if let (Some(account), Some(guard)) = (&outgoing_account, &outgoing) {
+        guard.ensure_unchanged(account)?;
+    }
     let path = get_codex_auth_path();
     let (auth_bytes, auth_readable) = match crate::live::engine::read_current(&path) {
         Ok(bytes) => (bytes, true),
@@ -93,14 +149,24 @@ pub(crate) fn prepare(
     let proxy = !official
         && extract_codex_auth_api_key(row_auth).as_deref()
             == Some(crate::live::project::codex::PROXY_TOKEN_PLACEHOLDER);
+    use crate::proxy::providers::codex_oauth_auth::CodexLiveAuthSwitchGuard;
+    let outgoing_missing = matches!(outgoing, Some(CodexLiveAuthSwitchGuard::MissingAccount));
+    let live_is_managed = live.as_ref().is_some_and(|auth| {
+        target_account
+            .iter()
+            .chain(outgoing_account.iter().filter(|_| !outgoing_missing))
+            .any(|account| codex_live_auth_is_managed_chatgpt_login(auth, account))
+    });
     let mut plan = plan(AuthInput {
         live: live.as_ref(),
-        live_is_managed: false,
+        live_is_managed,
         third_party_keys: &keys,
         leaving_official: previous
-            .filter(|p| is_official(p))
+            .filter(|p| is_official(p) && account_id(p).is_none())
             .and_then(|p| p.settings_config.get("auth")),
-        target: if official {
+        target: if let Some(auth) = target_auth.as_ref() {
+            AuthTarget::Managed { auth }
+        } else if official {
             AuthTarget::Official { row_auth }
         } else if proxy {
             AuthTarget::ProxyThirdParty
@@ -165,7 +231,26 @@ pub(crate) fn prepare(
         })
         .map(|p| p.exclusive)
         .unwrap_or_default();
+    let marker_pre =
+        crate::live::engine::read_current(&get_codex_managed_oauth_live_auth_marker_path())?;
+    let marker = match (&target_account, &target_auth, &plan.auth) {
+        (Some(account), Some(auth), Some(Some(written))) if auth == written => {
+            codex_managed_oauth_marker_bytes(auth, account)?
+                .map(crate::live::patch::WholeFile::Write)
+        }
+        _ if marker_pre.is_some()
+            && ((live_is_managed && plan.auth == Some(None)) || outgoing_missing) =>
+        {
+            Some(crate::live::patch::WholeFile::Delete)
+        }
+        _ => None,
+    }
+    .map(|then| crate::live::patch::Guarded {
+        expected_pre: crate::live::engine::digest(marker_pre.as_deref()),
+        then,
+    });
     Ok(Prepared {
+        marker,
         common: Default::default(),
         auth: plan,
         auth_pre,
@@ -184,6 +269,7 @@ pub(crate) fn prepare(
 
 #[derive(Clone)]
 pub(crate) struct Prepared {
+    pub marker: Option<crate::live::patch::Guarded>,
     pub common: crate::live::patch::toml::TomlPatch,
     pub auth: AuthPlan,
     pub auth_pre: Option<String>,
@@ -265,6 +351,14 @@ pub(crate) fn apply(
     if let Some(patch) = &stash {
         changes.push(operation::FileChange {
             file: LiveFile::private(stash_path()),
+            patch,
+        });
+    }
+    if let Some(patch) = &prepared.marker {
+        changes.push(operation::FileChange {
+            file: LiveFile::private(
+                crate::codex_config::get_codex_managed_oauth_live_auth_marker_path(),
+            ),
             patch,
         });
     }

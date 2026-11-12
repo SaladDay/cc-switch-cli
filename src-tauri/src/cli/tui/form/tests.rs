@@ -8149,3 +8149,33 @@ fn claude_editor_context_and_global_values_survive_json_and_template_changes() {
         .contains(&ProviderAddField::IncludeCommonConfig));
     assert!(!form.fields().contains(&ProviderAddField::CommonSnippet));
 }
+
+#[test]
+fn codex_official_managed_account_binding_round_trip() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.apply_template(
+        template_index_by_label(AppType::Codex, "OpenAI Official"),
+        &[],
+    );
+    assert!(form.fields().contains(&ProviderAddField::CodexOAuthAccount));
+    assert!(!form.fields().contains(&ProviderAddField::CodexFastMode));
+    assert!(form.to_provider_json_value()["meta"]
+        .get("authBinding")
+        .is_none());
+    form.set_codex_oauth_account_id(Some("account-b".into()));
+    let value = form.to_provider_json_value();
+    assert_eq!(value["meta"]["authBinding"]["accountId"], "account-b");
+    assert_eq!(value["meta"]["providerType"], "codex_oauth");
+    assert_eq!(value["settingsConfig"]["auth"], serde_json::json!({}));
+    let provider: crate::provider::Provider = serde_json::from_value(value).unwrap();
+    let mut reopened = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(
+        reopened.codex_oauth_account_id.as_deref(),
+        Some("account-b")
+    );
+    reopened.set_codex_oauth_account_id(None);
+    let native = reopened.to_provider_json_value();
+    assert!(native["meta"].get("authBinding").is_none());
+    assert!(native["meta"].get("providerType").is_none());
+    assert_eq!(native["meta"]["codexOfficial"], true);
+}
