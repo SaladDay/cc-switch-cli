@@ -839,10 +839,17 @@ async fn startup_recovery_skips_owned_managed_session_when_probe_is_unreachable(
     assert_eq!(
         taken_over
             .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
             .and_then(|value| value.as_str()),
         Some("PROXY_MANAGED"),
         "managed startup should place Claude in proxy takeover mode"
+    );
+    assert!(
+        taken_over
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .is_none(),
+        "route mode must not present the placeholder as a custom API key"
     );
 
     let runtime_session_raw = state
@@ -894,10 +901,17 @@ async fn startup_recovery_skips_owned_managed_session_when_probe_is_unreachable(
     assert_eq!(
         live_after_restart
             .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
             .and_then(|value| value.as_str()),
         Some("PROXY_MANAGED"),
         "startup recovery must not restore live config while managed runtime still exists"
+    );
+    assert!(
+        live_after_restart
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .is_none(),
+        "route mode must not present the placeholder as a custom API key"
     );
     assert!(
         recovered
