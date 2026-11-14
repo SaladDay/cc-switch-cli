@@ -37,7 +37,7 @@ const PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY: &str = "CC_SWITCH_PROXY_SESSION_TOKEN
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaudeTakeoverAuthPolicy {
-    PreserveExistingOrAuthToken,
+    AuthToken,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -239,7 +239,7 @@ impl ProxyService {
         Self::apply_claude_takeover_fields_with_policy(
             config,
             proxy_url,
-            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
+            ClaudeTakeoverAuthPolicy::AuthToken,
         );
     }
 
@@ -256,7 +256,7 @@ impl ProxyService {
                 auth_token: !provider.is_github_copilot() || !provider.claude_uses_api_key_field(),
             }
         } else {
-            ProxyAuth::FollowRow
+            ProxyAuth::AuthToken
         };
         let target = proxy_projection(
             &ClaudeProjection::of(&provider.settings_config),
@@ -276,7 +276,7 @@ impl ProxyService {
             proxy_projection, store_into_row, ClaudeProjection, ProxyAuth,
         };
         let auth = match auth_policy {
-            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken => ProxyAuth::FollowRow,
+            ClaudeTakeoverAuthPolicy::AuthToken => ProxyAuth::AuthToken,
         };
         let target = proxy_projection(&ClaudeProjection::of(config), proxy_url, auth, None);
         *config = store_into_row(config, &target);
@@ -3445,7 +3445,7 @@ impl ProxyService {
                     Self::apply_claude_takeover_fields_with_policy(
                         live,
                         proxy_url,
-                        ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
+                        ClaudeTakeoverAuthPolicy::AuthToken,
                     );
                 }
             }
@@ -4553,7 +4553,7 @@ mod tests {
     }
 
     #[test]
-    fn copilot_claude_takeover_defaults_to_auth_token_placeholder() {
+    fn copilot_claude_takeover_defaults_to_auth_token_and_honors_explicit_api_key() {
         let mut provider = Provider::with_id(
             "copilot".to_string(),
             "GitHub Copilot".to_string(),
@@ -4589,6 +4589,16 @@ mod tests {
         assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
         assert_env_str(env, "OPENROUTER_API_KEY", Some("stale-openrouter-key"));
         assert_env_str(env, "OPENAI_API_KEY", Some("stale-openai-key"));
+
+        provider.meta.as_mut().unwrap().api_key_field = Some("ANTHROPIC_API_KEY".into());
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
     }
 
     #[test]
@@ -4800,6 +4810,43 @@ mod tests {
             Some("provider-fable"),
         );
         assert_env_str(env, "CLAUDE_CODE_SUBAGENT_MODEL", Some("provider-subagent"));
+    }
+
+    #[test]
+    fn normal_claude_takeover_keeps_api_key_rows_off_the_local_hop() {
+        // #8104：OpenCode Go 这类预设把凭据存在 `ANTHROPIC_API_KEY`（上游跳要
+        // x-api-key），路由模式的本地占位符只能写 `ANTHROPIC_AUTH_TOKEN`；
+        // 残留的 `ANTHROPIC_API_KEY` 一并清掉，否则 Claude Code 弹自定义 key
+        // 确认框，默认拒绝后就是未登录会话。
+        let provider = Provider::with_id(
+            "opencode-go".to_string(),
+            "OpenCode Go".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go",
+                    "ANTHROPIC_API_KEY": "sk-go"
+                }
+            }),
+            None,
+        );
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://stale.example.com",
+                "ANTHROPIC_API_KEY": "stale-key"
+            }
+        });
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+
+        let env = live_config
+            .get("env")
+            .and_then(|value| value.as_object())
+            .expect("env should exist");
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
     }
 
     #[test]
@@ -9588,7 +9635,8 @@ requires_openai_auth = true
             "ANTHROPIC_BASE_URL",
             Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
         );
-        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
         assert_env_str(env, "LOCAL_ONLY", Some("kept"));
     }
 

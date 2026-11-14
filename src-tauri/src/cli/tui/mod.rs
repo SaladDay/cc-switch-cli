@@ -13,6 +13,8 @@ mod runtime_actions;
 mod runtime_skills;
 mod runtime_systems;
 mod terminal;
+#[cfg(unix)]
+mod terminal_hangup;
 #[cfg(test)]
 mod tests;
 mod text_edit;
@@ -3049,6 +3051,9 @@ fn is_lightweight_preseed_app(app_type: &AppType) -> bool {
 }
 
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
+    #[cfg(unix)]
+    let _hangup_guard =
+        terminal_hangup::HangupGuard::start().map_err(|e| AppError::Message(e.to_string()))?;
     let _panic_hook = PanicRestoreHookGuard::install();
     let mut terminal = TuiTerminal::new()?;
     let (mut app, mut data) =

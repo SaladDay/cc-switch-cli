@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **xAI OAuth managed accounts**: `cc-switch auth xai login|status|list|default|remove|logout` adds xAI OAuth device-flow accounts (credentials in the CC-Switch config directory, mode 0600, auto-refreshed per request). New `xai-oauth` provider templates (`xAI (Grok)` in Claude, `xAI (Grok) OAuth` in Codex, matching the desktop presets) are OAuth sign-in providers like Codex OAuth, not API-key providers: the TUI form binds a signed-in xAI account (or follows the default) instead of showing Base URL / API Key / Usage Query fields, and `provider current` shows the bound xAI account. They route through the local proxy to `api.x.ai/v1` with the managed token injected per request: Claude converts Anthropic Messages to the xAI Responses API, Codex speaks native Responses with namespace-tool flattening and strict-field sanitization for xAI's gateway. The default model is `grok-4.7`, and the Claude template pins `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to `500000` and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to `450000` (90% of the window): Grok 4.7 only offers 500K and 256K windows, while Claude defaults to 100K when the variable is unset. Managed accounts query their weekly quota directly, without a separate Grok CLI login. Refresh-token rotation is synchronized across workers; xAI spending-limit errors preserve the upstream message and code. Auth management is symmetric per provider: `auth codex …` (alias `auth openai …`) mirrors the bare ChatGPT/Codex subcommands alongside `auth xai …`.
 
+### Fixed
+
+- **TUI**: Exit when the input terminal hangs up, including terminal proxies that do not deliver SIGHUP, instead of leaving a process spinning at full CPU.
+- **Database / Compatibility**: Support database schemas 23 through 26 from upstream, fixing WebDAV/S3 restore failures with `Remote database schema is too new (24); this app supports up to 22`. Align the migration steps, MCP/Skills enablement columns, and session-log parser state with the shared schema while preserving upstream flags and parser state through upgrades, edits, runtime cursor updates, and sync round-trips.
+
+### Upgrade notes
+
+- Databases newer than schema 26 are still rejected. After migrating to schema 26, older CLI versions (v5.11.3 and earlier) cannot open the upgraded database.
+- This release adds database compatibility, not CLI management for Oh My Pi, DeepSeek Harness, GitHub Copilot CLI, or WorkBuddy.
+
 ## [5.11.3] - 2026-10-22
 
 ### Fixed
