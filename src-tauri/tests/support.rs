@@ -46,6 +46,7 @@ pub fn reset_test_fs() {
         ".cc-switch",
         ".agents",
         ".gemini",
+        ".grok",
         ".openclaw",
         ".config",
         ".runtime",

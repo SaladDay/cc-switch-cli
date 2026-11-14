@@ -796,7 +796,7 @@ impl App {
 
                 if binding {
                     if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                        provider.set_codex_oauth_account_id(selected_account_id);
+                        provider.set_managed_account_id(selected_account_id);
                     }
                 }
                 self.overlay = Overlay::None;
@@ -1064,7 +1064,7 @@ impl App {
                     let codex_oauth = provider.is_claude_codex_oauth_provider();
                     let codex_oauth_account_id = provider
                         .is_claude_codex_oauth_provider()
-                        .then(|| provider.codex_oauth_account_id.clone())
+                        .then(|| provider.managed_account_id.clone())
                         .flatten();
                     Action::ProviderModelFetch {
                         base_url: provider.claude_base_url.value.clone(),
@@ -1550,7 +1550,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(4);
+                *selected = (*selected + 1).min(5);
                 Action::None
             }
             KeyCode::Char(' ') => {
@@ -1631,7 +1631,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(6);
+                *selected = (*selected + 1).min(7);
                 Action::None
             }
             KeyCode::Char(' ') => {
@@ -1700,7 +1700,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(5);
+                *selected = (*selected + 1).min(6);
                 Action::None
             }
             KeyCode::Char(' ') => {

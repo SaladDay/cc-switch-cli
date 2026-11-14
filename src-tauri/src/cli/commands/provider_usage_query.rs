@@ -622,7 +622,12 @@ fn provider_base_url(provider: &Provider) -> Option<String> {
         .and_then(|value| value.as_str())
         .is_some()
     {
-        return provider_codex_base_url(provider);
+        return provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(crate::grok_config::extract_base_url)
+            .or_else(|| provider_codex_base_url(provider));
     }
 
     provider
@@ -668,14 +673,14 @@ fn usage_query_comment_credentials(app_type: &AppType, provider: &Provider) -> (
     let base_url = base_url.unwrap_or_default();
     (
         usage_query_comment_value(&base_url),
-        usage_query_comment_value(api_key.unwrap_or_default()),
+        usage_query_comment_value(api_key.as_deref().unwrap_or_default()),
     )
 }
 
-fn provider_comment_credentials<'a>(
+fn provider_comment_credentials(
     app_type: &AppType,
-    provider: &'a Provider,
-) -> (Option<String>, Option<&'a str>) {
+    provider: &Provider,
+) -> (Option<String>, Option<String>) {
     let settings = &provider.settings_config;
     match app_type {
         AppType::Claude if provider.is_codex_oauth() => {
@@ -688,7 +693,8 @@ fn provider_comment_credentials<'a>(
                     .and_then(|value| value.as_str())
                     .map(str::to_string),
                 env.and_then(|value| value.get("ANTHROPIC_AUTH_TOKEN"))
-                    .and_then(|value| value.as_str()),
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
             )
         }
         AppType::Codex => (
@@ -696,8 +702,20 @@ fn provider_comment_credentials<'a>(
             settings
                 .get("auth")
                 .and_then(|value| value.get("OPENAI_API_KEY"))
-                .and_then(|value| value.as_str()),
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
         ),
+        AppType::GrokBuild => {
+            let config_text = settings.get("config").and_then(|value| value.as_str());
+            // base_url 与密钥各自解析：env_key 指向的变量在当前进程读不到时
+            // 不能连坐清空端点。
+            (
+                config_text.and_then(crate::grok_config::extract_base_url),
+                config_text
+                    .and_then(crate::grok_config::extract_credentials)
+                    .map(|(_, api_key)| api_key),
+            )
+        }
         AppType::Gemini => {
             let env = settings.get("env");
             (
@@ -706,7 +724,8 @@ fn provider_comment_credentials<'a>(
                     .and_then(|value| value.as_str())
                     .map(str::to_string),
                 env.and_then(|value| value.get("GEMINI_API_KEY"))
-                    .and_then(|value| value.as_str()),
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
             )
         }
         AppType::OpenCode => {
@@ -718,7 +737,8 @@ fn provider_comment_credentials<'a>(
                     .map(str::to_string),
                 options
                     .and_then(|value| value.get("apiKey"))
-                    .and_then(|value| value.as_str()),
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
             )
         }
         AppType::Hermes => (
@@ -733,21 +753,28 @@ fn provider_comment_credentials<'a>(
                 .get("api_key")
                 .or_else(|| settings.get("apiKey"))
                 .or_else(|| settings.get("auth_token"))
-                .and_then(|value| value.as_str()),
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
         ),
         AppType::OpenClaw => (
             settings
                 .get("baseUrl")
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
-            settings.get("apiKey").and_then(|value| value.as_str()),
+            settings
+                .get("apiKey")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
         ),
         AppType::Pi => (
             settings
                 .get("baseUrl")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            settings.get("apiKey").and_then(Value::as_str),
+            settings
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         ),
     }
 }

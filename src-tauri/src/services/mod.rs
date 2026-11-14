@@ -36,6 +36,7 @@ pub mod sql_helpers;
 pub(crate) mod state_coordination;
 pub mod stream_check;
 pub mod subscription;
+pub mod subscription_grok;
 pub(crate) mod sync_protocol;
 pub mod usage_stats;
 #[cfg(feature = "cli")]

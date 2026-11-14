@@ -901,12 +901,13 @@ mod tests {
         app.on_key(key(KeyCode::Down), &data);
         app.on_key(key(KeyCode::Down), &data);
         app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::SkillsAppsPicker { selected, apps, .. } if *selected == 4 && apps.hermes
+            Overlay::SkillsAppsPicker { selected, apps, .. } if *selected == 5 && apps.hermes
         ));
 
         let action = app.on_key(key(KeyCode::Enter), &data);
@@ -937,7 +938,7 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::SkillsAppsPicker { selected, .. } if *selected == 5
+            Overlay::SkillsAppsPicker { selected, .. } if *selected == 6
         ));
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
@@ -945,7 +946,7 @@ mod tests {
         assert!(matches!(
             &app.overlay,
             Overlay::SkillsAppsPicker { selected, apps, .. }
-                if *selected == 5
+                if *selected == 6
                     && !apps.claude
                     && !apps.codex
                     && !apps.gemini
@@ -969,6 +970,7 @@ mod tests {
                 claude: true,
                 codex: false,
                 gemini: false,
+                grokbuild: false,
                 opencode: false,
                 hermes: false,
                 openclaw: false,
@@ -983,7 +985,7 @@ mod tests {
         assert!(matches!(
             &app.overlay,
             Overlay::VisibleAppsPicker { selected, apps }
-                if *selected == 6 && apps.pi
+                if *selected == 7 && apps.pi
         ));
     }
 
@@ -1164,6 +1166,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: true,
+            grokbuild: false,
             opencode: true,
             hermes: false,
             openclaw: true,
@@ -1190,6 +1193,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: true,
+            grokbuild: false,
             opencode: true,
             hermes: false,
             openclaw: true,
@@ -1224,6 +1228,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: true,
+            grokbuild: false,
             opencode: true,
             hermes: false,
             openclaw: true,
@@ -1266,6 +1271,7 @@ mod tests {
             claude: true,
             codex: false,
             gemini: false,
+            grokbuild: false,
             opencode: true,
             hermes: false,
             openclaw: true,
@@ -1290,6 +1296,7 @@ mod tests {
             claude: false,
             codex: true,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -1318,6 +1325,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: true,
@@ -1342,6 +1350,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -3936,12 +3945,13 @@ mod tests {
         app.on_key(key(KeyCode::Down), &data);
         app.on_key(key(KeyCode::Down), &data);
         app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::McpAppsPicker { selected, apps, .. } if *selected == 3 && apps.opencode
+            Overlay::McpAppsPicker { selected, apps, .. } if *selected == 4 && apps.opencode
         ));
 
         let action = app.on_key(key(KeyCode::Enter), &data);
@@ -3979,12 +3989,13 @@ mod tests {
         app.on_key(key(KeyCode::Down), &data);
         app.on_key(key(KeyCode::Down), &data);
         app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::McpAppsPicker { selected, apps, .. } if *selected == 4 && apps.hermes
+            Overlay::McpAppsPicker { selected, apps, .. } if *selected == 5 && apps.hermes
         ));
 
         let action = app.on_key(key(KeyCode::Enter), &data);
@@ -4026,7 +4037,7 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::McpAppsPicker { selected, .. } if *selected == 4
+            Overlay::McpAppsPicker { selected, .. } if *selected == 5
         ));
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
@@ -4034,7 +4045,7 @@ mod tests {
         assert!(matches!(
             &app.overlay,
             Overlay::McpAppsPicker { selected, apps, .. }
-                if *selected == 4
+                if *selected == 5
                     && !apps.claude
                     && !apps.codex
                     && !apps.gemini
@@ -11265,6 +11276,7 @@ mod tests {
             claude: true,
             codex: false,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -11316,6 +11328,7 @@ mod tests {
             claude: true,
             codex: false,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -11354,6 +11367,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: true,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -11393,6 +11407,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -11431,6 +11446,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: false,
@@ -15464,7 +15480,7 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::None));
         let account_id = match app.form.as_ref() {
-            Some(FormState::ProviderAdd(form)) => form.codex_oauth_account_id.as_deref(),
+            Some(FormState::ProviderAdd(form)) => form.managed_account_id.as_deref(),
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
         assert_eq!(account_id, Some("acc-alt"));
@@ -15478,7 +15494,7 @@ mod tests {
         let action = app.on_key(key(KeyCode::Enter), &data());
         assert!(matches!(action, Action::None));
         let account_id = match app.form.as_ref() {
-            Some(FormState::ProviderAdd(form)) => form.codex_oauth_account_id.as_deref(),
+            Some(FormState::ProviderAdd(form)) => form.managed_account_id.as_deref(),
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
         assert_eq!(account_id, None);

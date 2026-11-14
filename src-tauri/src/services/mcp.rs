@@ -14,6 +14,7 @@ impl McpService {
             AppType::Claude,
             AppType::Codex,
             AppType::Gemini,
+            AppType::GrokBuild,
             AppType::OpenCode,
             AppType::Hermes,
         ]
@@ -210,6 +211,9 @@ impl McpService {
             AppType::Gemini => {
                 mcp::sync_single_server_to_gemini(cfg, &server.id, &server.server)?;
             }
+            AppType::GrokBuild => {
+                mcp::sync_single_server_to_grokbuild(cfg, &server.id, &server.server)?;
+            }
             AppType::OpenCode => {
                 mcp::sync_single_server_to_opencode(cfg, &server.id, &server.server)?;
             }
@@ -240,6 +244,7 @@ impl McpService {
             AppType::Claude => mcp::remove_server_from_claude(id)?,
             AppType::Codex => mcp::remove_server_from_codex(id)?,
             AppType::Gemini => mcp::remove_server_from_gemini(id)?,
+            AppType::GrokBuild => mcp::remove_server_from_grokbuild(id)?,
             AppType::OpenCode => mcp::remove_server_from_opencode(id)?,
             AppType::Hermes => mcp::remove_server_from_hermes(id)?,
             AppType::OpenClaw => {}
@@ -395,6 +400,11 @@ impl McpService {
         total += Self::import_from_claude(state)?;
         total += Self::import_from_codex(state)?;
         total += Self::import_from_gemini(state)?;
+        {
+            let mut config = state.config.write()?;
+            total += mcp::import_from_grokbuild(&mut config)?;
+        }
+        state.save()?;
         total += Self::import_from_opencode(state)?;
         total += Self::import_from_hermes(state)?;
         Ok(total)
