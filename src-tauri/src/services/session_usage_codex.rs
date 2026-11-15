@@ -193,6 +193,9 @@ struct ParentSignatureSnapshot {
     entry_end_offsets: Vec<u64>,
     /// Complete parsed JSONL boundaries, needed only by paginated references.
     record_end_offsets: Vec<u64>,
+    /// A byte prefix cannot certify history after its first unreadable record.
+    /// Legacy replay still skips malformed lines; only paginated chains use this.
+    first_invalid_record_start: Option<u64>,
     /// Root identity from the same opened file as the cached signatures.
     root_meta: Option<RootMeta>,
     /// UTC creation time from the first session_meta; only used to order segments.
@@ -1337,6 +1340,7 @@ fn parse_parent_signature_file(
     let mut entries: Vec<(DateTime<Utc>, TokenUsageSignature)> = Vec::new();
     let mut entry_end_offsets = Vec::new();
     let mut record_end_offsets = Vec::new();
+    let mut first_invalid_record_start = None;
     let mut max_timestamp: Option<DateTime<Utc>> = None;
     let mut creation_timestamp = None;
     let mut root_meta = None;
@@ -1351,20 +1355,26 @@ fn parse_parent_signature_file(
     let mut byte_offset = 0u64;
     loop {
         line_bytes.clear();
+        let record_start = byte_offset;
         let read = reader.read_until(b'\n', &mut line_bytes);
         byte_offset = byte_offset.saturating_add(line_bytes.len() as u64);
         match read {
             Ok(0) => break,
             Ok(_) => {}
-            Err(_) => continue,
+            Err(_) => {
+                first_invalid_record_start.get_or_insert(record_start);
+                continue;
+            }
         }
         let Ok(line) = std::str::from_utf8(&line_bytes) else {
+            first_invalid_record_start.get_or_insert(record_start);
             continue;
         };
         total_lines += 1;
 
         // Keep the narrow parser's JSON semantics; offsets include LF/CRLF bytes.
         let Ok(parsed) = serde_json::from_str::<ParentLine<'_>>(line) else {
+            first_invalid_record_start.get_or_insert(record_start);
             continue;
         };
         let timestamp = parsed.timestamp.as_deref().and_then(parse_timestamp_str);
@@ -1433,6 +1443,7 @@ fn parse_parent_signature_file(
         entries,
         entry_end_offsets,
         record_end_offsets,
+        first_invalid_record_start,
         root_meta,
         creation_timestamp,
         max_timestamp,
@@ -1581,6 +1592,12 @@ fn resolve_paginated_parent_signatures(
         }
         let signatures = segment.snapshot.signatures_in_prefix(cutoff, prefix_end);
         for copy in &segment.copies {
+            if copy
+                .first_invalid_record_start
+                .is_some_and(|start| prefix_end.is_none_or(|end| start < end))
+            {
+                return Err(invalid("分页历史包含无法读取或解析的记录"));
+            }
             if let Some(end) = prefix_end {
                 if end > copy.stamp.size || copy.record_end_offsets.binary_search(&end).is_err() {
                     return Err(invalid("history_base 字节前缀尚未完整写入所有副本"));
@@ -1637,6 +1654,7 @@ fn resolve_parent_signatures(
         entries: Vec::new(),
         entry_end_offsets: Vec::new(),
         record_end_offsets: Vec::new(),
+        first_invalid_record_start: None,
         root_meta: None,
         creation_timestamp: None,
         max_timestamp: None,
@@ -4160,6 +4178,156 @@ mod tests {
                 ],
             );
             assert_child_deferred(&db, &child, &[&original, &copy, &page, &child])?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_corrupt_paginated_parent_records_defer_and_recover_without_child_changes(
+    ) -> Result<(), AppError> {
+        for corrupt_active_segment in [false, true] {
+            for invalid_utf8 in [false, true] {
+                let db = Database::memory()?;
+                let temp = tempdir().unwrap();
+                let original = rollout_path(temp.path(), PARENT_ID);
+                let page = temp.path().join(format!(
+                    "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+                ));
+                let child = rollout_path(temp.path(), CHILD_A_ID);
+                let mut original_lines = vec![
+                    paginated_parent_meta("2026-07-10T03:00:00Z", None),
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:01Z"),
+                ];
+                if !corrupt_active_segment {
+                    original_lines.push(token_count_at(200, 0, 20, "2026-07-10T03:00:02Z"));
+                }
+                original_lines.push(turn_context_at("2026-07-10T03:00:03Z"));
+                write_jsonl(&original, &original_lines);
+                let cap = fs::metadata(&original).unwrap().len();
+                let mut page_lines = vec![paginated_parent_meta(
+                    "2026-07-10T03:00:20Z",
+                    Some(history_reference(PARENT_ID, cap)),
+                )];
+                if corrupt_active_segment {
+                    page_lines.push(token_count_at(200, 0, 20, "2026-07-10T03:00:21Z"));
+                }
+                page_lines.extend([
+                    token_count_at(300, 0, 30, "2026-07-10T03:00:22Z"),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ]);
+                write_jsonl(&page, &page_lines);
+                write_jsonl(
+                    &child,
+                    &[
+                        session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                        token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                        token_count_at(200, 0, 20, "2026-07-10T03:00:32Z"),
+                        token_count_at(300, 0, 30, "2026-07-10T03:00:33Z"),
+                        token_count_at(350, 0, 35, "2026-07-10T03:00:34Z"),
+                    ],
+                );
+                let (corrupt_path, corrupt_record) = if corrupt_active_segment {
+                    (&page, 1)
+                } else {
+                    (&original, 2)
+                };
+                let intact = fs::read(corrupt_path).unwrap();
+                let record_start = intact
+                    .split_inclusive(|byte| *byte == b'\n')
+                    .take(corrupt_record)
+                    .map(<[u8]>::len)
+                    .sum::<usize>();
+                let mut damaged = intact.clone();
+                damaged[record_start] = if invalid_utf8 { 0xff } else { b'!' };
+                fs::write(corrupt_path, &damaged).unwrap();
+                let files = [&original as &Path, &page, &child];
+                let child_before = fs::read(&child).unwrap();
+                assert_child_deferred(&db, &child, &files)?;
+
+                let repaired = temp.path().join("repaired.jsonl");
+                fs::write(&repaired, intact).unwrap();
+                fs::rename(&repaired, corrupt_path).unwrap();
+                assert_eq!(fs::read(&child).unwrap(), child_before);
+                let recovered = sync_test_file(&db, &child, &files)?;
+                assert_eq!(
+                    (recovered.imported, recovered.skipped, recovered.deferred),
+                    (1, 3, false)
+                );
+                assert_eq!(get_sync_state(&db, &child.to_string_lossy())?.1, 5);
+                assert_eq!(sync_test_file(&db, &child, &files)?.imported, 0);
+                let conn = lock_conn!(db.conn);
+                let totals: (i64, i64, i64) = conn.query_row(
+                    "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM proxy_request_logs",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                assert_eq!(totals, (1, 50, 5));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_corruption_after_referenced_paginated_prefix_does_not_discard_valid_history(
+    ) -> Result<(), AppError> {
+        for invalid_utf8 in [false, true] {
+            let db = Database::memory()?;
+            let temp = tempdir().unwrap();
+            let original = rollout_path(temp.path(), PARENT_ID);
+            let page = temp.path().join(format!(
+                "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+            ));
+            let child = rollout_path(temp.path(), CHILD_A_ID);
+            write_jsonl(
+                &original,
+                &[
+                    paginated_parent_meta("2026-07-10T03:00:00Z", None),
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:01Z"),
+                ],
+            );
+            let mut bytes = fs::read(&original).unwrap();
+            let cap = bytes.len() as u64;
+            bytes.extend(if invalid_utf8 {
+                &b"\xff\n"[..]
+            } else {
+                &b"invalid json\n"[..]
+            });
+            bytes.extend((turn_context_at("2026-07-10T03:00:40Z").to_string() + "\n").bytes());
+            fs::write(&original, bytes).unwrap();
+            write_jsonl(
+                &page,
+                &[
+                    paginated_parent_meta(
+                        "2026-07-10T03:00:20Z",
+                        Some(history_reference(PARENT_ID, cap)),
+                    ),
+                    token_count_at(300, 0, 30, "2026-07-10T03:00:21Z"),
+                    turn_context_at("2026-07-10T03:00:40Z"),
+                ],
+            );
+            write_jsonl(
+                &child,
+                &[
+                    session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                    token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                    token_count_at(300, 0, 30, "2026-07-10T03:00:32Z"),
+                    token_count_at(350, 0, 35, "2026-07-10T03:00:33Z"),
+                ],
+            );
+            let files = [&original as &Path, &page, &child];
+            let result = sync_test_file(&db, &child, &files)?;
+            assert_eq!(
+                (result.imported, result.skipped, result.deferred),
+                (1, 2, false)
+            );
+            assert_eq!(sync_test_file(&db, &child, &files)?.imported, 0);
+            let conn = lock_conn!(db.conn);
+            let totals: (i64, i64) = conn.query_row(
+                "SELECT COUNT(*), SUM(input_tokens) FROM proxy_request_logs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(totals, (1, 50));
         }
         Ok(())
     }
