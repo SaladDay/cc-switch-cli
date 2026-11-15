@@ -196,6 +196,8 @@ struct ParentSignatureSnapshot {
     /// A byte prefix cannot certify history after its first unreadable record.
     /// Legacy replay still skips malformed lines; only paginated chains use this.
     first_invalid_record_start: Option<u64>,
+    /// I/O failures are transient evidence and cannot be cached by file metadata.
+    had_read_error: bool,
     /// Root identity from the same opened file as the cached signatures.
     root_meta: Option<RootMeta>,
     /// UTC creation time from the first session_meta; only used to order segments.
@@ -1336,11 +1338,20 @@ fn parse_parent_signature_file(
     parent_path: &Path,
     stamp: ParentFileStamp,
 ) -> ParentSignatureSnapshot {
+    parse_parent_signature_reader(BufReader::new(file), parent_path, stamp)
+}
+
+fn parse_parent_signature_reader(
+    mut reader: impl BufRead,
+    parent_path: &Path,
+    stamp: ParentFileStamp,
+) -> ParentSignatureSnapshot {
     let started = Instant::now();
     let mut entries: Vec<(DateTime<Utc>, TokenUsageSignature)> = Vec::new();
     let mut entry_end_offsets = Vec::new();
     let mut record_end_offsets = Vec::new();
     let mut first_invalid_record_start = None;
+    let mut had_read_error = false;
     let mut max_timestamp: Option<DateTime<Utc>> = None;
     let mut creation_timestamp = None;
     let mut root_meta = None;
@@ -1350,7 +1361,6 @@ fn parse_parent_signature_file(
 
     // 必须扫描完整父文件并逐行应用 cutoff，不能在首个未来时间戳处 break：
     // rollout 写入顺序不承诺时间戳严格单调。
-    let mut reader = BufReader::new(file);
     let mut line_bytes = Vec::new();
     let mut byte_offset = 0u64;
     loop {
@@ -1362,6 +1372,7 @@ fn parse_parent_signature_file(
             Ok(0) => break,
             Ok(_) => {}
             Err(_) => {
+                had_read_error = true;
                 first_invalid_record_start.get_or_insert(record_start);
                 continue;
             }
@@ -1444,6 +1455,7 @@ fn parse_parent_signature_file(
         entry_end_offsets,
         record_end_offsets,
         first_invalid_record_start,
+        had_read_error,
         root_meta,
         creation_timestamp,
         max_timestamp,
@@ -1467,6 +1479,13 @@ fn parent_signatures_before(
 /// and any cache miss is parsed through the same handle. An append changes its
 /// stamp and forces a reload on the next query. See `ParentFileStamp` for limits.
 fn load_parent_snapshot(parent_path: &Path) -> Result<Arc<ParentSignatureSnapshot>, String> {
+    load_parent_snapshot_with_parser(parent_path, parse_parent_signature_file)
+}
+
+fn load_parent_snapshot_with_parser(
+    parent_path: &Path,
+    parse: impl FnOnce(fs::File, &Path, ParentFileStamp) -> ParentSignatureSnapshot,
+) -> Result<Arc<ParentSignatureSnapshot>, String> {
     let file = fs::File::open(parent_path)
         .map_err(|error| format!("无法打开父 rollout {}: {error}", parent_path.display()))?;
     let stamp = file
@@ -1491,12 +1510,8 @@ fn load_parent_snapshot(parent_path: &Path) -> Result<Arc<ParentSignatureSnapsho
         }
     }
 
-    let snapshot = Arc::new(parse_parent_signature_file(
-        file,
-        parent_path,
-        stamp.unwrap_or_default(),
-    ));
-    if stamp.is_some() {
+    let snapshot = Arc::new(parse(file, parent_path, stamp.unwrap_or_default()));
+    if stamp.is_some() && !snapshot.had_read_error {
         if let Ok(mut caches) = replay_caches().lock() {
             caches
                 .parent_signatures
@@ -1655,6 +1670,7 @@ fn resolve_parent_signatures(
         entry_end_offsets: Vec::new(),
         record_end_offsets: Vec::new(),
         first_invalid_record_start: None,
+        had_read_error: false,
         root_meta: None,
         creation_timestamp: None,
         max_timestamp: None,
@@ -4264,6 +4280,98 @@ mod tests {
                 assert_eq!(totals, (1, 50, 5));
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_transient_parent_read_error_does_not_poison_unchanged_child_retry(
+    ) -> Result<(), AppError> {
+        struct FailOnce<R> {
+            inner: R,
+            failed: bool,
+        }
+        impl<R: std::io::Read> std::io::Read for FailOnce<R> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !self.failed {
+                    self.failed = true;
+                    return Err(std::io::Error::other("one-shot parent read failure"));
+                }
+                self.inner.read(buffer)
+            }
+        }
+
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        let original = rollout_path(temp.path(), PARENT_ID);
+        let page = temp.path().join(format!(
+            "rollout-2026-07-10T03-00-20-{PARENT_ID}_{PARENT_PAGE_ID}.jsonl"
+        ));
+        let child = rollout_path(temp.path(), CHILD_A_ID);
+        write_jsonl(
+            &original,
+            &[
+                paginated_parent_meta("2026-07-10T03:00:00Z", None),
+                token_count_at(100, 0, 10, "2026-07-10T03:00:01Z"),
+                token_count_at(200, 0, 20, "2026-07-10T03:00:02Z"),
+            ],
+        );
+        let original_bytes = fs::read(&original).unwrap();
+        write_jsonl(
+            &page,
+            &[
+                paginated_parent_meta(
+                    "2026-07-10T03:00:20Z",
+                    Some(history_reference(PARENT_ID, original_bytes.len() as u64)),
+                ),
+                token_count_at(300, 0, 30, "2026-07-10T03:00:21Z"),
+                turn_context_at("2026-07-10T03:00:40Z"),
+            ],
+        );
+        write_jsonl(
+            &child,
+            &[
+                session_meta_at(CHILD_A_ID, Some(PARENT_ID), None, "2026-07-10T03:00:30Z"),
+                token_count_at(100, 0, 10, "2026-07-10T03:00:31Z"),
+                token_count_at(200, 0, 20, "2026-07-10T03:00:32Z"),
+                token_count_at(300, 0, 30, "2026-07-10T03:00:33Z"),
+                token_count_at(350, 0, 35, "2026-07-10T03:00:34Z"),
+            ],
+        );
+        let child_bytes = fs::read(&child).unwrap();
+        // The failed read consumes no bytes, then the same reader returns all
+        // healthy contents. That I/O result must not become a stamped cache hit.
+        let failed_snapshot = load_parent_snapshot_with_parser(&original, |file, path, stamp| {
+            parse_parent_signature_reader(
+                BufReader::new(FailOnce {
+                    inner: file,
+                    failed: false,
+                }),
+                path,
+                stamp,
+            )
+        })
+        .unwrap();
+        assert_eq!(failed_snapshot.first_invalid_record_start, Some(0));
+        assert_eq!(failed_snapshot.entries.len(), 2);
+        assert_eq!(get_sync_state(&db, &child.to_string_lossy())?, (0, 0));
+
+        let files = [&original as &Path, &page, &child];
+        let recovered = sync_test_file(&db, &child, &files)?;
+        assert_eq!(
+            (recovered.imported, recovered.skipped, recovered.deferred),
+            (1, 3, false)
+        );
+        assert_eq!(get_sync_state(&db, &child.to_string_lossy())?.1, 5);
+        assert_eq!(sync_test_file(&db, &child, &files)?.imported, 0);
+        assert_eq!(fs::read(&original).unwrap(), original_bytes);
+        assert_eq!(fs::read(&child).unwrap(), child_bytes);
+        let conn = lock_conn!(db.conn);
+        let totals: (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM proxy_request_logs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(totals, (1, 50, 5));
         Ok(())
     }
 
