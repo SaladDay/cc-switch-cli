@@ -754,8 +754,15 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::ClaudeFallbackModel => HelpContent::new(
             texts::tui_label_claude_fallback_model(),
             help_lines(
-                "用于未明确落到具体角色模型（Haiku、Sonnet、Opus 等）的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。可在模型名末尾追加 [1M] 声明百万上下文支持；此标记不会验证上游能力。",
-                "A fallback for requests that don't clearly map to a specific role model (Haiku, Sonnet, Opus, etc.). Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints. Append [1M] to declare million-token context support; this marker does not verify upstream capability.",
+                "直连时写入 ANTHROPIC_MODEL，是 Claude Code 启动时使用的主模型，会优先于角色模型。角色的 1M 开关不会自动作用于它；请使用下方的默认模型 1M 开关。后台任务另用 Haiku 档。经过本地路由时，它还用于未匹配到具体角色的请求。",
+                "Writes ANTHROPIC_MODEL: in direct mode this is Claude Code's startup model and takes precedence over role models. Role 1M toggles do not enable 1M for it; use Default model 1M below. Background tasks use Haiku separately. With local routing, it also handles requests that don't clearly map to a specific role model.",
+            ),
+        ),
+        ProviderAddField::ClaudeFallbackOneM => HelpContent::new(
+            texts::tui_label_claude_fallback_one_m(),
+            help_lines(
+                "按 Enter 切换默认模型的 1M 声明，将 [1M] 标记写入 ANTHROPIC_MODEL。请先填写模型；此开关独立于角色模型，不验证供应商是否支持百万上下文。修改模型名时保留声明，清空模型后关闭。",
+                "Press Enter to toggle the 1M declaration for ANTHROPIC_MODEL. Enter a model first. This adds [1M] independently of role models and does not verify provider capability. Renaming preserves the declaration; clearing the model disables it.",
             ),
         ),
         ProviderAddField::ClaudeQuickConfig => HelpContent::new(
@@ -824,8 +831,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::CodexOAuthAccount => HelpContent::new(
             texts::tui_label_chatgpt_account(),
             help_lines(
-                "绑定 ChatGPT/Codex 官方登录账号。官方账号可用于 Codex 插件、移动端远程操作等官方能力。",
-                "Binds an official ChatGPT/Codex account. Official login can keep Codex plugins, mobile remote control, and other official app features available.",
+                "Codex 的 OpenAI Official 可选择托管账号，直接写入本机登录，无需开启路由；选择“不托管”则使用 Codex 原生登录。Claude 下的 Codex 模板仍通过本地代理使用绑定账号。官方账号可用于 Codex 插件、移动端远程操作等官方能力。订阅额度通过绑定账号的内置查询显示，无需余额模板；可在供应商列表按 r 刷新。",
+                "Codex OpenAI Official writes the selected managed account to the local login without requiring routing. Choose unmanaged to use the native Codex login. The Codex template under Claude uses the bound account through the local proxy. Official login can keep Codex plugins, mobile remote control, and other official app features available. Subscription quota uses the bound account's built-in query without a balance template; press r in the provider list to refresh.",
             ),
         ),
         ProviderAddField::CodexFastMode => HelpContent::new(
@@ -835,6 +842,7 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Enables the priority service tier for Codex OAuth requests. It only affects accounts or services that support it.",
             ),
         ),
+        ProviderAddField::ClaudeInactiveFields => HelpContent::new(crate::t!("Inactive fields", "未应用字段"), help_lines("这些旧配置保存在供应商记录中，但不会随切换生效。可以复制到当前编辑内容，检查后保存。", "These legacy values remain in the provider record but are not applied when switching. Copy them into the editor, review, then save.")),
         ProviderAddField::CommonSnippet => HelpContent::new(
             texts::tui_config_item_common_snippet(),
             help_lines(
@@ -1058,8 +1066,8 @@ fn provider_preview_help(app_type: AppType, section: Option<CodexPreviewSection>
         (AppType::Codex, Some(CodexPreviewSection::Auth)) => HelpContent::new(
             texts::tui_codex_auth_json_title(),
             help_lines(
-                "这里预览将保存的 Codex 认证配置。代理接管时，上游会强调这里是存储配置，不是运行中的 auth.json。",
-                "This previews the Codex auth config to be saved. During proxy takeover, upstream treats this as stored config, not the live auth.json.",
+                "这里预览保存在 CC Switch 中的认证配置，不是运行中的 auth.json。第三方 API Key 在切换时写入 config.toml；auth.json 用于官方登录。",
+                "This previews the auth config stored in CC Switch, not the live auth.json. Third-party API keys are written to config.toml on switch; auth.json is used for official login.",
             ),
         ),
         (AppType::Codex, Some(CodexPreviewSection::Config)) => HelpContent::new(
@@ -1072,8 +1080,8 @@ fn provider_preview_help(app_type: AppType, section: Option<CodexPreviewSection>
         (AppType::Claude, _) => HelpContent::new(
             texts::tui_provider_config_title(),
             help_lines(
-                "这里预览将保存的供应商配置。Proxy 开启时，Claude 实际读取的 settings.json 会由代理临时接管，因此会显示本地代理地址、占位凭据和模型映射，而不是这里的真实上游配置。按 Enter 可打开编辑器进行高级修改。",
-                "This previews the stored provider config. While Proxy is on, Claude's live settings.json is temporarily managed by the proxy, so it contains the local proxy URL, placeholder credentials, and model mappings instead of the real upstream config shown here. Press Enter to open the advanced editor.",
+                "这里展示切到此供应商后的 settings.json。密钥、模型和上下文限制随供应商保存；语言、权限等全局设置按修改直接写盘，编辑其他供应商时也会生效。外部修改发生冲突时会提示选择。代理开启时仍显示真实供应商配置，保存不会覆盖代理地址和占位凭据。按 Enter 编辑。旧通用片段仅保留兼容，可用 config common show 查看后按需复制。",
+                "This shows settings.json after switching to this provider. Keys, models and context limits belong to the provider; changed global settings such as language and permissions are written immediately, even when editing an inactive provider. Conflicting external edits require a choice. While proxying, the editor shows real provider settings and saving preserves the proxy route. Press Enter to edit. Legacy common snippets remain available through config common show for manual copying.",
             ),
         ),
         _ => HelpContent::new(

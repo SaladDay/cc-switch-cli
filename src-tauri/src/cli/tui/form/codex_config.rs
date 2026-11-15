@@ -61,17 +61,8 @@ pub(crate) fn update_codex_config_snippet(
     base_url: &str,
     model: &str,
     wire_api: CodexWireApi,
-    requires_openai_auth: bool,
-    env_key: &str,
 ) -> String {
-    crate::codex_config::update_codex_config_snippet(
-        original,
-        base_url,
-        model,
-        wire_api.as_str(),
-        requires_openai_auth,
-        env_key,
-    )
+    crate::codex_config::update_codex_config_snippet(original, base_url, model, wire_api.as_str())
 }
 
 pub(crate) fn build_codex_third_party_config_toml(
@@ -86,6 +77,75 @@ pub(crate) fn build_codex_third_party_config_toml(
         model,
         wire_api.as_str(),
     )
+}
+
+// Match upstream useCodexConfigState: stored auth wins; bearer is a display fallback.
+pub(super) fn codex_api_key(settings: &serde_json::Value) -> String {
+    settings
+        .get("auth")
+        .and_then(|auth| auth.get("OPENAI_API_KEY"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let doc = settings
+                .get("config")?
+                .as_str()?
+                .parse::<toml_edit::DocumentMut>()
+                .ok()?;
+            let token = |item: &toml_edit::Item| {
+                item.as_str()
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_string)
+            };
+            doc.get("model_provider")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty() && !crate::live::project::codex::is_built_in_id(id))
+                .and_then(|id| {
+                    doc.get("model_providers")?
+                        .get(id)?
+                        .get("experimental_bearer_token")
+                })
+                .and_then(token)
+                .or_else(|| doc.get("experimental_bearer_token").and_then(token))
+        })
+        .unwrap_or_default()
+}
+
+// Match upstream updateCodexExperimentalBearerToken: update only an existing
+// active-provider token, falling back to the root token. Never add a token.
+pub(super) fn update_existing_codex_bearer(config: &str, key: &str) -> String {
+    let Ok(mut doc) = config.parse::<toml_edit::DocumentMut>() else {
+        return config.to_string();
+    };
+    let provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && !crate::live::project::codex::is_built_in_id(id))
+        .filter(|id| {
+            doc.get("model_providers")
+                .and_then(|item| item.get(*id))
+                .and_then(|item| item.get("experimental_bearer_token"))
+                .is_some()
+        })
+        .map(str::to_string);
+    let table = match provider {
+        Some(id) => doc["model_providers"][&id].as_table_like_mut(),
+        None => Some(doc.as_table_mut() as &mut dyn toml_edit::TableLike),
+    };
+    if let Some(table) = table {
+        if let Some(token) = table.get_mut("experimental_bearer_token") {
+            if key.trim().is_empty() {
+                table.remove("experimental_bearer_token");
+            } else {
+                *token = toml_edit::value(key.trim());
+            }
+        }
+    }
+    doc.to_string()
 }
 
 #[cfg(test)]

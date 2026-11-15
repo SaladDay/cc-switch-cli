@@ -25,7 +25,7 @@ pub(crate) fn sse_event(event: &str, data: Value) -> Bytes {
 }
 
 // ---------------------------------------------------------------------------
-// Response lifecycle (created / in_progress / completed / failed)
+// Response lifecycle (created / in_progress / completed or incomplete / failed)
 // ---------------------------------------------------------------------------
 
 /// `response.created`, wrapping a caller-built `response` object (usage/created_at differ
@@ -45,12 +45,16 @@ pub(crate) fn response_in_progress(response: &Value) -> Bytes {
     )
 }
 
-/// `response.completed`.
-pub(crate) fn response_completed(response: &Value) -> Bytes {
-    sse_event(
-        "response.completed",
-        json!({ "type": "response.completed", "response": response }),
-    )
+/// Terminal event for a finished response: `response.incomplete` when its `status` is
+/// `incomplete`, otherwise `response.completed`. Codex reads `incomplete_details` only
+/// from a `response.incomplete` event and treats `response.completed` as success.
+pub(crate) fn response_terminal(response: &Value) -> Bytes {
+    let event = if response.get("status").and_then(Value::as_str) == Some("incomplete") {
+        "response.incomplete"
+    } else {
+        "response.completed"
+    };
+    sse_event(event, json!({ "type": event, "response": response }))
 }
 
 /// `response.failed`.

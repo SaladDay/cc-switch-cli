@@ -44,6 +44,7 @@ pub(crate) fn add_form_key_items(
                         | ProviderAddField::CodexOAuthAccount
                         | ProviderAddField::CodexLocalRouting
                         | ProviderAddField::LocalProxySettings
+                        | ProviderAddField::ClaudeInactiveFields
                         | ProviderAddField::CommonSnippet
                         | ProviderAddField::UsageQuery
                         | ProviderAddField::OpenClawModels
@@ -53,6 +54,7 @@ pub(crate) fn add_form_key_items(
                         ProviderAddField::ClaudeHideAttribution
                         | ProviderAddField::ClaudeTeammates
                         | ProviderAddField::ClaudeToolSearch
+                        | ProviderAddField::ClaudeFallbackOneM
                         | ProviderAddField::ClaudeEffortMax
                         | ProviderAddField::ClaudeDisableAutoUpgrade
                         | ProviderAddField::CodexGoalMode

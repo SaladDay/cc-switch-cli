@@ -30,6 +30,12 @@ pub(super) fn populate_form_from_provider(
         AppType::OpenClaw => populate_openclaw_form(form, provider),
         AppType::Pi => populate_openclaw_form(form, provider),
     }
+    if matches!(app_type, AppType::Codex) && provider.is_codex_official() {
+        form.codex_oauth_account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
+    }
     form.is_full_url = form.supports_full_url_mode()
         && provider
             .meta
@@ -193,7 +199,7 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
             .get(CLAUDE_DEFAULT_MODEL_ENV_KEY)
             .and_then(|value| value.as_str())
         {
-            form.claude_model.set(model);
+            form.set_claude_fallback_model_from_config(model);
         }
         let model = env
             .get(CLAUDE_DEFAULT_MODEL_ENV_KEY)
@@ -251,15 +257,9 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
         form.codex_remote_compaction =
             crate::codex_config::is_codex_remote_compaction_enabled(config);
     }
-    if let Some(auth) = provider
-        .settings_config
-        .get("auth")
-        .and_then(|value| value.as_object())
-    {
-        if let Some(key) = auth.get("OPENAI_API_KEY").and_then(|value| value.as_str()) {
-            form.codex_api_key.set(key);
-        }
-    }
+    form.codex_api_key.set(super::codex_config::codex_api_key(
+        &provider.settings_config,
+    ));
     form.claude_api_format = parse_codex_api_format(provider);
     form.claude_api_key_field = provider
         .meta

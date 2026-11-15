@@ -489,6 +489,7 @@ impl ConfigItem {
 
     pub(crate) fn listed_in_config_menu(&self, app_type: &AppType) -> bool {
         self.visible_for_app(app_type)
+            && !(matches!(app_type, AppType::Claude) && matches!(self, ConfigItem::CommonSnippet))
             && !matches!(
                 self,
                 ConfigItem::OpenClawWorkspace

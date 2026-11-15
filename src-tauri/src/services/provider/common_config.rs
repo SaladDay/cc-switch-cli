@@ -626,7 +626,9 @@ pub(super) fn provider_uses_common_config(
     provider: &Provider,
     snippet: Option<&str>,
 ) -> bool {
-    let _ = app_type;
+    if matches!(app_type, AppType::Claude) {
+        return false;
+    }
     provider
         .meta
         .as_ref()
@@ -646,12 +648,7 @@ pub(super) fn apply_common_config_to_settings(
     }
 
     match app_type {
-        AppType::Claude => {
-            let source = parse_json_object_snippet(app_type, trimmed)?;
-            let mut result = settings.clone();
-            json_deep_merge(&mut result, &source);
-            Ok(result)
-        }
+        AppType::Claude => Ok(settings.clone()),
         AppType::Codex => {
             let mut result = settings.clone();
             let config_toml = settings.get("config").and_then(Value::as_str).unwrap_or("");
@@ -858,11 +855,12 @@ pub(super) fn normalize_provider_common_config_for_storage(
     provider: &mut Provider,
     snippet: Option<&str>,
 ) -> Result<(), AppError> {
-    if provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.apply_common_config)
-        != Some(true)
+    if matches!(app_type, AppType::Claude)
+        || provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config)
+            != Some(true)
     {
         return Ok(());
     }

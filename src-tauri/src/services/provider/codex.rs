@@ -25,6 +25,15 @@ impl ProviderService {
         provider_id: &str,
         codex_home: &Path,
     ) -> Result<(), AppError> {
+        if db
+            .get_all_providers("codex")?
+            .get(provider_id)
+            .and_then(|provider| provider.meta.as_ref())
+            .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+            .is_some()
+        {
+            return Ok(());
+        }
         let auth_path = codex_home.join("auth.json");
         let auth = if auth_path.exists() {
             read_json_file::<Value>(&auth_path)?
@@ -513,7 +522,14 @@ impl ProviderService {
             clean_config_text
         };
 
-        let mut plan = codex_live::prepare(is_official, auth, &live_config_text, rows, previous)?;
+        let mut plan = codex_live::prepare(
+            is_official,
+            auth,
+            &live_config_text,
+            rows,
+            previous,
+            Some(provider),
+        )?;
         plan.config.catalog = prepared_config.model_catalog.is_some();
         Ok(PreparedLiveWrite::Codex {
             plan,

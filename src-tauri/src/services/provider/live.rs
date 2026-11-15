@@ -20,6 +20,7 @@ pub(super) enum LiveSnapshot {
         auth_readable: bool,
         config: Option<String>,
         stash: Option<Vec<u8>>,
+        marker: Option<Vec<u8>>,
     },
     Gemini {
         env: Option<HashMap<String, String>>,
@@ -52,8 +53,16 @@ impl LiveSnapshot {
                 auth_readable,
                 config,
                 stash,
+                marker,
             } => {
                 super::codex_live::restore_stash(stash.as_deref())?;
+                let marker_path =
+                    crate::codex_config::get_codex_managed_oauth_live_auth_marker_path();
+                match marker {
+                    Some(bytes) => crate::config::atomic_write_private(&marker_path, bytes)?,
+                    None if marker_path.exists() => delete_file(&marker_path)?,
+                    None => {}
+                }
                 let auth_path = get_codex_auth_path();
                 let config_path = get_codex_config_path();
                 if *auth_readable {
@@ -151,6 +160,9 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
                 auth_readable,
                 config,
                 stash: super::codex_live::read_stash_bytes()?,
+                marker: crate::live::engine::read_current(
+                    &crate::codex_config::get_codex_managed_oauth_live_auth_marker_path(),
+                )?,
             })
         }
         AppType::Gemini => {

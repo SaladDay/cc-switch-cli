@@ -514,7 +514,7 @@ fn add_packycode_template_is_scriptable_for_every_additive_app() {
         "https://www.packyapi.ai/v1"
     );
     assert!(opencode.settings_config["models"]
-        .get("claude-opus-5")
+        .get("claude-opus-5-5")
         .is_some());
 
     let hermes = saved_provider(AppType::Hermes, "packy-hermes");
@@ -524,7 +524,7 @@ fn add_packycode_template_is_scriptable_for_every_additive_app() {
         "https://www.packyapi.ai"
     );
     assert_eq!(hermes.settings_config["api_mode"], "anthropic_messages");
-    assert_eq!(hermes.settings_config["models"][0]["id"], "claude-opus-5");
+    assert_eq!(hermes.settings_config["models"][0]["id"], "claude-opus-5-5");
 
     let openclaw = saved_provider(AppType::OpenClaw, "packy-openclaw");
     assert_eq!(openclaw.settings_config["apiKey"], "sk-packy");
@@ -533,7 +533,10 @@ fn add_packycode_template_is_scriptable_for_every_additive_app() {
         "https://www.packyapi.ai"
     );
     assert_eq!(openclaw.settings_config["api"], "anthropic-messages");
-    assert_eq!(openclaw.settings_config["models"][0]["id"], "claude-opus-5");
+    assert_eq!(
+        openclaw.settings_config["models"][0]["id"],
+        "claude-opus-5-5"
+    );
 }
 
 #[test]
@@ -574,7 +577,7 @@ fn add_openmodel_template_is_scriptable_for_every_app() {
     let codex_config = codex.settings_config["config"]
         .as_str()
         .expect("OpenModel Codex config should be TOML");
-    assert!(codex_config.contains("model = \"gpt-5.6-sol\""));
+    assert!(codex_config.contains("model = \"gpt-6.1-sol\""));
     assert!(codex_config.contains("base_url = \"https://api.openmodel.ai/v1\""));
     assert!(codex_config.contains("wire_api = \"responses\""));
 
@@ -584,7 +587,7 @@ fn add_openmodel_template_is_scriptable_for_every_app() {
         env_str(&gemini, "GOOGLE_GEMINI_BASE_URL"),
         Some("https://api.openmodel.ai")
     );
-    assert_eq!(env_str(&gemini, "GEMINI_MODEL"), Some("gemini-3.6-flash"));
+    assert_eq!(env_str(&gemini, "GEMINI_MODEL"), Some("gemini-3.8-flash"));
 
     let opencode = saved_provider(AppType::OpenCode, "openmodel-opencode");
     assert_eq!(opencode.settings_config["options"]["apiKey"], "om-test");
@@ -593,7 +596,7 @@ fn add_openmodel_template_is_scriptable_for_every_app() {
         "https://api.openmodel.ai/v1"
     );
     assert!(opencode.settings_config["models"]
-        .get("claude-opus-5")
+        .get("claude-opus-5-5")
         .is_some());
 
     let hermes = saved_provider(AppType::Hermes, "openmodel-hermes");
@@ -603,7 +606,7 @@ fn add_openmodel_template_is_scriptable_for_every_app() {
         "https://api.openmodel.ai"
     );
     assert_eq!(hermes.settings_config["api_mode"], "anthropic_messages");
-    assert_eq!(hermes.settings_config["models"][0]["id"], "claude-opus-5");
+    assert_eq!(hermes.settings_config["models"][0]["id"], "claude-opus-5-5");
 
     let openclaw = saved_provider(AppType::OpenClaw, "openmodel-openclaw");
     assert_eq!(openclaw.settings_config["apiKey"], "om-test");
@@ -612,7 +615,10 @@ fn add_openmodel_template_is_scriptable_for_every_app() {
         "https://api.openmodel.ai"
     );
     assert_eq!(openclaw.settings_config["api"], "anthropic-messages");
-    assert_eq!(openclaw.settings_config["models"][0]["id"], "claude-opus-5");
+    assert_eq!(
+        openclaw.settings_config["models"][0]["id"],
+        "claude-opus-5-5"
+    );
 }
 
 #[test]
@@ -653,7 +659,7 @@ fn add_patewayai_template_uses_upstream_claude_and_codex_settings() {
     let config = codex.settings_config["config"]
         .as_str()
         .expect("PatewayAI Codex config should be TOML");
-    assert!(config.contains("model = \"gpt-5.6-sol\""));
+    assert!(config.contains("model = \"gpt-6.1-sol\""));
     assert!(config.contains("base_url = \"https://api.pateway.ai/v1\""));
     assert!(config.contains("name = \"patewayai\""));
     assert!(config.contains("wire_api = \"responses\""));

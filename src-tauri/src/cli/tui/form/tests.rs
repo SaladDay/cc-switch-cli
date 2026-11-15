@@ -43,9 +43,8 @@ fn normalize_template_provider_json(mut value: serde_json::Value) -> serde_json:
     if let Some(obj) = value.as_object_mut() {
         obj.remove("inFailoverQueue");
         if let Some(meta) = obj.get_mut("meta").and_then(|value| value.as_object_mut()) {
-            if meta.get("commonConfigEnabled") == Some(&json!(false)) {
-                meta.remove("commonConfigEnabled");
-            }
+            // Compatibility metadata is assigned on save, not part of a template.
+            meta.remove("commonConfigEnabled");
             if meta.is_empty() {
                 obj.remove("meta");
             }
@@ -119,7 +118,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Claude Official",
             "Codex",
             "88API",
-            "PatewayAI",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -128,6 +127,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "AICodeMirror",
             "ClaudeAPI",
             "Qiniu",
+            "PatewayAI",
             "FennoAI",
             "DeepSeek",
             "Zhipu GLM",
@@ -148,7 +148,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "OpenAI Official",
             "88API",
-            "PatewayAI",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -156,6 +156,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "RunAPI",
             "AICodeMirror",
             "Qiniu",
+            "PatewayAI",
             "FennoAI",
             "DeepSeek",
             "Zhipu GLM",
@@ -176,6 +177,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Google OAuth",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -190,6 +192,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -210,6 +213,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -226,6 +230,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -258,6 +263,7 @@ fn provider_add_form_pi_exposes_only_the_selected_template_scope() {
             "OpenCode Go",
             "OpenRouter",
             "88API",
+            "APIMart",
             "Cubence",
             "PackyCode",
             "RunAPI",
@@ -295,7 +301,7 @@ fn provider_add_form_pi_picker_uses_family_sections() {
             ProviderTemplateRow::Header(_) => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(items.len(), 17);
+    assert_eq!(items.len(), 18);
     assert_eq!(items[0], (0, "Custom", ProviderTemplateSection::BuiltIn));
     assert_eq!(
         items[9],
@@ -303,8 +309,8 @@ fn provider_add_form_pi_picker_uses_family_sections() {
     );
     assert_eq!(items[10], (10, "88API", ProviderTemplateSection::Sponsors));
     assert_eq!(
-        items[16],
-        (16, "FennoAI", ProviderTemplateSection::Sponsors)
+        items[17],
+        (17, "FennoAI", ProviderTemplateSection::Sponsors)
     );
 }
 
@@ -359,82 +365,82 @@ fn provider_add_form_claude_builtin_presets_match_upstream_fields() {
         (
             "DeepSeek",
             "https://api.deepseek.com/anthropic",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek-flash[1M]",
+            "deepseek-flash[1M]",
+            "deepseek-flash[1M]",
+            "deepseek-flash[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "Zhipu GLM",
             "https://open.bigmodel.cn/api/anthropic",
-            "glm-5.1",
-            "glm-5.1",
-            "glm-5.1",
-            "glm-5.1",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "Zhipu GLM en",
             "https://api.z.ai/api/anthropic",
-            "glm-5.1",
-            "glm-5.1",
-            "glm-5.1",
-            "glm-5.1",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
+            "glm-5.3[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "ModelScope",
             "https://api-inference.modelscope.cn",
-            "ZhipuAI/GLM-5.2",
-            "ZhipuAI/GLM-5.2",
-            "ZhipuAI/GLM-5.2",
-            "ZhipuAI/GLM-5.2",
+            "ZhipuAI/GLM-5.2[1M]",
+            "ZhipuAI/GLM-5.2[1M]",
+            "ZhipuAI/GLM-5.2[1M]",
+            "ZhipuAI/GLM-5.2[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "MiniMax",
             "https://api.minimaxi.com/anthropic",
-            "MiniMax-M2.7",
-            "MiniMax-M2.7",
-            "MiniMax-M2.7",
-            "MiniMax-M2.7",
+            "MiniMax-M3.1-Flash[1M]",
+            "MiniMax-M3.1-Flash[1M]",
+            "MiniMax-M3.1-Flash[1M]",
+            "MiniMax-M3[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "Xiaomi MiMo",
             "https://api.xiaomimimo.com/anthropic",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "Xiaomi MiMo Token Plan (China)",
             "https://token-plan-cn.xiaomimimo.com/anthropic",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
+            "mimo-v2.6-pro[1M]",
             ClaudeApiKeyField::AuthToken,
         ),
         (
             "OpenCode Go",
             "https://opencode.ai/zen/go",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
+            "deepseek-v4.1-flash[1M]",
+            "deepseek-v4.1-flash[1M]",
+            "deepseek-v4.1-flash[1M]",
+            "deepseek-v4.1-flash[1M]",
             ClaudeApiKeyField::ApiKey,
         ),
         (
             "OpenRouter",
             "https://openrouter.ai/api",
-            "anthropic/claude-sonnet-5",
-            "anthropic/claude-haiku-4.5",
-            "anthropic/claude-sonnet-5",
-            "anthropic/claude-opus-5",
+            "anthropic/claude-sonnet-5.5",
+            "anthropic/claude-haiku-5.5",
+            "anthropic/claude-sonnet-5.5",
+            "anthropic/claude-opus-5.5",
             ClaudeApiKeyField::AuthToken,
         ),
     ];
@@ -479,15 +485,15 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "DeepSeek",
             "deepseek",
             "https://api.deepseek.com",
-            "deepseek-v4-flash",
+            "deepseek-flash",
             "openai_responses",
-            2,
+            1,
         ),
         (
             "Zhipu GLM",
             "zhipu_glm",
             "https://open.bigmodel.cn/api/coding/paas/v4",
-            "glm-5.2",
+            "glm-5.3",
             "openai_chat",
             1,
         ),
@@ -495,7 +501,7 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "Zhipu GLM en",
             "zhipu_glm_en",
             "https://api.z.ai/api/coding/paas/v4",
-            "glm-5.2",
+            "glm-5.3",
             "openai_chat",
             1,
         ),
@@ -511,23 +517,23 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "MiniMax",
             "minimax",
             "https://api.minimaxi.com/v1",
-            "MiniMax-M3",
+            "MiniMax-M3.1-Flash",
             "openai_responses",
-            1,
+            2,
         ),
         (
             "Xiaomi MiMo",
             "xiaomi_mimo",
             "https://api.xiaomimimo.com/v1",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro",
             "openai_responses",
-            2,
+            3,
         ),
         (
             "Xiaomi MiMo Token Plan (China)",
             "xiaomi_mimo_token_plan",
             "https://token-plan-cn.xiaomimimo.com/v1",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro",
             "openai_responses",
             2,
         ),
@@ -535,15 +541,15 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
             "OpenCode Go",
             "opencode_go",
             "https://opencode.ai/zen/go/v1",
-            "glm-5.2",
+            "glm-5.3",
             "openai_chat",
-            6,
+            5,
         ),
         (
             "OpenRouter",
             "openrouter",
             "https://openrouter.ai/api/v1",
-            "gpt-5.6-sol",
+            "openai/gpt-6.1-sol",
             "openai_responses",
             0,
         ),
@@ -601,7 +607,7 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
         "zen"
     );
     assert_eq!(
-        opencode["settingsConfig"]["modelCatalog"]["models"][4]["reasoningLevels"],
+        opencode["settingsConfig"]["modelCatalog"]["models"][3]["reasoningLevels"],
         json!(["low", "high", "max"])
     );
 
@@ -613,13 +619,59 @@ fn provider_add_form_codex_builtin_presets_match_upstream_fields() {
     assert_eq!(minimax_model["inputModalities"], json!(["text", "image"]));
     assert_eq!(
         minimax_model["baseInstructions"],
-        "You are Codex, a coding agent based on MiniMax-M3. You and the user share the same workspace and collaborate to achieve the user's goals."
+        "You are Codex, a coding agent based on MiniMax-M3.1-Flash. You and the user share the same workspace and collaborate to achieve the user's goals."
     );
+    let m3 = &minimax["settingsConfig"]["modelCatalog"]["models"][1];
+    assert_eq!(m3["model"], "MiniMax-M3");
+    assert_eq!(m3["reasoningLevels"], json!(["none", "high"]));
+    assert_eq!(m3["contextWindow"], 1_000_000);
+    assert_eq!(m3["inputModalities"], json!(["text", "image"]));
+    assert_eq!(m3["supportsParallelToolCalls"], true);
+}
+
+#[test]
+fn qiniu_and_fenno_templates_keep_distinct_models_in_cli_and_tui() {
+    for (label, template, model) in [
+        ("Qiniu", ProviderAddTemplate::Qiniu, "gpt-6-astra"),
+        ("FennoAI", ProviderAddTemplate::Fenno, "gpt-6.1-sol"),
+    ] {
+        for app in [
+            AppType::Codex,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            let cli = build_provider_template_seed(&app, template, &[]).expect("CLI template");
+            let mut form = ProviderAddFormState::new(app.clone());
+            form.apply_template(template_index_by_label(app.clone(), label), &[]);
+            let tui = form.to_provider_json_value();
+            for settings in [&cli.settings_config, &tui["settingsConfig"]] {
+                match app {
+                    AppType::Codex => {
+                        let config: toml::Value =
+                            settings["config"].as_str().unwrap().parse().unwrap();
+                        assert_eq!(config["model"].as_str(), Some(model), "{label}");
+                    }
+                    AppType::OpenCode => {
+                        assert!(settings["models"].get(model).is_some(), "{label}");
+                        assert_eq!(settings["models"].as_object().unwrap().len(), 1);
+                    }
+                    _ => assert_eq!(settings["models"][0]["id"], model, "{label}"),
+                }
+            }
+        }
+    }
 }
 
 #[test]
 fn cli_provider_templates_match_tui_serializer_output() {
     for (app_type, template, label) in [
+        (AppType::Claude, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::Codex, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::Gemini, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::OpenCode, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::Hermes, ProviderAddTemplate::Apimart, "APIMart"),
+        (AppType::OpenClaw, ProviderAddTemplate::Apimart, "APIMart"),
         (
             AppType::Claude,
             ProviderAddTemplate::ClaudeOfficial,
@@ -717,7 +769,7 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
     assert_eq!(form.name.value, "DeepSeek");
     assert_eq!(form.website_url.value, "https://platform.deepseek.com");
     assert_eq!(form.codex_base_url.value, "https://api.deepseek.com");
-    assert_eq!(form.codex_model.value, "deepseek-v4-flash");
+    assert_eq!(form.codex_model.value, "deepseek-flash");
     assert_eq!(form.codex_wire_api, CodexWireApi::Responses);
     assert!(form.codex_requires_openai_auth);
 
@@ -746,7 +798,7 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
         .as_str()
         .expect("settingsConfig.config should be TOML string");
     assert!(cfg.contains("model_provider = \"custom\""));
-    assert!(cfg.contains("model = \"deepseek-v4-flash\""));
+    assert!(cfg.contains("model = \"deepseek-flash\""));
     assert!(cfg.contains("disable_response_storage = true"));
     assert!(cfg.contains("[model_providers.custom]"));
     assert!(cfg.contains("name = \"deepseek\""));
@@ -762,15 +814,10 @@ fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
         json!({
             "models": [
                 {
-                    "model": "deepseek-v4-flash",
-                    "displayName": "DeepSeek V4 Flash",
+                    "model": "deepseek-flash",
+                    "displayName": "DeepSeek V4.1 Flash",
                     "contextWindow": 1048576,
-                    "reasoningLevels": ["low", "high", "max"],
-                },
-                {
-                    "model": "deepseek-v4-pro",
-                    "displayName": "DeepSeek V4 Pro",
-                    "contextWindow": 1048576,
+                    "inputModalities": ["text", "image"],
                     "reasoningLevels": ["low", "high", "max"],
                 },
             ],
@@ -797,10 +844,10 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
         form.claude_api_format,
         crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses
     );
-    assert_eq!(form.claude_model.value, "gpt-5.6-sol");
-    assert_eq!(form.claude_haiku_model.value, "gpt-5.6-luna");
-    assert_eq!(form.claude_sonnet_model.value, "gpt-5.6-sol");
-    assert_eq!(form.claude_opus_model.value, "gpt-5.6-sol");
+    assert_eq!(form.claude_model.value, "gpt-6.1-sol");
+    assert_eq!(form.claude_haiku_model.value, "gpt-6-luna");
+    assert_eq!(form.claude_sonnet_model.value, "gpt-6.1-sol");
+    assert_eq!(form.claude_opus_model.value, "gpt-6.1-sol");
     assert!(!form.codex_fast_mode);
     assert!(form.claude_hide_attribution);
 
@@ -833,11 +880,11 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
     );
     assert_eq!(
         provider["settingsConfig"]["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
-        "372000"
+        "272000"
     );
     assert_eq!(
         provider["settingsConfig"]["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
-        "372000"
+        "272000"
     );
     assert!(
         provider["settingsConfig"]["env"]
@@ -1075,7 +1122,7 @@ fn provider_add_form_dds_template_codex_sets_base_url_and_partner_meta() {
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://www.ddshub.cc\""));
-    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
+    assert!(cfg.contains("model = \"gpt-6.1-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     let meta = provider["meta"]
@@ -1171,7 +1218,7 @@ fn provider_add_form_cubence_template_gemini_sets_base_url_and_partner_meta() {
     );
     assert_eq!(
         provider["settingsConfig"]["env"]["GEMINI_MODEL"],
-        "gemini-3.6-flash"
+        "gemini-3.8-flash"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
@@ -1192,12 +1239,12 @@ fn provider_add_form_cubence_template_opencode_sets_base_url_and_partner_meta() 
         "https://api.cubence.com/v1"
     );
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
-        "Claude Sonnet 5"
+        provider["settingsConfig"]["models"]["claude-sonnet-5-5"]["name"],
+        "Claude Sonnet 5.5"
     );
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-opus-5"]["name"],
-        "Claude Opus 5"
+        provider["settingsConfig"]["models"]["claude-opus-5-5"]["name"],
+        "Claude Opus 5.5"
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
@@ -1221,11 +1268,11 @@ fn provider_add_form_cubence_template_hermes_sets_base_url_and_partner_meta() {
     assert_eq!(
         settings.get("models"),
         Some(&json!([
-            { "id": "claude-opus-5", "name": "Claude Opus 5" },
-            { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
+            { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+            { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
             {
-                "id": "claude-haiku-4-5-20251001",
-                "name": "Claude Haiku 4.5"
+                "id": "claude-haiku-5-5",
+                "name": "Claude Haiku 5.5"
             },
         ]))
     );
@@ -1251,16 +1298,22 @@ fn provider_add_form_cubence_template_openclaw_sets_base_url_and_partner_meta() 
         provider["settingsConfig"]["models"],
         json!([
             {
-                "id": "claude-opus-5",
-                "name": "Claude Opus 5",
+                "id": "claude-opus-5-5",
+                "name": "Claude Opus 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
-                "cost": { "input": 5, "output": 25 },
+                "maxTokens": 128000,
+                "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
             },
             {
-                "id": "claude-sonnet-5",
-                "name": "Claude Sonnet 5",
+                "id": "claude-sonnet-5-5",
+                "name": "Claude Sonnet 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
-                "cost": { "input": 3, "output": 15 },
+                "maxTokens": 128000,
+                "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
             },
         ])
     );
@@ -1336,7 +1389,7 @@ fn provider_add_form_runapi_template_codex_sets_v1_base_url() {
     assert!(cfg.contains("[model_providers.custom]"));
     assert!(cfg.contains("name = \"RunAPI\""));
     assert!(cfg.contains("base_url = \"https://runapi.co/v1\""));
-    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
+    assert!(cfg.contains("model = \"gpt-6.1-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert_eq!(provider["meta"]["partnerPromotionKey"], "runapi");
 }
@@ -1361,13 +1414,16 @@ fn provider_add_form_runapi_template_opencode_matches_upstream_anthropic_shape()
         "blank OpenCode API keys should be omitted on save"
     );
     assert_eq!(
-        settings["models"]["claude-sonnet-5"]["name"],
-        "Claude Sonnet 5"
+        settings["models"]["claude-sonnet-5-5"]["name"],
+        "Claude Sonnet 5.5"
     );
-    assert_eq!(settings["models"]["claude-opus-5"]["name"], "Claude Opus 5");
     assert_eq!(
-        settings["models"]["claude-haiku-4-5"]["name"],
-        "Claude Haiku 4.5"
+        settings["models"]["claude-opus-5-5"]["name"],
+        "Claude Opus 5.5"
+    );
+    assert_eq!(
+        settings["models"]["claude-haiku-5-5"]["name"],
+        "Claude Haiku 5.5"
     );
     assert_eq!(provider["meta"]["partnerPromotionKey"], "runapi");
 }
@@ -1393,9 +1449,9 @@ fn provider_add_form_runapi_template_hermes_matches_upstream_anthropic_shape() {
     assert_eq!(
         settings["models"],
         json!([
-            { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
-            { "id": "claude-opus-5", "name": "Claude Opus 5" },
-            { "id": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },
+            { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
+            { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+            { "id": "claude-haiku-5-5", "name": "Claude Haiku 5.5" },
         ])
     );
     assert_eq!(provider["meta"]["partnerPromotionKey"], "runapi");
@@ -1422,19 +1478,31 @@ fn provider_add_form_runapi_template_openclaw_matches_upstream_anthropic_shape()
         settings["models"],
         json!([
             {
-                "id": "claude-sonnet-5",
-                "name": "Claude Sonnet 5",
+                "id": "claude-sonnet-5-5",
+                "name": "Claude Sonnet 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
             },
             {
-                "id": "claude-opus-5",
-                "name": "Claude Opus 5",
+                "id": "claude-opus-5-5",
+                "name": "Claude Opus 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
             },
             {
-                "id": "claude-haiku-4-5",
-                "name": "Claude Haiku 4.5",
-                "contextWindow": 200000,
+                "id": "claude-haiku-5-5",
+                "name": "Claude Haiku 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 },
             },
         ])
     );
@@ -1912,7 +1980,7 @@ fn provider_add_form_claude_fields_include_model_config_entry() {
 }
 
 #[test]
-fn provider_add_form_claude_places_quick_config_menu_below_common_config() {
+fn provider_add_form_claude_places_quick_config_menu_after_model_config() {
     let form = ProviderAddFormState::new(AppType::Claude);
     let fields = form.fields();
     let pos = |field: ProviderAddField| {
@@ -1923,7 +1991,7 @@ fn provider_add_form_claude_places_quick_config_menu_below_common_config() {
     };
     let advanced_divider_idx = pos(ProviderAddField::ClaudeAdvancedDivider);
     let model_cfg_idx = pos(ProviderAddField::ClaudeModelConfig);
-    let include_common_idx = pos(ProviderAddField::IncludeCommonConfig);
+    assert!(!fields.contains(&ProviderAddField::IncludeCommonConfig));
     let quick_config_idx = pos(ProviderAddField::ClaudeQuickConfig);
     let usage_divider_idx = pos(ProviderAddField::UsageQueryDivider);
 
@@ -1932,8 +2000,8 @@ fn provider_add_form_claude_places_quick_config_menu_below_common_config() {
         "model mapping should sit in the advanced section after the divider"
     );
     assert!(
-        quick_config_idx == include_common_idx + 1,
-        "the quick-config menu should sit directly below the add-common-config toggle"
+        quick_config_idx > model_cfg_idx,
+        "the quick-config menu follows the model configuration"
     );
     assert!(
         quick_config_idx < usage_divider_idx,
@@ -1993,204 +2061,6 @@ fn provider_add_form_claude_quick_config_menu_opens_and_toggles() {
 
     form.close_claude_quick_config_page();
     assert!(matches!(form.page, super::ProviderFormPage::Main));
-}
-
-#[test]
-fn provider_add_form_claude_quick_config_reflects_effective_common_config() {
-    use crate::provider::ProviderMeta;
-
-    let common_snippet = r#"{
-        "attribution": { "commit": "", "pr": "" },
-        "env": {
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-            "ENABLE_TOOL_SEARCH": "true",
-            "CLAUDE_CODE_EFFORT_LEVEL": "max",
-            "DISABLE_AUTOUPDATER": "1"
-        }
-    }"#;
-
-    let new_form = ProviderAddFormState::new_with_common_snippet(AppType::Claude, common_snippet);
-    assert!(new_form.include_common_config);
-    assert_eq!(new_form.claude_quick_config_enabled_count(), 5);
-    assert!(new_form.claude_effort_max);
-    assert!(!new_form.has_unsaved_changes());
-
-    let mut enabled_later = ProviderAddFormState::new(AppType::Claude);
-    enabled_later
-        .toggle_include_common_config(common_snippet)
-        .expect("common config should enable");
-    assert_eq!(enabled_later.claude_quick_config_enabled_count(), 5);
-
-    let mut provider = Provider::with_id(
-        "provider-1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider",
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            }
-        }),
-        None,
-    );
-    provider.meta = Some(ProviderMeta {
-        apply_common_config: Some(true),
-        ..Default::default()
-    });
-
-    let form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        common_snippet,
-    );
-    assert_eq!(form.claude_quick_config_enabled_count(), 5);
-    assert!(!form.has_unsaved_changes());
-
-    let raw = form.to_provider_json_value();
-    assert!(raw["settingsConfig"].get("attribution").is_none());
-    assert!(raw["settingsConfig"]["env"]
-        .get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
-        .is_none());
-    assert!(raw["settingsConfig"]["env"]
-        .get("CLAUDE_CODE_EFFORT_LEVEL")
-        .is_none());
-}
-
-#[test]
-fn provider_edit_form_claude_can_disable_inherited_effort_max() {
-    use crate::provider::ProviderMeta;
-
-    let common_snippet = r#"{"env":{"CLAUDE_CODE_EFFORT_LEVEL":"max"}}"#;
-    let mut provider = Provider::with_id(
-        "provider-1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider",
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            }
-        }),
-        None,
-    );
-    provider.meta = Some(ProviderMeta {
-        apply_common_config: Some(true),
-        ..Default::default()
-    });
-
-    let mut form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        common_snippet,
-    );
-    assert!(form.claude_effort_max);
-    assert_eq!(form.claude_quick_config_enabled_count(), 1);
-
-    form.toggle_claude_quick_config_field(ProviderAddField::ClaudeEffortMax, common_snippet)
-        .expect("inherited max effort should be editable");
-
-    assert!(!form.include_common_config);
-    assert!(!form.claude_effort_max);
-    let raw = form.to_provider_json_value();
-    assert_eq!(raw["meta"]["commonConfigEnabled"], false);
-    assert!(raw["settingsConfig"]["env"]
-        .get("CLAUDE_CODE_EFFORT_LEVEL")
-        .is_none());
-}
-
-#[test]
-fn provider_edit_form_claude_can_disable_inherited_quick_config() {
-    use crate::provider::ProviderMeta;
-
-    let common_snippet = r#"{
-        "attribution": { "commit": "", "pr": "" },
-        "env": {
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-            "ENABLE_TOOL_SEARCH": "true",
-            "DISABLE_AUTOUPDATER": "1",
-            "SHARED_FLAG": "keep-me"
-        }
-    }"#;
-    let mut provider = Provider::with_id(
-        "provider-1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider",
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            }
-        }),
-        None,
-    );
-    provider.meta = Some(ProviderMeta {
-        apply_common_config: Some(true),
-        ..Default::default()
-    });
-
-    let mut form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        common_snippet,
-    );
-    form.set_main_field_error(ProviderAddField::ClaudeBaseUrl, "invalid base URL");
-    form.set_usage_query_field_error(UsageQueryField::ApiKey, "missing query key");
-    form.toggle_claude_quick_config_field(ProviderAddField::ClaudeTeammates, common_snippet)
-        .expect("inherited quick config should be editable");
-
-    assert!(!form.include_common_config);
-    assert_eq!(form.claude_quick_config_enabled_count(), 3);
-    assert!(form.has_unsaved_changes());
-    assert_eq!(
-        form.main_field_error(ProviderAddField::ClaudeBaseUrl),
-        Some("invalid base URL")
-    );
-    assert_eq!(
-        form.usage_query_field_error(UsageQueryField::ApiKey),
-        Some("missing query key")
-    );
-
-    let saved = form.to_provider_json_value();
-    assert_eq!(saved["meta"]["commonConfigEnabled"], false);
-    assert!(saved["settingsConfig"]["env"]
-        .get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
-        .is_none());
-    assert_eq!(saved["settingsConfig"]["env"]["ENABLE_TOOL_SEARCH"], "true");
-    assert_eq!(saved["settingsConfig"]["env"]["SHARED_FLAG"], "keep-me");
-    assert_eq!(
-        saved["settingsConfig"]["attribution"],
-        json!({ "commit": "", "pr": "" })
-    );
-
-    let saved_provider: Provider =
-        serde_json::from_value(saved).expect("saved provider should deserialize");
-    let reopened = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &saved_provider,
-        common_snippet,
-    );
-    assert!(!reopened.include_common_config);
-    assert!(!reopened.claude_teammates);
-    assert!(reopened.claude_hide_attribution);
-    assert!(reopened.claude_tool_search);
-    assert!(reopened.claude_disable_auto_upgrade);
-}
-
-#[test]
-fn provider_add_form_claude_can_override_conflicting_common_quick_config() {
-    let common_snippet = r#"{
-        "env": { "ENABLE_TOOL_SEARCH": "false", "SHARED_FLAG": "keep-me" }
-    }"#;
-    let mut form = ProviderAddFormState::new_with_common_snippet(AppType::Claude, common_snippet);
-    assert!(form.include_common_config);
-    assert!(!form.claude_tool_search);
-
-    form.toggle_claude_quick_config_field(ProviderAddField::ClaudeToolSearch, common_snippet)
-        .expect("conflicting common quick config should be overridable");
-
-    assert!(!form.include_common_config);
-    assert!(form.claude_tool_search);
-    let saved = form.to_provider_json_value();
-    assert_eq!(saved["meta"]["commonConfigEnabled"], false);
-    assert_eq!(saved["settingsConfig"]["env"]["ENABLE_TOOL_SEARCH"], "true");
-    assert_eq!(saved["settingsConfig"]["env"]["SHARED_FLAG"], "keep-me");
 }
 
 #[test]
@@ -2995,7 +2865,7 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://api.aicodemirror.ai/api/codex/backend-api/codex\""));
-    assert!(cfg.contains("model = \"gpt-5.6-sol\""));
+    assert!(cfg.contains("model = \"gpt-6.1-sol\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     assert!(form.codex_api_key.value.is_empty());
@@ -3020,7 +2890,7 @@ fn provider_add_form_codex_custom_defaults_to_upstream_model() {
     let form = ProviderAddFormState::new(AppType::Codex);
 
     assert_eq!(form.codex_base_url.value, "");
-    assert_eq!(form.codex_model.value, "gpt-5.6-sol");
+    assert_eq!(form.codex_model.value, "gpt-6.1-sol");
 }
 
 #[test]
@@ -5211,55 +5081,6 @@ fn provider_add_form_has_unsaved_changes_roundtrip_edit_returns_clean() {
 }
 
 #[test]
-fn provider_add_form_common_config_json_merges_into_preview_but_not_raw_submit_payload() {
-    let mut form = ProviderAddFormState::new(AppType::Claude);
-    form.id.set("p1");
-    form.name.set("Provider One");
-    form.include_common_config = true;
-    form.claude_base_url.set("https://provider.example");
-    form.claude_api_key.set("sk-provider");
-
-    let raw = form.to_provider_json_value();
-    let raw_settings = raw
-        .get("settingsConfig")
-        .expect("settingsConfig should exist");
-
-    assert!(
-        raw_settings.get("alwaysThinkingEnabled").is_none(),
-        "raw submit payload should not include common snippet scalar keys"
-    );
-    assert_eq!(
-        raw_settings["env"]["ANTHROPIC_BASE_URL"], "https://provider.example",
-        "raw submit payload should still include provider-specific fields"
-    );
-    assert_eq!(raw_settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-provider");
-
-    let merged = form
-        .to_provider_json_value_with_common_config(
-            r#"{
-                "alwaysThinkingEnabled": false,
-                "env": {
-                    "ANTHROPIC_BASE_URL": "https://common.example",
-                    "COMMON_FLAG": "1"
-                }
-            }"#,
-        )
-        .expect("common config should merge");
-    let settings = merged
-        .get("settingsConfig")
-        .expect("settingsConfig should exist");
-
-    assert_eq!(settings["alwaysThinkingEnabled"], false);
-    assert_eq!(settings["env"]["COMMON_FLAG"], "1");
-    assert_eq!(
-        settings["env"]["ANTHROPIC_BASE_URL"], "https://common.example",
-        "common config should follow backend merge precedence"
-    );
-    assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-provider");
-    assert_eq!(merged["meta"]["commonConfigEnabled"], true);
-}
-
-#[test]
 fn provider_add_form_removes_legacy_apply_common_config_alias_from_meta() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     form.id.set("p1");
@@ -5363,8 +5184,8 @@ fn provider_add_form_defaults_common_config_from_effective_snippet_only() {
         r#"{"permissions":{"allow":["Bash"]}}"#,
     );
     assert!(
-        with_snippet.include_common_config,
-        "new provider should attach common config when a usable snippet exists"
+        !with_snippet.include_common_config,
+        "Claude no longer attaches legacy common snippets"
     );
 
     let blank_gemini =
@@ -5388,7 +5209,7 @@ fn provider_add_form_empty_common_config_toggle_matches_upstream_apps() {
     claude
         .toggle_include_common_config("")
         .expect("upstream Claude permits explicitly enabling an empty snippet");
-    assert!(claude.include_common_config);
+    assert!(!claude.include_common_config);
 
     for app_type in [AppType::Codex, AppType::Gemini] {
         let mut form = ProviderAddFormState::new(app_type);
@@ -5476,7 +5297,6 @@ fn gemini_empty_effective_snippet_matches_upstream_ui_state_transitions() {
 #[test]
 fn provider_form_disabling_malformed_common_config_matches_upstream_apps() {
     for (app_type, malformed) in [
-        (AppType::Claude, r#"{"env":{"#),
         (AppType::Codex, "[features\ngoals = true"),
         (AppType::Gemini, r#"{"BROKEN":"#),
     ] {
@@ -5498,7 +5318,7 @@ fn provider_add_form_empty_content_snippet_replacement_keeps_upstream_enabled_st
     claude
         .replace_common_config_snippet(claude_previous, "{}")
         .expect("valid Claude replacement should succeed");
-    assert!(claude.include_common_config);
+    assert!(!claude.include_common_config);
     assert!(!claude.claude_tool_search);
 
     let codex_previous = "[features]\ngoals = true\n";
@@ -5551,7 +5371,7 @@ fn provider_form_membership_rejects_valid_snippets_without_effective_content() {
 fn provider_form_array_membership_matches_upstream_ui_exactness() {
     let claude_snippet = r#"{"permissions":{"allow":["Bash"]}}"#;
     assert!(
-        ProviderAddFormState::settings_contain_common_config_for_form(
+        !ProviderAddFormState::settings_contain_common_config_for_form(
             &AppType::Claude,
             &json!({ "permissions": { "allow": ["Bash"] } }),
             claude_snippet,
@@ -5604,89 +5424,6 @@ fn provider_form_array_membership_matches_upstream_ui_exactness() {
 }
 
 #[test]
-fn claude_form_common_config_removal_treats_arrays_as_atomic() {
-    let snippet = r#"{"permissions":{"allow":["Bash"]}}"#;
-    let mut provider_owned = json!({
-        "permissions": { "allow": ["Read", "Bash"] }
-    });
-    strip_common_config_from_settings(&AppType::Claude, &mut provider_owned, snippet)
-        .expect("valid snippet should be removable");
-    assert_eq!(
-        provider_owned,
-        json!({ "permissions": { "allow": ["Read", "Bash"] } })
-    );
-
-    let mut exact = json!({
-        "permissions": { "allow": ["Bash"] },
-        "env": { "PROVIDER_ONLY": "keep" }
-    });
-    strip_common_config_from_settings(&AppType::Claude, &mut exact, snippet)
-        .expect("exact array should be removable");
-    assert_eq!(exact, json!({ "env": { "PROVIDER_ONLY": "keep" } }));
-}
-
-#[test]
-fn claude_form_common_config_recursively_ignores_upstream_forbidden_keys() {
-    let mixed_snippet = r#"{
-        "__proto__": {"COMMON": "drop"},
-        "env": {
-            "SAFE": "1",
-            "constructor": {"COMMON": "drop"},
-            "NESTED": [{"prototype": {"COMMON": "drop"}, "keep": "yes"}]
-        }
-    }"#;
-    let settings = json!({
-        "__proto__": {"PROVIDER_ONLY": "keep"},
-        "env": {
-            "SAFE": "1",
-            "constructor": {"PROVIDER_ONLY": "keep"},
-            "NESTED": [{"keep": "yes"}]
-        }
-    });
-    assert!(
-        ProviderAddFormState::settings_contain_common_config_for_form(
-            &AppType::Claude,
-            &settings,
-            mixed_snippet,
-        )
-    );
-
-    let mut stripped = settings.clone();
-    strip_common_config_from_settings(&AppType::Claude, &mut stripped, mixed_snippet)
-        .expect("valid sanitized snippet should be removable");
-    assert_eq!(
-        stripped,
-        json!({
-            "__proto__": {"PROVIDER_ONLY": "keep"},
-            "env": {"constructor": {"PROVIDER_ONLY": "keep"}}
-        })
-    );
-
-    let forbidden_only = r#"{"__proto__":{},"constructor":{},"prototype":{}}"#;
-    assert!(
-        !ProviderAddFormState::settings_contain_common_config_for_form(
-            &AppType::Claude,
-            &json!({}),
-            forbidden_only,
-        )
-    );
-    let mut new_form =
-        ProviderAddFormState::new_with_common_snippet(AppType::Claude, forbidden_only);
-    assert!(
-        new_form.include_common_config,
-        "upstream's new-form effect checks the raw object before merge filtering"
-    );
-    let effective = new_form
-        .to_provider_json_value_with_common_config(forbidden_only)
-        .expect("forbidden-only snippet should be a no-op");
-    assert!(effective["settingsConfig"].get("__proto__").is_none());
-    new_form
-        .toggle_claude_quick_config_field(ProviderAddField::ClaudeToolSearch, forbidden_only)
-        .expect("a later settings edit should succeed");
-    assert!(!new_form.include_common_config);
-}
-
-#[test]
 fn provider_edit_form_malformed_snippet_state_matches_upstream_apps() {
     let mut provider = Provider::with_id(
         "provider-1".to_string(),
@@ -5700,7 +5437,6 @@ fn provider_edit_form_malformed_snippet_state_matches_upstream_apps() {
     });
 
     for (app_type, snippet) in [
-        (AppType::Claude, r#"{"env":{"#),
         (AppType::Codex, "[features\ngoals = true"),
         (AppType::Gemini, r#"{"BROKEN":"#),
     ] {
@@ -5725,7 +5461,7 @@ fn provider_edit_form_valid_empty_snippet_matches_upstream_effect_order() {
 
     let claude =
         ProviderAddFormState::from_provider_with_common_snippet(AppType::Claude, &provider, "{}");
-    assert!(claude.include_common_config);
+    assert!(!claude.include_common_config);
 
     let codex = ProviderAddFormState::from_provider_with_common_snippet(
         AppType::Codex,
@@ -5774,11 +5510,6 @@ fn codex_edit_form_preserves_text_fallback_membership_for_malformed_config() {
 fn disabled_form_reinfers_membership_after_common_snippet_replacement() {
     for (app_type, settings, next_snippet) in [
         (
-            AppType::Claude,
-            json!({"env": {"SHARED": "claude"}}),
-            r#"{"env":{"SHARED":"claude"}}"#,
-        ),
-        (
             AppType::Codex,
             json!({"config": "[features]\ngoals = true\n"}),
             "[features]\ngoals = true\n",
@@ -5825,7 +5556,6 @@ fn provider_form_malformed_snippet_replacement_matches_upstream_apps() {
     assert_eq!(effective["settingsConfig"]["env"]["SHARED"], "next");
 
     for (app_type, malformed) in [
-        (AppType::Claude, r#"{"env":{"#),
         (AppType::Codex, "[features\ngoals = true"),
         (AppType::Gemini, r#"{"BROKEN":"#),
     ] {
@@ -5838,17 +5568,9 @@ fn provider_form_malformed_snippet_replacement_matches_upstream_apps() {
             "clearing should disable sharing for {app_type:?}"
         );
     }
-
-    let mut claude = ProviderAddFormState::new(AppType::Claude);
-    claude.include_common_config = true;
-    assert!(claude
-        .replace_common_config_snippet(r#"{"env":{"#, r#"{"env":{"ENABLE_TOOL_SEARCH":"true"}}"#,)
-        .is_err());
-    assert!(!claude.include_common_config);
 }
-
 #[test]
-fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
+fn provider_edit_form_preserves_missing_common_config_meta_for_legacy_claude() {
     let provider = Provider::with_id(
         "legacy-provider".to_string(),
         "Legacy Provider".to_string(),
@@ -5884,71 +5606,7 @@ fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
     )
     .expect("toggle should succeed");
     let toggled = form.to_provider_json_value();
-    assert_eq!(toggled["meta"]["commonConfigEnabled"], true);
-}
-
-#[test]
-fn provider_edit_form_missing_meta_inferrs_common_config_from_subset() {
-    let provider = Provider::with_id(
-        "legacy-provider".to_string(),
-        "Legacy Provider".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://provider.example",
-                "CC_SWITCH_SHARED": "1"
-            }
-        }),
-        None,
-    );
-
-    let form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#,
-    );
-
-    assert!(
-        form.include_common_config,
-        "missing-meta edit should infer common config usage when provider settings contain the snippet"
-    );
-    let raw = form.to_provider_json_value();
-    assert!(
-        raw.get("meta")
-            .and_then(|meta| meta.get("commonConfigEnabled"))
-            .is_none(),
-        "inferred missing-meta usage should not force explicit meta until the user toggles"
-    );
-}
-
-#[test]
-fn provider_edit_form_quick_edit_persists_inferred_common_config_opt_in() {
-    let common_snippet = r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#;
-    let provider = Provider::with_id(
-        "legacy-provider".to_string(),
-        "Legacy Provider".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://provider.example",
-                "CC_SWITCH_SHARED": "1"
-            }
-        }),
-        None,
-    );
-
-    let mut form = ProviderAddFormState::from_provider_with_common_snippet(
-        AppType::Claude,
-        &provider,
-        common_snippet,
-    );
-    assert!(form.include_common_config);
-
-    form.toggle_claude_quick_config_field(ProviderAddField::ClaudeToolSearch, common_snippet)
-        .expect("provider-only quick edit should succeed");
-
-    let saved = form.to_provider_json_value();
-    assert!(form.include_common_config);
-    assert!(form.claude_tool_search);
-    assert_eq!(saved["meta"]["commonConfigEnabled"], true);
+    assert!(toggled["meta"].get("commonConfigEnabled").is_none());
 }
 
 #[test]
@@ -6011,102 +5669,6 @@ fn provider_edit_form_apply_provider_json_keeps_locked_id() {
 }
 
 #[test]
-fn provider_add_form_disabling_common_config_strips_common_fields_from_json() {
-    let mut form = ProviderAddFormState::new(AppType::Claude);
-    form.id.set("p1");
-    form.name.set("Provider One");
-    form.include_common_config = true;
-
-    let parsed = Provider::with_id(
-        "p1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "alwaysThinkingEnabled": false,
-            "statusLine": {
-                "type": "command",
-                "command": "~/.claude/statusline.sh",
-                "padding": 0
-            },
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://provider.example"
-            }
-        }),
-        None,
-    );
-    form.apply_provider_json_to_fields(&parsed);
-
-    let common = r#"{
-        "alwaysThinkingEnabled": false,
-        "statusLine": {
-            "type": "command",
-            "command": "~/.claude/statusline.sh",
-            "padding": 0
-        }
-    }"#;
-    form.toggle_include_common_config(common)
-        .expect("toggle should succeed");
-
-    assert!(
-        !form.include_common_config,
-        "toggle should disable include_common_config"
-    );
-    let provider = form.to_provider_json_value();
-    let settings = provider
-        .get("settingsConfig")
-        .expect("settingsConfig should exist");
-    assert!(
-        settings.get("alwaysThinkingEnabled").is_none(),
-        "common scalar field should be removed after disabling common config"
-    );
-    assert!(
-        settings.get("statusLine").is_none(),
-        "common nested field should be removed after disabling common config"
-    );
-}
-
-#[test]
-fn provider_add_form_disabling_common_config_preserves_provider_specific_env_keys() {
-    let mut form = ProviderAddFormState::new(AppType::Claude);
-    form.id.set("p1");
-    form.name.set("Provider One");
-    form.include_common_config = true;
-
-    let parsed = Provider::with_id(
-        "p1".to_string(),
-        "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://common.example",
-                "ANTHROPIC_AUTH_TOKEN": "sk-provider"
-            }
-        }),
-        None,
-    );
-    form.apply_provider_json_to_fields(&parsed);
-
-    form.toggle_include_common_config(r#"{"env":{"ANTHROPIC_BASE_URL":"https://common.example"}}"#)
-        .expect("toggle should succeed");
-
-    let provider = form.to_provider_json_value();
-    let env = provider
-        .get("settingsConfig")
-        .and_then(|settings| settings.get("env"))
-        .and_then(|value| value.as_object())
-        .expect("env should exist");
-
-    assert!(
-        env.get("ANTHROPIC_BASE_URL").is_none(),
-        "common env keys should be removed"
-    );
-    assert_eq!(
-        env.get("ANTHROPIC_AUTH_TOKEN")
-            .and_then(|value| value.as_str()),
-        Some("sk-provider"),
-        "provider-specific env keys should be preserved"
-    );
-}
-
-#[test]
 fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
     let form = ProviderAddFormState::new(AppType::OpenCode);
     let labels = form.template_labels();
@@ -6116,6 +5678,7 @@ fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -6140,6 +5703,7 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         vec![
             "Custom",
             "88API",
+            "APIMart",
             "Cubence",
             "OpenModel",
             "PackyCode",
@@ -6322,14 +5886,14 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
         .keys()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    assert_eq!(model_ids, ["claude-sonnet-5", "claude-opus-5"]);
+    assert_eq!(model_ids, ["claude-sonnet-5-5", "claude-opus-5-5"]);
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
-        "Claude Sonnet 5"
+        provider["settingsConfig"]["models"]["claude-sonnet-5-5"]["name"],
+        "Claude Sonnet 5.5"
     );
     assert_eq!(
-        provider["settingsConfig"]["models"]["claude-opus-5"]["name"],
-        "Claude Opus 5"
+        provider["settingsConfig"]["models"]["claude-opus-5-5"]["name"],
+        "Claude Opus 5.5"
     );
 
     let mut parsed = Provider::with_id(
@@ -6354,8 +5918,8 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
         roundtrip_form.opencode_base_url.value,
         "https://api.aicodemirror.ai/api/claudecode"
     );
-    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5");
-    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5");
+    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5-5");
+    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5.5");
 
     let roundtrip = roundtrip_form.to_provider_json_value();
     assert!(
@@ -6365,12 +5929,12 @@ fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loade
         "OpenCode roundtrip should still omit blank API keys"
     );
     assert_eq!(
-        roundtrip["settingsConfig"]["models"]["claude-sonnet-5"]["name"],
-        "Claude Sonnet 5"
+        roundtrip["settingsConfig"]["models"]["claude-sonnet-5-5"]["name"],
+        "Claude Sonnet 5.5"
     );
     assert_eq!(
-        roundtrip["settingsConfig"]["models"]["claude-opus-5"]["name"],
-        "Claude Opus 5"
+        roundtrip["settingsConfig"]["models"]["claude-opus-5-5"]["name"],
+        "Claude Opus 5.5"
     );
 }
 
@@ -6677,21 +6241,31 @@ fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loade
         provider["settingsConfig"]["models"],
         json!([
             {
-                "id": "claude-opus-5",
-                "name": "Claude Opus 5",
+                "id": "claude-opus-5-5",
+                "name": "Claude Opus 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
                 "cost": {
-                    "input": 5,
-                    "output": 25
+                    "input": 4,
+                    "output": 20,
+                    "cacheRead": 0.2,
+                    "cacheWrite": 5
                 }
             },
             {
-                "id": "claude-sonnet-5",
-                "name": "Claude Sonnet 5",
+                "id": "claude-sonnet-5-5",
+                "name": "Claude Sonnet 5.5",
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
                 "cost": {
-                    "input": 3,
-                    "output": 15
+                    "input": 2,
+                    "output": 10,
+                    "cacheRead": 0.1,
+                    "cacheWrite": 2.5
                 }
             }
         ])
@@ -6719,8 +6293,8 @@ fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loade
         roundtrip_form.opencode_base_url.value,
         "https://api.aicodemirror.ai/api/claudecode"
     );
-    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5");
-    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5");
+    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-5-5");
+    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 5.5");
     assert_eq!(roundtrip_form.opencode_model_context_limit.value, "1000000");
 
     let roundtrip = roundtrip_form.to_provider_json_value();
@@ -8221,4 +7795,387 @@ fn api88_selection_clears_previous_additive_template_options() {
             .get("User-Agent")
             .is_none()
     );
+}
+
+#[test]
+fn claude_fallback_one_m_roundtrip_is_independent_of_roles() {
+    let provider = Provider::with_id(
+        "p1".into(),
+        "Provider".into(),
+        json!({"env": {
+            "ANTHROPIC_MODEL": "deepseek-flash[1m]",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet[1M]",
+            "CUSTOM_SETTING": "keep"
+        }}),
+        None,
+    );
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_model.value, "deepseek-flash");
+    assert!(form.claude_fallback_one_m);
+    // Untouched records retain their original spelling.
+    assert_eq!(
+        form.to_provider_json_value()["settingsConfig"]["env"],
+        provider.settings_config["env"]
+    );
+    form.claude_model.set("new-model");
+    form.mark_claude_fallback_model_touched();
+    let saved = form.to_provider_json_value();
+    assert_eq!(
+        saved["settingsConfig"]["env"]["ANTHROPIC_MODEL"],
+        "new-model[1M]"
+    );
+    assert!(form.toggle_claude_fallback_one_m());
+    let saved = form.to_provider_json_value();
+    assert_eq!(
+        saved["settingsConfig"]["env"]["ANTHROPIC_MODEL"],
+        "new-model"
+    );
+    assert_eq!(
+        saved["settingsConfig"]["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+        "sonnet[1M]"
+    );
+    assert_eq!(saved["settingsConfig"]["env"]["CUSTOM_SETTING"], "keep");
+    form.claude_model.set("manual[1m]");
+    form.mark_claude_fallback_model_touched();
+    assert!(form.claude_fallback_one_m);
+    assert_eq!(form.claude_fallback_model_value_for_config(), "manual[1M]");
+    form.claude_model.set("");
+    form.mark_claude_fallback_model_touched();
+    assert!(!form.claude_fallback_one_m);
+    assert!(!form.toggle_claude_fallback_one_m());
+    assert!(form.to_provider_json_value()["settingsConfig"]["env"]
+        .get("ANTHROPIC_MODEL")
+        .is_none());
+}
+
+#[test]
+fn claude_fallback_one_m_is_adjacent_and_resets_with_template() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    let fields = form.fields();
+    let idx = fields
+        .iter()
+        .position(|f| *f == ProviderAddField::ClaudeFallbackModel)
+        .unwrap();
+    assert_eq!(fields[idx + 1], ProviderAddField::ClaudeFallbackOneM);
+    form.set_claude_fallback_model_from_config("custom[1M]");
+    form.apply_template(template_index_by_label(AppType::Claude, "PatewayAI"), &[]);
+    assert!(!form.claude_fallback_one_m);
+    assert!(form.claude_model.value.is_empty());
+}
+
+#[test]
+fn codex_oauth_hides_usage_query_and_preserves_binding_and_saved_script() {
+    for script in [
+        serde_json::Value::Null,
+        json!({
+            "enabled": true, "language": "javascript", "code": "invalid legacy script",
+            "templateType": "general", "autoQueryInterval": 0
+        }),
+    ] {
+        let mut value = json!({
+            "id": "oauth", "name": "Account", "settingsConfig": {},
+            "meta": {"providerType": "codex_oauth", "authBinding": {
+                "source": "managed_account", "authProvider": "codex_oauth", "accountId": "acct-1"
+            }}
+        });
+        if !script.is_null() {
+            value["meta"]["usage_script"] = script;
+        }
+        let provider: Provider = serde_json::from_value(value.clone()).unwrap();
+        let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+        assert!(!form.fields().contains(&ProviderAddField::UsageQuery));
+        assert!(!form.fields().contains(&ProviderAddField::UsageQueryDivider));
+        form.open_usage_query_page();
+        assert!(matches!(form.page, ProviderFormPage::Main));
+        assert!(form.usage_query_script_validation_error().is_none());
+        form.name.set("Renamed account");
+        let saved = form.to_provider_json_value();
+        assert_eq!(saved["meta"]["authBinding"], value["meta"]["authBinding"]);
+        assert_eq!(saved["meta"]["usage_script"], value["meta"]["usage_script"]);
+        let reopened = ProviderAddFormState::from_provider(
+            AppType::Claude,
+            &serde_json::from_value(saved).unwrap(),
+        );
+        assert!(!reopened.fields().contains(&ProviderAddField::UsageQuery));
+    }
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "custom", "name": "Codex OAuth", "settingsConfig": {}
+    }))
+    .unwrap();
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert!(form.fields().contains(&ProviderAddField::UsageQuery));
+}
+
+#[test]
+fn codex_auth_form_preserves_explicit_auth_and_bearer_on_unrelated_save() {
+    for auth in [
+        json!({"tokens": {"account_id": "account"}}),
+        json!({"OPENAI_API_KEY": "sk-stored"}),
+    ] {
+        for directive in [
+            "",
+            "requires_openai_auth = false",
+            "requires_openai_auth = true",
+            "requires_openai_auth = true\nenv_key = \"CUSTOM_KEY\"",
+        ] {
+            let config = format!("model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://example.com/v1\"\nexperimental_bearer_token = \"sk-bearer\"\n{directive}\n[model_providers.other]\nexperimental_bearer_token = \"sk-other\"\n");
+            let provider = Provider::with_id(
+                "custom".into(),
+                "Custom".into(),
+                json!({"auth": auth, "config": config}),
+                None,
+            );
+            let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+            assert_eq!(
+                form.codex_api_key.value,
+                auth.get("OPENAI_API_KEY")
+                    .and_then(Value::as_str)
+                    .unwrap_or("sk-bearer")
+            );
+            form.name.set("Renamed");
+            let saved = form.to_provider_json_value();
+            assert_eq!(saved["settingsConfig"]["auth"], auth);
+            let before: toml::Table = toml::from_str(&config).unwrap();
+            let after: toml::Table =
+                toml::from_str(saved["settingsConfig"]["config"].as_str().unwrap()).unwrap();
+            for key in [
+                "requires_openai_auth",
+                "env_key",
+                "experimental_bearer_token",
+            ] {
+                assert_eq!(
+                    after["model_providers"]["custom"].get(key),
+                    before["model_providers"]["custom"].get(key),
+                    "{directive}: {key}"
+                );
+            }
+            assert_eq!(
+                after["model_providers"]["other"],
+                before["model_providers"]["other"]
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_auth_form_key_edits_update_or_clear_existing_bearer() {
+    for location in ["provider", "root", "absent"] {
+        let root = if location == "root" {
+            "experimental_bearer_token = \"sk-old\"\n"
+        } else {
+            ""
+        };
+        let token = if location == "provider" {
+            "experimental_bearer_token = \"sk-old\"\n"
+        } else {
+            ""
+        };
+        let config = format!("{root}model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://example.com/v1\"\nrequires_openai_auth = false\n{token}[model_providers.other]\nexperimental_bearer_token = \"sk-other\"\n");
+        let provider = Provider::with_id(
+            "custom".into(),
+            "Custom".into(),
+            json!({"auth": {"OPENAI_API_KEY": "sk-old", "tokens": {"account_id": "account"}}, "config": config}),
+            None,
+        );
+        for key in ["sk-new", ""] {
+            let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+            form.codex_api_key.set(key);
+            let saved = form.to_provider_json_value();
+            assert_eq!(
+                saved["settingsConfig"]["auth"]["tokens"]["account_id"],
+                "account"
+            );
+            assert_eq!(
+                saved["settingsConfig"]["auth"]
+                    .get("OPENAI_API_KEY")
+                    .and_then(Value::as_str),
+                (!key.is_empty()).then_some(key)
+            );
+            let after: toml::Table =
+                toml::from_str(saved["settingsConfig"]["config"].as_str().unwrap()).unwrap();
+            let table = if location == "root" {
+                &after
+            } else {
+                after["model_providers"]["custom"].as_table().unwrap()
+            };
+            assert_eq!(
+                table
+                    .get("experimental_bearer_token")
+                    .and_then(toml::Value::as_str),
+                (location != "absent" && !key.is_empty()).then_some(key)
+            );
+            assert!(after["model_providers"]["custom"].get("env_key").is_none());
+            assert_eq!(
+                after["model_providers"]["other"]["experimental_bearer_token"].as_str(),
+                Some("sk-other")
+            );
+            let reopened: Provider = serde_json::from_value(saved).unwrap();
+            assert_eq!(
+                ProviderAddFormState::from_provider(AppType::Codex, &reopened)
+                    .codex_api_key
+                    .value,
+                key
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_auth_form_bearer_fallback_accepts_inline_tables_and_empty_provider_tokens() {
+    for (config, expected) in [
+        (
+            r#"model_provider = "custom"
+experimental_bearer_token = "sk-root"
+[model_providers.custom]
+base_url = "https://example.com/v1"
+experimental_bearer_token = "  "
+"#,
+            "sk-root",
+        ),
+        (
+            r#"model_provider = "custom"
+model_providers = { custom = { base_url = "https://example.com/v1", experimental_bearer_token = "sk-inline" } }
+"#,
+            "sk-inline",
+        ),
+    ] {
+        let provider = Provider::with_id(
+            "custom".into(),
+            "Custom".into(),
+            json!({"auth": {"tokens": {"account_id": "account"}}, "config": config}),
+            None,
+        );
+        let mut form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+        assert_eq!(form.codex_api_key.value, expected);
+        form.name.set("Renamed");
+        let saved = form.to_provider_json_value();
+        assert_eq!(
+            saved["settingsConfig"]["auth"],
+            provider.settings_config["auth"]
+        );
+        let reopened: Provider = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            ProviderAddFormState::from_provider(AppType::Codex, &reopened)
+                .codex_api_key
+                .value,
+            expected
+        );
+    }
+}
+
+#[test]
+fn codex_auth_form_uses_case_sensitive_current_builtin_ids() {
+    for (id, custom) in [
+        ("OpenAI", true),
+        ("oss", true),
+        ("ollama-chat", true),
+        ("openai", false),
+        ("amazon-bedrock-runtime", false),
+    ] {
+        let config = format!("model_provider = \"{id}\"\nexperimental_bearer_token = \"sk-root\"\n[model_providers.{id}]\nbase_url = \"https://example.com/v1\"\nexperimental_bearer_token = \"sk-provider\"\n");
+        let provider = Provider::with_id(
+            "custom".into(),
+            "Custom".into(),
+            json!({"config": config}),
+            None,
+        );
+        let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+        assert_eq!(
+            form.codex_api_key.value,
+            if custom { "sk-provider" } else { "sk-root" },
+            "{id}"
+        );
+        for key in ["sk-new", ""] {
+            let mut form = form.clone();
+            form.codex_api_key.set(key);
+            let saved = form.to_provider_json_value();
+            let after: toml::Table =
+                toml::from_str(saved["settingsConfig"]["config"].as_str().unwrap()).unwrap();
+            let changed = if custom {
+                after["model_providers"][id].as_table().unwrap()
+            } else {
+                &after
+            };
+            assert_eq!(
+                changed
+                    .get("experimental_bearer_token")
+                    .and_then(toml::Value::as_str),
+                (!key.is_empty()).then_some(key),
+                "{id}"
+            );
+            let untouched = if custom {
+                &after
+            } else {
+                after["model_providers"][id].as_table().unwrap()
+            };
+            assert_eq!(
+                untouched["experimental_bearer_token"].as_str(),
+                Some(if custom { "sk-root" } else { "sk-provider" }),
+                "{id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn claude_editor_context_and_global_values_survive_json_and_template_changes() {
+    let base = json!({"env":{"ANTHROPIC_AUTH_TOKEN":"key","ANTHROPIC_BASE_URL":"https://old.example","GLOBAL_ENV":"keep"},"language":"chinese","permissions":{"allow":["Read"]}});
+    let provider = Provider::with_id("old".into(), "Old".into(), base.clone(), None);
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    form.claude_editor = Some(crate::services::provider::claude_editor::EditorSave {
+        base: base.clone(),
+        draft: None,
+        on_conflict: Default::default(),
+    });
+    let mut value = form.to_provider_json_value();
+    value["settingsConfig"]["language"] = json!("english");
+    value["settingsConfig"]
+        .as_object_mut()
+        .unwrap()
+        .remove("permissions");
+    form.apply_provider_json_value_to_fields(value).unwrap();
+    assert_eq!(form.claude_editor.as_ref().unwrap().base, base);
+    assert!(form.to_provider_json_value()["settingsConfig"]
+        .get("permissions")
+        .is_none());
+    form.apply_template(0, &[]);
+    let settings = &form.to_provider_json_value()["settingsConfig"];
+    assert_eq!(settings["language"], "english");
+    assert_eq!(settings["env"]["GLOBAL_ENV"], "keep");
+    assert!(settings.get("permissions").is_none());
+    assert_eq!(form.claude_editor.as_ref().unwrap().base, base);
+    assert!(!form
+        .fields()
+        .contains(&ProviderAddField::IncludeCommonConfig));
+    assert!(!form.fields().contains(&ProviderAddField::CommonSnippet));
+}
+
+#[test]
+fn codex_official_managed_account_binding_round_trip() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    form.apply_template(
+        template_index_by_label(AppType::Codex, "OpenAI Official"),
+        &[],
+    );
+    assert!(form.fields().contains(&ProviderAddField::CodexOAuthAccount));
+    assert!(!form.fields().contains(&ProviderAddField::CodexFastMode));
+    assert!(form.to_provider_json_value()["meta"]
+        .get("authBinding")
+        .is_none());
+    form.set_codex_oauth_account_id(Some("account-b".into()));
+    let value = form.to_provider_json_value();
+    assert_eq!(value["meta"]["authBinding"]["accountId"], "account-b");
+    assert_eq!(value["meta"]["providerType"], "codex_oauth");
+    assert_eq!(value["settingsConfig"]["auth"], serde_json::json!({}));
+    let provider: crate::provider::Provider = serde_json::from_value(value).unwrap();
+    let mut reopened = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    assert_eq!(
+        reopened.codex_oauth_account_id.as_deref(),
+        Some("account-b")
+    );
+    reopened.set_codex_oauth_account_id(None);
+    let native = reopened.to_provider_json_value();
+    assert!(native["meta"].get("authBinding").is_none());
+    assert!(native["meta"].get("providerType").is_none());
+    assert_eq!(native["meta"]["codexOfficial"], true);
 }

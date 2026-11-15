@@ -2404,6 +2404,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_claude_fallback_one_m() -> &'static str {
+        if is_chinese() {
+            "默认模型 1M"
+        } else {
+            "Default model 1M"
+        }
+    }
+
     pub fn tui_label_claude_quick_config() -> &'static str {
         if is_chinese() {
             "快捷配置菜单"
@@ -4935,6 +4943,15 @@ pub mod texts {
             "托管账号"
         } else {
             "Managed Accounts"
+        }
+    }
+
+    /// Native Codex keeps its own login when no managed account is bound.
+    pub fn tui_codex_native_login() -> &'static str {
+        if is_chinese() {
+            "使用 Codex 原生登录（不托管）"
+        } else {
+            "Use native Codex login (unmanaged)"
         }
     }
 

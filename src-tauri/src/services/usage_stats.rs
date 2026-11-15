@@ -2318,9 +2318,9 @@ mod tests {
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        assert_eq!(input_cost, "5.000000");
-        assert_eq!(output_cost, "30.000000");
-        assert_eq!(total_cost, "35.000000");
+        assert_eq!(input_cost, "4.000000");
+        assert_eq!(output_cost, "20.000000");
+        assert_eq!(total_cost, "24.000000");
 
         Ok(())
     }

@@ -55,9 +55,22 @@
           ]
         }
       },
-      "claude-haiku-4-5": {
-        "name": "Claude Haiku 4.5",
-        "reasoning": true
+      "claude-haiku-5-5": {
+        "name": "Claude Haiku 5.5",
+        "reasoning": true,
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        }
       },
       "claude-fable-5-1": {
         "name": "Claude Fable 5.1",
@@ -106,9 +119,15 @@
         "maxTokens": 128000
       },
       {
-        "id": "claude-haiku-4-5",
-        "name": "Claude Haiku 4.5",
-        "contextWindow": 200000
+        "id": "claude-haiku-5-5",
+        "name": "Claude Haiku 5.5",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
       },
       {
         "id": "claude-fable-5-1",
@@ -140,9 +159,9 @@
         "context_length": 1000000
       },
       {
-        "id": "claude-haiku-4-5",
-        "name": "Claude Haiku 4.5",
-        "context_length": 200000
+        "id": "claude-haiku-5-5",
+        "name": "Claude Haiku 5.5",
+        "context_length": 1000000
       },
       {
         "id": "claude-fable-5-1",
@@ -180,15 +199,15 @@
         "maxTokens": 128000
       },
       {
-        "id": "claude-haiku-4-5",
-        "name": "Claude Haiku 4.5",
+        "id": "claude-haiku-5-5",
+        "name": "Claude Haiku 5.5",
         "reasoning": true,
         "input": [
           "text",
           "image"
         ],
-        "contextWindow": 200000,
-        "maxTokens": 64000
+        "contextWindow": 1000000,
+        "maxTokens": 128000
       },
       {
         "id": "claude-fable-5-1",

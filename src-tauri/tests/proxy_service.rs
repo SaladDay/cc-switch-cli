@@ -1042,11 +1042,12 @@ async fn proxy_service_stop_preserves_takeover_state_until_explicit_restore() {
     assert_eq!(
         live_after_stop
             .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
             .and_then(|value| value.as_str()),
         Some("PROXY_MANAGED"),
         "stop should not restore the original Claude token"
     );
+    assert!(live_after_stop.pointer("/env/ANTHROPIC_API_KEY").is_none());
 
     state
         .proxy_service

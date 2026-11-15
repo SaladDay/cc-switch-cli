@@ -1105,7 +1105,8 @@ fn json_value_to_toml_item(value: &Value, field_name: &str) -> Option<toml_edit:
 /// Helper: 将 JSON MCP 服务器规范转换为 toml_edit::Table
 ///
 /// 策略：
-/// 1. 核心字段（type, command, args, url, headers, env, cwd）使用强类型处理
+/// 1. 核心字段（command, args, url, headers, env, cwd）使用强类型处理；
+///    `type` 只用于选择核心字段，不写入 Codex TOML（Codex 不支持该字段）
 /// 2. 扩展字段（timeout、retry 等）通过白名单列表自动转换
 /// 3. 其他未知字段使用通用转换器尝试转换
 fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError> {
@@ -1113,7 +1114,11 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
 
     let mut t = Table::new();
     let typ = spec.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    t["type"] = toml_edit::value(typ);
+    // Codex 的 `[mcp_servers.<id>]` 不认识 `type` 字段：普通模式下会告警
+    // "is ignored"，`--strict-config` 下直接校验失败。传输方式由 Codex 根据
+    // `command`（stdio）或 `url`（streamable HTTP）自行推断，导入侧
+    // （`import_from_codex`）在缺少 `type` 时也按同样规则推断，因此这里不写出
+    // `type`，只用它来决定写哪些核心字段。
 
     // 定义核心字段（已在下方处理，跳过通用转换）
     let core_fields = match typ {
@@ -1811,6 +1816,38 @@ mod codex_mcp_tests {
         remove_mcp_server_from_doc(&mut doc, "whatever");
 
         assert_eq!(doc.to_string(), "mcp_servers = 42\n");
+    }
+
+    #[test]
+    fn codex_toml_omits_unsupported_type_field() {
+        // Codex rejects `mcp_servers.<id>.type` under `--strict-config` and warns
+        // about it otherwise; the transport is inferred from `command` / `url`.
+        for (spec, expect_command, expect_url) in [
+            (
+                json!({ "type": "stdio", "command": "npx", "args": ["-y", "x"] }),
+                true,
+                false,
+            ),
+            (json!({ "command": "npx" }), true, false),
+            (
+                json!({ "type": "http", "url": "https://mcp.example.com/mcp" }),
+                false,
+                true,
+            ),
+            (
+                json!({ "type": "sse", "url": "https://mcp.example.com/sse" }),
+                false,
+                true,
+            ),
+        ] {
+            let table = json_server_to_toml_table(&spec).expect("server table");
+            assert!(
+                table.get("type").is_none(),
+                "`type` must not be written to Codex TOML for {spec}"
+            );
+            assert_eq!(table.contains_key("command"), expect_command, "{spec}");
+            assert_eq!(table.contains_key("url"), expect_url, "{spec}");
+        }
     }
 
     #[test]

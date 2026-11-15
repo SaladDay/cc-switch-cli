@@ -45,6 +45,11 @@ pub(super) fn render_confirm_overlay(
     confirm: &crate::cli::tui::app::ConfirmOverlay,
 ) {
     let keys: &[(&str, &str)] = match &confirm.action {
+        ConfirmAction::ClaudeEditorConflict { .. } => &[
+            ("M", crate::t!("Keep mine", "保留我的修改")),
+            ("T", crate::t!("Keep external", "保留外部修改")),
+            ("Esc", texts::tui_key_cancel()),
+        ],
         ConfirmAction::EditorSaveBeforeClose | ConfirmAction::FormSaveBeforeClose => &[
             ("Enter", texts::tui_key_save_and_exit()),
             ("N", texts::tui_key_exit_without_save()),

@@ -6,7 +6,7 @@
 
 **Manage Claude Code, Codex, Gemini, OpenCode, Hermes, OpenClaw, and Pi from one interactive TUI or scriptable CLI.**
 
-[![Version](https://img.shields.io/badge/version-5.11.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.11.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -38,17 +38,9 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 <td>Thanks to 88API Token Aggregation Platform for sponsoring this project! 88API is a one-stop multi-model API platform operated by a Hong Kong company, built mainly for developers, creators and AI application users. A unified interface gives access to text, image, speech and video models, covering common workflows such as AI coding, smart translation, content creation, voice-over, image generation and video generation. You can add it as a provider and switch to it right inside CC-Switch CLI. 88API supports major international payment methods, can issue invoices, and provides enterprise-grade stable service. Register via <a href="https://88api.ai/sign-up?aff=TeNl">this link</a> to receive exclusive bonus credits!</td>
 </tr>
   <tr>
-    <td width="180">
-      <a href="https://pateway.ai/?ch=18fxbjo">
-        <img src="assets/partners/logos/pateway.png" alt="PatewayAI" width="150">
-      </a>
-    </td>
-    <td>
-      PatewayAI is an API relay service tailored for seasoned AI developers. It offers full‑fledged support for Claude and Codex model families. All models are sourced from high‑quality official channels with no diluted or counterfeit outputs. Transparent billing details are available for full traceability.<br/>
-      Enjoy rates as low as 95% off official pricing. Sign up via <a href="https://pateway.ai/?ch=18fxbjo">this link</a> to receive trial credits, and stay tuned for periodic promotional campaigns to earn free credits.<br/>
-      The platform also delivers enterprise‑grade concurrency capacity, a dedicated admin dashboard, formal contracts and invoicing support. Earn up to $150 in mutual referral bonuses.
-    </td>
-  </tr>
+<td width="180"><a href="https://go.apimart.ai/gh-cc-switch-cli"><img src="assets/partners/logos/apimart.png" alt="APIMart" width="150"></a></td>
+<td>Thanks to APIMart for sponsoring this project! APIMart is a low-cost API platform for AI image &amp; video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-cc-switch-cli">sign up here</a> to get started.</td>
+</tr>
   <tr>
     <td width="180">
       <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
@@ -80,6 +72,18 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
     <td>
       Thanks to <b>PackyCode</b> for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. <br/>
       PackyCode provides special discounts for our software users: register via <a href="https://www.packyapi.com/register?aff=cc-switch-cli">this link</a> and use promo code <code>cc-switch-cli</code> when recharging to get <b>10% off</b>.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://www.ipwo.net/?ref=githubswitchcli">
+        <img src="assets/partners/logos/ipwo.png" alt="IPWO" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>IPWO</b> for sponsoring this project! IPWO offers a free trial and access to over <b>90 million active residential IPs across 195+ countries and regions</b>. It supports rotating, static, and unlimited-bandwidth residential proxies, with HTTP(S) and SOCKS5 compatibility.<br/>
+      From AI tool development and cross-region network access to API debugging and data collection, IPWO gives developers flexible residential proxy options for applications in different regions.<br/>
+      Visit <a href="https://www.ipwo.net/?ref=githubswitchcli">IPWO</a> and use promo code <code>0200</code> for <b>10% off</b>.
     </td>
   </tr>
   <tr>
@@ -420,11 +424,14 @@ cc-switch config show                # Display configuration
 cc-switch config path                # Show config file paths
 cc-switch config validate            # Validate config file
 
-# Common snippet (shared settings across providers)
-# Tries to refresh live config when applicable (`--apply` is kept only as a compatibility flag)
+# Claude: open the TUI, edit a provider, then open its JSON editor
+cc-switch --app claude
+# Read a legacy common snippet to copy into the configuration editor if needed
 cc-switch --app claude config common show
-cc-switch --app claude config common set --snippet '{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}'
-cc-switch --app claude config common clear
+
+# Codex / Gemini still support common snippets
+cc-switch --app codex config common set --snippet 'model_reasoning_effort = "high"'
+cc-switch --app codex config common clear
 
 # Backup
 cc-switch config backup              # Create backup (auto-named)

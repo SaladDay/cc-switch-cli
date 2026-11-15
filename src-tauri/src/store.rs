@@ -1303,11 +1303,9 @@ requires_openai_auth = true
             let state = AppState::try_new_with_startup_recovery().expect("first startup");
             assert!(state.db.get_config_snippet("claude").unwrap().is_some());
 
-            crate::services::provider::ProviderService::clear_common_config_snippet(
-                &state,
-                crate::app_config::AppType::Claude,
-            )
-            .expect("clear snippet");
+            // A previous-version client cleared this compatibility data.
+            state.db.set_config_snippet("claude", None).unwrap();
+            state.db.set_config_snippet_cleared("claude", true).unwrap();
 
             assert!(state.db.is_config_snippet_cleared("claude").unwrap());
             assert!(state.db.get_config_snippet("claude").unwrap().is_none());

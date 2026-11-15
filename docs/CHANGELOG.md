@@ -9,6 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **TUI**: Exit when the input terminal hangs up, including terminal proxies that do not deliver SIGHUP, instead of leaving a process spinning at full CPU.
+- **Database / Compatibility**: Support database schemas 23 through 26 from upstream, fixing WebDAV/S3 restore failures with `Remote database schema is too new (24); this app supports up to 22`. Align the migration steps, MCP/Skills enablement columns, and session-log parser state with the shared schema while preserving upstream flags and parser state through upgrades, edits, runtime cursor updates, and sync round-trips.
+
+### Upgrade notes
+
+- Databases newer than schema 26 are still rejected. After migrating to schema 26, older CLI versions (v5.11.3 and earlier) cannot open the upgraded database.
+- This release adds database compatibility, not CLI management for Oh My Pi, DeepSeek Harness, GitHub Copilot CLI, or WorkBuddy.
+
+## [5.11.3] - 2026-10-22
+
+### Fixed
+
+- **Database / Compatibility**: Support database schemas 21 and 22, fixing startup failures when opening a database created by a newer CC Switch desktop version. Align the migration steps and MCP/Skills fields with the shared schema, preserving existing data and application enablement flags through upgrades, edits, and WebDAV sync. Includes [#528](https://github.com/SaladDay/cc-switch-cli/pull/528), fixing [#526](https://github.com/SaladDay/cc-switch-cli/issues/526).
+
+### Upgrade notes
+
+- If startup reports database version 21 or 22 as unsupported, update to v5.11.3. The existing pre-migration backup runs before upgrading older databases; databases newer than schema 22 are still rejected.
+- This release adds database compatibility, not CLI management for Antigravity or Kimi Code. After migration to schema 22, older CLI versions cannot open the upgraded database.
+- Run `cc-switch update`, or use `brew upgrade cc-switch-cli` for Homebrew installations once the formula is updated.
+
+### Thanks
+
+Thank you to everyone who reported problems, proposed changes, shared diagnostics, reviewed code, or joined the discussions. The list below covers issues and pull requests active since v5.11.2, including earlier participants in those discussions and contributions that have not been merged. Being listed here does not mean a proposed feature is included in this release.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@AtaraxiaEpiphany](https://github.com/AtaraxiaEpiphany) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517), [#522](https://github.com/SaladDay/cc-switch-cli/pull/522) |
+| [@claude](https://github.com/claude) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517), [#521](https://github.com/SaladDay/cc-switch-cli/pull/521), [#522](https://github.com/SaladDay/cc-switch-cli/pull/522) |
+| [@hao-lin-lwh](https://github.com/hao-lin-lwh) | [#525](https://github.com/SaladDay/cc-switch-cli/issues/525) |
+| [@kelvkhiu](https://github.com/kelvkhiu) | [#526](https://github.com/SaladDay/cc-switch-cli/issues/526) |
+| [@RGB-loop](https://github.com/RGB-loop) | [#481](https://github.com/SaladDay/cc-switch-cli/issues/481), [#521](https://github.com/SaladDay/cc-switch-cli/pull/521) |
+| [@SaladDay](https://github.com/SaladDay) | [#528](https://github.com/SaladDay/cc-switch-cli/pull/528) |
+| [@SanAntonio021](https://github.com/SanAntonio021) | [#523](https://github.com/SaladDay/cc-switch-cli/pull/523), [#524](https://github.com/SaladDay/cc-switch-cli/pull/524) |
+| [@stone-w4tch3r](https://github.com/stone-w4tch3r) | [#481](https://github.com/SaladDay/cc-switch-cli/issues/481) |
+| [@Xiao-Maker-droid](https://github.com/Xiao-Maker-droid) | [#527](https://github.com/SaladDay/cc-switch-cli/pull/527) |
+
+Thanks also to our sponsors, everyone supporting and using the project, and the CC-Switch maintainers and contributors whose shared migration implementations underpin this fix.
+
+## [5.11.2] - 2026-10-16
+
+### Added
+
+- **Presets / APIMart**: Add APIMart as the second sponsor preset with protocol-specific endpoints for supported applications. Update the English, Chinese and Japanese README sponsor sections with the supplied banner and registration link. Includes [#518](https://github.com/SaladDay/cc-switch-cli/pull/518).
+
+### Changed
+
+- **Presets / Ordering**: Keep PatewayAI available for Claude and Codex in the penultimate sponsor position, while removing its README sponsorship entry. Existing provider records remain unchanged. Includes [#518](https://github.com/SaladDay/cc-switch-cli/pull/518).
+- **Documentation / Japanese**: Synchronize the Japanese README with current project documentation. Includes [#511](https://github.com/SaladDay/cc-switch-cli/pull/511).
+
+### Fixed
+
+- **Claude / Default Model Context**: Add an independent **Default model 1M** toggle immediately after the default-model field in the TUI. `ANTHROPIC_MODEL` takes precedence over role aliases in direct sessions, so enabling 1M only on role rows could leave the active default model at a smaller context window. The new control preserves its declaration when renaming, disables it when clearing the model, and keeps role settings independent. Contextual help explains the priority. Includes [#519](https://github.com/SaladDay/cc-switch-cli/pull/519), fixing [#507](https://github.com/SaladDay/cc-switch-cli/issues/507).
+
+### Upgrade notes
+
+- If your default Claude model supports 1M context, enable **Default model 1M** in the provider form, save, and restart Claude Code. Role-model 1M toggles do not automatically enable it for the default model. The declaration does not verify provider capability.
+- Existing provider settings are not automatically rewritten. The APIMart presets configure supported text protocols; this release does not add image/video task APIs to the CLI.
+- For Homebrew installations, use `brew upgrade cc-switch-cli` once the formula is updated.
+
+### Thanks
+
+Thank you to everyone who reported problems, proposed changes, shared diagnostics, reviewed code, or joined the discussions. The list below covers issues and pull requests active since v5.11.1, including earlier participants in those discussions and contributions that have not been merged. Being listed here does not mean a proposed feature is included in this release.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@AtaraxiaEpiphany](https://github.com/AtaraxiaEpiphany) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517) |
+| [@claude](https://github.com/claude) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517) |
+| [@denghongcai](https://github.com/denghongcai) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507) |
+| [@feicai922](https://github.com/feicai922) | [#516](https://github.com/SaladDay/cc-switch-cli/issues/516) |
+| [@GalaxyKW](https://github.com/GalaxyKW) | [#514](https://github.com/SaladDay/cc-switch-cli/pull/514) |
+| [@jellyjelly814](https://github.com/jellyjelly814) | [#511](https://github.com/SaladDay/cc-switch-cli/pull/511) |
+| [@lijiawei0305-pixel](https://github.com/lijiawei0305-pixel) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507) |
+| [@RGB-loop](https://github.com/RGB-loop) | [#512](https://github.com/SaladDay/cc-switch-cli/pull/512) |
+| [@SaladDay](https://github.com/SaladDay) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507), [#511](https://github.com/SaladDay/cc-switch-cli/pull/511), [#513](https://github.com/SaladDay/cc-switch-cli/issues/513), [#516](https://github.com/SaladDay/cc-switch-cli/issues/516), [#518](https://github.com/SaladDay/cc-switch-cli/pull/518), [#519](https://github.com/SaladDay/cc-switch-cli/pull/519) |
+| [@TaichiLi](https://github.com/TaichiLi) | [#515](https://github.com/SaladDay/cc-switch-cli/issues/515) |
+| [@xiaojueshi](https://github.com/xiaojueshi) | [#513](https://github.com/SaladDay/cc-switch-cli/issues/513) |
+
+Thanks also to APIMart and our other sponsors, everyone supporting and using the project, and the CC-Switch maintainers and contributors whose shared implementations underpin these improvements.
+
 ## [5.11.1] - 2026-10-12
 
 ### Added

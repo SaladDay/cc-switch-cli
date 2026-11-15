@@ -121,14 +121,19 @@ pub fn anthropic_to_openai_with_reasoning_content(
                 messages.push(json!({"role": "system", "content": text}));
             }
         } else if let Some(arr) = system.as_array() {
+            // Merge the top-level system blocks into one message. Their content is
+            // fixed for the whole conversation, so this stays byte-stable across
+            // turns and does not disturb prefix caching.
+            let mut parts = Vec::new();
             for msg in arr {
                 if let Some(text) = msg.get("text").and_then(|t| t.as_str()) {
-                    let Some(text) = sanitize_system_text(text) else {
-                        continue;
-                    };
-                    let system_message = json!({"role": "system", "content": text});
-                    messages.push(system_message);
+                    if let Some(text) = sanitize_system_text(text) {
+                        parts.push(text.into_owned());
+                    }
                 }
+            }
+            if !parts.is_empty() {
+                messages.push(json!({"role": "system", "content": parts.join("\n")}));
             }
         }
     }
@@ -145,7 +150,6 @@ pub fn anthropic_to_openai_with_reasoning_content(
         }
     }
 
-    normalize_openai_system_messages(&mut messages);
     result["messages"] = json!(messages);
 
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
@@ -257,58 +261,6 @@ fn map_tool_choice_to_chat(tool_choice: &Value) -> Value {
             _ => tool_choice.clone(),
         },
         _ => tool_choice.clone(),
-    }
-}
-
-fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
-    let system_count = messages
-        .iter()
-        .filter(|message| message.get("role").and_then(|value| value.as_str()) == Some("system"))
-        .count();
-
-    if system_count == 0 {
-        return;
-    }
-
-    if system_count == 1 {
-        if let Some(index) = messages.iter().position(|message| {
-            message.get("role").and_then(|value| value.as_str()) == Some("system")
-        }) {
-            if index > 0 {
-                let message = messages.remove(index);
-                messages.insert(0, message);
-            }
-        }
-        return;
-    }
-
-    let mut parts = Vec::new();
-    messages.retain(|message| {
-        if message.get("role").and_then(|value| value.as_str()) != Some("system") {
-            return true;
-        }
-
-        match message.get("content") {
-            Some(Value::String(text)) if !text.is_empty() => parts.push(text.clone()),
-            Some(Value::Array(content_parts)) => {
-                let text = content_parts
-                    .iter()
-                    .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
-                    parts.push(text);
-                }
-            }
-            _ => {}
-        }
-
-        false
-    });
-
-    if !parts.is_empty() {
-        let merged = json!({"role": "system", "content": parts.join("\n")});
-        messages.insert(0, merged);
     }
 }
 
@@ -1493,5 +1445,71 @@ mod tests {
         );
         assert_eq!(msg["tool_calls"][0]["id"], "call_date");
         assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_date");
+    }
+
+    #[test]
+    fn anthropic_to_openai_preserves_mid_conversation_system_in_place() {
+        // Claude Code injects a system message every turn (environment and
+        // system-reminder blocks). Hoisting or merging them into the head
+        // rewrites the prompt prefix each turn and defeats upstream prefix
+        // caching, so they must stay exactly where the client put them.
+        let input = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": "You are Claude Code.",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "# Environment\ncwd=/tmp"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "Continue"}
+            ]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are Claude Code.");
+        assert_eq!(messages[2]["role"], "system");
+        assert_eq!(messages[2]["content"], "# Environment\ncwd=/tmp");
+    }
+
+    #[test]
+    fn anthropic_to_openai_keeps_prefix_stable_when_a_turn_is_appended() {
+        // The serialized messages of one turn must remain a prefix of the next
+        // turn; otherwise the upstream prompt cache can never hit.
+        let turn_one = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": [{"type": "text", "text": "You are Claude Code."}],
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "# Environment\ncwd=/tmp"}
+            ]
+        });
+        let turn_two = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": [{"type": "text", "text": "You are Claude Code."}],
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "# Environment\ncwd=/tmp"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "Continue"},
+                {"role": "system", "content": "# Environment\ncwd=/tmp"}
+            ]
+        });
+
+        let first = anthropic_to_openai(turn_one, None).unwrap();
+        let second = anthropic_to_openai(turn_two, None).unwrap();
+        let first_messages = first["messages"].as_array().unwrap();
+        let second_messages = second["messages"].as_array().unwrap();
+
+        assert_eq!(second_messages.len(), 6);
+        assert_eq!(
+            &second_messages[..first_messages.len()],
+            &first_messages[..]
+        );
     }
 }

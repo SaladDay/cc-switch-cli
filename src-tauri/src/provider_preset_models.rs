@@ -1,25 +1,27 @@
 use serde_json::{json, Map, Value};
 
-pub(crate) const CLAUDE_OPUS_MODEL: &str = "claude-opus-5";
-pub(crate) const CLAUDE_OPUS_NAME: &str = "Claude Opus 5";
-pub(crate) const CLAUDE_SONNET_MODEL: &str = "claude-sonnet-5";
-pub(crate) const CLAUDE_SONNET_NAME: &str = "Claude Sonnet 5";
-pub(crate) const CLAUDE_HAIKU_MODEL: &str = "claude-haiku-4-5";
-pub(crate) const CLAUDE_HAIKU_DATED_MODEL: &str = "claude-haiku-4-5-20251001";
-pub(crate) const CLAUDE_HAIKU_NAME: &str = "Claude Haiku 4.5";
+pub(crate) const CLAUDE_OPUS_MODEL: &str = "claude-opus-5-5";
+pub(crate) const CLAUDE_OPUS_NAME: &str = "Claude Opus 5.5";
+pub(crate) const CLAUDE_SONNET_MODEL: &str = "claude-sonnet-5-5";
+pub(crate) const CLAUDE_SONNET_NAME: &str = "Claude Sonnet 5.5";
+pub(crate) const CLAUDE_HAIKU_MODEL: &str = "claude-haiku-5-5";
+pub(crate) const CLAUDE_HAIKU_NAME: &str = "Claude Haiku 5.5";
 
-pub(crate) const CODEX_DEFAULT_MODEL: &str = "gpt-5.6-sol";
-pub(crate) const CODEX_DEFAULT_MODEL_NAME: &str = "GPT-5.6 Sol";
-pub(crate) const CODEX_OAUTH_FAST_MODEL: &str = "gpt-5.6-luna";
-pub(crate) const CODEX_OAUTH_CONTEXT_TOKENS: &str = "372000";
+pub(crate) const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+pub(crate) const CODEX_DEFAULT_MODEL_NAME: &str = "GPT-6.1 Sol";
+pub(crate) const CODEX_OAUTH_FAST_MODEL: &str = "gpt-6-luna";
+// Codex 订阅后端把 GPT 系窗口封在 272K（超过 272K 输入按 2 倍计价），
+// 与上游 cc-switch 的 GPT_CONTEXT_WINDOW_CAP 保持同值。
+pub(crate) const CODEX_OAUTH_CONTEXT_TOKENS: &str = "272000";
 
-pub(crate) const GEMINI_DEFAULT_MODEL: &str = "gemini-3.6-flash";
+pub(crate) const GEMINI_DEFAULT_MODEL: &str = "gemini-3.8-flash";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SponsorModelFamily {
     Claude,
     RunApiClaude,
     Gpt,
+    GptAstra,
 }
 
 impl SponsorModelFamily {
@@ -28,6 +30,7 @@ impl SponsorModelFamily {
             Self::Claude => CLAUDE_OPUS_MODEL,
             Self::RunApiClaude => CLAUDE_SONNET_MODEL,
             Self::Gpt => CODEX_DEFAULT_MODEL,
+            Self::GptAstra => "gpt-6-astra",
         }
     }
 
@@ -36,13 +39,14 @@ impl SponsorModelFamily {
             Self::Claude => CLAUDE_OPUS_NAME,
             Self::RunApiClaude => CLAUDE_SONNET_NAME,
             Self::Gpt => CODEX_DEFAULT_MODEL_NAME,
+            Self::GptAstra => "GPT-6 Astra",
         }
     }
 
     pub(crate) const fn primary_context_window(self) -> &'static str {
         match self {
             Self::Claude | Self::RunApiClaude => "1000000",
-            Self::Gpt => "400000",
+            Self::Gpt | Self::GptAstra => "272000",
         }
     }
 }
@@ -51,8 +55,16 @@ pub(crate) fn sponsor_model_family(preset_id: &str) -> Option<SponsorModelFamily
     match preset_id {
         "packycode" | "aicodemirror" | "cubence" | "openmodel" => Some(SponsorModelFamily::Claude),
         "runapi" => Some(SponsorModelFamily::RunApiClaude),
-        "qiniu" | "fenno" => Some(SponsorModelFamily::Gpt),
+        "qiniu" => Some(SponsorModelFamily::GptAstra),
+        "fenno" => Some(SponsorModelFamily::Gpt),
         _ => None,
+    }
+}
+
+pub(crate) fn sponsor_codex_model(preset_id: &str) -> &'static str {
+    match sponsor_model_family(preset_id) {
+        Some(SponsorModelFamily::GptAstra) => SponsorModelFamily::GptAstra.primary_model(),
+        _ => CODEX_DEFAULT_MODEL,
     }
 }
 
@@ -84,8 +96,12 @@ pub(crate) fn sponsor_opencode_settings(
             insert_named_model(&mut models, CLAUDE_OPUS_MODEL, CLAUDE_OPUS_NAME);
             insert_named_model(&mut models, CLAUDE_HAIKU_MODEL, CLAUDE_HAIKU_NAME);
         }
-        SponsorModelFamily::Gpt => {
-            insert_named_model(&mut models, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_MODEL_NAME);
+        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
+            insert_named_model(
+                &mut models,
+                family.primary_model(),
+                family.primary_model_name(),
+            );
         }
     }
 
@@ -94,7 +110,7 @@ pub(crate) fn sponsor_opencode_settings(
             SponsorModelFamily::Claude | SponsorModelFamily::RunApiClaude => {
                 "@ai-sdk/anthropic"
             }
-            SponsorModelFamily::Gpt => "@ai-sdk/openai-compatible",
+            SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => "@ai-sdk/openai-compatible",
         },
         "name": provider_name,
         "options": {
@@ -110,7 +126,7 @@ pub(crate) fn sponsor_hermes_models(family: SponsorModelFamily) -> Vec<Value> {
         SponsorModelFamily::Claude => vec![
             named_model(CLAUDE_OPUS_MODEL, CLAUDE_OPUS_NAME),
             named_model(CLAUDE_SONNET_MODEL, CLAUDE_SONNET_NAME),
-            named_model(CLAUDE_HAIKU_DATED_MODEL, CLAUDE_HAIKU_NAME),
+            named_model(CLAUDE_HAIKU_MODEL, CLAUDE_HAIKU_NAME),
         ],
         // Hermes derives model.default from the first entry. Upstream keeps a
         // separate suggested default for RunAPI, so put Sonnet first here to
@@ -120,8 +136,11 @@ pub(crate) fn sponsor_hermes_models(family: SponsorModelFamily) -> Vec<Value> {
             named_model(CLAUDE_OPUS_MODEL, CLAUDE_OPUS_NAME),
             named_model(CLAUDE_HAIKU_MODEL, CLAUDE_HAIKU_NAME),
         ],
-        SponsorModelFamily::Gpt => {
-            vec![named_model(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_MODEL_NAME)]
+        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
+            vec![named_model(
+                family.primary_model(),
+                family.primary_model_name(),
+            )]
         }
     }
 }
@@ -132,20 +151,20 @@ pub(crate) fn sponsor_openclaw_models(family: SponsorModelFamily) -> Vec<Value> 
             json!({
                 "id": CLAUDE_OPUS_MODEL,
                 "name": CLAUDE_OPUS_NAME,
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
-                "cost": {
-                    "input": 5,
-                    "output": 25,
-                },
+                "maxTokens": 128000,
+                "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
             }),
             json!({
                 "id": CLAUDE_SONNET_MODEL,
                 "name": CLAUDE_SONNET_NAME,
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
-                "cost": {
-                    "input": 3,
-                    "output": 15,
-                },
+                "maxTokens": 128000,
+                "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
             }),
         ],
         // OpenClaw also derives the no-argument default from the first entry.
@@ -154,23 +173,35 @@ pub(crate) fn sponsor_openclaw_models(family: SponsorModelFamily) -> Vec<Value> 
             json!({
                 "id": CLAUDE_SONNET_MODEL,
                 "name": CLAUDE_SONNET_NAME,
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
             }),
             json!({
                 "id": CLAUDE_OPUS_MODEL,
                 "name": CLAUDE_OPUS_NAME,
+                "reasoning": true,
+                "input": ["text", "image"],
                 "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
             }),
             json!({
                 "id": CLAUDE_HAIKU_MODEL,
                 "name": CLAUDE_HAIKU_NAME,
-                "contextWindow": 200000,
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1000000,
+                "maxTokens": 128000,
+                "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 },
             }),
         ],
-        SponsorModelFamily::Gpt => vec![json!({
-            "id": CODEX_DEFAULT_MODEL,
-            "name": CODEX_DEFAULT_MODEL_NAME,
-            "contextWindow": 400000,
+        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => vec![json!({
+            "id": family.primary_model(),
+            "name": family.primary_model_name(),
+            "contextWindow": 272000,
         })],
     }
 }
@@ -192,10 +223,12 @@ mod tests {
 
     #[test]
     fn upstream_default_model_ids_are_pinned() {
-        assert_eq!(CLAUDE_OPUS_MODEL, "claude-opus-5");
-        assert_eq!(CLAUDE_SONNET_MODEL, "claude-sonnet-5");
-        assert_eq!(CODEX_DEFAULT_MODEL, "gpt-5.6-sol");
-        assert_eq!(GEMINI_DEFAULT_MODEL, "gemini-3.6-flash");
+        assert_eq!(CLAUDE_OPUS_MODEL, "claude-opus-5-5");
+        assert_eq!(CLAUDE_SONNET_MODEL, "claude-sonnet-5-5");
+        assert_eq!(CLAUDE_HAIKU_MODEL, "claude-haiku-5-5");
+        assert_eq!(CODEX_DEFAULT_MODEL, "gpt-6.1-sol");
+        assert_eq!(CODEX_OAUTH_FAST_MODEL, "gpt-6-luna");
+        assert_eq!(GEMINI_DEFAULT_MODEL, "gemini-3.8-flash");
     }
 
     #[test]
@@ -232,7 +265,10 @@ mod tests {
             sponsor_model_family("runapi"),
             Some(SponsorModelFamily::RunApiClaude)
         );
-        assert_eq!(sponsor_model_family("qiniu"), Some(SponsorModelFamily::Gpt));
+        assert_eq!(
+            sponsor_model_family("qiniu"),
+            Some(SponsorModelFamily::GptAstra)
+        );
         assert_eq!(sponsor_model_family("fenno"), Some(SponsorModelFamily::Gpt));
     }
 }

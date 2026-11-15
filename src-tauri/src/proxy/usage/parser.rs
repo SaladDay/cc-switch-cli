@@ -532,15 +532,15 @@ impl TokenUsage {
         for event in events {
             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
                 log::debug!("[Codex] 事件类型: {event_type}");
-                if event_type == "response.completed" {
+                if matches!(event_type, "response.completed" | "response.incomplete") {
                     if let Some(response) = event.get("response") {
-                        log::debug!("[Codex] 找到 response.completed 事件，解析 usage");
+                        log::debug!("[Codex] 找到 {event_type} 事件，解析 usage");
                         return Self::from_codex_response_adjusted(response);
                     }
                 }
             }
         }
-        log::debug!("[Codex] 未找到 response.completed 事件");
+        log::debug!("[Codex] 未找到 response.completed/response.incomplete 事件");
         None
     }
 
@@ -572,12 +572,12 @@ impl TokenUsage {
     pub fn from_codex_stream_events_auto(events: &[Value]) -> Option<Self> {
         log::debug!("[Codex] 智能解析流式事件，共 {} 个事件", events.len());
 
-        // 先尝试 Codex Responses API 格式 (response.completed 事件)
+        // 先尝试 Codex Responses API 格式 (response.completed / response.incomplete 事件)
         for event in events {
             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
-                if event_type == "response.completed" {
+                if matches!(event_type, "response.completed" | "response.incomplete") {
                     if let Some(response) = event.get("response") {
-                        log::debug!("[Codex] 找到 response.completed 事件");
+                        log::debug!("[Codex] 找到 {event_type} 事件");
                         return Self::from_codex_response_auto(response);
                     }
                 }
@@ -1231,6 +1231,28 @@ mod tests {
         assert_eq!(usage.output_tokens, 500);
         assert_eq!(usage.cache_read_tokens, 200);
         assert_eq!(usage.model, Some("o3".to_string()));
+    }
+
+    #[test]
+    fn test_codex_stream_events_read_usage_from_incomplete_event() {
+        let events = vec![json!({
+            "type": "response.incomplete",
+            "response": {
+                "model": "o3",
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 8192
+                }
+            }
+        })];
+
+        let usage = TokenUsage::from_codex_stream_events_auto(&events).unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 8192);
+        let usage = TokenUsage::from_codex_stream_events(&events).unwrap();
+        assert_eq!(usage.output_tokens, 8192);
     }
 
     #[test]

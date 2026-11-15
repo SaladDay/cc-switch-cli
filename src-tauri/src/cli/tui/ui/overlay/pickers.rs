@@ -807,7 +807,9 @@ pub(super) fn render_managed_account_picker_overlay(
             };
             return Some(ListItem::new(Line::raw(format!(
                 "{marker}  {}",
-                texts::tui_managed_accounts_follow_default()
+                if matches!(app.form.as_ref(), Some(crate::cli::tui::form::FormState::ProviderAdd(provider)) if provider.is_codex_official_provider()) {
+                    texts::tui_codex_native_login()
+                } else { texts::tui_managed_accounts_follow_default() }
             ))));
         }
 

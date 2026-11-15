@@ -12,8 +12,9 @@ use crate::error::AppError;
 use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
 use crate::provider_preset_builtin::{builtin_provider_preset_value, BuiltinProviderPresetId};
 use crate::provider_preset_models::{
-    codex_oauth_claude_env, sponsor_hermes_models, sponsor_model_family, sponsor_openclaw_models,
-    sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL, GEMINI_DEFAULT_MODEL,
+    codex_oauth_claude_env, sponsor_codex_model, sponsor_hermes_models, sponsor_model_family,
+    sponsor_openclaw_models, sponsor_opencode_settings, SponsorModelFamily, CODEX_DEFAULT_MODEL,
+    GEMINI_DEFAULT_MODEL,
 };
 use crate::provider_preset_sponsors::{
     sponsor_provider_preset, sponsor_provider_presets_for_app, SponsorProviderPreset,
@@ -35,6 +36,7 @@ pub enum ProviderAddTemplate {
     GoogleOauth,
     #[value(name = "88api")]
     Api88,
+    Apimart,
     Patewayai,
     Cubence,
     Openmodel,
@@ -61,6 +63,7 @@ impl ProviderAddTemplate {
             Self::Runapi => "runapi",
             Self::Aicodemirror => "aicodemirror",
             Self::Patewayai => "patewayai",
+            Self::Apimart => "apimart",
             Self::Api88 => "88api",
             Self::Cubence => "cubence",
             Self::Openmodel => "openmodel",
@@ -83,6 +86,7 @@ impl ProviderAddTemplate {
                 | Self::Runapi
                 | Self::Aicodemirror
                 | Self::Api88
+                | Self::Apimart
                 | Self::Patewayai
                 | Self::Cubence
                 | Self::Openmodel
@@ -123,7 +127,7 @@ impl SettingsConfigPromptResult {
 }
 
 pub fn supports_common_config(app_type: &AppType) -> bool {
-    matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+    matches!(app_type, AppType::Codex | AppType::Gemini)
 }
 
 pub fn common_snippet_has_effective_config(
@@ -245,6 +249,7 @@ fn sponsor_template_from_id(id: &str) -> ProviderAddTemplate {
         "packycode" => ProviderAddTemplate::Packycode,
         "runapi" => ProviderAddTemplate::Runapi,
         "aicodemirror" => ProviderAddTemplate::Aicodemirror,
+        "apimart" => ProviderAddTemplate::Apimart,
         "patewayai" => ProviderAddTemplate::Patewayai,
         "88api" => ProviderAddTemplate::Api88,
         "cubence" => ProviderAddTemplate::Cubence,
@@ -355,6 +360,7 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -379,6 +385,7 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -405,6 +412,7 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Dds => None,
@@ -444,6 +452,7 @@ fn template_default_meta(
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -484,6 +493,7 @@ fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> 
         | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -504,6 +514,7 @@ fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -534,6 +545,7 @@ fn build_provider_template_settings_config(
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Api88
+        | ProviderAddTemplate::Apimart
         | ProviderAddTemplate::Patewayai
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Openmodel
@@ -575,7 +587,7 @@ fn build_sponsor_template_settings_config(
             Ok(build_codex_settings_config(
                 None,
                 preset.codex_base_url,
-                CODEX_DEFAULT_MODEL,
+                sponsor_codex_model(preset.id),
                 "responses",
                 provider_name,
             ))
@@ -617,7 +629,9 @@ fn build_sponsor_template_settings_config(
                         SponsorModelFamily::Claude | SponsorModelFamily::RunApiClaude => {
                             "anthropic_messages"
                         }
-                        SponsorModelFamily::Gpt => crate::hermes_config::HERMES_DEFAULT_API_MODE,
+                        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
+                            crate::hermes_config::HERMES_DEFAULT_API_MODE
+                        }
                     },
                     preset.hermes_base_url,
                     "",
@@ -644,7 +658,7 @@ fn build_sponsor_template_settings_config(
                         SponsorModelFamily::Claude | SponsorModelFamily::RunApiClaude => {
                             "anthropic-messages"
                         }
-                        SponsorModelFamily::Gpt => {
+                        SponsorModelFamily::Gpt | SponsorModelFamily::GptAstra => {
                             crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
                         }
                     },
@@ -913,7 +927,7 @@ env_key = "OLD_API_KEY"
             .get("config")
             .and_then(Value::as_str)
             .expect("config should be present");
-        assert!(config.contains("model = \"gpt-5.6-sol\""));
+        assert!(config.contains("model = \"gpt-6.1-sol\""));
         assert!(config.contains("base_url = \"https://api.example.com/v1\""));
     }
 
@@ -1140,7 +1154,7 @@ requires_openai_auth = true
 
     #[test]
     fn common_config_helpers_detect_and_mark_supported_provider() {
-        assert!(common_snippet_has_effective_config(
+        assert!(!common_snippet_has_effective_config(
             &AppType::Claude,
             Some(r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#)
         ));
@@ -1182,7 +1196,7 @@ requires_openai_auth = true
                 "Claude Official",
                 "Codex",
                 "* 88API",
-                "* PatewayAI",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1191,6 +1205,7 @@ requires_openai_auth = true
                 "* AICodeMirror",
                 "* ClaudeAPI",
                 "* Qiniu",
+                "* PatewayAI",
                 "* FennoAI",
             ]
         );
@@ -1200,7 +1215,7 @@ requires_openai_auth = true
                 "Custom",
                 "OpenAI Official",
                 "* 88API",
-                "* PatewayAI",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1208,6 +1223,7 @@ requires_openai_auth = true
                 "* RunAPI",
                 "* AICodeMirror",
                 "* Qiniu",
+                "* PatewayAI",
                 "* FennoAI",
                 "DeepSeek",
             ]
@@ -1218,6 +1234,7 @@ requires_openai_auth = true
                 "Custom",
                 "Google OAuth",
                 "* 88API",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1230,6 +1247,7 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* 88API",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1244,6 +1262,7 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* 88API",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1258,6 +1277,7 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "* 88API",
+                "* APIMart",
                 "* Cubence",
                 "* OpenModel",
                 "* PackyCode",
@@ -1367,19 +1387,19 @@ requires_openai_auth = true
         );
         assert_eq!(
             provider.settings_config["env"]["ANTHROPIC_MODEL"],
-            "gpt-5.6-sol"
+            "gpt-6.1-sol"
         );
         assert_eq!(
             provider.settings_config["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
-            "gpt-5.6-luna"
+            "gpt-6-luna"
         );
         assert_eq!(
             provider.settings_config["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
-            "372000"
+            "272000"
         );
         assert_eq!(
             provider.settings_config["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
-            "372000"
+            "272000"
         );
         assert!(
             provider.settings_config["env"]
@@ -1462,7 +1482,7 @@ requires_openai_auth = true
         let config = codex.settings_config["config"]
             .as_str()
             .expect("PatewayAI Codex config should be TOML");
-        assert!(config.contains("model = \"gpt-5.6-sol\""));
+        assert!(config.contains("model = \"gpt-6.1-sol\""));
         assert!(config.contains("base_url = \"https://api.pateway.ai/v1\""));
         assert!(config.contains("name = \"patewayai\""));
         assert!(config.contains("wire_api = \"responses\""));
@@ -1861,7 +1881,7 @@ requires_openai_auth = true
             .and_then(Value::as_str)
             .expect("DeepSeek Codex config should be TOML string");
         assert!(config.contains("model_provider = \"custom\""));
-        assert!(config.contains("model = \"deepseek-v4-flash\""));
+        assert!(config.contains("model = \"deepseek-flash\""));
         assert!(config.contains("disable_response_storage = true"));
         assert!(config.contains("[model_providers.custom]"));
         assert!(config.contains("name = \"deepseek\""));
@@ -1878,15 +1898,10 @@ requires_openai_auth = true
             json!({
                 "models": [
                     {
-                        "model": "deepseek-v4-flash",
-                        "displayName": "DeepSeek V4 Flash",
+                        "model": "deepseek-flash",
+                        "displayName": "DeepSeek V4.1 Flash",
                         "contextWindow": 1048576,
-                        "reasoningLevels": ["low", "high", "max"],
-                    },
-                    {
-                        "model": "deepseek-v4-pro",
-                        "displayName": "DeepSeek V4 Pro",
-                        "contextWindow": 1048576,
+                        "inputModalities": ["text", "image"],
                         "reasoningLevels": ["low", "high", "max"],
                     },
                 ],
@@ -1910,7 +1925,7 @@ requires_openai_auth = true
             .expect("Codex sponsor config should be TOML string");
         assert_eq!(codex.name, "PackyCode");
         assert!(codex_config.contains("base_url = \"https://www.packyapi.ai/v1\""));
-        assert!(codex_config.contains("model = \"gpt-5.6-sol\""));
+        assert!(codex_config.contains("model = \"gpt-6.1-sol\""));
         assert!(codex_config.contains("wire_api = \"responses\""));
         assert_eq!(
             codex
@@ -1943,8 +1958,8 @@ requires_openai_auth = true
             "https://api.aicodemirror.ai/api/claudecode"
         );
         assert_eq!(
-            opencode.settings_config["models"]["claude-opus-5"]["name"],
-            "Claude Opus 5"
+            opencode.settings_config["models"]["claude-opus-5-5"]["name"],
+            "Claude Opus 5.5"
         );
         assert_eq!(
             opencode
@@ -1966,9 +1981,9 @@ requires_openai_auth = true
         assert_eq!(
             hermes.settings_config["models"],
             json!([
-                { "id": "claude-opus-5", "name": "Claude Opus 5" },
-                { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
-                { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5" },
+                { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+                { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
+                { "id": "claude-haiku-5-5", "name": "Claude Haiku 5.5" },
             ])
         );
 
@@ -1984,16 +1999,22 @@ requires_openai_auth = true
             openclaw.settings_config["models"],
             json!([
                 {
-                    "id": "claude-opus-5",
-                    "name": "Claude Opus 5",
+                    "id": "claude-opus-5-5",
+                    "name": "Claude Opus 5.5",
+                    "reasoning": true,
+                    "input": ["text", "image"],
                     "contextWindow": 1000000,
-                    "cost": { "input": 5, "output": 25 },
+                    "maxTokens": 128000,
+                    "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
                 },
                 {
-                    "id": "claude-sonnet-5",
-                    "name": "Claude Sonnet 5",
+                    "id": "claude-sonnet-5-5",
+                    "name": "Claude Sonnet 5.5",
+                    "reasoning": true,
+                    "input": ["text", "image"],
                     "contextWindow": 1000000,
-                    "cost": { "input": 3, "output": 15 },
+                    "maxTokens": 128000,
+                    "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
                 },
             ])
         );
@@ -2056,7 +2077,7 @@ requires_openai_auth = true
         let codex_config = codex.settings_config["config"]
             .as_str()
             .expect("OpenModel Codex config should be TOML");
-        assert!(codex_config.contains("model = \"gpt-5.6-sol\""));
+        assert!(codex_config.contains("model = \"gpt-6.1-sol\""));
         assert!(codex_config.contains("base_url = \"https://api.openmodel.ai/v1\""));
         assert!(codex_config.contains("wire_api = \"responses\""));
         assert!(codex_config.contains("requires_openai_auth = true"));
@@ -2073,7 +2094,7 @@ requires_openai_auth = true
             json!({
                 "env": {
                     "GOOGLE_GEMINI_BASE_URL": "https://api.openmodel.ai",
-                    "GEMINI_MODEL": "gemini-3.6-flash",
+                    "GEMINI_MODEL": "gemini-3.8-flash",
                 },
             })
         );
@@ -2089,8 +2110,8 @@ requires_openai_auth = true
         assert_eq!(
             opencode.settings_config["models"],
             json!({
-                "claude-sonnet-5": { "name": "Claude Sonnet 5" },
-                "claude-opus-5": { "name": "Claude Opus 5" },
+                "claude-sonnet-5-5": { "name": "Claude Sonnet 5.5" },
+                "claude-opus-5-5": { "name": "Claude Opus 5.5" },
             })
         );
 
@@ -2105,9 +2126,9 @@ requires_openai_auth = true
         assert_eq!(
             hermes.settings_config["models"],
             json!([
-                { "id": "claude-opus-5", "name": "Claude Opus 5" },
-                { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
-                { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5" },
+                { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+                { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
+                { "id": "claude-haiku-5-5", "name": "Claude Haiku 5.5" },
             ])
         );
 
@@ -2123,16 +2144,22 @@ requires_openai_auth = true
             openclaw.settings_config["models"],
             json!([
                 {
-                    "id": "claude-opus-5",
-                    "name": "Claude Opus 5",
+                    "id": "claude-opus-5-5",
+                    "name": "Claude Opus 5.5",
+                    "reasoning": true,
+                    "input": ["text", "image"],
                     "contextWindow": 1000000,
-                    "cost": { "input": 5, "output": 25 },
+                    "maxTokens": 128000,
+                    "cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
                 },
                 {
-                    "id": "claude-sonnet-5",
-                    "name": "Claude Sonnet 5",
+                    "id": "claude-sonnet-5-5",
+                    "name": "Claude Sonnet 5.5",
+                    "reasoning": true,
+                    "input": ["text", "image"],
                     "contextWindow": 1000000,
-                    "cost": { "input": 3, "output": 15 },
+                    "maxTokens": 128000,
+                    "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
                 },
             ])
         );
@@ -2659,8 +2686,6 @@ pub(crate) fn build_codex_settings_config_from_prompt(
         base_url,
         model,
         "responses",
-        true,
-        "OPENAI_API_KEY",
     );
 
     let mut settings_obj = current
@@ -4312,7 +4337,7 @@ fn prompt_codex_config(current: Option<&Value>, provider_name: &str) -> Result<V
     let model = if let Some(current) = current_model.as_deref() {
         Text::new(&format!("{}:", texts::model_label()))
             .with_initial_value(current)
-            .with_help_message("Model name (e.g., gpt-5.6-sol, o3)")
+            .with_help_message("Model name (e.g., gpt-6.1-sol, o3)")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     } else {

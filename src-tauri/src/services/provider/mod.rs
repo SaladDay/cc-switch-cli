@@ -4,6 +4,8 @@ mod key_field_live;
 use std::collections::HashSet;
 
 mod claude;
+pub(crate) mod claude_editor;
+mod claude_editor_service;
 mod codex;
 pub(crate) mod codex_live;
 pub(crate) mod codex_login;
@@ -1017,13 +1019,10 @@ impl ProviderService {
         }
         let effect = if action.edit_common_config
             && action.takeover_active
-            && matches!(action.app_type, AppType::Claude | AppType::Gemini)
+            && matches!(action.app_type, AppType::Gemini)
         {
             // Explicit CLI global edits must not replace an active proxy route.
             PreparedPostCommitEffect::Live(match action.app_type {
-                AppType::Claude => PreparedLiveWrite::Claude {
-                    patch: Default::default(),
-                },
                 AppType::Gemini => PreparedLiveWrite::Gemini {
                     env: Default::default(),
                     settings: Default::default(),
@@ -1843,6 +1842,16 @@ impl ProviderService {
         provider: &mut Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Codex)
+            && provider.is_codex_official()
+            && provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+                .is_some()
+        {
+            provider.settings_config["auth"] = json!({});
+        }
         common_config::normalize_provider_common_config_for_storage(
             app_type,
             provider,
@@ -2201,6 +2210,12 @@ impl ProviderService {
         app_type: AppType,
         snippet: Option<String>,
     ) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Claude) {
+            return Err(AppError::Message(crate::t!(
+                "Claude settings are edited in the provider configuration editor; common snippets are retained only for older clients.",
+                "请在供应商配置编辑器中修改 Claude 设置；通用片段仅保留供旧版本读取。"
+            ).to_string()));
+        }
         let normalized_snippet = snippet.and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {

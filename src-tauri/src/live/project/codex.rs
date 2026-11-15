@@ -58,7 +58,7 @@ const ROW_TOP_FIELDS: &[&str] = &[
     "disable_response_storage",
 ];
 
-fn is_built_in_id(id: &str) -> bool {
+pub(crate) fn is_built_in_id(id: &str) -> bool {
     BUILT_IN_IDS.contains(&id)
 }
 

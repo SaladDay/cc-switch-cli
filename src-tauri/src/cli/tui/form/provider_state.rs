@@ -11,9 +11,8 @@ use super::super::text_edit::{
 };
 
 use super::provider_json::{
-    claude_settings_contain_common_config_for_form, codex_settings_contain_common_config_for_form,
-    merge_json_values, normalize_gemini_common_config_for_form,
-    sanitize_claude_common_config_for_form, should_hide_provider_field,
+    codex_settings_contain_common_config_for_form, merge_json_values,
+    normalize_gemini_common_config_for_form, should_hide_provider_field,
     strip_common_config_from_settings,
 };
 use super::provider_state_loading::populate_form_from_provider;
@@ -108,16 +107,8 @@ impl ProviderAddFormState {
     }
 
     pub fn new_with_common_snippet(app_type: AppType, common_snippet: &str) -> Self {
-        let include_common_config = if matches!(app_type, AppType::Claude) {
-            // The upstream new-provider effect checks the raw object's key
-            // count before its merge helper skips prototype-pollution keys.
-            serde_json::from_str::<Value>(common_snippet.trim())
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .is_some_and(|object| !object.is_empty())
-        } else {
-            Self::snippet_has_effective_common_config(&app_type, common_snippet)
-        };
+        let include_common_config =
+            Self::snippet_has_effective_common_config(&app_type, common_snippet);
         let is_codex = matches!(app_type, AppType::Codex);
         let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
@@ -135,6 +126,8 @@ impl ProviderAddFormState {
             app_type,
             mode: FormMode::Add,
             copy_source_id: None,
+            claude_inactive: Vec::new(),
+            claude_editor: None,
             // The template is a field row now, and `fields()` puts it first in
             // Add mode, so the form opens with it selected.
             focus: FormFocus::Fields,
@@ -173,6 +166,7 @@ impl ProviderAddFormState {
                 ClaudeApiFormat::Anthropic
             },
             claude_model: TextInput::new(""),
+            claude_fallback_one_m: false,
             claude_haiku_model: TextInput::new(""),
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
@@ -349,7 +343,7 @@ impl ProviderAddFormState {
     }
 
     pub fn supports_common_config(app_type: &AppType) -> bool {
-        matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+        matches!(app_type, AppType::Codex | AppType::Gemini)
     }
 
     pub fn snippet_has_effective_common_config(app_type: &AppType, common_snippet: &str) -> bool {
@@ -367,15 +361,15 @@ impl ProviderAddFormState {
                 .parse::<toml_edit::DocumentMut>()
                 .ok()
                 .is_some_and(|doc| doc.as_table().iter().next().is_some()),
-            AppType::Claude => sanitize_claude_common_config_for_form(snippet)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .is_some_and(|obj| !obj.is_empty()),
             AppType::Gemini => normalize_gemini_common_config_for_form(snippet)
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|env| !env.is_empty()),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::Claude
+            | AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi => false,
         }
     }
 
@@ -411,9 +405,6 @@ impl ProviderAddFormState {
         }
 
         match app_type {
-            AppType::Claude => {
-                claude_settings_contain_common_config_for_form(settings, common_snippet)
-            }
             AppType::Codex => {
                 codex_settings_contain_common_config_for_form(settings, common_snippet)
             }
@@ -431,7 +422,11 @@ impl ProviderAddFormState {
                     app_type, settings, &snippet,
                 )
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::Claude
+            | AppType::OpenCode
+            | AppType::Hermes
+            | AppType::OpenClaw
+            | AppType::Pi => false,
         }
     }
 
@@ -447,7 +442,7 @@ impl ProviderAddFormState {
         }
     }
 
-    fn capture_initial_snapshot(&mut self) {
+    pub(crate) fn capture_initial_snapshot(&mut self) {
         self.initial_snapshot = self.to_provider_json_value();
     }
 
@@ -505,6 +500,7 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeAdvancedDivider);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
+                    fields.push(ProviderAddField::ClaudeFallbackOneM);
                     fields.push(ProviderAddField::LocalProxySettings);
                 } else if !self.is_claude_official_provider() {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
@@ -513,13 +509,16 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeApiFormat);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
+                    fields.push(ProviderAddField::ClaudeFallbackOneM);
                     if self.supports_local_proxy_settings() {
                         fields.push(ProviderAddField::LocalProxySettings);
                     }
                 }
             }
             AppType::Codex => {
-                if !self.is_codex_official_provider() {
+                if self.is_codex_official_provider() {
+                    fields.push(ProviderAddField::CodexOAuthAccount);
+                } else {
                     fields.push(ProviderAddField::CodexBaseUrl);
                     fields.push(ProviderAddField::CodexApiKey);
                     // No standalone model field (matches upstream): the model is
@@ -581,6 +580,9 @@ impl ProviderAddFormState {
             }
         }
 
+        if !self.claude_inactive.is_empty() {
+            fields.push(ProviderAddField::ClaudeInactiveFields);
+        }
         if Self::supports_common_config(&self.app_type) {
             fields.push(ProviderAddField::CommonConfigDivider);
             fields.push(ProviderAddField::CommonSnippet);
@@ -595,8 +597,12 @@ impl ProviderAddFormState {
             AppType::Codex => fields.push(ProviderAddField::CodexQuickConfig),
             _ => {}
         }
-        fields.push(ProviderAddField::UsageQueryDivider);
-        fields.push(ProviderAddField::UsageQuery);
+        // Managed Codex OAuth uses the bound account's native quota, like the
+        // desktop provider card; generic usage templates do not apply.
+        if !self.is_claude_codex_oauth_provider() {
+            fields.push(ProviderAddField::UsageQueryDivider);
+            fields.push(ProviderAddField::UsageQuery);
+        }
 
         // Add mode leads with the template picker row plus its divider, so the
         // template reads as its own group above the real fields. Inserted last
@@ -692,7 +698,8 @@ impl ProviderAddFormState {
     }
 
     pub fn usage_query_script_validation_error(&self) -> Option<&'static str> {
-        if !self.usage_query_enabled
+        if self.is_claude_codex_oauth_provider()
+            || !self.usage_query_enabled
             || matches!(
                 self.usage_query_template,
                 UsageQueryTemplate::GitHubCopilot
@@ -762,6 +769,7 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::ClaudeTeammates
             | ProviderAddField::ClaudeToolSearch
+            | ProviderAddField::ClaudeFallbackOneM
             | ProviderAddField::ClaudeEffortMax
             | ProviderAddField::ClaudeDisableAutoUpgrade
             | ProviderAddField::GeminiAuthType
@@ -772,6 +780,7 @@ impl ProviderAddFormState {
             | ProviderAddField::HermesModels
             | ProviderAddField::HermesAdvancedDivider
             | ProviderAddField::CommonConfigDivider
+            | ProviderAddField::ClaudeInactiveFields
             | ProviderAddField::CommonSnippet
             | ProviderAddField::IncludeCommonConfig
             | ProviderAddField::UsageQueryDivider
@@ -832,6 +841,7 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::ClaudeTeammates
             | ProviderAddField::ClaudeToolSearch
+            | ProviderAddField::ClaudeFallbackOneM
             | ProviderAddField::ClaudeEffortMax
             | ProviderAddField::ClaudeDisableAutoUpgrade
             | ProviderAddField::GeminiAuthType
@@ -842,6 +852,7 @@ impl ProviderAddFormState {
             | ProviderAddField::HermesModels
             | ProviderAddField::HermesAdvancedDivider
             | ProviderAddField::CommonConfigDivider
+            | ProviderAddField::ClaudeInactiveFields
             | ProviderAddField::CommonSnippet
             | ProviderAddField::IncludeCommonConfig
             | ProviderAddField::UsageQueryDivider
@@ -1163,7 +1174,7 @@ impl ProviderAddFormState {
         &mut self,
         common_snippet: &str,
     ) -> Result<(), String> {
-        if !self.include_common_config {
+        if !Self::supports_common_config(&self.app_type) || !self.include_common_config {
             return Ok(());
         }
 
@@ -1531,6 +1542,9 @@ impl ProviderAddFormState {
     }
 
     pub fn open_usage_query_page(&mut self) {
+        if self.is_claude_codex_oauth_provider() {
+            return;
+        }
         self.refresh_usage_query_provider_kind();
         self.refresh_default_usage_query_template();
         self.page = ProviderFormPage::UsageQuery;
@@ -2456,7 +2470,40 @@ impl ProviderAddFormState {
             .count()
     }
 
+    pub fn set_claude_fallback_model_from_config(&mut self, value: &str) {
+        let (model, one_m) = split_claude_one_m_marker(value);
+        self.claude_model.set(&model);
+        self.claude_fallback_one_m = one_m && !model.trim().is_empty();
+    }
+
+    pub fn claude_fallback_model_value_for_config(&self) -> String {
+        let (model, explicit_one_m) = split_claude_one_m_marker(&self.claude_model.value);
+        let model = model.trim();
+        if model.is_empty() {
+            String::new()
+        } else if self.claude_fallback_one_m || explicit_one_m {
+            format!("{model}[1M]")
+        } else {
+            model.to_string()
+        }
+    }
+
+    pub fn toggle_claude_fallback_one_m(&mut self) -> bool {
+        let (model, explicit_one_m) = split_claude_one_m_marker(&self.claude_model.value);
+        if model.trim().is_empty() {
+            return false;
+        }
+        self.claude_model.set(&model);
+        self.claude_fallback_one_m = !(self.claude_fallback_one_m || explicit_one_m);
+        self.claude_fallback_model_touched = true;
+        true
+    }
+
     pub fn mark_claude_fallback_model_touched(&mut self) {
+        let (model, explicit_one_m) = split_claude_one_m_marker(&self.claude_model.value);
+        self.claude_fallback_one_m =
+            !model.trim().is_empty() && (self.claude_fallback_one_m || explicit_one_m);
+        self.claude_model.set(&model);
         self.claude_fallback_model_touched = true;
     }
 
@@ -2678,6 +2725,12 @@ impl ProviderAddFormState {
             next.include_common_config_touched = previous_include_common_config_touched;
         }
 
+        if !Self::supports_common_config(&self.app_type) {
+            next.include_common_config = false;
+            next.include_common_config_touched = false;
+        }
+        next.claude_inactive = self.claude_inactive.clone();
+        next.claude_editor = self.claude_editor.clone();
         next.mode = previous_mode.clone();
         next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
@@ -2787,6 +2840,12 @@ impl ProviderAddFormState {
             next.include_common_config_touched = previous_include_common_config_touched;
         }
 
+        if !Self::supports_common_config(&self.app_type) {
+            next.include_common_config = false;
+            next.include_common_config_touched = false;
+        }
+        next.claude_inactive = self.claude_inactive.clone();
+        next.claude_editor = self.claude_editor.clone();
         next.mode = previous_mode.clone();
         next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
@@ -2844,6 +2903,9 @@ impl ProviderAddFormState {
     }
 
     pub fn toggle_include_common_config(&mut self, common_snippet: &str) -> Result<(), String> {
+        if !Self::supports_common_config(&self.app_type) {
+            return Ok(());
+        }
         let next_enabled = !self.include_common_config;
         if next_enabled {
             Self::validate_common_config_snippet_for_form(&self.app_type, common_snippet)?;
@@ -2905,6 +2967,9 @@ impl ProviderAddFormState {
         previous_snippet: &str,
         next_snippet: &str,
     ) -> Result<(), String> {
+        if !Self::supports_common_config(&self.app_type) {
+            return Ok(());
+        }
         if !self.include_common_config {
             if !next_snippet.trim().is_empty() {
                 Self::validate_common_config_snippet_for_form(&self.app_type, next_snippet)?;
@@ -2932,34 +2997,17 @@ impl ProviderAddFormState {
             Self::validate_common_config_snippet_for_form(&self.app_type, next_snippet)?;
         }
 
-        if let Err(previous_error) =
-            Self::validate_common_config_snippet_for_form(&self.app_type, previous_snippet)
+        if Self::validate_common_config_snippet_for_form(&self.app_type, previous_snippet).is_err()
         {
-            if matches!(self.app_type, AppType::Codex | AppType::Gemini) {
-                // Upstream skips removal when the previous Codex/Gemini
-                // snippet cannot be parsed, then applies the valid replacement
-                // (or simply disables sharing when the snippet was cleared).
-                let mut next = self.clone();
-                next.include_common_config = false;
-                next.include_common_config_touched = true;
-                if !next_snippet.trim().is_empty() {
-                    next.include_common_config = true;
-                    next.refresh_quick_config_from_common_snippet(next_snippet)?;
-                }
-                *self = next;
-                return Ok(());
+            let mut next = self.clone();
+            next.include_common_config = false;
+            next.include_common_config_touched = true;
+            if !next_snippet.trim().is_empty() {
+                next.include_common_config = true;
+                next.refresh_quick_config_from_common_snippet(next_snippet)?;
             }
-
-            // Claude ignores the malformed-old removal error when clearing,
-            // but a non-empty replacement reports it and its membership effect
-            // turns sharing off against the newly saved snippet.
-            self.include_common_config = false;
-            self.include_common_config_touched = true;
-            return if next_snippet.trim().is_empty() {
-                Ok(())
-            } else {
-                Err(previous_error)
-            };
+            *self = next;
+            return Ok(());
         }
 
         let previous = self.clone();

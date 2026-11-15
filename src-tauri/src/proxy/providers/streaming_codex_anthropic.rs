@@ -482,7 +482,7 @@ impl AnthropicToResponsesState {
             response["incomplete_details"] = json!({ "reason": reason });
         }
 
-        events.push(sse::response_completed(&response));
+        events.push(sse::response_terminal(&response));
         self.completed = true;
         events
     }
@@ -907,11 +907,56 @@ mod tests {
         );
         let merged = run(input).await;
         assert!(merged.contains("\"delta\":\"partial\""));
-        assert!(merged.contains("event: response.completed"));
+        assert!(merged.contains("event: response.incomplete"));
+        assert!(!merged.contains("event: response.completed"));
         // The top-level response is incomplete (message output items keep their own
         // "completed" status, but the response status must not be "completed").
         assert!(merged.contains("\"status\":\"incomplete\""));
         assert!(merged.contains("\"reason\":\"max_output_tokens\""));
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_stop_reasons_emit_response_incomplete_event() {
+        // Codex reads incomplete_details only from a response.incomplete event.
+        for (stop_reason, reason) in [
+            ("max_tokens", "max_output_tokens"),
+            ("refusal", "content_filter"),
+        ] {
+            let input = format!(
+                concat!(
+                    "event: message_start\n",
+                    "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_inc\",\"model\":\"claude\",\"usage\":{{\"input_tokens\":4}}}}}}\n\n",
+                    "event: content_block_start\n",
+                    "data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n",
+                    "event: content_block_delta\n",
+                    "data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"partial\"}}}}\n\n",
+                    "event: content_block_stop\n",
+                    "data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n",
+                    "event: message_delta\n",
+                    "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{}\"}},\"usage\":{{\"output_tokens\":8}}}}\n\n",
+                    "event: message_stop\n",
+                    "data: {{\"type\":\"message_stop\"}}\n\n"
+                ),
+                stop_reason
+            );
+            let merged = run(&input).await;
+            assert!(
+                merged.contains("event: response.incomplete"),
+                "{stop_reason}: {merged}"
+            );
+            assert!(
+                merged.contains("\"type\":\"response.incomplete\""),
+                "{stop_reason}"
+            );
+            assert!(
+                !merged.contains("event: response.completed"),
+                "{stop_reason}"
+            );
+            assert!(
+                merged.contains(&format!("\"reason\":\"{reason}\"")),
+                "{stop_reason}"
+            );
+        }
     }
 
     #[tokio::test]

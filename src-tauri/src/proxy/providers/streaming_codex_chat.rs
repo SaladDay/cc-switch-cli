@@ -4,6 +4,7 @@ use super::{
     codex_chat_common::{
         extract_reasoning_field_text, split_leading_think_block, strip_leading_think_open_tag,
     },
+    codex_responses_sse::response_terminal,
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
         response_id_from_chat_id, response_status_from_finish_reason,
@@ -564,13 +565,7 @@ impl ChatToResponsesState {
             } else {
                 let mut response = self.base_response("incomplete", output);
                 response["incomplete_details"] = json!({ "reason": "stream_truncated" });
-                events.push(sse_event(
-                    "response.completed",
-                    json!({
-                        "type": "response.completed",
-                        "response": response
-                    }),
-                ));
+                events.push(response_terminal(&response));
             }
             self.completed = true;
             return events;
@@ -582,13 +577,7 @@ impl ChatToResponsesState {
             response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
         }
 
-        events.push(sse_event(
-            "response.completed",
-            json!({
-                "type": "response.completed",
-                "response": response
-            }),
-        ));
+        events.push(response_terminal(&response));
         self.completed = true;
         events
     }
@@ -1439,6 +1428,47 @@ mod tests {
         assert!(output.contains("\"execution\":\"client\""));
         assert!(output.contains("\"call_id\":\"call_tool_search_1\""));
         assert!(output.contains("\"query\":\"Gmail search emails\""));
+    }
+
+    #[tokio::test]
+    async fn length_finish_reason_emits_response_incomplete_event() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_len\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+        let events = parse_sse_events(&output);
+        let terminal = events
+            .iter()
+            .find(|event| event["type"] == "response.incomplete")
+            .unwrap();
+
+        assert!(output.contains("event: response.incomplete"));
+        assert!(!output.contains("event: response.completed"));
+        assert_eq!(terminal["response"]["status"], "incomplete");
+        assert_eq!(
+            terminal["response"]["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_stream_with_output_emits_response_incomplete_event() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_cut\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        ])
+        .await;
+        let events = parse_sse_events(&output);
+        let terminal = events
+            .iter()
+            .find(|event| event["type"] == "response.incomplete")
+            .unwrap();
+
+        assert!(!output.contains("event: response.completed"));
+        assert_eq!(
+            terminal["response"]["incomplete_details"]["reason"],
+            "stream_truncated"
+        );
     }
 
     #[tokio::test]

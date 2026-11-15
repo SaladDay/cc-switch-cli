@@ -1201,10 +1201,16 @@ fn update_claude_sync_state_conn(
         .unwrap_or(0);
 
     conn.prepare_cached(
-        "INSERT OR REPLACE INTO session_log_sync
+        "INSERT INTO session_log_sync
              (file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset,
               last_tail_fingerprint)
-         VALUES (?1, ?2, 0, ?3, ?4, ?5)",
+         VALUES (?1, ?2, 0, ?3, ?4, ?5)
+         ON CONFLICT(file_path) DO UPDATE SET
+            last_modified = excluded.last_modified,
+            last_line_offset = excluded.last_line_offset,
+            last_synced_at = excluded.last_synced_at,
+            last_byte_offset = excluded.last_byte_offset,
+            last_tail_fingerprint = excluded.last_tail_fingerprint",
     )
     .and_then(|mut stmt| {
         stmt.execute(rusqlite::params![
@@ -1438,6 +1444,31 @@ pub(crate) fn delete_session_logs_covered_by_proxy_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_cursor_update_preserves_upstream_parser_state() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open memory db");
+        Database::create_tables_on_conn(&conn).expect("create tables");
+        conn.execute(
+            r#"INSERT INTO session_log_sync
+                (file_path, last_modified, last_line_offset, last_synced_at, parser_state)
+             VALUES ('session.jsonl', 1, 0, 1, '{"step":7}')"#,
+            [],
+        )
+        .expect("seed upstream parser state");
+
+        update_claude_sync_state_conn(&conn, "session.jsonl", 2, 128, Some(9))
+            .expect("update claude cursor");
+
+        let parser_state: Option<String> = conn
+            .query_row(
+                "SELECT parser_state FROM session_log_sync WHERE file_path = 'session.jsonl'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read parser state");
+        assert_eq!(parser_state.as_deref(), Some(r#"{"step":7}"#));
+    }
 
     #[test]
     fn memory_database_session_guard_does_not_create_a_lock_file() -> Result<(), AppError> {

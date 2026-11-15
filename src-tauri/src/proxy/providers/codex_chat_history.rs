@@ -432,7 +432,7 @@ async fn inspect_sse_block(
                     .await;
             }
         }
-        Some("response.completed") => {
+        Some("response.completed" | "response.incomplete") => {
             if let Some(response) = value.get("response") {
                 history.record_response(response).await;
             }
@@ -798,6 +798,33 @@ mod tests {
                 {
                     "type": "function_call_output",
                     "call_id": "call_1",
+                    "output": "ok"
+                }
+            ]
+        });
+
+        assert_eq!(history.enrich_request(&mut request).await, 1);
+        assert_eq!(request["input"][0]["reasoning_content"], "Need a file.");
+    }
+
+    #[tokio::test]
+    async fn records_function_calls_from_incomplete_terminal_event() {
+        let history = Arc::new(CodexChatHistoryStore::default());
+        let stream = futures::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_inc\",\"name\":\"read_file\",\"arguments\":\"{}\",\"reasoning_content\":\"Need a file.\"}]}}\n\n",
+        ))]);
+
+        let output = record_responses_sse_stream(stream, history.clone())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(output.len(), 1);
+
+        let mut request = json!({
+            "previous_response_id": "resp_incomplete",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_inc",
                     "output": "ok"
                 }
             ]

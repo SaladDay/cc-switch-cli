@@ -578,6 +578,12 @@ impl App {
                 provider.toggle_claude_tool_search();
                 Action::None
             }
+            ProviderAddField::ClaudeFallbackOneM => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.toggle_claude_fallback_one_m();
+                }
+                Action::None
+            }
             ProviderAddField::ClaudeEffortMax => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
@@ -651,6 +657,28 @@ impl App {
                     };
                     provider.open_hermes_models_picker();
                     self.overlay = Overlay::HermesModelsPicker { editing: false };
+                }
+                Action::None
+            }
+            ProviderAddField::ClaudeInactiveFields => {
+                if matches!(key.code, KeyCode::Enter) {
+                    if let Some(FormState::ProviderAdd(form)) = self.form.as_ref() {
+                        let fields = form
+                            .claude_inactive
+                            .iter()
+                            .map(|field| format!("{}: {}", field.path.join("."), field.value))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.overlay = Overlay::Confirm(ConfirmOverlay {
+                            title: crate::t!(
+                                "Copy inactive fields into editor?",
+                                "将未应用字段复制到编辑器？"
+                            )
+                            .to_string(),
+                            message: fields,
+                            action: ConfirmAction::ClaudeCopyInactive,
+                        });
+                    }
                 }
                 Action::None
             }

@@ -6,7 +6,7 @@
 
 **対話型 TUI またはスクリプトで利用できる CLI から、Claude Code、Codex、Gemini、OpenCode、Hermes、OpenClaw、Pi を一元管理できます。**
 
-[![バージョン](https://img.shields.io/badge/version-5.11.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![バージョン](https://img.shields.io/badge/version-5.11.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![対応プラットフォーム](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Rust 製](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![ライセンス](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -43,17 +43,9 @@
     </td>
   </tr>
   <tr>
-    <td width="180">
-      <a href="https://pateway.ai/?ch=18fxbjo">
-        <img src="assets/partners/logos/pateway.png" alt="PatewayAI" width="150">
-      </a>
-    </td>
-    <td>
-      PatewayAI は、経験豊富な AI 開発者向けの API 中継サービスです。Claude と Codex のモデル群に幅広く対応しています。すべてのモデルは高品質な公式チャネルから提供され、出力品質の低下やモデルの偽装はありません。料金の内訳も明確で、利用履歴を確認できます。<br/>
-      公式料金から最大 95% オフで利用できます。<a href="https://pateway.ai/?ch=18fxbjo">こちらのリンク</a>から登録すると試用クレジットを受け取れるほか、不定期のキャンペーンでも無料クレジットを獲得できます。<br/>
-      企業向けの同時処理能力、専用管理画面、正式な契約書と請求書の発行にも対応しています。紹介する側とされる側の双方に、最大 150 ドルの紹介特典があります。
-    </td>
-  </tr>
+<td width="180"><a href="https://go.apimart.ai/gh-cc-switch-cli"><img src="assets/partners/logos/apimart.png" alt="APIMart" width="150"></a></td>
+<td>本プロジェクトをご支援いただいている APIMart に感謝します！APIMart は AI 画像・動画生成に特化した低価格 API プラットフォームです。GPT-Image-2 は 1 枚 $0.006 から、1 ドルで 160 枚以上を生成できます。画像と動画を共通の非同期 API で扱い、タスクを送信して ID を取得し、ポーリングまたはコールバックで結果を受け取れます。数万枚の一括生成でもタイムアウトせず、コードを変更せずにモデルを切り替えられます。月額料金なしの従量課金です。<a href="https://go.apimart.ai/gh-cc-switch-cli">こちらから登録</a>してご利用ください。</td>
+</tr>
   <tr>
     <td width="180">
       <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
@@ -83,6 +75,18 @@
     <td>
       本プロジェクトをご支援いただいている <b>PackyCode</b> に感謝します！PackyCode は、Claude Code、Codex、Gemini などに対応する、信頼性と効率性に優れた API 中継サービスです。<br/>
       CC-Switch CLI ユーザー向けの割引として、<a href="https://www.packyapi.com/register?aff=cc-switch-cli">こちらのリンク</a>から登録し、チャージ時にクーポンコード <code>cc-switch-cli</code> を入力すると、<b>10% オフ</b>になります。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://www.ipwo.net/?ref=githubswitchcli">
+        <img src="assets/partners/logos/ipwo.png" alt="IPWO" width="150">
+      </a>
+    </td>
+    <td>
+      本プロジェクトをご支援いただいている <b>IPWO</b> に感謝します！IPWO は無料でお試しいただける住宅用プロキシサービスで、<b>195 以上の国と地域にわたる 9,000 万以上のアクティブな住宅用 IP</b> を提供しています。ローテーション型、固定型、通信量無制限の住宅用プロキシに対応し、HTTP(S) と SOCKS5 を利用できます。<br/>
+      AI ツールの開発、地域をまたぐネットワークアクセス、API のデバッグ、データ収集など、さまざまな地域でのアプリケーション開発に向けて、柔軟な住宅用プロキシの選択肢を提供します。<br/>
+      <a href="https://www.ipwo.net/?ref=githubswitchcli">こちらのリンク</a>から IPWO にアクセスし、クーポンコード <code>0200</code> を入力すると、<b>10% オフ</b>になります。
     </td>
   </tr>
   <tr>
