@@ -45,6 +45,20 @@ pub enum SettingsCommand {
     /// Manage the persistent global outbound proxy
     #[command(name = "outbound-proxy", subcommand)]
     OutboundProxy(OutboundProxyCommand),
+
+    /// Show, enable, or disable usage cost tracking
+    #[command(name = "cost-tracking", subcommand)]
+    CostTracking(CostTrackingCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CostTrackingCommand {
+    /// Show whether cost tracking is enabled
+    Show,
+    /// Enable cost calculation and historical backfills
+    Enable,
+    /// Disable cost calculation (token counts are still recorded)
+    Disable,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +242,34 @@ pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
         SettingsCommand::CodexAuthPreservation(cmd) => codex_auth_preservation_cmd(cmd),
         SettingsCommand::CodexHistory(cmd) => codex_history_cmd(cmd),
         SettingsCommand::OutboundProxy(cmd) => outbound_proxy_cmd(cmd),
+        SettingsCommand::CostTracking(cmd) => cost_tracking_cmd(cmd),
     }
+}
+
+fn cost_tracking_cmd(cmd: CostTrackingCommand) -> Result<(), AppError> {
+    match cmd {
+        CostTrackingCommand::Show => {
+            println!(
+                "Usage cost tracking: {}",
+                yes_no(crate::settings::cost_tracking_enabled())
+            );
+            Ok(())
+        }
+        CostTrackingCommand::Enable => set_cost_tracking(true),
+        CostTrackingCommand::Disable => set_cost_tracking(false),
+    }
+}
+
+fn set_cost_tracking(enabled: bool) -> Result<(), AppError> {
+    crate::settings::set_cost_tracking_enabled(enabled)?;
+    println!(
+        "{}",
+        success(&format!(
+            "Usage cost tracking {}",
+            if enabled { "enabled" } else { "disabled" }
+        ))
+    );
+    Ok(())
 }
 
 fn outbound_proxy_cmd(cmd: OutboundProxyCommand) -> Result<(), AppError> {
@@ -377,6 +418,7 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
             "openclawConfigDir": settings.openclaw_config_dir,
             "piConfigDir": settings.pi_config_dir,
             "preferredEditor": settings.preferred_editor,
+            "costTrackingEnabled": settings.cost_tracking_enabled,
         });
         println!(
             "{}",
@@ -414,6 +456,10 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
     println!(
         "Pi config dir: {}",
         settings.pi_config_dir.as_deref().unwrap_or("(default)")
+    );
+    println!(
+        "Usage cost tracking: {}",
+        yes_no(settings.cost_tracking_enabled)
     );
     println!(
         "Preferred editor: {}",
