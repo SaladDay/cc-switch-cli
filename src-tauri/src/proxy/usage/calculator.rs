@@ -240,6 +240,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_cost_multiplier_discounts_all_cost_buckets() {
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 200,
+            cache_read_tokens: 300,
+            cache_creation_tokens: 100,
+            ..Default::default()
+        };
+        for app in ["claude", "codex", "gemini"] {
+            for pricing in [
+                ModelPricing::from_strings("2", "10", "0.2", "2.5").unwrap(),
+                ModelPricing::from_strings("5", "25", "0.5", "6.25").unwrap(),
+            ] {
+                let full = CostCalculator::calculate_for_app(app, &usage, &pricing, Decimal::ONE);
+                let half =
+                    CostCalculator::calculate_for_app(app, &usage, &pricing, Decimal::new(5, 1));
+                assert_eq!(half.total_cost, full.total_cost / Decimal::from(2));
+                assert_eq!(half.input_cost, full.input_cost);
+            }
+        }
+    }
+
+    #[test]
     fn test_gpt_6_astra_seeded_cost() {
         let db = Database::memory().unwrap();
         let usage = TokenUsage {

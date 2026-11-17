@@ -759,6 +759,12 @@ pub enum ProviderCommand {
         /// Provider ID to edit
         id: String,
     },
+    /// Set the provider's reference cost multiplier for future proxy usage
+    CostMultiplier {
+        id: String,
+        /// Decimal from 0 to 1000, or "inherit" to use the app default
+        value: String,
+    },
     /// Delete a provider
     Delete {
         /// Provider ID to delete
@@ -903,6 +909,21 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
             },
         ),
         ProviderCommand::Edit { id } => edit_provider(app_type, &id),
+        ProviderCommand::CostMultiplier { id, value } => {
+            if !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
+                return Err(AppError::InvalidInput(
+                    "Cost multipliers require a supported local proxy app (claude, codex, gemini)."
+                        .into(),
+                ));
+            }
+            let raw = if value == "inherit" { "" } else { &value };
+            let normalized =
+                crate::provider::normalize_cost_multiplier(raw).map_err(AppError::InvalidInput)?;
+            let db = crate::database::Database::init()?;
+            db.set_provider_cost_multiplier(app_type.as_str(), &id, normalized.as_deref())?;
+            println!("{}: {}", id, normalized.as_deref().unwrap_or("inherit"));
+            Ok(())
+        }
         ProviderCommand::Delete { id } => delete_provider(app_type, &id),
         ProviderCommand::Duplicate { id, edit } => duplicate_provider(app_type, &id, edit),
         ProviderCommand::ImportLive => import_live_config(app_type),

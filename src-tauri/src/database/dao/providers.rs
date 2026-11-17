@@ -12,6 +12,44 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 impl Database {
+    /// Change only pricing metadata, without rewriting live credentials or other provider fields.
+    #[cfg(feature = "cli")]
+    pub(crate) fn set_provider_cost_multiplier(
+        &self,
+        app: &str,
+        id: &str,
+        value: Option<&str>,
+    ) -> Result<(), AppError> {
+        let normalized = crate::provider::normalize_cost_multiplier(value.unwrap_or(""))
+            .map_err(AppError::InvalidInput)?;
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let raw: String = tx.query_row(
+            "SELECT COALESCE(meta, '{}') FROM providers WHERE id=?1 AND app_type=?2",
+            params![id, app],
+            |r| r.get(0),
+        )?;
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| AppError::Database(e.to_string()))?;
+        let object = meta
+            .as_object_mut()
+            .ok_or_else(|| AppError::Database("Provider metadata must be an object".into()))?;
+        match normalized {
+            Some(value) => {
+                object.insert("costMultiplier".into(), value.into());
+            }
+            None => {
+                object.remove("costMultiplier");
+            }
+        }
+        tx.execute(
+            "UPDATE providers SET meta=?1 WHERE id=?2 AND app_type=?3",
+            params![meta.to_string(), id, app],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn unbind_codex_managed_accounts(
         &self,
         account_ids: &[String],
@@ -629,6 +667,52 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use serde_json::json;
+
+    #[cfg(feature = "cli")]
+    #[tokio::test]
+    async fn provider_cost_multiplier_updates_only_selected_metadata_and_resolves(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.save_provider("claude", &provider("relay"))?;
+        db.save_provider("codex", &provider("relay"))?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE providers SET meta=?1 WHERE id='relay' AND app_type='claude'",
+                [r#"{"futureField":{"keep":true},"costMultiplier":"1"}"#],
+            )?;
+        }
+        db.set_provider_cost_multiplier("claude", "relay", Some("0.50"))?;
+        let updated = db.get_provider_by_id("relay", "claude")?.unwrap();
+        let resolved = crate::proxy::usage::calculator::resolve_pricing_config(
+            &db,
+            &crate::app_config::AppType::Claude,
+            &updated,
+        )
+        .await;
+        assert_eq!(resolved.cost_multiplier.to_string(), "0.5");
+        assert!(db
+            .get_provider_by_id("relay", "codex")?
+            .unwrap()
+            .meta
+            .unwrap()
+            .cost_multiplier
+            .is_none());
+        assert!(db
+            .set_provider_cost_multiplier("claude", "relay", Some("-1"))
+            .is_err());
+        db.set_provider_cost_multiplier("claude", "relay", None)?;
+        let conn = lock_conn!(db.conn);
+        let raw: String = conn.query_row(
+            "SELECT meta FROM providers WHERE app_type='claude' AND id='relay'",
+            [],
+            |r| r.get(0),
+        )?;
+        let meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(meta["futureField"]["keep"], true);
+        assert!(meta.get("costMultiplier").is_none());
+        Ok(())
+    }
 
     fn provider(id: &str) -> Provider {
         Provider::with_id(

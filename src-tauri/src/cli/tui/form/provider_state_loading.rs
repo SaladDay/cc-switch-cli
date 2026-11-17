@@ -21,6 +21,13 @@ pub(super) fn populate_form_from_provider(
     app_type: &AppType,
     provider: &Provider,
 ) {
+    form.cost_multiplier.set(
+        provider
+            .meta
+            .as_ref()
+            .and_then(|m| m.cost_multiplier.as_deref())
+            .unwrap_or(""),
+    );
     match app_type {
         AppType::Claude => populate_claude_form(form, provider),
         AppType::Codex => populate_codex_form(form, provider),

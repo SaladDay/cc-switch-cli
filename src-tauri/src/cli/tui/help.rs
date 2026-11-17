@@ -645,6 +645,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Short private note, such as account purpose, plan, or renewal info. It is not written to the live client config.",
             ),
         ),
+        ProviderAddField::CostMultiplier => HelpContent::new(
+            tr("费用倍率", "Cost multiplier"),
+            help_lines(
+                "该供应商所有模型的参考总费用乘以此值，例如 0.5 表示半价，1 表示原价。留空继承应用默认倍率。仅影响后续本地代理计价，不改变 Token 数或已计价历史；无法识别供应商的离线会话不会套用此倍率。",
+                "Multiply reference costs for every model on this provider: 0.5 is half price, 1 is full price. Blank inherits the app default. Applies to future local proxy usage; token counts and priced history stay unchanged. Offline sessions without provider attribution cannot use this multiplier.",
+            ),
+        ),
         ProviderAddField::ClaudeBaseUrl
         | ProviderAddField::CodexBaseUrl
         | ProviderAddField::GeminiBaseUrl

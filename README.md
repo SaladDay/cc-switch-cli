@@ -505,6 +505,21 @@ Interactive mode supports English and Chinese, language settings are automatical
 
 ### 🔧 Utilities
 
+For Claude, Codex and Gemini local-proxy usage, set **Cost multiplier** in the provider
+add/edit form, or use:
+
+```bash
+cc-switch --app codex provider cost-multiplier PROVIDER_ID 0.5
+cc-switch --app codex provider cost-multiplier PROVIDER_ID inherit
+```
+
+The provider multiplier applies to the total reference cost of every model (including
+cache costs): `0.5` means half price and `1` means full price. Values from `0` to `1000`
+are accepted; blank / `inherit` uses the application default. This affects future proxy
+usage, not token counts or already-priced history. Offline session imports without
+provider attribution cannot apply a provider multiplier. Reference costs are estimates,
+not a reconciliation of the provider's actual bill.
+
 Shell completions, environment management, and other utilities.
 
 ```bash
