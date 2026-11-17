@@ -51,6 +51,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         // Default to interactive mode if no command is provided
         None | Some(Commands::Interactive) => cc_switch_lib::cli::interactive::run(cli.app),
         Some(Commands::Auth(cmd)) => cc_switch_lib::cli::commands::auth::execute(cmd),
+        Some(Commands::Pricing(cmd)) => cc_switch_lib::cli::commands::pricing::execute(cmd),
         Some(Commands::Provider(cmd)) => {
             cc_switch_lib::cli::commands::provider::execute(cmd, cli.app)
         }
@@ -99,6 +100,7 @@ fn command_requires_startup_state(command: &Option<Commands>) -> bool {
         | Some(Commands::Update(_))
         | Some(Commands::Internal(_))
         | Some(Commands::Sessions(_))
+        | Some(Commands::Pricing(_))
         | Some(Commands::Settings(
             cc_switch_lib::cli::commands::settings::SettingsCommand::CodexAuthPreservation(_),
         )) => false,
@@ -207,6 +209,15 @@ mod tests {
 
     #[test]
     fn update_and_completions_skip_startup_state() {
+        let pricing = Cli::parse_from([
+            "cc-switch",
+            "pricing",
+            "sync",
+            "--provider",
+            "openai",
+            "--dry-run",
+        ]);
+        assert!(!command_requires_startup_state(&pricing.command));
         let update = Cli::parse_from(["cc-switch", "update"]);
         let completions_generate = Cli::parse_from(["cc-switch", "completions", "bash"]);
         let completions_install = Cli::parse_from(["cc-switch", "completions", "install"]);

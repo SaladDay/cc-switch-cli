@@ -505,6 +505,23 @@ Interactive mode supports English and Chinese, language settings are automatical
 
 ### 🔧 Utilities
 
+Import reference text-model prices from [models.dev](https://models.dev) explicitly:
+
+```bash
+cc-switch pricing sync --provider openai --model gpt-6.1-sol --dry-run
+cc-switch pricing sync --provider openai --model gpt-6.1-sol --backfill
+cc-switch pricing sync --provider anthropic --overwrite --json
+```
+
+`--provider` is a **models.dev catalog provider ID**, not a configured CC Switch provider.
+Omit `--model` to import all supported text models for that provider, or repeat it to select
+exact catalog IDs. Existing prices and deleted models are preserved unless `--overwrite`
+is supplied. `--dry-run` previews the selected source prices without opening the database.
+`--backfill` fills missing costs for the selected models; it does not reprice already
+calculated history. Prices are base USD per million tokens: context tiers, discounts,
+and your relay's actual billing are not represented. There is no background network sync;
+run the command again when you want to refresh the catalog.
+
 Shell completions, environment management, and other utilities.
 
 ```bash
