@@ -16,6 +16,8 @@ pub mod global_proxy;
 pub mod local_env_check;
 pub mod mcp;
 pub mod model_fetch;
+#[cfg(feature = "cli")]
+pub(crate) mod model_pricing_sync;
 pub(crate) mod pi_prompt_files;
 pub(crate) mod pi_state;
 pub mod prompt;

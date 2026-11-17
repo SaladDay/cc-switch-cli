@@ -481,7 +481,14 @@ impl Database {
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
-        Self::init_impl(true)
+        Self::init_impl(true, true)
+    }
+
+    /// Initialize safely without globally backfilling or pruning usage before
+    /// the caller imports prices and optionally backfills selected models.
+    #[cfg(feature = "cli")]
+    pub(crate) fn init_for_pricing_sync() -> Result<Self, AppError> {
+        Self::init_impl(true, false)
     }
 
     /// Daemon startup already owns `daemon.pid`; the type-level lease proves
@@ -490,12 +497,12 @@ impl Database {
     pub(crate) fn init_for_daemon(
         _pidfile: &crate::daemon::pidfile::PidFile,
     ) -> Result<Self, AppError> {
-        Self::init_impl(false)
+        Self::init_impl(false, true)
     }
 
     #[cfg_attr(not(unix), allow(unused_variables))]
-    fn init_impl(quiesce_daemon: bool) -> Result<Self, AppError> {
-        let result = Self::init_impl_inner(quiesce_daemon);
+    fn init_impl(quiesce_daemon: bool, maintain_usage: bool) -> Result<Self, AppError> {
+        let result = Self::init_impl_inner(quiesce_daemon, maintain_usage);
         match result {
             Ok(database) => Ok(database),
             Err(error) => {
@@ -506,7 +513,7 @@ impl Database {
     }
 
     #[cfg_attr(not(unix), allow(unused_variables))]
-    fn init_impl_inner(quiesce_daemon: bool) -> Result<Self, AppError> {
+    fn init_impl_inner(quiesce_daemon: bool, maintain_usage: bool) -> Result<Self, AppError> {
         if let Err(err) = crate::config::validate_config_dir() {
             log::warn!("拒绝初始化数据库：配置目录校验失败: {err}");
             return Err(err);
@@ -677,7 +684,9 @@ impl Database {
             log::warn!("Failed to ensure incremental auto-vacuum: {err}");
         }
         db.ensure_model_pricing_seeded()?;
-        db.run_usage_maintenance("startup");
+        if maintain_usage {
+            db.run_usage_maintenance("startup");
+        }
 
         drop(migration_sync_guard);
 

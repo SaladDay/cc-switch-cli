@@ -42,6 +42,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Import reference model prices from models.dev
+    #[command(subcommand)]
+    Pricing(commands::pricing::PricingCommand),
+
     /// Manage ChatGPT Codex OAuth accounts
     #[command(subcommand)]
     Auth(commands::auth::AuthCommand),
@@ -146,6 +150,37 @@ mod tests {
     use crate::cli::commands::completions::{
         CompletionLifecycleCommand, CompletionsAction, ManagedShellSelection,
     };
+
+    #[test]
+    fn pricing_sync_requires_provider_and_rejects_backfill_preview() {
+        assert!(Cli::try_parse_from(["cc-switch", "pricing", "sync"]).is_err());
+        assert!(Cli::try_parse_from([
+            "cc-switch",
+            "pricing",
+            "sync",
+            "--provider",
+            "openai",
+            "--dry-run",
+            "--backfill"
+        ])
+        .is_err());
+        let cli = Cli::try_parse_from([
+            "cc-switch",
+            "pricing",
+            "sync",
+            "--provider",
+            "openai",
+            "--model",
+            "one",
+            "--model",
+            "two",
+            "--json",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Pricing(super::commands::pricing::PricingCommand::Sync { provider, model, json: true, .. })) if provider == "openai" && model == ["one", "two"])
+        );
+    }
 
     #[test]
     fn long_help_mentions_prompts_and_proxy_routes() {
