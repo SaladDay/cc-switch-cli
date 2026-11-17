@@ -69,6 +69,30 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
+    #[test]
+    fn provider_cost_multiplier_save_shortcut_rejects_invalid_input() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        apply_current_provider_template(&mut app, &data);
+        let Some(FormState::ProviderAdd(form)) = app.form.as_mut() else {
+            panic!("provider form")
+        };
+        form.name.set("Relay");
+        form.cost_multiplier.set("-1");
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(action, Action::None));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("form remains open")
+        };
+        assert!(form
+            .field_errors
+            .iter()
+            .any(|e| e.field == ProviderAddField::CostMultiplier));
+    }
+
     fn alt(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::ALT)
     }

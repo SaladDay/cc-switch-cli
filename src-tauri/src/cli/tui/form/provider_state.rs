@@ -149,6 +149,7 @@ impl ProviderAddFormState {
             name: TextInput::new(""),
             website_url: TextInput::new(""),
             notes: TextInput::new(""),
+            cost_multiplier: TextInput::new(""),
             include_common_config,
             include_common_config_touched: false,
             json_scroll: 0,
@@ -483,6 +484,12 @@ impl ProviderAddFormState {
             ProviderAddField::WebsiteUrl,
             ProviderAddField::Notes,
         ];
+        if matches!(
+            self.app_type,
+            AppType::Claude | AppType::Codex | AppType::Gemini
+        ) {
+            fields.push(ProviderAddField::CostMultiplier);
+        }
 
         if matches!(
             self.app_type,
@@ -728,6 +735,7 @@ impl ProviderAddFormState {
             ProviderAddField::Name => Some(&self.name),
             ProviderAddField::WebsiteUrl => Some(&self.website_url),
             ProviderAddField::Notes => Some(&self.notes),
+            ProviderAddField::CostMultiplier => Some(&self.cost_multiplier),
             ProviderAddField::ClaudeBaseUrl => Some(&self.claude_base_url),
             ProviderAddField::ClaudeApiKey => Some(&self.claude_api_key),
             ProviderAddField::ClaudeFallbackModel => Some(&self.claude_model),
@@ -796,6 +804,7 @@ impl ProviderAddFormState {
             ProviderAddField::Name => Some(&mut self.name),
             ProviderAddField::WebsiteUrl => Some(&mut self.website_url),
             ProviderAddField::Notes => Some(&mut self.notes),
+            ProviderAddField::CostMultiplier => Some(&mut self.cost_multiplier),
             ProviderAddField::ClaudeBaseUrl => Some(&mut self.claude_base_url),
             ProviderAddField::ClaudeApiKey => Some(&mut self.claude_api_key),
             ProviderAddField::ClaudeFallbackModel => Some(&mut self.claude_model),

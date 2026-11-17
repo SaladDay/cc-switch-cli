@@ -1933,6 +1933,7 @@ pub(crate) fn provider_field_label_and_value(
             strip_trailing_colon(texts::website_url_label()).to_string()
         }
         ProviderAddField::Notes => strip_trailing_colon(texts::notes_label()).to_string(),
+        ProviderAddField::CostMultiplier => crate::t!("Cost multiplier", "费用倍率").to_string(),
         ProviderAddField::ClaudeBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::ClaudeApiFormat => {
             if provider.app_type == AppType::Codex {

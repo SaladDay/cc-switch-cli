@@ -61,7 +61,16 @@ impl App {
                     .then(|| validate_hermes_base_url(&provider.hermes_base_url.value))
                     .flatten();
 
-            if ProviderService::is_provider_key_app(&provider.app_type) && provider.id.is_blank() {
+            if let Err(message) =
+                crate::provider::normalize_cost_multiplier(&provider.cost_multiplier.value)
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::CostMultiplier),
+                    message,
+                ))
+            } else if ProviderService::is_provider_key_app(&provider.app_type)
+                && provider.id.is_blank()
+            {
                 Some((
                     ProviderValidationTarget::Main(ProviderAddField::Id),
                     texts::tui_toast_provider_add_missing_fields().to_string(),
@@ -1971,6 +1980,9 @@ pub(super) fn validate_provider_inline_field(
     field: ProviderAddField,
 ) -> Option<String> {
     match field {
+        ProviderAddField::CostMultiplier => {
+            crate::provider::normalize_cost_multiplier(&provider.cost_multiplier.value).err()
+        }
         ProviderAddField::Name if provider.name.is_blank() => Some(
             if provider.mode.is_edit() {
                 texts::tui_toast_provider_missing_name()

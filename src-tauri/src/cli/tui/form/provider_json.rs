@@ -791,6 +791,7 @@ impl ProviderAddFormState {
         &self,
         common_snippet: &str,
     ) -> Result<Value, String> {
+        crate::provider::normalize_cost_multiplier(&self.cost_multiplier.value)?;
         let mut provider_value = self.to_provider_json_value();
         let raw_snippet = common_snippet.trim();
         if raw_snippet.is_empty()
@@ -874,6 +875,7 @@ impl ProviderAddFormState {
         let should_write_full_url = self.supports_full_url_mode() && self.is_full_url;
 
         if !should_write_common_config_meta
+            && self.cost_multiplier.is_blank()
             && !should_write_claude_api_format
             && !should_write_codex_api_format
             && !should_write_prompt_cache_routing
@@ -898,6 +900,13 @@ impl ProviderAddFormState {
         let Some(meta_obj) = meta_value.as_object_mut() else {
             return;
         };
+        if let Ok(Some(multiplier)) =
+            crate::provider::normalize_cost_multiplier(&self.cost_multiplier.value)
+        {
+            meta_obj.insert("costMultiplier".to_string(), json!(multiplier));
+        } else if self.cost_multiplier.is_blank() {
+            meta_obj.remove("costMultiplier");
+        }
 
         meta_obj.remove("applyCommonConfig");
         if should_write_common_config_meta {

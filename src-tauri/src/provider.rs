@@ -9,6 +9,27 @@ use crate::app_config::AppType;
 pub const CLAUDE_AUTH_TOKEN_ENV_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
 pub const CLAUDE_API_KEY_ENV_KEY: &str = "ANTHROPIC_API_KEY";
 
+/// Blank inherits the application default; use decimal strings to avoid float rounding.
+pub(crate) fn normalize_cost_multiplier(raw: &str) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let valid_syntax = raw.bytes().all(|c| c.is_ascii_digit() || c == b'.')
+        && raw.bytes().any(|c| c.is_ascii_digit());
+    let value = raw.parse::<rust_decimal::Decimal>().ok();
+    match value.filter(|v| {
+        valid_syntax && *v >= rust_decimal::Decimal::ZERO && *v <= rust_decimal::Decimal::from(1000)
+    }) {
+        Some(value) => Ok(Some(value.normalize().to_string())),
+        None => Err(crate::t!(
+            "Cost multiplier must be a decimal from 0 to 1000, or blank to inherit.",
+            "费用倍率须为 0 到 1000 的十进制数，留空继承默认值。"
+        )
+        .to_string()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeApiKeyField {
     AuthToken,

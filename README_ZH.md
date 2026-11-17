@@ -506,6 +506,18 @@ cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Herme
 
 ### 🔧 实用工具
 
+Claude、Codex 和 Gemini 的供应商新增/编辑表单支持设置**费用倍率**，也可直接运行：
+
+```bash
+cc-switch --app codex provider cost-multiplier PROVIDER_ID 0.5
+cc-switch --app codex provider cost-multiplier PROVIDER_ID inherit
+```
+
+该供应商所有模型的参考总费用（含缓存费用）统一乘以此值，`0.5` 为半价，`1` 为原价。
+支持 `0` 到 `1000`，留空或 `inherit` 继承应用默认倍率。仅影响后续本地代理用量，
+不改变 Token 数或已计价历史。无法识别供应商的离线 session 不会套用此倍率。
+参考费用是估算值，并非供应商实际账单。
+
 Shell 补全、环境管理等实用功能。
 
 ```bash

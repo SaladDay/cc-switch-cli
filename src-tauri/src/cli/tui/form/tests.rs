@@ -3,6 +3,32 @@ use crate::cli::commands::provider_input::{build_provider_template_seed, Provide
 use crate::provider::Provider;
 use serde_json::{json, Value};
 
+#[test]
+fn provider_cost_multiplier_form_roundtrip_clear_and_validation() {
+    for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+        let provider: Provider = serde_json::from_value(json!({"id":"relay","name":"Relay","settingsConfig":{},"meta":{"costMultiplier":"0.5","isPartner":true}})).unwrap();
+        let mut form = ProviderAddFormState::from_provider(app, &provider);
+        assert!(form.fields().contains(&ProviderAddField::CostMultiplier));
+        assert_eq!(form.cost_multiplier.value, "0.5");
+        assert_eq!(
+            form.to_provider_json_value()["meta"]["costMultiplier"],
+            "0.5"
+        );
+        form.cost_multiplier.set("0.25");
+        assert_eq!(
+            form.to_provider_json_value_with_common_config("").unwrap()["meta"]["costMultiplier"],
+            "0.25"
+        );
+        form.cost_multiplier.set("-1");
+        assert!(form.to_provider_json_value_with_common_config("").is_err());
+        form.cost_multiplier.set("");
+        assert!(form.to_provider_json_value()["meta"]
+            .get("costMultiplier")
+            .is_none());
+        assert_eq!(form.to_provider_json_value()["meta"]["isPartner"], true);
+    }
+}
+
 fn template_index_by_label(app_type: AppType, label: &str) -> usize {
     ProviderAddFormState::new(app_type)
         .template_labels()
