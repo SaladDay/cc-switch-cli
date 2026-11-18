@@ -1515,6 +1515,9 @@ struct PricingInfo {
 impl Database {
     /// Recalculate stored zero-cost usage rows once pricing becomes available.
     pub(crate) fn backfill_missing_usage_costs(&self) -> Result<u64, AppError> {
+        if !crate::settings::cost_tracking_enabled() {
+            return Ok(0);
+        }
         let conn = lock_conn!(self.conn);
         Self::backfill_missing_usage_costs_on_conn(&conn, None)
     }
@@ -1524,6 +1527,9 @@ impl Database {
         &self,
         model_id: &str,
     ) -> Result<u64, AppError> {
+        if !crate::settings::cost_tracking_enabled() {
+            return Ok(0);
+        }
         let conn = lock_conn!(self.conn);
         Self::backfill_missing_usage_costs_on_conn(&conn, Some(model_id))
     }
@@ -1532,7 +1538,17 @@ impl Database {
         conn: &Connection,
         only_model_id: Option<&str>,
     ) -> Result<u64, AppError> {
-        const BASE_SQL: &str =
+        // Full sweeps only consider rows with no pricing evidence at all. Rows
+        // settled with the `unknown` marker are skipped so a large backlog does
+        // not slow down every short-lived CLI invocation. Targeted sweeps (a
+        // pricing row was just added/edited) additionally revisit `unknown`
+        // rows so a model that gains a price can recover its historical costs.
+        let pricing_filter = if only_model_id.is_some() {
+            "AND (pricing_model IS NULL OR TRIM(pricing_model) = '' OR TRIM(pricing_model) = 'unknown')"
+        } else {
+            "AND (pricing_model IS NULL OR TRIM(pricing_model) = '')"
+        };
+        let base_sql = format!(
             "SELECT request_id, provider_id, NULL AS provider_name, app_type, model, request_model,
                         pricing_model, cost_multiplier,
                         input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -1544,18 +1560,19 @@ impl Database {
              WHERE CAST(total_cost_usd AS REAL) <= 0
                AND (input_tokens > 0 OR output_tokens > 0
                     OR cache_read_tokens > 0 OR cache_creation_tokens > 0)
-               AND (pricing_model IS NULL OR TRIM(pricing_model) = '')";
+               {pricing_filter}"
+        );
 
         let mut logs = {
             match only_model_id {
                 Some(model) => {
-                    let sql = format!("{BASE_SQL} AND (model = ?1 OR request_model = ?1)");
+                    let sql = format!("{base_sql} AND (model = ?1 OR request_model = ?1)");
                     let mut stmt = conn.prepare(&sql)?;
                     let rows = stmt.query_map([model], row_to_request_log_detail)?;
                     rows.collect::<Result<Vec<_>, _>>()?
                 }
                 None => {
-                    let mut stmt = conn.prepare(BASE_SQL)?;
+                    let mut stmt = conn.prepare(&base_sql)?;
                     let rows = stmt.query_map([], row_to_request_log_detail)?;
                     rows.collect::<Result<Vec<_>, _>>()?
                 }
@@ -1591,7 +1608,7 @@ impl Database {
     fn maybe_backfill_log_costs(
         conn: &Connection,
         log: &mut RequestLogDetail,
-        pricing_cache: &mut HashMap<String, PricingInfo>,
+        pricing_cache: &mut HashMap<String, Option<PricingInfo>>,
     ) -> Result<bool, AppError> {
         let existing_cost = rust_decimal::Decimal::from_str(&log.total_cost_usd)
             .unwrap_or(rust_decimal::Decimal::ZERO);
@@ -1600,10 +1617,10 @@ impl Database {
             || log.output_tokens > 0
             || log.cache_read_tokens > 0
             || log.cache_creation_tokens > 0;
-        let has_pricing_evidence = log
-            .pricing_model
-            .as_deref()
-            .is_some_and(|model| !model.trim().is_empty());
+        let has_pricing_evidence = log.pricing_model.as_deref().is_some_and(|model| {
+            let model = model.trim();
+            !model.is_empty() && !model.eq_ignore_ascii_case(UNPRICED_MARKER)
+        });
 
         if has_cost || !has_usage || has_pricing_evidence {
             return Ok(false);
@@ -1612,7 +1629,18 @@ impl Database {
         let (pricing_model, pricing) =
             match Self::get_log_model_pricing_cached(conn, pricing_cache, log)? {
                 Some(resolved) => resolved,
-                None => return Ok(false),
+                None => {
+                    // Settle genuinely unpriced rows once. Costs stay at zero,
+                    // and the marker excludes them from future sweeps until the
+                    // pricing catalog changes. This turns an O(backlog) cost on
+                    // every CLI startup into a one-time O(backlog) cost.
+                    conn.execute(
+                        "UPDATE proxy_request_logs SET pricing_model = ?1 WHERE request_id = ?2",
+                        params![UNPRICED_MARKER, log.request_id],
+                    )
+                    .map_err(|e| AppError::Database(format!("标记无定价用量失败: {e}")))?;
+                    return Ok(true);
+                }
             };
         let multiplier =
             rust_decimal::Decimal::from_str(&log.cost_multiplier).unwrap_or_else(|e| {
@@ -1689,36 +1717,41 @@ impl Database {
 
     fn get_model_pricing_cached(
         conn: &Connection,
-        cache: &mut HashMap<String, PricingInfo>,
+        cache: &mut HashMap<String, Option<PricingInfo>>,
         model: &str,
     ) -> Result<Option<PricingInfo>, AppError> {
-        if let Some(info) = cache.get(model) {
-            return Ok(Some(info.clone()));
+        // Cache misses too: a single backfill pass re-checks the same handful of
+        // unpriced model names for thousands of rows. Without a negative entry
+        // every row re-runs candidate expansion plus the prefix LIKE scans over
+        // model_pricing, which dominates startup on databases with a large
+        // backlog of zero-cost rows. The cache is per-call (a single pass), so
+        // adding a price later is picked up by the next pass immediately.
+        if let Some(cached) = cache.get(model) {
+            return Ok(cached.clone());
         }
 
         let row = find_model_pricing_row(conn, model)?;
-        let Some((input, output, cache_read, cache_creation)) = row else {
-            return Ok(None);
-        };
-
-        let pricing = PricingInfo {
-            input: rust_decimal::Decimal::from_str(&input)
-                .map_err(|e| AppError::Database(format!("解析输入价格失败: {e}")))?,
-            output: rust_decimal::Decimal::from_str(&output)
-                .map_err(|e| AppError::Database(format!("解析输出价格失败: {e}")))?,
-            cache_read: rust_decimal::Decimal::from_str(&cache_read)
-                .map_err(|e| AppError::Database(format!("解析缓存读取价格失败: {e}")))?,
-            cache_creation: rust_decimal::Decimal::from_str(&cache_creation)
-                .map_err(|e| AppError::Database(format!("解析缓存写入价格失败: {e}")))?,
+        let pricing = match row {
+            Some((input, output, cache_read, cache_creation)) => Some(PricingInfo {
+                input: rust_decimal::Decimal::from_str(&input)
+                    .map_err(|e| AppError::Database(format!("解析输入价格失败: {e}")))?,
+                output: rust_decimal::Decimal::from_str(&output)
+                    .map_err(|e| AppError::Database(format!("解析输出价格失败: {e}")))?,
+                cache_read: rust_decimal::Decimal::from_str(&cache_read)
+                    .map_err(|e| AppError::Database(format!("解析缓存读取价格失败: {e}")))?,
+                cache_creation: rust_decimal::Decimal::from_str(&cache_creation)
+                    .map_err(|e| AppError::Database(format!("解析缓存写入价格失败: {e}")))?,
+            }),
+            None => None,
         };
 
         cache.insert(model.to_string(), pricing.clone());
-        Ok(Some(pricing))
+        Ok(pricing)
     }
 
     fn get_log_model_pricing_cached(
         conn: &Connection,
-        cache: &mut HashMap<String, PricingInfo>,
+        cache: &mut HashMap<String, Option<PricingInfo>>,
         log: &RequestLogDetail,
     ) -> Result<Option<(String, PricingInfo)>, AppError> {
         if let Some(pricing) = Self::get_model_pricing_cached(conn, cache, &log.model)? {
@@ -1824,6 +1857,11 @@ pub(crate) fn is_placeholder_pricing_model(model_id: &str) -> bool {
     let normalized = model_id.trim().to_ascii_lowercase();
     normalized.is_empty() || matches!(normalized.as_str(), "unknown" | "null" | "none")
 }
+
+/// Marker written to rows whose model has no price in the catalog yet. Keeping
+/// a marker (instead of leaving the column empty) prevents every short-lived
+/// CLI invocation from re-scanning the same unpriced backlog forever.
+pub(crate) const UNPRICED_MARKER: &str = "unknown";
 
 fn query_model_pricing_exact(
     conn: &Connection,
@@ -2244,6 +2282,107 @@ mod tests {
         )?;
         assert_eq!(pricing_model.as_deref(), Some("backfill-free-model"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn backfill_settles_unpriced_rows_once_and_leaves_cost_at_zero() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "unpriced-row",
+                "claude",
+                "_session",
+                "totally-unlisted-model-xyz",
+                "session_log",
+                1_000,
+                10_000,
+                2_000,
+                500,
+                0,
+                200,
+                "0",
+            )?;
+        }
+
+        assert_eq!(db.backfill_missing_usage_costs()?, 1);
+        {
+            let conn = lock_conn!(db.conn);
+            let (pricing_model, total_cost): (Option<String>, String) = conn.query_row(
+                "SELECT pricing_model, total_cost_usd FROM proxy_request_logs
+                 WHERE request_id = 'unpriced-row'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(pricing_model.as_deref(), Some(UNPRICED_MARKER));
+            assert_eq!(total_cost, "0");
+        }
+        assert_eq!(
+            db.backfill_missing_usage_costs()?,
+            0,
+            "settled rows must not be re-scanned on the next startup"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn targeted_backfill_revisits_settled_unpriced_rows() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "revisit-row",
+                "claude",
+                "_session",
+                "later-priced-model",
+                "session_log",
+                1_000,
+                1_000_000,
+                0,
+                0,
+                0,
+                200,
+                "0",
+            )?;
+        }
+
+        assert_eq!(db.backfill_missing_usage_costs()?, 1);
+        {
+            let conn = lock_conn!(db.conn);
+            let marker: Option<String> = conn.query_row(
+                "SELECT pricing_model FROM proxy_request_logs WHERE request_id = 'revisit-row'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(marker.as_deref(), Some(UNPRICED_MARKER));
+            conn.execute(
+                "INSERT INTO model_pricing (
+                     model_id, display_name, input_cost_per_million,
+                     output_cost_per_million, cache_read_cost_per_million,
+                     cache_creation_cost_per_million
+                 ) VALUES ('later-priced-model', 'Later Priced', '1', '2', '0.1', '0')",
+                [],
+            )?;
+        }
+
+        assert_eq!(
+            db.backfill_missing_usage_costs_for_model("later-priced-model")?,
+            1,
+            "a newly added price must recover a previously settled row"
+        );
+        let conn = lock_conn!(db.conn);
+        let (pricing_model, total_cost): (Option<String>, String) = conn.query_row(
+            "SELECT pricing_model, total_cost_usd FROM proxy_request_logs
+             WHERE request_id = 'revisit-row'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(pricing_model.as_deref(), Some("later-priced-model"));
+        assert_eq!(total_cost, "1.000000");
         Ok(())
     }
 

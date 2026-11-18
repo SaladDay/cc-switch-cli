@@ -587,6 +587,11 @@ pub struct AppSettings {
     /// settings written by other clients, which is why it defaults to true.
     #[serde(default = "default_usage_auto_sync")]
     pub usage_auto_sync: bool,
+    /// Track token usage and compute costs for proxy/session logs. Disabling
+    /// keeps token counts but stops cost calculation and historical backfills.
+    /// Defaults to true for existing installations.
+    #[serde(default = "default_cost_tracking_enabled")]
+    pub cost_tracking_enabled: bool,
     /// Skills 同步方式（auto|symlink|copy）
     #[serde(default)]
     pub skill_sync_method: crate::services::skill::SyncMethod,
@@ -629,6 +634,10 @@ fn default_usage_auto_sync() -> bool {
     true
 }
 
+fn default_cost_tracking_enabled() -> bool {
+    true
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -661,6 +670,7 @@ impl Default for AppSettings {
             unify_codex_session_history: false,
             unify_codex_migrate_existing: None,
             usage_auto_sync: default_usage_auto_sync(),
+            cost_tracking_enabled: default_cost_tracking_enabled(),
             skill_sync_method: crate::services::skill::SyncMethod::default(),
             skill_storage_location: crate::services::skill::SkillStorageLocation::default(),
             security: None,
@@ -1368,6 +1378,19 @@ pub fn get_skip_claude_onboarding() -> bool {
         .read()
         .map(|s| s.skip_claude_onboarding)
         .unwrap_or(false)
+}
+
+pub fn cost_tracking_enabled() -> bool {
+    settings_store()
+        .read()
+        .map(|s| s.cost_tracking_enabled)
+        .unwrap_or(true)
+}
+
+pub fn set_cost_tracking_enabled(enabled: bool) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.cost_tracking_enabled = enabled;
+    update_settings(settings)
 }
 
 pub fn get_enable_claude_plugin_integration() -> bool {
