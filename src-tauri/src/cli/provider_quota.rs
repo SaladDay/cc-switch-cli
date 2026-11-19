@@ -373,6 +373,31 @@ mod tests {
     }
 
     #[test]
+    fn opencode_go_codex_quota_accepts_the_usage_script_key() {
+        for route in ["zen/go", "inference/go"] {
+            let config = format!(r#"base_url = "https://opencode.ai/{route}/v1""#);
+            let mut provider = test_provider("go", "OpenCode Go", json!({ "config": config }));
+            set_usage_script(&mut provider, true, "token_plan");
+            provider
+                .meta
+                .as_mut()
+                .unwrap()
+                .usage_script
+                .as_mut()
+                .unwrap()
+                .api_key = Some("test-key".into());
+            assert!(
+                matches!(
+                    quota_target_for_provider(&AppType::Codex, "go", &provider)
+                        .map(|target| target.kind),
+                    Some(QuotaTargetKind::UsageScript)
+                ),
+                "{route}"
+            );
+        }
+    }
+
+    #[test]
     fn quota_target_detects_codex_oauth_managed_account() {
         let mut provider = test_provider("codex-oauth", "Codex OAuth", json!({}));
         provider.meta = Some(ProviderMeta {

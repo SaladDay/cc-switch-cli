@@ -18,9 +18,7 @@ enum CodingPlanProvider {
     ZhipuEn,
     MiniMaxCn,
     MiniMaxEn,
-    /// OpenCode Go（$10/月订阅，美元额度三时间窗口）。base_url 分两档：
-    /// `https://opencode.ai/zen/go`（Claude 直连 /messages）与
-    /// `https://opencode.ai/zen/go/v1`（Codex/Pi 走 Chat）。
+    /// OpenCode Go（$10/月订阅，美元额度三时间窗口）。支持 /inference/go 和旧版 /zen/go。
     OpencodeGo,
 }
 
@@ -36,9 +34,7 @@ fn detect_provider(base_url: &str) -> Option<CodingPlanProvider> {
         Some(CodingPlanProvider::MiniMaxCn)
     } else if url.contains("api.minimax.io") {
         Some(CodingPlanProvider::MiniMaxEn)
-    } else if url.contains("opencode.ai/zen/go") {
-        // 同时覆盖 /zen/go 与 /zen/go/v1；Zen 按量版（/zen/v1）
-        // 没有任何用量/余额 API，刻意不命中。
+    } else if crate::provider::is_opencode_go_url(&url) {
         Some(CodingPlanProvider::OpencodeGo)
     } else {
         None
@@ -642,16 +638,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn opencode_go_detects_both_base_variants_but_not_zen() {
-        assert!(matches!(
-            detect_provider("https://opencode.ai/zen/go"),
-            Some(CodingPlanProvider::OpencodeGo)
-        ));
-        assert!(matches!(
-            detect_provider("https://opencode.ai/zen/go/v1"),
-            Some(CodingPlanProvider::OpencodeGo)
-        ));
-        assert!(detect_provider("https://opencode.ai/zen/v1").is_none());
+    fn opencode_go_detects_subscription_base_urls() {
+        for base_url in [
+            "https://opencode.ai/zen/go",
+            "https://opencode.ai/zen/go/v1",
+            "https://opencode.ai/inference/go",
+            "https://opencode.ai/inference/go/anthropic",
+            "https://opencode.ai/inference/go/v1",
+            "https://opencode.ai/inference/go?region=us",
+        ] {
+            assert!(
+                matches!(
+                    detect_provider(base_url),
+                    Some(CodingPlanProvider::OpencodeGo)
+                ),
+                "{base_url}"
+            );
+        }
+        for base_url in [
+            "https://opencode.ai/zen/v1",
+            "https://opencode.ai/inference/v1",
+            "https://opencode.ai/inference/gopher",
+            "https://example.com/inference/go",
+        ] {
+            assert!(detect_provider(base_url).is_none(), "{base_url}");
+        }
     }
 
     #[test]
