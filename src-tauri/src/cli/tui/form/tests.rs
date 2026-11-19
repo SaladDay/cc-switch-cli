@@ -7410,6 +7410,16 @@ fn provider_add_form_usage_query_table_fields_hide_script_row() {
 }
 
 #[test]
+fn opencode_go_usage_query_recognizes_the_current_base_url() {
+    assert_eq!(
+        super::provider_state::detect_coding_plan_provider_for_usage_query(
+            "https://opencode.ai/inference/go/anthropic"
+        ),
+        Some("opencode_go")
+    );
+}
+
+#[test]
 fn opencode_go_templates_enable_token_plan_usage_query() {
     for app_type in [AppType::Claude, AppType::Codex, AppType::Pi] {
         let mut form = ProviderAddFormState::new(app_type.clone());
