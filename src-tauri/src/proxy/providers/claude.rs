@@ -911,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_oauth_generation_uses_gpt6_compatible_identity() {
+    fn codex_oauth_generation_uses_current_client_identity() {
         let request = ClaudeAdapter::new()
             .add_auth_headers(
                 reqwest::Client::new().get("https://example.com"),
@@ -927,10 +927,10 @@ mod tests {
             .split('.')
             .map(|part| part.parse().unwrap())
             .collect();
-        // Official rust-v0.153.4 catalog: gpt-6-astra requires 0.153.0.
+        // The ChatGPT-account catalog only lists GPT-6.2 for Codex >= 0.169.0.
         assert!(
-            version.as_slice() >= [0, 153, 0].as_slice(),
-            "gpt-6-astra requires Codex >= 0.153.0; sent {version:?}"
+            version.as_slice() >= [0, 169, 0].as_slice(),
+            "ChatGPT OAuth requests should advertise Codex >= 0.169.0; sent {version:?}"
         );
     }
 
