@@ -4273,3 +4273,75 @@ fn init_and_backup_work_under_symlinked_home_parent() {
         0o750
     );
 }
+
+#[test]
+fn model_pricing_uses_list_prices_for_sonnet_5_and_o_mini_models() {
+    let db = Database::memory().expect("create memory db");
+
+    let read = |db: &Database, model_id: &str| -> (String, String, String, String) {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = ?1",
+            [model_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap_or_else(|error| panic!("query {model_id} pricing: {error}"))
+    };
+    let owned = |r: (&str, &str, &str, &str)| {
+        (
+            r.0.to_string(),
+            r.1.to_string(),
+            r.2.to_string(),
+            r.3.to_string(),
+        )
+    };
+
+    // Fresh database: list prices, not the old 3/15 and 0.55/2.20 seeds.
+    assert_eq!(
+        read(&db, "claude-sonnet-5"),
+        owned(("2", "10", "0.2", "2.5"))
+    );
+    assert_eq!(read(&db, "o3-mini"), owned(("1.1", "4.4", "0.55", "0")));
+    assert_eq!(read(&db, "o1-mini"), owned(("1.10", "4.40", "0.55", "0")));
+
+    // Existing database still holding the old built-in seeds is repaired on startup.
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        for (model_id, input, output, cache_read, cache_write) in [
+            ("claude-sonnet-5", "3", "15", "0.30", "3.75"),
+            ("o3-mini", "0.55", "2.20", "0.55", "0"),
+            ("o1-mini", "0.55", "2.20", "0.55", "0"),
+        ] {
+            conn.execute(
+                "UPDATE model_pricing SET input_cost_per_million = ?2,
+                    output_cost_per_million = ?3, cache_read_cost_per_million = ?4,
+                    cache_creation_cost_per_million = ?5
+                 WHERE model_id = ?1",
+                params![model_id, input, output, cache_read, cache_write],
+            )
+            .unwrap();
+        }
+    }
+    db.ensure_model_pricing_seeded().unwrap();
+    assert_eq!(
+        read(&db, "claude-sonnet-5"),
+        owned(("2", "10", "0.2", "2.5"))
+    );
+    assert_eq!(read(&db, "o3-mini"), owned(("1.1", "4.4", "0.55", "0")));
+    assert_eq!(read(&db, "o1-mini"), owned(("1.10", "4.40", "0.55", "0")));
+
+    // A user-edited price is left alone.
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "UPDATE model_pricing SET input_cost_per_million = '2.5'
+             WHERE model_id = 'claude-sonnet-5'",
+            [],
+        )
+        .unwrap();
+    }
+    db.ensure_model_pricing_seeded().unwrap();
+    assert_eq!(read(&db, "claude-sonnet-5").0, "2.5");
+}
