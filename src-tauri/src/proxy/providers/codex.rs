@@ -12,6 +12,14 @@ use super::{AuthInfo, AuthStrategy, ProviderAdapter};
 
 pub struct CodexAdapter;
 
+fn grok_model_config(provider: &Provider) -> Option<crate::grok_config::GrokModelConfig> {
+    provider
+        .settings_config
+        .get("config")
+        .and_then(JsonValue::as_str)
+        .and_then(crate::grok_config::extract_model_config)
+}
+
 /// Which generated-catalog tool profile a Codex provider should use.
 ///
 /// Derived from the same chat/responses detection as request routing (which
@@ -22,7 +30,11 @@ pub struct CodexAdapter;
 pub fn codex_provider_catalog_tool_profile(
     provider: &Provider,
 ) -> crate::codex_config::CodexCatalogToolProfile {
-    if codex_provider_uses_anthropic(provider) {
+    if provider.is_xai_oauth() {
+        // xAI OAuth pins the native Responses profile regardless of editable
+        // api_format, mirroring the managed-provider invariant on Claude.
+        crate::codex_config::CodexCatalogToolProfile::NativeResponses
+    } else if codex_provider_uses_anthropic(provider) {
         crate::codex_config::CodexCatalogToolProfile::Anthropic
     } else if codex_provider_uses_chat_completions(provider) {
         crate::codex_config::CodexCatalogToolProfile::ProxyChat
@@ -35,6 +47,13 @@ pub fn codex_provider_catalog_tool_profile(
 /// OpenAI Chat Completions, even if the local Codex client is talking to CC
 /// Switch through the Responses API.
 pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
+    if provider.is_xai_oauth() {
+        return false;
+    }
+    if let Some(model) = grok_model_config(provider) {
+        return model.api_backend == "chat_completions";
+    }
+
     if let Some(api_format) = provider
         .meta
         .as_ref()
@@ -87,6 +106,13 @@ pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &st
 /// Only explicit format configuration is accepted. Anthropic gateway URLs vary
 /// too widely for safe base-URL inference.
 pub fn codex_provider_uses_anthropic(provider: &Provider) -> bool {
+    if provider.is_xai_oauth() {
+        return false;
+    }
+    if let Some(model) = grok_model_config(provider) {
+        return model.api_backend == "messages";
+    }
+
     if let Some(api_format) = provider
         .meta
         .as_ref()
@@ -190,6 +216,9 @@ pub fn inject_codex_chat_prompt_cache_key(
 
 /// Extract the real upstream model configured for a Codex provider.
 pub fn codex_provider_upstream_model(provider: &Provider) -> Option<String> {
+    if let Some(model) = grok_model_config(provider) {
+        return Some(model.model);
+    }
     provider
         .settings_config
         .get("model")
@@ -545,6 +574,9 @@ fn normalize_codex_base_url(base_url: &str) -> Option<String> {
 }
 
 fn codex_provider_base_url(provider: &Provider) -> Option<String> {
+    if let Some(model) = grok_model_config(provider) {
+        return normalize_codex_base_url(&model.base_url);
+    }
     if let Some(config) = provider.settings_config.get("config") {
         if let Some(config_text) = config.as_str() {
             if !config_text.trim().is_empty() {
@@ -578,6 +610,9 @@ impl CodexAdapter {
     }
 
     fn extract_key(&self, provider: &Provider) -> Option<String> {
+        if grok_model_config(provider).is_some() {
+            return provider.configured_api_key(&crate::app_config::AppType::GrokBuild);
+        }
         provider.configured_api_key(&crate::app_config::AppType::Codex)
     }
 }
@@ -594,6 +629,11 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
+        // xAI OAuth: ignore editable provider base URLs and always use the xAI
+        // API origin associated with the managed token.
+        if provider.is_xai_oauth() {
+            return Ok(super::XAI_API_BASE_URL.to_string());
+        }
         if let Some(base_url) = codex_provider_base_url(provider) {
             return Ok(base_url);
         }
@@ -604,6 +644,15 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_auth(&self, provider: &Provider) -> Option<AuthInfo> {
+        // xAI OAuth (Grok subscription): placeholder credentials only; the real
+        // access_token is resolved per-request by the request builder via the
+        // shared xAI OAuth manager.
+        if provider.is_xai_oauth() {
+            return Some(AuthInfo::new(
+                "xai_oauth_placeholder".to_string(),
+                AuthStrategy::XaiOAuth,
+            ));
+        }
         let strategy = if codex_provider_uses_anthropic(provider) {
             let uses_x_api_key = provider
                 .meta

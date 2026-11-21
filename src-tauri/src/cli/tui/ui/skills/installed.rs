@@ -25,6 +25,7 @@ pub(super) fn render_skills_installed(
         Cell::from(crate::app_config::AppType::Claude.as_str()),
         Cell::from(crate::app_config::AppType::Codex.as_str()),
         Cell::from(crate::app_config::AppType::Gemini.as_str()),
+        Cell::from(crate::app_config::AppType::GrokBuild.as_str()),
         Cell::from(crate::app_config::AppType::OpenCode.as_str()),
         Cell::from(crate::app_config::AppType::Hermes.as_str()),
         Cell::from(crate::app_config::AppType::Pi.as_str()),
@@ -43,6 +44,7 @@ pub(super) fn render_skills_installed(
             Cell::from(skill_marker(skill.apps.claude)),
             Cell::from(skill_marker(skill.apps.codex)),
             Cell::from(skill_marker(skill.apps.gemini)),
+            Cell::from(skill_marker(skill.apps.grokbuild)),
             Cell::from(skill_marker(skill.apps.opencode)),
             Cell::from(skill_marker(skill.apps.hermes)),
             Cell::from(skill_marker(skill.apps.pi)),
@@ -53,6 +55,7 @@ pub(super) fn render_skills_installed(
         rows,
         [
             Constraint::Percentage(50),
+            Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),

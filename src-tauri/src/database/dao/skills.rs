@@ -22,8 +22,8 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
-                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes,
-                        installed_at, content_hash, updated_at
+                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild,
+                        enabled_opencode, enabled_hermes, installed_at, content_hash, updated_at
                  FROM skills ORDER BY name ASC",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -43,13 +43,14 @@ impl Database {
                         claude: row.get(8)?,
                         codex: row.get(9)?,
                         gemini: row.get(10)?,
-                        opencode: row.get(11)?,
-                        hermes: row.get(12)?,
+                        grokbuild: row.get(11)?,
+                        opencode: row.get(12)?,
+                        hermes: row.get(13)?,
                         pi: false,
                     },
-                    installed_at: row.get(13)?,
-                    content_hash: row.get(14)?,
-                    updated_at: row.get(15)?,
+                    installed_at: row.get(14)?,
+                    content_hash: row.get(15)?,
+                    updated_at: row.get(16)?,
                 })
             })
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -68,8 +69,8 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
-                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes,
-                        installed_at, content_hash, updated_at
+                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild,
+                        enabled_opencode, enabled_hermes, installed_at, content_hash, updated_at
                  FROM skills WHERE id = ?1",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -88,13 +89,14 @@ impl Database {
                     claude: row.get(8)?,
                     codex: row.get(9)?,
                     gemini: row.get(10)?,
-                    opencode: row.get(11)?,
-                    hermes: row.get(12)?,
+                    grokbuild: row.get(11)?,
+                    opencode: row.get(12)?,
+                    hermes: row.get(13)?,
                     pi: false,
                 },
-                installed_at: row.get(13)?,
-                content_hash: row.get(14)?,
-                updated_at: row.get(15)?,
+                installed_at: row.get(14)?,
+                content_hash: row.get(15)?,
+                updated_at: row.get(16)?,
             })
         });
 
@@ -111,9 +113,9 @@ impl Database {
         conn.execute(
             "INSERT INTO skills
              (id, name, description, directory, repo_owner, repo_name, repo_branch,
-              readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes,
+              readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild, enabled_opencode, enabled_hermes,
               installed_at, content_hash, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -125,6 +127,7 @@ impl Database {
                 enabled_claude = excluded.enabled_claude,
                 enabled_codex = excluded.enabled_codex,
                 enabled_gemini = excluded.enabled_gemini,
+                enabled_grokbuild = excluded.enabled_grokbuild,
                 enabled_opencode = excluded.enabled_opencode,
                 enabled_hermes = excluded.enabled_hermes,
                 installed_at = excluded.installed_at,
@@ -142,6 +145,7 @@ impl Database {
                 skill.apps.claude,
                 skill.apps.codex,
                 skill.apps.gemini,
+                skill.apps.grokbuild,
                 skill.apps.opencode,
                 skill.apps.hermes,
                 skill.installed_at,
@@ -175,8 +179,10 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let affected = conn
             .execute(
-                "UPDATE skills SET enabled_claude = ?1, enabled_codex = ?2, enabled_gemini = ?3, enabled_opencode = ?4, enabled_hermes = ?5 WHERE id = ?6",
-                params![apps.claude, apps.codex, apps.gemini, apps.opencode, apps.hermes, id],
+                "UPDATE skills SET enabled_claude = ?1, enabled_codex = ?2, enabled_gemini = ?3, enabled_grokbuild = ?4, enabled_opencode = ?5, enabled_hermes = ?6 WHERE id = ?7",
+                params![
+                    apps.claude, apps.codex, apps.gemini, apps.grokbuild, apps.opencode, apps.hermes, id
+                ],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(affected > 0)

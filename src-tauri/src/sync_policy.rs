@@ -18,6 +18,8 @@ pub(crate) fn should_sync_live(app_type: &AppType) -> bool {
         AppType::Codex => crate::codex_config::get_codex_config_dir().exists(),
         // Gemini is considered initialized if ~/.gemini (or override dir) exists.
         AppType::Gemini => crate::gemini_config::get_gemini_dir().exists(),
+        // Grok Build is considered initialized if ~/.grok (or override dir) exists.
+        AppType::GrokBuild => crate::grok_config::get_grok_config_dir().exists(),
         // OpenCode is considered initialized if ~/.config/opencode (or override dir) exists.
         AppType::OpenCode => crate::opencode_config::get_opencode_dir().exists(),
         // Hermes is considered initialized if ~/.hermes (or override dir) exists.

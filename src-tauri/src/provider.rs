@@ -150,6 +150,19 @@ impl Provider {
                     .or_else(|| env.get(field.alternate_env_key()))
             }
             AppType::Codex => return self.configured_codex_api_key(),
+            AppType::GrokBuild => {
+                // Grok Build 的凭据在 `config` TOML 里：优先内联 api_key，其次
+                // env_key 指名的环境变量。解析不到（含 env_key 未设置）视为
+                // "没有配置凭据"，与其它应用语义一致。
+                return self
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .and_then(crate::grok_config::extract_credentials)
+                    .map(|(_, api_key)| api_key)
+                    .map(|key| key.trim().to_string())
+                    .filter(|key| !key.is_empty());
+            }
             AppType::Gemini => self.settings_config.pointer("/env/GEMINI_API_KEY"),
             AppType::OpenCode => self.settings_config.pointer("/options/apiKey"),
             AppType::Hermes => self
@@ -233,7 +246,12 @@ impl Provider {
     pub fn uses_managed_account_auth(&self) -> bool {
         self.is_github_copilot()
             || self.is_codex_oauth()
+            || self.is_xai_oauth()
             || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
+    }
+
+    pub fn is_xai_oauth(&self) -> bool {
+        self.provider_type() == Some("xai_oauth")
     }
 
     fn provider_type(&self) -> Option<&str> {
@@ -265,6 +283,8 @@ impl Provider {
             AppType::Codex => "codex",
             AppType::Gemini => "gemini",
             AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => return None,
+            // Grok Build 官方订阅额度：grok.com gRPC-web（按 7 天窗口 tier 展示）。
+            AppType::GrokBuild => "grokbuild",
         };
 
         if self.category.as_deref() == Some("official") {
@@ -311,6 +331,11 @@ impl Provider {
                 api_key_missing && base_url_missing
             }
             AppType::OpenCode | AppType::Hermes | AppType::OpenClaw | AppType::Pi => false,
+            AppType::GrokBuild => self
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .is_some_and(crate::grok_config::is_official_live_config),
         };
 
         is_official.then_some(tool)

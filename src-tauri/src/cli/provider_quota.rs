@@ -11,6 +11,7 @@ use crate::usage_script::UsageQueryTemplate;
 pub(crate) enum QuotaTargetKind {
     SubscriptionTool { tool: String },
     CodexOAuth { account_id: Option<String> },
+    XaiOAuth { account_id: Option<String> },
     UsageScript,
 }
 
@@ -33,6 +34,9 @@ impl QuotaTarget {
             QuotaTargetKind::SubscriptionTool { tool } => format!("subscription:{tool}"),
             QuotaTargetKind::CodexOAuth { account_id } => {
                 format!("codex_oauth:{}", account_id.as_deref().unwrap_or("default"))
+            }
+            QuotaTargetKind::XaiOAuth { account_id } => {
+                format!("xai_oauth:{}", account_id.as_deref().unwrap_or("default"))
             }
             QuotaTargetKind::UsageScript => "usage_script".to_string(),
         };
@@ -98,6 +102,35 @@ pub(crate) fn quota_target_for_provider(
         .as_ref()
         .and_then(|meta| meta.usage_script.as_ref());
 
+    if provider.is_xai_oauth() {
+        return Some(QuotaTarget {
+            app_type: app_type.clone(),
+            provider_id: id.to_string(),
+            provider_name,
+            kind: QuotaTargetKind::XaiOAuth {
+                account_id: provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("xai_oauth")),
+            },
+            auto_query_interval_minutes: 5,
+        });
+    }
+
+    if *app_type == AppType::GrokBuild
+        && provider.official_subscription_tool(app_type) == Some("grokbuild")
+    {
+        return Some(QuotaTarget {
+            app_type: app_type.clone(),
+            provider_id: id.to_string(),
+            provider_name,
+            kind: QuotaTargetKind::SubscriptionTool {
+                tool: "grokbuild".into(),
+            },
+            auto_query_interval_minutes: 5,
+        });
+    }
+
     if provider.is_codex_oauth() {
         return Some(QuotaTarget {
             app_type: app_type.clone(),
@@ -156,6 +189,16 @@ pub(crate) fn quota_target_for_provider(
 pub(crate) async fn query_quota(target: &QuotaTarget) -> Result<ProviderUsageQuota, String> {
     match &target.kind {
         QuotaTargetKind::SubscriptionTool { tool } => {
+            if tool == "grokbuild"
+                && crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::shared()
+                    .default_account_id()
+                    .await
+                    .is_some()
+            {
+                return crate::services::AuthService::get_quota("xai_oauth", None)
+                    .await
+                    .map(ProviderUsageQuota::Subscription);
+            }
             crate::services::subscription::get_subscription_quota(tool)
                 .await
                 .map(ProviderUsageQuota::Subscription)
@@ -163,6 +206,11 @@ pub(crate) async fn query_quota(target: &QuotaTarget) -> Result<ProviderUsageQuo
         QuotaTargetKind::CodexOAuth { account_id } => Ok(ProviderUsageQuota::Subscription(
             crate::services::CodexOAuthService::get_quota(account_id.as_deref()).await,
         )),
+        QuotaTargetKind::XaiOAuth { account_id } => {
+            crate::services::AuthService::get_quota("xai_oauth", account_id.as_deref())
+                .await
+                .map(ProviderUsageQuota::Subscription)
+        }
         QuotaTargetKind::UsageScript => {
             let state = AppState::try_open_snapshot().map_err(|error| error.to_string())?;
             ProviderService::query_provider_usage(
@@ -332,11 +380,47 @@ mod tests {
     }
 
     #[test]
+    fn grok_official_quota_is_available_without_a_custom_usage_script() {
+        let mut provider =
+            test_provider("grokbuild-official", "Grok Official", json!({"config":""}));
+        provider.category = Some("official".into());
+        let target =
+            quota_target_for_provider(&AppType::GrokBuild, &provider.id, &provider).unwrap();
+        assert!(
+            matches!(target.kind, QuotaTargetKind::SubscriptionTool { tool } if tool == "grokbuild")
+        );
+    }
+
+    #[test]
+    fn xai_managed_accounts_use_the_bound_account_for_weekly_quota() {
+        for app in [AppType::Claude, AppType::Codex] {
+            let mut provider = test_provider("xai", "xAI (Grok)", json!({}));
+            provider.meta = Some(ProviderMeta {
+                provider_type: Some("xai_oauth".into()),
+                auth_binding: Some(AuthBinding {
+                    source: AuthBindingSource::ManagedAccount,
+                    auth_provider: Some("xai_oauth".into()),
+                    account_id: Some("xai-account".into()),
+                }),
+                ..Default::default()
+            });
+            let target =
+                quota_target_for_provider(&app, "xai", &provider).expect("native xAI quota");
+            assert!(
+                matches!(&target.kind, QuotaTargetKind::XaiOAuth { account_id }
+                if account_id.as_deref() == Some("xai-account"))
+            );
+            assert!(target.cache_key().contains("xai_oauth:xai-account"));
+        }
+    }
+
+    #[test]
     fn official_subscription_template_routes_supported_apps_to_native_quota() {
         for (app_type, tool, settings) in [
             (AppType::Claude, "claude", json!({"env": {}})),
             (AppType::Codex, "codex", json!({"auth": {}})),
             (AppType::Gemini, "gemini", json!({"env": {}})),
+            (AppType::GrokBuild, "grokbuild", json!({"config": ""})),
         ] {
             let mut provider = test_provider("official", "Official", settings);
             set_usage_script(&mut provider, true, "official_subscription");

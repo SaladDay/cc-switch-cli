@@ -18,7 +18,10 @@ const REASONING_VENDOR_HINTS: &[&str] = &["moonshot", "kimi", "deepseek", "mimo"
 
 pub fn get_claude_api_format(provider: &Provider) -> &'static str {
     if let Some(meta) = provider.meta.as_ref() {
-        if meta.provider_type.as_deref() == Some("codex_oauth") {
+        if matches!(
+            meta.provider_type.as_deref(),
+            Some("codex_oauth" | "xai_oauth")
+        ) {
             return "openai_responses";
         }
     }
@@ -246,12 +249,32 @@ pub fn transform_claude_request_for_api_format_with_shadow(
         .filter(|session_id| !session_id.is_empty());
 
     match api_format {
-        "openai_responses" => super::transform_responses::anthropic_to_responses(
-            body,
-            explicit_cache_key.or(session_cache_key),
-            provider.is_codex_oauth(),
-            provider.codex_fast_mode_enabled(),
-        ),
+        "openai_responses" => {
+            let mut result = super::transform_responses::anthropic_to_responses(
+                body,
+                explicit_cache_key.or(session_cache_key),
+                provider.is_codex_oauth(),
+                provider.codex_fast_mode_enabled(),
+            )?;
+            if provider.is_xai_oauth() {
+                // xAI needs reasoning.encrypted_content in `include` so
+                // multi-turn reasoning state round-trips through the proxy.
+                const REASONING_MARKER: &str = "reasoning.encrypted_content";
+                let mut include = result
+                    .get("include")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if !include
+                    .iter()
+                    .any(|item| item.as_str() == Some(REASONING_MARKER))
+                {
+                    include.push(serde_json::json!(REASONING_MARKER));
+                }
+                result["include"] = serde_json::json!(include);
+            }
+            Ok(result)
+        }
         "openai_chat" => {
             let preserve_reasoning_content =
                 should_preserve_reasoning_content_for_openai_chat(provider, &body);
@@ -296,6 +319,9 @@ impl ClaudeAdapter {
         }
         if self.is_codex_oauth(provider) {
             return ProviderType::CodexOAuth;
+        }
+        if provider.is_xai_oauth() {
+            return ProviderType::XaiOAuth;
         }
         if self.is_github_copilot(provider) {
             return ProviderType::GitHubCopilot;
@@ -467,6 +493,11 @@ impl ProviderAdapter for ClaudeAdapter {
             return Ok("https://chatgpt.com/backend-api/codex".to_string());
         }
 
+        // xAI OAuth: the managed token is bound to the xAI API origin.
+        if provider.is_xai_oauth() {
+            return Ok(super::XAI_API_BASE_URL.to_string());
+        }
+
         if let Some(env) = provider.settings_config.get("env") {
             if let Some(url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
                 return Ok(url.trim_end_matches('/').to_string());
@@ -516,6 +547,13 @@ impl ProviderAdapter for ClaudeAdapter {
             return Some(AuthInfo::new(
                 "codex_oauth_placeholder".to_string(),
                 AuthStrategy::CodexOAuth,
+            ));
+        }
+
+        if provider_type == ProviderType::XaiOAuth {
+            return Some(AuthInfo::new(
+                "xai_oauth_placeholder".to_string(),
+                AuthStrategy::XaiOAuth,
             ));
         }
 
@@ -590,7 +628,7 @@ impl ProviderAdapter for ClaudeAdapter {
     fn add_auth_headers(&self, request: RequestBuilder, auth: &AuthInfo) -> RequestBuilder {
         match auth.strategy {
             AuthStrategy::Anthropic => request.header("x-api-key", &auth.api_key),
-            AuthStrategy::ClaudeAuth => {
+            AuthStrategy::ClaudeAuth | AuthStrategy::XaiOAuth => {
                 request.header("Authorization", format!("Bearer {}", auth.api_key))
             }
             AuthStrategy::GitHubCopilot => {
@@ -695,20 +733,25 @@ fn openai_error_to_anthropic(body: serde_json::Value) -> serde_json::Value {
     let error = body.get("error").cloned().unwrap_or_else(|| json!({}));
     let message = error
         .get("message")
-        .and_then(|value| value.as_str())
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
         .unwrap_or("Upstream error");
     let error_type = error
         .get("type")
         .and_then(|value| value.as_str())
         .unwrap_or("invalid_request_error");
 
-    json!({
+    let mut result = json!({
         "type": "error",
         "error": {
             "type": error_type,
             "message": message
         }
-    })
+    });
+    if let Some(code) = body.get("code").and_then(Value::as_str) {
+        result["error"]["code"] = json!(code);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -741,6 +784,47 @@ mod tests {
             settings_config,
             None,
         )
+    }
+
+    #[test]
+    fn xai_oauth_uses_managed_strategy_without_inline_credentials() {
+        let mut provider = create_provider(json!({"env": {
+            "ANTHROPIC_BASE_URL": "https://untrusted.example/v1"
+        }}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("xai_oauth".into()),
+            api_format: Some("anthropic".into()),
+            ..Default::default()
+        });
+        let adapter = ClaudeAdapter::new();
+        assert_eq!(adapter.provider_type(&provider), ProviderType::XaiOAuth);
+        assert_eq!(get_claude_api_format(&provider), "openai_responses");
+        assert_eq!(
+            adapter.extract_base_url(&provider).unwrap(),
+            super::super::XAI_API_BASE_URL
+        );
+        let auth = adapter
+            .extract_auth(&provider)
+            .expect("managed auth placeholder");
+        assert_eq!(auth.strategy, AuthStrategy::XaiOAuth);
+        assert_eq!(auth.api_key, "xai_oauth_placeholder");
+    }
+
+    #[test]
+    fn xai_spending_limit_error_preserves_message_and_code() {
+        let output = openai_error_to_anthropic(json!({
+            "code": "personal-team-blocked:spending-limit",
+            "error": "You have run out of credits or need a Grok subscription."
+        }));
+        assert_eq!(output["type"], "error");
+        assert_eq!(
+            output["error"]["code"],
+            "personal-team-blocked:spending-limit"
+        );
+        assert!(output["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("out of credits"));
     }
 
     #[test]

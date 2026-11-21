@@ -5455,6 +5455,7 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
         claude: true,
         codex: true,
         gemini: false,
+        grokbuild: false,
         opencode: true,
         hermes: false,
         openclaw: true,

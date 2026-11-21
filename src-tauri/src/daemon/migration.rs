@@ -117,8 +117,14 @@ impl ResumePlan {
         if takeovers.gemini {
             targets.insert("gemini".to_string(), None);
         }
+        if takeovers.grokbuild {
+            targets.insert("grokbuild".to_string(), None);
+        }
         for worker in workers {
-            if !matches!(worker.app_type.as_str(), "claude" | "codex" | "gemini") {
+            if !matches!(
+                worker.app_type.as_str(),
+                "claude" | "codex" | "gemini" | "grokbuild"
+            ) {
                 continue;
             }
             let fallback = worker
@@ -1199,6 +1205,7 @@ mod tests {
                 claude: true,
                 codex: false,
                 gemini: false,
+                grokbuild: false,
             },
             vec![WorkerState {
                 app_type: "codex".to_string(),

@@ -132,7 +132,7 @@ pub(super) fn ordered_visible_app_types(apps: &crate::settings::VisibleApps) -> 
 fn visible_apps_summary(apps: &crate::settings::VisibleApps) -> String {
     let labels = ordered_visible_app_types(apps)
         .into_iter()
-        .map(|app_type| app_type.as_str().to_string())
+        .map(|app_type| super::app_short_label(&app_type).to_string())
         .collect::<Vec<_>>();
 
     if labels.is_empty() {

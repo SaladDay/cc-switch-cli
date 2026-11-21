@@ -4,12 +4,12 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 
 pub(crate) fn supported_app_target_labels() -> &'static str {
-    "claude, codex, gemini, opencode, hermes, pi"
+    "claude, codex, gemini, grokbuild, opencode, hermes, pi"
 }
 
 fn supported_app_target_labels_for(feature: &str) -> &'static str {
     if feature.eq_ignore_ascii_case("MCP") {
-        "claude, codex, gemini, opencode, hermes"
+        "claude, codex, gemini, grokbuild, opencode, hermes"
     } else {
         supported_app_target_labels()
     }

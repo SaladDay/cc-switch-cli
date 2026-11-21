@@ -7,6 +7,7 @@ use crate::error::AppError;
 use crate::services::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse};
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
+const AUTH_PROVIDER_XAI_OAUTH: &str = "xai_oauth";
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuthCommand {
@@ -65,6 +66,113 @@ pub enum AuthCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Manage ChatGPT Codex OAuth accounts (same as the bare `auth` subcommands)
+    #[command(alias = "openai")]
+    Codex {
+        #[command(subcommand)]
+        cmd: CodexAuthCommand,
+    },
+    /// Manage xAI (Grok) OAuth accounts
+    Xai {
+        #[command(subcommand)]
+        cmd: XaiAuthCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexAuthCommand {
+    /// Show ChatGPT Codex OAuth authentication status
+    Status {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List signed-in ChatGPT accounts
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign in to ChatGPT with the Codex OAuth device flow
+    Login {
+        /// Reauthenticate this local account while preserving provider bindings
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set the default ChatGPT account
+    Default {
+        /// Account id to make default
+        account_id: String,
+    },
+    /// Remove a ChatGPT account
+    Remove {
+        /// Account id to remove
+        account_id: String,
+        /// Confirm removal without prompting
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Remove all ChatGPT Codex OAuth authentication data
+    Logout {
+        /// Confirm logout without prompting
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Reset Codex rate limit quota using a banked reset credit
+    ResetQuota {
+        /// Account ID (defaults to active account)
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Specific credit ID to consume (defaults to earliest expiring credit)
+        #[arg(long)]
+        credit_id: Option<String>,
+        /// Confirm consumption (safety gate; without this, runs in dry-run mode)
+        #[arg(long)]
+        confirm: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum XaiAuthCommand {
+    /// Show xAI OAuth authentication status
+    Status {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List signed-in xAI accounts
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign in to xAI with the OAuth device flow (opens a verification URL)
+    Login,
+    /// Set the default xAI account
+    Default {
+        /// Account id to make default
+        account_id: String,
+    },
+    /// Remove an xAI account
+    Remove {
+        /// Account id to remove
+        account_id: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Remove all xAI OAuth authentication data
+    Logout {
+        /// Confirm logout without prompting
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -90,7 +198,141 @@ pub fn execute(cmd: AuthCommand) -> Result<(), AppError> {
             confirm,
             json,
         } => reset_quota(&runtime, account_id, credit_id, confirm, json),
+        AuthCommand::Codex { cmd } => execute_codex(&runtime, cmd),
+        AuthCommand::Xai { cmd } => execute_xai(&runtime, cmd),
     }
+}
+
+fn execute_codex(runtime: &tokio::runtime::Runtime, cmd: CodexAuthCommand) -> Result<(), AppError> {
+    match cmd {
+        CodexAuthCommand::Status { json } => status(runtime, json),
+        CodexAuthCommand::List { json } => list_accounts(runtime, json),
+        CodexAuthCommand::Login { json, account_id } => login(runtime, json, account_id.as_deref()),
+        CodexAuthCommand::Default { account_id } => set_default(runtime, &account_id),
+        CodexAuthCommand::Remove { account_id, yes } => remove_account(runtime, &account_id, yes),
+        CodexAuthCommand::Logout { yes } => logout(runtime, yes),
+        CodexAuthCommand::ResetQuota {
+            account_id,
+            credit_id,
+            confirm,
+            json,
+        } => reset_quota(runtime, account_id, credit_id, confirm, json),
+    }
+}
+
+fn execute_xai(runtime: &tokio::runtime::Runtime, cmd: XaiAuthCommand) -> Result<(), AppError> {
+    match cmd {
+        XaiAuthCommand::Status { json } => status_for(runtime, AUTH_PROVIDER_XAI_OAUTH, json),
+        XaiAuthCommand::List { json } => list_for(runtime, AUTH_PROVIDER_XAI_OAUTH, json),
+        XaiAuthCommand::Login => login_for(runtime, AUTH_PROVIDER_XAI_OAUTH),
+        XaiAuthCommand::Default { account_id } => {
+            set_default_for(runtime, AUTH_PROVIDER_XAI_OAUTH, &account_id)
+        }
+        XaiAuthCommand::Remove { account_id, yes } => {
+            remove_for(runtime, AUTH_PROVIDER_XAI_OAUTH, &account_id, yes)
+        }
+        XaiAuthCommand::Logout { yes } => logout_for(runtime, AUTH_PROVIDER_XAI_OAUTH, yes),
+    }
+}
+
+fn status_for(
+    runtime: &tokio::runtime::Runtime,
+    provider: &str,
+    json: bool,
+) -> Result<(), AppError> {
+    let status = runtime
+        .block_on(AuthService::get_status(provider))
+        .map_err(AppError::Message)?;
+    if json {
+        println!(
+            "{}",
+            to_json(&status).map_err(|source| AppError::JsonSerialize { source })?
+        );
+    } else {
+        println!(
+            "{}: {}",
+            info("Provider"),
+            match provider {
+                AUTH_PROVIDER_XAI_OAUTH => "xAI (Grok) OAuth",
+                _ => provider,
+            }
+        );
+        if let Some(default_id) = status.default_account_id.as_ref() {
+            println!("{}: {}", info("Default account"), default_id);
+        }
+        if let Some(error) = status
+            .migration_error
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            println!("{}", warning(&format!("Credential store error: {error}")));
+        } else if status.accounts.is_empty() {
+            println!("{}", info("No accounts signed in. Use `auth xai login`."));
+        }
+        print_accounts(&status.accounts);
+    }
+    Ok(())
+}
+
+fn list_for(runtime: &tokio::runtime::Runtime, provider: &str, json: bool) -> Result<(), AppError> {
+    let accounts = runtime
+        .block_on(AuthService::list_accounts(provider))
+        .map_err(AppError::Message)?;
+    if json {
+        println!(
+            "{}",
+            to_json(&accounts).map_err(|source| AppError::JsonSerialize { source })?
+        );
+    } else {
+        print_accounts(&accounts);
+    }
+    Ok(())
+}
+
+fn login_for(runtime: &tokio::runtime::Runtime, provider: &str) -> Result<(), AppError> {
+    let device = runtime
+        .block_on(AuthService::start_login(provider))
+        .map_err(AppError::Message)?;
+    print_device_instructions(&device);
+    println!();
+    println!("{}", info("Waiting for authorization..."));
+    let account = poll_until_authorized(runtime, &device)?;
+    println!(
+        "{}",
+        success(&format!("Signed in as {} ({}).", account.login, account.id))
+    );
+    Ok(())
+}
+
+fn set_default_for(
+    runtime: &tokio::runtime::Runtime,
+    provider: &str,
+    account_id: &str,
+) -> Result<(), AppError> {
+    let account_id = normalize_account_id(account_id)?;
+    runtime
+        .block_on(AuthService::set_default_account(provider, account_id))
+        .map_err(AppError::Message)?;
+    println!("{}", success(&format!("Default xAI account: {account_id}")));
+    Ok(())
+}
+
+fn remove_for(
+    runtime: &tokio::runtime::Runtime,
+    provider: &str,
+    account_id: &str,
+    yes: bool,
+) -> Result<(), AppError> {
+    let account_id = normalize_account_id(account_id)?;
+    if !yes && !confirm("Remove this account?")? {
+        println!("{}", info("Aborted."));
+        return Ok(());
+    }
+    runtime
+        .block_on(AuthService::remove_account(provider, account_id))
+        .map_err(AppError::Message)?;
+    println!("{}", success(&format!("Removed account {account_id}.")));
+    Ok(())
 }
 
 fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
@@ -212,7 +454,7 @@ fn poll_until_authorized(
     loop {
         match runtime
             .block_on(AuthService::poll_for_account(
-                AUTH_PROVIDER_CODEX_OAUTH,
+                &device.provider,
                 &device.device_code,
             ))
             .map_err(AppError::Message)?
@@ -270,17 +512,33 @@ fn remove_account(
 }
 
 fn logout(runtime: &tokio::runtime::Runtime, yes: bool) -> Result<(), AppError> {
-    if !yes && !confirm("Remove all ChatGPT Codex OAuth authentication data?")? {
+    logout_for(runtime, AUTH_PROVIDER_CODEX_OAUTH, yes)
+}
+
+fn logout_for(
+    runtime: &tokio::runtime::Runtime,
+    provider: &str,
+    yes: bool,
+) -> Result<(), AppError> {
+    let (label, prompt) = if provider == AUTH_PROVIDER_XAI_OAUTH {
+        ("xAI OAuth", "Remove all xAI OAuth authentication data?")
+    } else {
+        (
+            "ChatGPT Codex OAuth",
+            "Remove all ChatGPT Codex OAuth authentication data?",
+        )
+    };
+    if !yes && !confirm(prompt)? {
         println!("{}", info("Cancelled."));
         return Ok(());
     }
 
     runtime
-        .block_on(AuthService::logout(AUTH_PROVIDER_CODEX_OAUTH))
+        .block_on(AuthService::logout(provider))
         .map_err(AppError::Message)?;
     println!(
         "{}",
-        success("ChatGPT Codex OAuth authentication data removed.")
+        success(&format!("{label} authentication data removed."))
     );
     Ok(())
 }

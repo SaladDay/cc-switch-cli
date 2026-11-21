@@ -1187,7 +1187,7 @@ fn uses_responses_protocol(app_type: &AppType, provider: &Provider, endpoint: &s
 }
 
 fn uses_codex_anthropic_protocol(app_type: &AppType, provider: &Provider, endpoint: &str) -> bool {
-    matches!(app_type, AppType::Codex)
+    matches!(app_type, AppType::Codex | AppType::GrokBuild)
         && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
 }
 

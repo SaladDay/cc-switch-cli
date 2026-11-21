@@ -1245,14 +1245,14 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
             }
         }
         ManagedAuthMsg::Removed {
-            auth_provider: _,
+            auth_provider,
             account_id,
             result,
         } => {
             app.managed_auth_loading = false;
             match result {
                 Ok(status) => {
-                    app.clear_codex_oauth_binding_if_removed(&account_id);
+                    app.clear_managed_account_binding_if_removed(&auth_provider, &account_id);
                     app.managed_auth_status = Some(status);
                     app.push_toast(
                         texts::tui_toast_managed_auth_account_removed(),

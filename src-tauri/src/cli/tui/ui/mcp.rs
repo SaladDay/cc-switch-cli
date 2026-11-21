@@ -84,6 +84,11 @@ pub(super) fn render_mcp(
         data.mcp
             .rows
             .iter()
+            .filter(|row| row.server.apps.grokbuild)
+            .count(),
+        data.mcp
+            .rows
+            .iter()
             .filter(|row| row.server.apps.opencode)
             .count(),
         data.mcp
@@ -106,6 +111,7 @@ pub(super) fn render_mcp(
         rows,
         [
             Constraint::Percentage(50),
+            Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),

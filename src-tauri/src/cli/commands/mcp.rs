@@ -105,7 +105,7 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
     // 创建表格
     let mut table = create_table();
     table.set_header(vec![
-        "ID", "Name", "Claude", "Codex", "Gemini", "OpenCode", "Hermes", "Tags",
+        "ID", "Name", "Claude", "Codex", "Gemini", "Grok", "OpenCode", "Hermes", "Tags",
     ]);
 
     // 按 ID 排序
@@ -116,6 +116,7 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
         let claude_marker = if server.apps.claude { "✓" } else { " " };
         let codex_marker = if server.apps.codex { "✓" } else { " " };
         let gemini_marker = if server.apps.gemini { "✓" } else { " " };
+        let grok_marker = if server.apps.grokbuild { "✓" } else { " " };
         let opencode_marker = if server.apps.opencode { "✓" } else { " " };
         let hermes_marker = if server.apps.hermes { "✓" } else { " " };
         let tags = server.tags.join(", ");
@@ -126,6 +127,7 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
             claude_marker.to_string(),
             codex_marker.to_string(),
             gemini_marker.to_string(),
+            grok_marker.to_string(),
             opencode_marker.to_string(),
             hermes_marker.to_string(),
             tags,
@@ -172,6 +174,11 @@ fn delete_server(id: &str) -> Result<(), AppError> {
         },
         if server.apps.gemini {
             Some("Gemini")
+        } else {
+            None
+        },
+        if server.apps.grokbuild {
+            Some("Grok Build")
         } else {
             None
         },

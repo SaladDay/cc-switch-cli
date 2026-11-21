@@ -48,7 +48,7 @@ pub(super) fn render_prompts(
         &format!(
             "{} · {}",
             texts::menu_manage_prompts(),
-            app.app_type.as_str()
+            super::app_short_label(&app.app_type)
         ),
         &keys,
         Some(prompts_summary(data)),

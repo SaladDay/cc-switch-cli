@@ -34,8 +34,9 @@ pub struct VisibleAppsStartupOutcome {
     pub should_prompt: bool,
 }
 
-const CONTROLLED_APPS: [AppType; 5] = [
+const CONTROLLED_APPS: [AppType; 6] = [
     AppType::Gemini,
+    AppType::GrokBuild,
     AppType::OpenCode,
     AppType::Hermes,
     AppType::OpenClaw,
@@ -187,6 +188,7 @@ pub fn app_display_name(app: &AppType) -> &'static str {
         AppType::Claude => "Claude",
         AppType::Codex => "Codex",
         AppType::Gemini => "Gemini",
+        AppType::GrokBuild => "Grok Build",
         AppType::OpenCode => "OpenCode",
         AppType::Hermes => "Hermes",
         AppType::OpenClaw => "OpenClaw",
@@ -318,6 +320,7 @@ mod tests {
             claude: false,
             codex: true,
             gemini: false,
+            grokbuild: false,
             opencode: true,
             hermes: true,
             openclaw: false,
@@ -361,6 +364,7 @@ mod tests {
             claude: true,
             codex: true,
             gemini: false,
+            grokbuild: false,
             opencode: false,
             hermes: false,
             openclaw: true,
@@ -429,6 +433,7 @@ mod tests {
             claude: false,
             codex: false,
             gemini: true,
+            grokbuild: false,
             opencode: true,
             hermes: true,
             openclaw: true,
