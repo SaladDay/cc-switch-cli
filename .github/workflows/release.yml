@@ -84,12 +84,12 @@ jobs:
       matrix:
         include:
           # macOS ARM64
-          - os: macos-14
+          - os: macos-15
             platform: darwin-arm64
             target: aarch64-apple-darwin
             binary: cc-switch
           # macOS x86_64
-          - os: macos-14
+          - os: macos-15
             platform: darwin-x64
             target: x86_64-apple-darwin
             binary: cc-switch
@@ -178,7 +178,7 @@ jobs:
   # Create macOS universal binary
   universal-macos:
     name: Universal macOS Binary
-    runs-on: macos-14
+    runs-on: macos-15
     needs: build
     steps:
       - name: Download ARM64 binary
