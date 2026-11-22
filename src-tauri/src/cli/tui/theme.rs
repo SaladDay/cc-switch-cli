@@ -288,6 +288,33 @@ pub fn configured_theme_mode() -> ThemeMode {
         .unwrap_or_default()
 }
 
+pub fn configured_app_accent_rgb(app: &AppType) -> Option<(u8, u8, u8)> {
+    crate::settings::get_app_accent(app)
+        .as_deref()
+        .and_then(crate::settings::parse_accent_rgb)
+}
+
+fn srgb_channel_to_linear(channel: u8) -> f64 {
+    let c = f64::from(channel) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn contrast_foreground_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
+    let luminance = 0.2126 * srgb_channel_to_linear(r)
+        + 0.7152 * srgb_channel_to_linear(g)
+        + 0.0722 * srgb_channel_to_linear(b);
+    // WCAG 2.0 crossover between near-black (10,10,10) and white (255,255,255).
+    if luminance > 0.181 {
+        (10, 10, 10)
+    } else {
+        (255, 255, 255)
+    }
+}
+
 fn resolved_light(mode: ThemeMode) -> bool {
     match mode {
         ThemeMode::Dark => false,
@@ -329,8 +356,16 @@ pub fn theme_for_mode(app: &AppType, mode: ThemeMode) -> Theme {
         )
     };
 
+    let custom_accent = configured_app_accent_rgb(app);
+    let accent = custom_accent.unwrap_or_else(|| accent_rgb(app, light));
+    let on_accent_rgb = match custom_accent {
+        Some(rgb) => contrast_foreground_rgb(rgb),
+        None if light => (255, 255, 255),
+        None => (10, 10, 10),
+    };
+
     Theme {
-        accent: terminal_color(color_mode, accent_rgb(app, light)),
+        accent: terminal_color(color_mode, accent),
         ok: terminal_color(color_mode, ok),
         warn: terminal_color(color_mode, warn),
         err: terminal_color(color_mode, err),
@@ -340,12 +375,10 @@ pub fn theme_for_mode(app: &AppType, mode: ThemeMode) -> Theme {
         surface: terminal_color(color_mode, surface),
         fg_strong: terminal_color(color_mode, fg_strong),
         on_comment: terminal_color(color_mode, (255, 255, 255)),
-        // Light-mode accents are dark enough to carry white text; the
-        // bright Dracula accents need dark text.
-        on_accent: terminal_color(
-            color_mode,
-            if light { (255, 255, 255) } else { (10, 10, 10) },
-        ),
+        // Light-mode built-in accents are dark enough to carry white text; the
+        // bright Dracula accents need dark text. Custom overrides pick the
+        // higher-contrast foreground from relative luminance.
+        on_accent: terminal_color(color_mode, on_accent_rgb),
         no_color,
         color_mode,
     }
@@ -354,12 +387,13 @@ pub fn theme_for_mode(app: &AppType, mode: ThemeMode) -> Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{update_settings, AppSettings};
+    use crate::test_support::{lock_test_home_and_settings, TestEnvGuard, TestHomeSettingsLock};
+    use std::collections::HashMap;
     use std::ffi::OsString;
-    use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn env_lock() -> TestHomeSettingsLock {
+        lock_test_home_and_settings()
     }
 
     #[test]
@@ -381,7 +415,7 @@ mod tests {
 
     #[test]
     fn light_and_dark_palettes_differ() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock();
         let dark = theme_for_mode(&AppType::Claude, ThemeMode::Dark);
         let light = theme_for_mode(&AppType::Claude, ThemeMode::Light);
         assert_ne!(dark.accent, light.accent);
@@ -420,7 +454,7 @@ mod tests {
 
     #[test]
     fn opencode_theme_uses_distinct_accent_from_codex() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove(COLOR_MODE_ENV);
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -434,7 +468,7 @@ mod tests {
 
     #[test]
     fn openclaw_theme_uses_distinct_upstream_aligned_accent() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove(COLOR_MODE_ENV);
         let _colorterm = EnvGuard::set("COLORTERM", "truecolor");
@@ -451,7 +485,7 @@ mod tests {
 
     #[test]
     fn theme_keeps_rgb_colors_when_truecolor_is_available() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::set("COLORTERM", "truecolor");
@@ -467,7 +501,7 @@ mod tests {
 
     #[test]
     fn theme_defaults_to_rgb_when_terminal_capability_is_unknown() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -484,7 +518,7 @@ mod tests {
 
     #[test]
     fn theme_keeps_truecolor_when_term_advertises_xterm_256color_without_negative_signals() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -501,7 +535,7 @@ mod tests {
 
     #[test]
     fn theme_keeps_truecolor_for_termius_without_explicit_truecolor_signal() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -518,7 +552,7 @@ mod tests {
 
     #[test]
     fn theme_keeps_truecolor_when_term_advertises_tmux_256color_without_negative_signals() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -535,7 +569,7 @@ mod tests {
 
     #[test]
     fn theme_uses_ansi256_for_plain_xterm_over_ssh_without_truecolor_signal() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -553,7 +587,7 @@ mod tests {
 
     #[test]
     fn theme_uses_ansi256_for_plain_xterm_without_truecolor_signal() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -571,7 +605,7 @@ mod tests {
 
     #[test]
     fn explicit_truecolor_override_beats_plain_xterm_auto_fallback() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "truecolor");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -589,7 +623,7 @@ mod tests {
 
     #[test]
     fn theme_keeps_truecolor_for_plain_xterm_over_ssh_with_explicit_truecolor_signal() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::set("COLORTERM", "truecolor");
@@ -607,7 +641,7 @@ mod tests {
 
     #[test]
     fn theme_keeps_truecolor_for_term_direct_over_ssh() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -625,7 +659,7 @@ mod tests {
 
     #[test]
     fn theme_uses_ansi256_when_explicitly_requested() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "ansi256");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -642,7 +676,7 @@ mod tests {
 
     #[test]
     fn no_color_has_priority_over_explicit_color_mode() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::set("NO_COLOR", "1");
         let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "truecolor");
         let _colorterm = EnvGuard::set("COLORTERM", "truecolor");
@@ -659,7 +693,7 @@ mod tests {
 
     #[test]
     fn theme_uses_ansi256_in_apple_terminal_without_truecolor_signal() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -676,7 +710,7 @@ mod tests {
 
     #[test]
     fn explicit_truecolor_override_beats_apple_terminal_auto_fallback() {
-        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "truecolor");
         let _colorterm = EnvGuard::remove("COLORTERM");
@@ -729,5 +763,103 @@ mod tests {
         assert_eq!(rgb_to_ansi256(248, 248, 248), 231);
         assert_eq!(rgb_to_ansi256(108, 108, 108), 242);
         assert_eq!(rgb_to_ansi256(255, 255, 255), 231);
+    }
+
+    #[test]
+    fn custom_app_accent_overrides_selected_app_and_falls_back_for_others() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _home_guard = TestEnvGuard::isolated(home.path());
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::remove(COLOR_MODE_ENV);
+        let _colorterm = EnvGuard::set("COLORTERM", "truecolor");
+        let _term = EnvGuard::set("TERM", "xterm-256color");
+
+        let mut accents = HashMap::new();
+        accents.insert("claude".to_string(), "#ffb86c".to_string());
+        accents.insert("codex".to_string(), "navy".to_string());
+        update_settings(AppSettings {
+            app_accent: Some(accents),
+            ..AppSettings::default()
+        })
+        .expect("save custom app accents");
+
+        let claude_dark = theme_for_mode(&AppType::Claude, ThemeMode::Dark);
+        assert_eq!(claude_dark.accent, Color::Rgb(255, 184, 108));
+        assert_eq!(claude_dark.on_accent, Color::Rgb(10, 10, 10));
+
+        // Same override applies in light mode, keeping readable dark text on bright orange.
+        let claude_light = theme_for_mode(&AppType::Claude, ThemeMode::Light);
+        assert_eq!(claude_light.accent, Color::Rgb(255, 184, 108));
+        assert_eq!(claude_light.on_accent, Color::Rgb(10, 10, 10));
+
+        // Dark custom accent in dark mode switches on_accent to white for contrast.
+        let codex_dark = theme_for_mode(&AppType::Codex, ThemeMode::Dark);
+        assert_eq!(codex_dark.accent, Color::Rgb(0, 0, 128));
+        assert_eq!(codex_dark.on_accent, Color::Rgb(255, 255, 255));
+
+        // Apps without an override keep their built-in dark/light accents.
+        let gemini_dark = theme_for_mode(&AppType::Gemini, ThemeMode::Dark);
+        assert_eq!(gemini_dark.accent, Color::Rgb(255, 121, 198));
+        assert_eq!(gemini_dark.on_accent, Color::Rgb(10, 10, 10));
+
+        let gemini_light = theme_for_mode(&AppType::Gemini, ThemeMode::Light);
+        assert_eq!(gemini_light.accent, Color::Rgb(186, 36, 120));
+        assert_eq!(gemini_light.on_accent, Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn custom_app_accent_degrades_through_ansi256_and_no_color() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _home_guard = TestEnvGuard::isolated(home.path());
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _colorterm = EnvGuard::remove("COLORTERM");
+        let _term = EnvGuard::remove("TERM");
+
+        let mut accents = HashMap::new();
+        accents.insert("claude".to_string(), "#ffb86c".to_string());
+        update_settings(AppSettings {
+            app_accent: Some(accents),
+            ..AppSettings::default()
+        })
+        .expect("save custom app accent");
+
+        {
+            let _color_mode = EnvGuard::set(COLOR_MODE_ENV, "ansi256");
+            let theme = theme_for_mode(&AppType::Claude, ThemeMode::Dark);
+            assert_eq!(theme.accent, Color::Indexed(rgb_to_ansi256(255, 184, 108)));
+        }
+
+        {
+            let _color_mode = EnvGuard::set(COLOR_MODE_ENV, "none");
+            let theme = theme_for_mode(&AppType::Claude, ThemeMode::Dark);
+            assert_eq!(theme.accent, Color::Reset);
+            assert_eq!(theme.on_accent, Color::Reset);
+            assert!(theme.no_color);
+        }
+    }
+
+    #[test]
+    fn invalid_app_accent_silently_falls_back_to_builtin_default() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _home_guard = TestEnvGuard::isolated(home.path());
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::remove(COLOR_MODE_ENV);
+        let _colorterm = EnvGuard::set("COLORTERM", "truecolor");
+        let _term = EnvGuard::set("TERM", "xterm-256color");
+
+        let settings_path = home.path().join(".cc-switch/settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).expect("create config dir");
+        std::fs::write(
+            &settings_path,
+            r##"{"appAccent":{"claude":"not-a-color","codex":"#12345"}}"##,
+        )
+        .expect("write settings with invalid appAccent");
+        crate::settings::reload_test_settings();
+
+        let claude = theme_for_mode(&AppType::Claude, ThemeMode::Dark);
+        assert_eq!(claude.accent, Color::Rgb(139, 233, 253));
+
+        let codex = theme_for_mode(&AppType::Codex, ThemeMode::Light);
+        assert_eq!(codex.accent, Color::Rgb(24, 138, 66));
     }
 }
