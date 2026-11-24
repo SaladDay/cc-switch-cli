@@ -9,6 +9,12 @@ use crate::app_config::AppType;
 pub const CLAUDE_AUTH_TOKEN_ENV_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
 pub const CLAUDE_API_KEY_ENV_KEY: &str = "ANTHROPIC_API_KEY";
 
+/// Match OpenCode Go subscription URLs. The metered Zen service has no quota API.
+pub(crate) fn is_opencode_go_url(lowercase_url: &str) -> bool {
+    lowercase_url.contains("opencode.ai/zen/go")
+        || lowercase_url.contains("opencode.ai/inference/go")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeApiKeyField {
     AuthToken,
@@ -283,7 +289,7 @@ impl Provider {
                     .get("config")
                     .and_then(Value::as_str)
                     .and_then(crate::codex_config::extract_codex_base_url)
-                    .is_some_and(|url| url.to_lowercase().contains("opencode.ai/zen/go"));
+                    .is_some_and(|url| is_opencode_go_url(&url.to_lowercase()));
                 let api_key_missing = self
                     .settings_config
                     .pointer("/auth/OPENAI_API_KEY")

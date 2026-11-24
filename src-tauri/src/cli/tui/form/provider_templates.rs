@@ -941,7 +941,7 @@ impl ProviderAddFormState {
         if settings
             .get("baseUrl")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|url| url.to_lowercase().contains("opencode.ai/zen/go"))
+            .is_some_and(|url| crate::provider::is_opencode_go_url(&url.to_lowercase()))
         {
             extra = with_opencode_go_usage_script(extra);
         }
