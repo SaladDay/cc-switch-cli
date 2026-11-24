@@ -65,7 +65,8 @@ jobs:
             try { $key.GetValueKind('Path') } finally { $key.Close() }
           }
           function Get-Leftovers {
-            @(Get-ChildItem -LiteralPath $installDir -Filter 'cc-switch.exe.*' -Name) +
+            # -Filter 'cc-switch.exe.*' also matches cc-switch.exe itself, so filter by name.
+            @(Get-ChildItem -LiteralPath $installDir -Name | Where-Object { $_ -like 'cc-switch.exe.?*' }) +
               @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter 'cc-switch-install-*' -Directory -Name)
           }
           function Count-Entry([string]$Raw, [string]$Dir) {
