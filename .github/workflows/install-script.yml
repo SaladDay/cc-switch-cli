@@ -125,11 +125,13 @@ jobs:
           $savedEnv = @{ CC_SWITCH_CONFIG_DIR = $env:CC_SWITCH_CONFIG_DIR; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME }
           $env:CC_SWITCH_CONFIG_DIR = "$sandbox\.cc-switch"; $env:USERPROFILE = $sandbox; $env:HOME = $sandbox
           try {
-            $proc = Start-Process -FilePath $target -ArgumentList 'proxy', 'serve', '--listen-port', '0' -PassThru -WindowStyle Hidden
+            $proc = Start-Process -FilePath $target -ArgumentList 'proxy', 'serve', '--listen-port', '18765' -PassThru -NoNewWindow `
+              -RedirectStandardOutput "$env:RUNNER_TEMP\serve.out" -RedirectStandardError "$env:RUNNER_TEMP\serve.err"
           } finally {
             foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name]) }
           }
           Start-Sleep -Seconds 5
+          Get-Content "$env:RUNNER_TEMP\serve.out", "$env:RUNNER_TEMP\serve.err" -ErrorAction SilentlyContinue
           Assert (-not $proc.HasExited) "cc-switch.exe is running (pid $($proc.Id))"
           try { $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' } } finally { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; $proc.WaitForExit() }
           Assert ($r.Code -ne 0) 'install over a running exe exits non-zero'
