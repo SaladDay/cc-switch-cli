@@ -2539,10 +2539,14 @@ impl SkillService {
     pub async fn check_updates(&self) -> Result<SkillUpdateCheckResult, AppError> {
         let db = Database::init()?;
         let installed = db.get_all_installed_skills()?;
+        let non_github = db.non_github_skill_ids()?;
         let ssot_dir = Self::get_ssot_dir()?;
         let mut groups: HashMap<(String, String, String), Vec<InstalledSkill>> = HashMap::new();
 
         for skill in installed.into_values() {
+            if non_github.contains(&skill.id) {
+                continue;
+            }
             let (Some(owner), Some(repo)) = (&skill.repo_owner, &skill.repo_name) else {
                 continue;
             };
@@ -2683,6 +2687,11 @@ impl SkillService {
             .ok_or_else(|| AppError::Message(format!("Skill not found: {skill_id}")))?;
         let directory = Self::require_valid_directory(&skill.directory)?;
         skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+        if db.non_github_skill_ids()?.contains(skill_id) {
+            return Err(AppError::InvalidInput(format!(
+                "Skill comes from a non-GitHub repository; update it in CC Switch desktop: {skill_id}"
+            )));
+        }
 
         let (owner, name) = match (&skill.repo_owner, &skill.repo_name) {
             (Some(owner), Some(name)) => (owner.clone(), name.clone()),

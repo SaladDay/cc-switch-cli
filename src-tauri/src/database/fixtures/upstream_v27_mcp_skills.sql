@@ -1,5 +1,5 @@
--- MCP/Skills DDL from farion1231/cc-switch at
--- cf341a8aebc4660782a6e7ce362e5fb16635f684 (schema 26).
+-- MCP/Skills/Skill-repos DDL from farion1231/cc-switch at
+-- dbc7eb713b222b97f2a03fef76bd0abf86cdde76 (schema 27, desktop v4.0.34–v4.0.40).
 CREATE TABLE IF NOT EXISTS mcp_servers (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, server_config TEXT NOT NULL,
             description TEXT, homepage TEXT, docs TEXT, tags TEXT NOT NULL DEFAULT '[]',
@@ -40,5 +40,12 @@ CREATE TABLE IF NOT EXISTS skills (
             enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
             installed_at INTEGER NOT NULL DEFAULT 0,
             content_hash TEXT,
-            updated_at INTEGER NOT NULL DEFAULT 0
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            repo_host TEXT
+        );
+
+CREATE TABLE IF NOT EXISTS skill_repos (
+            owner TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL DEFAULT 'main',
+            enabled BOOLEAN NOT NULL DEFAULT 1, host TEXT NOT NULL DEFAULT 'github.com',
+            PRIMARY KEY (owner, name)
         );
