@@ -6,10 +6,12 @@ on:
       - main
     paths:
       - "install.ps1"
+      - "README.md"
       - ".github/workflows/install-script.yml"
   pull_request:
     paths:
       - "install.ps1"
+      - "README.md"
       - ".github/workflows/install-script.yml"
   workflow_dispatch:
 
@@ -61,6 +63,10 @@ jobs:
           function Get-UserPathKind {
             $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
             try { $key.GetValueKind('Path') } finally { $key.Close() }
+          }
+          function Get-Leftovers {
+            @(Get-ChildItem -LiteralPath $installDir -Filter 'cc-switch.exe.*' -Name) +
+              @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter 'cc-switch-install-*' -Directory -Name)
           }
           function Count-Entry([string]$Raw, [string]$Dir) {
             @($Raw -split ';' | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -eq $Dir.TrimEnd('\') }).Count
@@ -119,15 +125,21 @@ jobs:
           Assert ((Count-Entry $raw $installDir) -eq 1) 'install dir still in user PATH exactly once'
           Assert ($raw -like "*$seed*") 'unexpanded entry still preserved'
 
-          Write-Host '--- 4. locked exe gives a clear error and leaves the old file'
+          Write-Host '--- 4. a failed replace keeps the original exe'
+          # No sharing at all, so the installer cannot rename or delete the exe.
           $lock = [IO.File]::Open($target, 'Open', 'Read', 'None')
           try { $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' } } finally { $lock.Close() }
           Assert ($r.Code -ne 0) 'install over a locked exe exits non-zero'
-          Assert ($r.Output -match 'in use') 'error says the exe is in use'
-          Assert ((Get-FileHash $target).Hash -eq $hash) 'locked exe untouched'
-          Assert (-not (Test-Path "$target.new")) 'no staged .new file left behind'
+          Assert ($r.Output -match 'Could not replace .*cc-switch\.exe \(.+\)') 'error names the target and the underlying error'
+          Assert ((Get-FileHash $target).Hash -eq $hash) 'original exe still in place'
+          $left = Get-Leftovers
+          Assert ($left.Count -eq 0) "no .new/.old file or temp dir left behind: $left"
 
-          Write-Host '--- 4b. a running cc-switch.exe gives the same clear error'
+          Write-Host '--- 4b. a running cc-switch.exe is replaced, its backup removed by the next run'
+          $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1'; CC_SWITCH_VERSION = 'v5.11.3' }
+          Assert ($r.Code -eq 0) 'install v5.11.3 to run'
+          $oldHash = (Get-FileHash $target).Hash
+          Assert ($oldHash -ne $hash) 'v5.11.3 differs from the latest release'
           # Foreground proxy on a spare port, with its config in a sandbox dir.
           $sandbox = Join-Path $env:RUNNER_TEMP 'cc-switch-sandbox'
           New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
@@ -141,12 +153,31 @@ jobs:
           }
           Start-Sleep -Seconds 5
           Get-Content "$env:RUNNER_TEMP\serve.out", "$env:RUNNER_TEMP\serve.err" -ErrorAction SilentlyContinue
-          Assert (-not $proc.HasExited) "cc-switch.exe is running (pid $($proc.Id))"
-          try { $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' } } finally { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; $proc.WaitForExit() }
-          Assert ($r.Code -ne 0) 'install over a running exe exits non-zero'
-          Assert ($r.Output -match 'in use') 'error says the exe is in use'
-          Assert ((Get-FileHash $target).Hash -eq $hash) 'running exe untouched'
-          Assert (-not (Test-Path "$target.new")) 'no staged .new file left behind'
+          Assert (-not $proc.HasExited) "cc-switch.exe v5.11.3 is running (pid $($proc.Id))"
+          try {
+            $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' }
+            Assert ($r.Code -eq 0) 'install over a running exe succeeds'
+            Assert ((Get-FileHash $target).Hash -eq $hash) 'target is now the latest release'
+            Assert (-not $proc.HasExited) 'the running cc-switch keeps running'
+            Assert ($r.Output -match 'still running') 'warns that the old exe is still running'
+            $left = @(Get-Leftovers)
+            Assert ($left.Count -eq 1 -and $left[0] -like 'cc-switch.exe.*.old') "only the running backup is left: $left"
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; $proc.WaitForExit()
+          }
+          $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' }
+          Assert ($r.Code -eq 0) 'next install succeeds'
+          $left = Get-Leftovers
+          Assert ($left.Count -eq 0) "next install removed the backup: $left"
+
+          Write-Host '--- 4c. an install dir containing ; is rejected before anything is written'
+          $semiDir = Join-Path $env:RUNNER_TEMP 'cc;switch'
+          $pathBefore = Get-RawUserPath
+          $r = Invoke-Installer @{ CC_SWITCH_INSTALL_DIR = $semiDir }
+          Assert ($r.Code -ne 0) 'install dir with ; exits non-zero'
+          Assert ($r.Output -match "must not contain ';'") 'error explains the ; restriction'
+          Assert (-not (Test-Path -LiteralPath $semiDir)) 'install dir not created'
+          Assert ((Get-RawUserPath) -eq $pathBefore) 'user PATH unchanged'
 
           Write-Host '--- 5. download failure gives a clear error and installs nothing'
           $badDir = Join-Path $env:RUNNER_TEMP 'cc-switch-bad'

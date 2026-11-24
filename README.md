@@ -190,7 +190,12 @@ Windows (PowerShell, no administrator rights needed):
 irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
 ```
 
-This installs `cc-switch.exe` to `%LOCALAPPDATA%\cc-switch` and adds that directory to your user PATH. `CC_SWITCH_INSTALL_DIR` and `CC_SWITCH_FORCE=1` work the same way as above. Set `CC_SWITCH_VERSION` (for example `v5.11.4`) to install a specific release.
+This installs `cc-switch.exe` to `%LOCALAPPDATA%\cc-switch` and adds that directory to your user PATH. `CC_SWITCH_INSTALL_DIR` and `CC_SWITCH_FORCE` work the same way as above, and `CC_SWITCH_VERSION` installs a specific release. Set them in PowerShell before running the command, for example to overwrite without prompting or to pin a version:
+
+```powershell
+$env:CC_SWITCH_FORCE = '1'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+$env:CC_SWITCH_VERSION = 'v5.11.4'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+```
 
 If you previously copied `cc-switch.exe` into `C:\Windows\System32`, delete that copy (from an administrator terminal); otherwise it takes precedence over the new install.
 

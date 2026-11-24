@@ -188,7 +188,12 @@ Windows（PowerShell，无需管理员权限）：
 irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
 ```
 
-默认将 `cc-switch.exe` 安装到 `%LOCALAPPDATA%\cc-switch`，并把该目录加入用户级 PATH。`CC_SWITCH_INSTALL_DIR` 和 `CC_SWITCH_FORCE=1` 的用法与上面相同。设置 `CC_SWITCH_VERSION`（例如 `v5.11.4`）可安装指定版本。
+默认将 `cc-switch.exe` 安装到 `%LOCALAPPDATA%\cc-switch`，并把该目录加入用户级 PATH。`CC_SWITCH_INSTALL_DIR` 和 `CC_SWITCH_FORCE` 的用法与上面相同，`CC_SWITCH_VERSION` 可安装指定版本。请在 PowerShell 中先设置再运行命令，例如不经确认直接覆盖，或固定版本：
+
+```powershell
+$env:CC_SWITCH_FORCE = '1'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+$env:CC_SWITCH_VERSION = 'v5.11.4'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+```
 
 如果之前把 `cc-switch.exe` 复制到了 `C:\Windows\System32`，请删除那份副本（需要在管理员终端中操作），否则它会优先于新安装的版本被调用。
 

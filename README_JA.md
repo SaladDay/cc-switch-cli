@@ -196,7 +196,12 @@ Windows（PowerShell、管理者権限は不要）：
 irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
 ```
 
-`cc-switch.exe` は `%LOCALAPPDATA%\cc-switch` にインストールされ、そのディレクトリがユーザー PATH に追加されます。`CC_SWITCH_INSTALL_DIR` と `CC_SWITCH_FORCE=1` は上記と同じように使えます。特定のリリースをインストールするには `CC_SWITCH_VERSION`（例：`v5.11.4`）を設定してください。
+`cc-switch.exe` は `%LOCALAPPDATA%\cc-switch` にインストールされ、そのディレクトリがユーザー PATH に追加されます。`CC_SWITCH_INSTALL_DIR` と `CC_SWITCH_FORCE` は上記と同じように使え、`CC_SWITCH_VERSION` で特定のリリースをインストールできます。コマンドの前に PowerShell で設定してください。例えば、確認なしで上書きする場合やバージョンを固定する場合：
+
+```powershell
+$env:CC_SWITCH_FORCE = '1'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+$env:CC_SWITCH_VERSION = 'v5.11.4'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+```
 
 以前に `cc-switch.exe` を `C:\Windows\System32` にコピーした場合は、そのコピーを削除してください（管理者ターミナルで実行）。削除しないと、新しくインストールしたものより優先されます。
 

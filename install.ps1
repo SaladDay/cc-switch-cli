@@ -21,6 +21,9 @@ function Install-CcSwitch {
     function Write-Info([string]$Message) { Write-Host "  info: $Message" -ForegroundColor Green }
     function Write-Warn([string]$Message) { Write-Host "  warn: $Message" -ForegroundColor Yellow }
 
+    if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+        throw "PowerShell is running in $($ExecutionContext.SessionState.LanguageMode) mode, which this installer cannot use. Follow the manual installation steps instead: https://github.com/SaladDay/cc-switch-cli#-installation"
+    }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         throw "This script only supports Windows. On macOS or Linux, use install.sh: $releasesUrl"
     }
@@ -34,6 +37,9 @@ function Install-CcSwitch {
     }
     $installDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($installDir)
     if ($installDir -notmatch '^[A-Za-z]:\\$') { $installDir = $installDir.TrimEnd('\') }
+    if ($installDir.Contains(';')) {
+        throw "Install directory must not contain ';' because it is added to PATH: $installDir"
+    }
     $target = Join-Path $installDir $binName
 
     $version = $env:CC_SWITCH_VERSION
@@ -93,13 +99,41 @@ function Install-CcSwitch {
 
         # --- install ---
         [void][IO.Directory]::CreateDirectory($installDir)
+        # Stage next to the target, move the old exe aside, then move the new one
+        # in. Windows allows renaming a running exe, so a running cc-switch keeps
+        # working from its backup, which a later run removes.
+        Get-ChildItem -LiteralPath $installDir -Filter "$binName.*.old" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
         $staged = "$target.new"
+        $backup = "$target.$([Guid]::NewGuid().ToString('N')).old"
+        $hadTarget = Test-Path -LiteralPath $target
         try {
             Copy-Item -LiteralPath $extracted -Destination $staged -Force
-            Move-Item -LiteralPath $staged -Destination $target -Force
+            if ($hadTarget) { [IO.File]::Move($target, $backup) }
         } catch {
             Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-            throw "Could not replace $target ($($_.Exception.Message)). If it is in use, close every running cc-switch and try again. Nothing was overwritten."
+            throw "Could not replace $target ($($_.Exception.Message)). Close every program using it and try again. Nothing was overwritten."
+        }
+        try {
+            [IO.File]::Move($staged, $target)
+        } catch {
+            $installError = $_.Exception.Message
+            if ($hadTarget) {
+                try {
+                    [IO.File]::Move($backup, $target)
+                } catch {
+                    throw "Could not install $target ($installError), and restoring the previous version failed ($($_.Exception.Message)). The previous version is at $backup; rename it to $binName."
+                }
+            }
+            Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+            throw "Could not install $target ($installError). Nothing was overwritten."
+        }
+        if ($hadTarget) {
+            try {
+                Remove-Item -LiteralPath $backup -Force
+            } catch {
+                Write-Warn "The previous cc-switch is still running; $backup will be removed by the next install."
+            }
         }
         Write-Info "Installed cc-switch to $target"
     } finally {
@@ -109,7 +143,7 @@ function Install-CcSwitch {
     # --- user PATH ---
     # Read the raw registry value so entries such as %USERPROFILE%\bin stay
     # unexpanded, and write it back with its existing kind (REG_EXPAND_SZ if new).
-    $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    $envKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
     try {
         $userPath = [string]$envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         $entries = @($userPath -split ';' | Where-Object { $_ -ne '' })
