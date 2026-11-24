@@ -864,6 +864,8 @@ mod tests {
             ("mcp_servers", "enabled_workbuddy"),
             ("skills", "enabled_workbuddy"),
             ("session_log_sync", "parser_state"),
+            ("skills", "repo_host"),
+            ("skill_repos", "host"),
         ] {
             assert!(
                 Database::has_column(&conn, table, column).unwrap(),

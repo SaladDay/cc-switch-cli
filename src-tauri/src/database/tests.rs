@@ -312,9 +312,11 @@ fn schema_migration_sets_user_version_when_missing() {
 
 // Use upstream DDL independently of the CLI's fresh-table definitions.
 fn seed_upstream_mcp_skills(conn: &Connection, version: i32) {
-    conn.execute_batch("DROP TABLE IF EXISTS mcp_servers; DROP TABLE IF EXISTS skills;")
-        .expect("remove CLI tables");
-    conn.execute_batch(include_str!("fixtures/upstream_v26_mcp_skills.sql"))
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS mcp_servers; DROP TABLE IF EXISTS skills; DROP TABLE IF EXISTS skill_repos;",
+    )
+    .expect("remove CLI tables");
+    conn.execute_batch(include_str!("fixtures/upstream_v27_mcp_skills.sql"))
         .expect("create upstream tables");
     for (introduced, column) in [
         (21, "enabled_agy"),
@@ -329,6 +331,13 @@ fn seed_upstream_mcp_skills(conn: &Connection, version: i32) {
                     .expect("restore older upstream schema");
             }
         }
+    }
+    if version < 27 {
+        conn.execute_batch(
+            "ALTER TABLE skills DROP COLUMN repo_host;
+             ALTER TABLE skill_repos DROP COLUMN host;",
+        )
+        .expect("restore v26 skill schema");
     }
     if version < 23 {
         conn.execute_batch("ALTER TABLE mcp_servers DROP COLUMN enabled_omp;")
@@ -349,9 +358,19 @@ fn seed_upstream_mcp_skills(conn: &Connection, version: i32) {
         "INSERT INTO mcp_servers (id, name, server_config, enabled_codex)
          VALUES ('upstream-mcp', 'Upstream MCP', '{}', 1);
          INSERT INTO skills (id, name, directory, enabled_codex)
-         VALUES ('upstream-skill', 'Upstream Skill', 'upstream-skill', 1);",
+         VALUES ('upstream-skill', 'Upstream Skill', 'upstream-skill', 1);
+         INSERT INTO skill_repos (owner, name, branch, enabled)
+         VALUES ('group', 'upstream-skills', 'main', 1);",
     )
     .expect("seed upstream records");
+    if version >= 27 {
+        // Self-hosted GitLab with a port, as in the upstream v27 tests.
+        conn.execute_batch(
+            "UPDATE skills SET repo_host = 'gitlab.example.com:8443' WHERE id = 'upstream-skill';
+             UPDATE skill_repos SET host = 'gitlab.example.com:8443';",
+        )
+        .expect("mark upstream GitLab hosts");
+    }
     if version >= 19 {
         conn.execute_batch(
             "UPDATE mcp_servers SET enabled_mcode = 1;
@@ -425,11 +444,44 @@ fn assert_upstream_mcp_skills(conn: &Connection, original_version: i32) {
         };
         assert_eq!(flags, (1, i64::from(original_version >= introduced)));
     }
+
+    // v27: skill repositories record the host they live on (GitLab etc.).
+    let repo_host_info = get_column_info(conn, "skills", "repo_host");
+    assert_eq!(repo_host_info.r#type, "TEXT");
+    assert_eq!(repo_host_info.notnull, 0);
+    assert_eq!(normalize_default(&repo_host_info.default), None);
+    let host_info = get_column_info(conn, "skill_repos", "host");
+    assert_eq!(host_info.r#type, "TEXT");
+    assert_eq!(host_info.notnull, 1);
+    assert_eq!(
+        normalize_default(&host_info.default).as_deref(),
+        Some("github.com")
+    );
+
+    let (repo_host, host, branch, enabled): (Option<String>, String, String, i64) = conn
+        .query_row(
+            "SELECT (SELECT repo_host FROM skills WHERE id = 'upstream-skill'),
+                    (SELECT host FROM skill_repos WHERE owner = 'group'),
+                    (SELECT branch FROM skill_repos WHERE owner = 'group'),
+                    (SELECT enabled FROM skill_repos WHERE owner = 'group')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read upstream skill repo hosts");
+    if original_version >= 27 {
+        assert_eq!(repo_host.as_deref(), Some("gitlab.example.com:8443"));
+        assert_eq!(host, "gitlab.example.com:8443");
+    } else {
+        // Older rows need no backfill: the column default stands in for github.com.
+        assert_eq!(repo_host, None);
+        assert_eq!(host, "github.com");
+    }
+    assert_eq!((branch, enabled), ("main".to_string(), 1));
 }
 
 #[test]
-fn schema_migration_upstream_v18_through_v26_preserves_data_and_is_idempotent() {
-    for version in 18..=26 {
+fn schema_migration_upstream_v18_through_v27_preserves_data_and_is_idempotent() {
+    for version in 18..=27 {
         let conn = Connection::open_in_memory().unwrap();
         seed_upstream_mcp_skills(&conn, version);
         Database::apply_schema_migrations_on_conn(&conn).expect("migrate upstream schema");
@@ -441,17 +493,17 @@ fn schema_migration_upstream_v18_through_v26_preserves_data_and_is_idempotent() 
     let conn = Connection::open_in_memory().unwrap();
     Database::set_user_version(&conn, 18).unwrap();
     Database::apply_schema_migrations_on_conn(&conn).expect("migrate absent tables");
-    seed_upstream_mcp_skills(&conn, 26);
+    seed_upstream_mcp_skills(&conn, 27);
     Database::set_user_version(&conn, 18).unwrap();
     Database::apply_schema_migrations_on_conn(&conn).expect("migrate existing columns");
-    assert_upstream_mcp_skills(&conn, 26);
+    assert_upstream_mcp_skills(&conn, 27);
 }
 
 #[test]
 fn schema_migration_repairs_legacy_workbuddy_versions() {
     for version in 23..=25 {
         let conn = Connection::open_in_memory().unwrap();
-        seed_upstream_mcp_skills(&conn, 26);
+        seed_upstream_mcp_skills(&conn, 27);
         conn.execute_batch("ALTER TABLE mcp_servers DROP COLUMN enabled_omp;")
             .unwrap();
         for table in ["mcp_servers", "skills"] {
@@ -463,7 +515,7 @@ fn schema_migration_repairs_legacy_workbuddy_versions() {
         Database::set_user_version(&conn, version).unwrap();
         for _ in 0..2 {
             Database::apply_schema_migrations_on_conn(&conn).unwrap();
-            assert_eq!(Database::get_user_version(&conn).unwrap(), 26);
+            assert_eq!(Database::get_user_version(&conn).unwrap(), SCHEMA_VERSION);
             for table in ["mcp_servers", "skills"] {
                 let flags: (i64, i64, i64, i64) = conn
                     .query_row(
@@ -483,7 +535,7 @@ fn schema_migration_repairs_legacy_workbuddy_versions() {
 }
 
 #[test]
-fn schema_create_tables_matches_upstream_v26_flags() {
+fn schema_create_tables_matches_upstream_v27_flags() {
     let conn = Connection::open_in_memory().unwrap();
     Database::create_tables_on_conn(&conn).unwrap();
     for (table, column) in [
@@ -510,15 +562,41 @@ fn schema_create_tables_matches_upstream_v26_flags() {
     assert!(Database::has_column(&conn, "session_log_sync", "parser_state").unwrap());
     assert!(!Database::has_column(&conn, "skills", "enabled_pi").unwrap());
     assert!(!Database::has_column(&conn, "skills", "enabled_omp").unwrap());
+
+    // v27 skill repository hosts: nullable per-skill host, github.com by default for repos.
+    let repo_host_info = get_column_info(&conn, "skills", "repo_host");
+    assert_eq!(repo_host_info.r#type, "TEXT");
+    assert_eq!(repo_host_info.notnull, 0);
+    assert_eq!(normalize_default(&repo_host_info.default), None);
+    let host_info = get_column_info(&conn, "skill_repos", "host");
+    assert_eq!(host_info.r#type, "TEXT");
+    assert_eq!(host_info.notnull, 1);
+    assert_eq!(
+        normalize_default(&host_info.default).as_deref(),
+        Some("github.com")
+    );
+    conn.execute(
+        "INSERT INTO skill_repos (owner, name, branch, enabled) VALUES ('o', 'r', 'main', 1)",
+        [],
+    )
+    .unwrap();
+    let host: String = conn
+        .query_row(
+            "SELECT host FROM skill_repos WHERE owner = 'o'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(host, "github.com");
 }
 
 #[test]
-fn init_and_sync_import_accept_upstream_v18_through_v26() {
+fn init_and_sync_import_accept_upstream_v18_through_v27() {
     let home = tempfile::tempdir().unwrap();
     let _env = crate::test_support::TestEnvGuard::isolated(home.path());
     let config_dir = home.path().join(".cc-switch");
     std::fs::create_dir_all(&config_dir).unwrap();
-    for version in 18..=26 {
+    for version in 18..=27 {
         let conn = Connection::open(config_dir.join("cc-switch.db")).unwrap();
         Database::create_tables_on_conn(&conn).unwrap();
         seed_upstream_mcp_skills(&conn, version);
@@ -2549,20 +2627,107 @@ fn skill_dao_save_preserves_upstream_enablement() {
         (1, 1, 1, 1, 1),
         "save should preserve hidden flags"
     );
-    let upstream_flags: (i64, i64, i64) = {
+    let upstream_flags: (i64, i64, i64, Option<String>) = {
         let conn = db.conn.lock().expect("lock conn");
         conn.query_row(
-            "SELECT enabled_dsh, enabled_copilot, enabled_workbuddy FROM skills WHERE id = 'remote-skill'",
+            "SELECT enabled_dsh, enabled_copilot, enabled_workbuddy, repo_host FROM skills WHERE id = 'remote-skill'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("read upstream enablement after save")
     };
     assert_eq!(
         upstream_flags,
-        (1, 1, 1),
-        "save should preserve upstream flags"
+        (1, 1, 1, None),
+        "save should preserve upstream flags and repo_host"
     );
+}
+
+#[test]
+fn skill_dao_save_preserves_upstream_repo_host() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "INSERT INTO skills (id, name, directory, repo_host, installed_at)
+             VALUES ('group/subgroup/skills:demo', 'Demo', 'demo', 'gitlab.example.com:8443', 42)",
+            [],
+        )
+        .expect("seed GitLab Skill");
+    }
+
+    let mut skill = db
+        .get_installed_skill("group/subgroup/skills:demo")
+        .expect("load Skill")
+        .expect("find Skill");
+    skill.apps.codex = true;
+    db.save_skill(&skill).expect("save Skill");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let (repo_host, enabled_codex, installed_at): (Option<String>, i64, i64) = conn
+        .query_row(
+            "SELECT repo_host, enabled_codex, installed_at FROM skills WHERE id = 'group/subgroup/skills:demo'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read repo_host after save");
+    assert_eq!(
+        repo_host.as_deref(),
+        Some("gitlab.example.com:8443"),
+        "save should preserve the upstream repo_host"
+    );
+    assert_eq!((enabled_codex, installed_at), (1, 42));
+}
+
+#[test]
+fn skill_repo_save_preserves_upstream_host() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "INSERT INTO skill_repos (owner, name, branch, enabled, host)
+             VALUES ('group/subgroup', 'skills', 'develop', 0, 'gitlab.example.com:8443')",
+            [],
+        )
+        .expect("seed GitLab repo");
+    }
+
+    // A CLI round trip (`load_index` -> edit -> `save_index`) re-saves every repo
+    // with the four CLI-managed fields only; the upstream host must survive.
+    let repos = db.get_skill_repos().expect("load repos");
+    assert_eq!(repos.len(), 1);
+    let mut repo = repos.into_iter().next().expect("one repo");
+    repo.enabled = true;
+    db.save_skill_repo(&repo).expect("save repo");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let (host, branch, enabled): (String, String, i64) = conn
+        .query_row(
+            "SELECT host, branch, enabled FROM skill_repos WHERE owner = 'group/subgroup'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read repo after save");
+    assert_eq!(
+        host, "gitlab.example.com:8443",
+        "save must keep the upstream host"
+    );
+    assert_eq!((branch, enabled), ("develop".to_string(), 1));
+
+    // New repos added through the CLI still default to github.com.
+    conn.execute(
+        "INSERT INTO skill_repos (owner, name, branch, enabled) VALUES ('o', 'r', 'main', 1)",
+        [],
+    )
+    .expect("insert CLI-managed repo");
+    let host: String = conn
+        .query_row(
+            "SELECT host FROM skill_repos WHERE owner = 'o'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read default host");
+    assert_eq!(host, "github.com");
 }
 
 #[test]

@@ -229,10 +229,18 @@ impl Database {
     }
 
     /// 保存 Skill 仓库
+    ///
+    /// 只写 CLI 管理的四列；上游 v27 新增的 `host`（GitLab 等非 GitHub 主机）不在此处
+    /// 维护，冲突时必须保留库里的值，否则 `load_index → save_index` 一次往返就会把
+    /// 桌面端同步过来的 GitLab 仓库改回 github.com。
     pub fn save_skill_repo(&self, repo: &SkillRepo) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         conn.execute(
-            "INSERT OR REPLACE INTO skill_repos (owner, name, branch, enabled) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO skill_repos (owner, name, branch, enabled)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(owner, name) DO UPDATE SET
+                branch = excluded.branch,
+                enabled = excluded.enabled",
             params![repo.owner, repo.name, repo.branch, repo.enabled],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
