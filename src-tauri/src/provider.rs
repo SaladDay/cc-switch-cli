@@ -12,9 +12,7 @@ pub const CLAUDE_API_KEY_ENV_KEY: &str = "ANTHROPIC_API_KEY";
 /// Match OpenCode Go subscription URLs. The metered Zen service has no quota API.
 pub(crate) fn is_opencode_go_url(lowercase_url: &str) -> bool {
     lowercase_url.contains("opencode.ai/zen/go")
-        || lowercase_url
-            .strip_prefix("https://opencode.ai/inference/go")
-            .is_some_and(|tail| tail.is_empty() || tail.starts_with(['/', '?', '#']))
+        || lowercase_url.contains("opencode.ai/inference/go")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

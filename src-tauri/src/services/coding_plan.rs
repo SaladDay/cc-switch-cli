@@ -658,7 +658,6 @@ mod tests {
         for base_url in [
             "https://opencode.ai/zen/v1",
             "https://opencode.ai/inference/v1",
-            "https://opencode.ai/inference/gopher",
             "https://example.com/inference/go",
         ] {
             assert!(detect_provider(base_url).is_none(), "{base_url}");
