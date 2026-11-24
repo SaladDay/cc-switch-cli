@@ -120,8 +120,9 @@ jobs:
           Assert (-not (Test-Path "$target.new")) 'no staged .new file left behind'
 
           Write-Host '--- 4b. a running cc-switch.exe gives the same clear error'
-          # Foreground proxy on an ephemeral port, with its config in a sandbox dir.
+          # Foreground proxy on a spare port, with its config in a sandbox dir.
           $sandbox = Join-Path $env:RUNNER_TEMP 'cc-switch-sandbox'
+          New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
           $savedEnv = @{ CC_SWITCH_CONFIG_DIR = $env:CC_SWITCH_CONFIG_DIR; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME }
           $env:CC_SWITCH_CONFIG_DIR = "$sandbox\.cc-switch"; $env:USERPROFILE = $sandbox; $env:HOME = $sandbox
           try {
