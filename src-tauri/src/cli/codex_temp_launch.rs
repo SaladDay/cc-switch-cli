@@ -90,19 +90,8 @@ pub(crate) fn resolve_codex_binary() -> Result<PathBuf, AppError> {
     })
 }
 
-#[cfg(unix)]
 pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
     Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
-    Err(AppError::localized(
-        "codex.temp_launch_unsupported_platform",
-        "当前平台暂不支持在当前终端临时启动 Codex。".to_string(),
-        "Temporary Codex launch in the current terminal is not supported on this platform."
-            .to_string(),
-    ))
 }
 
 #[cfg(unix)]
@@ -138,17 +127,36 @@ pub(crate) fn exec_prepared_codex(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub(crate) fn exec_prepared_codex(
-    _prepared: &PreparedCodexLaunch,
-    _native_args: &[OsString],
+    prepared: &PreparedCodexLaunch,
+    native_args: &[OsString],
 ) -> Result<(), AppError> {
-    Err(AppError::localized(
-        "codex.temp_launch_unsupported_platform",
-        "当前平台暂不支持在当前终端临时启动 Codex。".to_string(),
-        "Temporary Codex launch in the current terminal is not supported on this platform."
-            .to_string(),
-    ))
+    let mut command = std::process::Command::new(&prepared.executable);
+    command
+        .env("CODEX_HOME", &prepared.codex_home)
+        .args(native_args);
+    let code = crate::cli::windows_launch::run_and_wait(command, "Codex")?;
+    let mut failed = false;
+    let persisted = crate::store::AppState::try_new().and_then(|state| {
+        crate::services::ProviderService::capture_codex_temp_launch_snapshot(
+            &state,
+            &prepared.provider_id,
+            &prepared.codex_home,
+        )
+    });
+    if let Err(err) = persisted {
+        eprintln!(
+            "cc-switch: failed to persist temporary Codex login state for {}: {err}",
+            prepared.provider_id
+        );
+        failed = true;
+    }
+    if let Err(err) = prepared.cleanup_home_dir() {
+        eprintln!("cc-switch: failed to remove temporary Codex home: {err}");
+        failed = true;
+    }
+    std::process::exit(if failed && code == 0 { 1 } else { code });
 }
 
 fn write_temp_codex_home(temp_dir: &Path, provider: &Provider) -> Result<PathBuf, AppError> {

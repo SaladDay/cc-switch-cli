@@ -129,7 +129,13 @@ fn start_codex(
                 return crate::cli::codex_shared_launch::launch(provider, native_args, dry_run);
             }
             #[cfg(not(unix))]
-            let _ = shared_sessions;
+            if shared_sessions {
+                return Err(AppError::localized(
+                    "codex.shared_sessions_unsupported_platform",
+                    "--shared-sessions 仅支持 macOS/Linux。".to_string(),
+                    "--shared-sessions is only supported on macOS/Linux.".to_string(),
+                ));
+            }
             if dry_run {
                 let prepared = preview_codex_launch_with(
                     provider,

@@ -159,7 +159,7 @@ cc-switch --app pi provider list        # Manage Pi providers
 # Supported apps: `claude` (default), `codex`, `gemini`, `opencode`, `hermes`, `openclaw`, `pi`
 ```
 
-Use `cc-switch start` when you want different providers in multiple terminals. It only affects the Claude or Codex session launched by that command; `provider switch` and `use` still change the global provider. In the TUI, select a provider on the Providers page and press `o` for the same behavior.
+Use `cc-switch start` when you want different providers in multiple terminals. It only affects the Claude or Codex session launched by that command; `provider switch` and `use` still change the global provider. On macOS/Linux, you can also select a provider on the TUI Providers page and press `o` for the same behavior.
 
 On macOS/Linux, add `--shared-sessions` to `start codex` to share the configured Codex home's sessions, archived sessions, and SQLite history index. Each provider uses a persistent, private directory under that home's `.cc-switch-launches/`; these directories must remain in place because Codex records session paths through them. Different providers can run concurrently; a second shared launch of the same provider is rejected while the first is running. Codex's per-thread writer locks are shared too, so close an active session before resuming it from another provider. Login changes are saved back to that provider, while launch-specific configuration is kept out of the saved provider settings. Native `--model`, `resume`, and `fork` arguments are supported; `--config`, `--profile`, and `--oss` overrides are not supported in shared mode.
 

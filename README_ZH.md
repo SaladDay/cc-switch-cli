@@ -157,7 +157,7 @@ cc-switch --app pi provider list        # 管理 Pi 供应商
 # 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`、`pi`
 ```
 
-需要在多个终端同时使用不同供应商时，请使用 `cc-switch start`。它只影响由该命令启动的 Claude 或 Codex 会话；`provider switch` 和 `use` 仍会切换全局供应商。在 TUI 的供应商页选中供应商后按 `o`，效果相同。
+需要在多个终端同时使用不同供应商时，请使用 `cc-switch start`。它只影响由该命令启动的 Claude 或 Codex 会话；`provider switch` 和 `use` 仍会切换全局供应商。在 macOS/Linux 上，也可以在 TUI 的供应商页选中供应商后按 `o`，效果相同。
 
 在 macOS/Linux 上，为 `start codex` 添加 `--shared-sessions`，即可共享当前配置的 Codex 目录中的会话、归档会话和 SQLite 历史索引。各供应商使用该目录下 `.cc-switch-launches/` 中独立、持久化的私有目录；Codex 会通过这些目录记录会话路径，因此请保留它们。不同供应商可以并行运行；同一供应商已有共享实例运行时，会拒绝第二次共享启动。原生 Codex 的会话写锁也会共享，因此切换供应商继续同一会话前，请先退出原会话。登录变更会回写到对应供应商，启动专用配置不会写回供应商设置。支持透传 `--model`、`resume` 和 `fork`；共享模式不支持 `--config`、`--profile` 和 `--oss` 覆盖。
 
