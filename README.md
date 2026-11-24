@@ -171,9 +171,9 @@ See the "Features" section for full command list.
 
 ## 📥 Installation
 
-### Method 1: Quick Install (macOS / Linux)
+### Method 1: Quick Install
 
-> Windows users: see Manual Installation below.
+macOS / Linux:
 
 ```bash
 curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
@@ -183,6 +183,23 @@ This installs `cc-switch` to `~/.local/bin`. Set `CC_SWITCH_INSTALL_DIR` to chan
 
 - If the target already exists, the installer prompts in TTY and refuses to overwrite in non-interactive shells unless `CC_SWITCH_FORCE=1` is set.
 - On Linux, auto mode uses the static musl build and never falls back to glibc. Set `CC_SWITCH_LINUX_LIBC=glibc` only when you explicitly need a compatible glibc build.
+
+Windows (PowerShell, no administrator rights needed):
+
+```powershell
+irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+```
+
+This installs `cc-switch.exe` to `%LOCALAPPDATA%\cc-switch` and adds that directory to your user PATH. `CC_SWITCH_INSTALL_DIR` and `CC_SWITCH_FORCE` work the same way as above, and `CC_SWITCH_VERSION` installs a specific release. Set them in PowerShell before running the command, for example to overwrite without prompting or to pin a version:
+
+```powershell
+$env:CC_SWITCH_FORCE = '1'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+$env:CC_SWITCH_VERSION = 'v5.11.4'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+```
+
+These variables stay set for the rest of the PowerShell session; close the window or run `Remove-Item Env:CC_SWITCH_FORCE` (or `Env:CC_SWITCH_VERSION`) to clear them.
+
+If you previously copied `cc-switch.exe` into `C:\Windows\System32`, delete that copy (from an administrator terminal); otherwise it takes precedence over the new install.
 
 <details>
 <summary>Manual Installation</summary>
@@ -238,10 +255,7 @@ sudo mv cc-switch /usr/local/bin/
 # Download the zip file
 # https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
 
-# After extracting, move cc-switch.exe to a PATH directory, e.g.:
-move cc-switch.exe C:\Windows\System32\
-
-# Or run directly
+# After extracting, put cc-switch.exe in a folder on your user PATH, such as %LOCALAPPDATA%\cc-switch, or run it directly
 .\cc-switch.exe
 ```
 

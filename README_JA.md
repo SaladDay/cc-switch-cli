@@ -177,9 +177,9 @@ macOS/Linux では、`start codex` に `--shared-sessions` を追加すると、
 
 ## 📥 インストール
 
-### 方法 1：クイックインストール（macOS / Linux）
+### 方法 1：クイックインストール
 
-> Windows ユーザーは、以下の「手動インストール」をご覧ください。
+macOS / Linux：
 
 ```bash
 curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
@@ -189,6 +189,23 @@ curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/in
 
 - インストール先にファイルが存在する場合、TTY では確認を求めます。非対話型シェルでは、`CC_SWITCH_FORCE=1` が設定されていない限り上書きしません。
 - Linux の自動モードは静的リンクされた musl ビルドを使用し、glibc にはフォールバックしません。互換性のある glibc ビルドが明示的に必要な場合のみ、`CC_SWITCH_LINUX_LIBC=glibc` を設定してください。
+
+Windows（PowerShell、管理者権限は不要）：
+
+```powershell
+irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+```
+
+`cc-switch.exe` は `%LOCALAPPDATA%\cc-switch` にインストールされ、そのディレクトリがユーザー PATH に追加されます。`CC_SWITCH_INSTALL_DIR` と `CC_SWITCH_FORCE` は上記と同じように使え、`CC_SWITCH_VERSION` で特定のリリースをインストールできます。コマンドの前に PowerShell で設定してください。例えば、確認なしで上書きする場合やバージョンを固定する場合：
+
+```powershell
+$env:CC_SWITCH_FORCE = '1'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+$env:CC_SWITCH_VERSION = 'v5.11.4'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
+```
+
+これらの変数は現在の PowerShell セッションの間ずっと有効です。ウィンドウを閉じるか、`Remove-Item Env:CC_SWITCH_FORCE`（または `Env:CC_SWITCH_VERSION`）を実行するとクリアされます。
+
+以前に `cc-switch.exe` を `C:\Windows\System32` にコピーした場合は、そのコピーを削除してください（管理者ターミナルで実行）。削除しないと、新しくインストールしたものより優先されます。
 
 <details>
 <summary>手動インストール</summary>
@@ -244,10 +261,7 @@ sudo mv cc-switch /usr/local/bin/
 # ZIP ファイルをダウンロード
 # https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
 
-# 展開後、cc-switch.exe を PATH に含まれるディレクトリへ移動（例）：
-move cc-switch.exe C:\Windows\System32\
-
-# または直接実行
+# 展開後、cc-switch.exe をユーザー PATH 上のフォルダー（例：%LOCALAPPDATA%\cc-switch）に置くか、直接実行
 .\cc-switch.exe
 ```
 
