@@ -92,7 +92,7 @@ function Install-CcSwitch {
         }
 
         # --- install ---
-        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+        [void][IO.Directory]::CreateDirectory($installDir)
         $staged = "$target.new"
         try {
             Copy-Item -LiteralPath $extracted -Destination $staged -Force
