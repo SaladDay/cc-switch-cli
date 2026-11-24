@@ -9,6 +9,8 @@ mod codex_temp_launch;
 pub mod commands;
 pub mod editor;
 pub(crate) mod failover_policy;
+#[cfg(windows)]
+mod windows_launch;
 pub use crate::i18n;
 pub mod interactive;
 pub(crate) mod openclaw_form_normalization;
@@ -93,7 +95,6 @@ pub enum Commands {
     Hermes(commands::hermes::HermesCommand),
 
     /// Start an app with a provider selector without switching the global current provider
-    #[cfg(unix)]
     #[command(subcommand)]
     Start(commands::start::StartCommand),
 

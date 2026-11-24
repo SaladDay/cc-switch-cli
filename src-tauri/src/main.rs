@@ -73,7 +73,6 @@ fn run(cli: Cli) -> Result<(), AppError> {
             cc_switch_lib::cli::commands::sessions::execute(cmd, cli.app)
         }
         Some(Commands::Hermes(cmd)) => cc_switch_lib::cli::commands::hermes::execute(cmd),
-        #[cfg(unix)]
         Some(Commands::Start(cmd)) => cc_switch_lib::cli::commands::start::execute(cmd),
         #[cfg(unix)]
         Some(Commands::Daemon(cmd)) => cc_switch_lib::cli::commands::daemon::execute(cmd),

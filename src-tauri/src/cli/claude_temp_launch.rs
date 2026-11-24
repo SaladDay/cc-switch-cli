@@ -113,19 +113,8 @@ pub(crate) fn resolve_claude_binary() -> Result<PathBuf, AppError> {
     })
 }
 
-#[cfg(unix)]
 pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
     Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
-    Err(AppError::localized(
-        "claude.temp_launch_unsupported_platform",
-        "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
-        "Temporary Claude launch in the current terminal is not supported on this platform."
-            .to_string(),
-    ))
 }
 
 #[cfg(unix)]
@@ -159,17 +148,22 @@ pub(crate) fn exec_prepared_claude(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub(crate) fn exec_prepared_claude(
-    _prepared: &PreparedClaudeLaunch,
-    _native_args: &[OsString],
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
 ) -> Result<(), AppError> {
-    Err(AppError::localized(
-        "claude.temp_launch_unsupported_platform",
-        "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
-        "Temporary Claude launch in the current terminal is not supported on this platform."
-            .to_string(),
-    ))
+    let mut command = std::process::Command::new(&prepared.executable);
+    command
+        .arg("--settings")
+        .arg(&prepared.settings_path)
+        .args(native_args);
+    let code = crate::cli::windows_launch::run_and_wait(command, "Claude")?;
+    if let Err(err) = prepared.cleanup_settings_file() {
+        eprintln!("cc-switch: failed to remove temporary Claude settings file: {err}");
+        std::process::exit(if code == 0 { 1 } else { code });
+    }
+    std::process::exit(code);
 }
 
 fn write_temp_settings_file(
