@@ -197,6 +197,8 @@ $env:CC_SWITCH_FORCE = '1'; irm https://raw.githubusercontent.com/SaladDay/cc-sw
 $env:CC_SWITCH_VERSION = 'v5.11.4'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
 ```
 
+These variables stay set for the rest of the PowerShell session; close the window or run `Remove-Item Env:CC_SWITCH_FORCE` (or `Env:CC_SWITCH_VERSION`) to clear them.
+
 If you previously copied `cc-switch.exe` into `C:\Windows\System32`, delete that copy (from an administrator terminal); otherwise it takes precedence over the new install.
 
 <details>
@@ -253,7 +255,7 @@ sudo mv cc-switch /usr/local/bin/
 # Download the zip file
 # https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
 
-# After extracting, run directly
+# After extracting, put cc-switch.exe in a folder on your user PATH, such as %LOCALAPPDATA%\cc-switch, or run it directly
 .\cc-switch.exe
 ```
 

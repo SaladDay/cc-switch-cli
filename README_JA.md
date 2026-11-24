@@ -203,6 +203,8 @@ $env:CC_SWITCH_FORCE = '1'; irm https://raw.githubusercontent.com/SaladDay/cc-sw
 $env:CC_SWITCH_VERSION = 'v5.11.4'; irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
 ```
 
+これらの変数は現在の PowerShell セッションの間ずっと有効です。ウィンドウを閉じるか、`Remove-Item Env:CC_SWITCH_FORCE`（または `Env:CC_SWITCH_VERSION`）を実行するとクリアされます。
+
 以前に `cc-switch.exe` を `C:\Windows\System32` にコピーした場合は、そのコピーを削除してください（管理者ターミナルで実行）。削除しないと、新しくインストールしたものより優先されます。
 
 <details>
@@ -259,7 +261,7 @@ sudo mv cc-switch /usr/local/bin/
 # ZIP ファイルをダウンロード
 # https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
 
-# 展開後、直接実行
+# 展開後、cc-switch.exe をユーザー PATH 上のフォルダー（例：%LOCALAPPDATA%\cc-switch）に置くか、直接実行
 .\cc-switch.exe
 ```
 

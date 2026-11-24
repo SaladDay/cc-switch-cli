@@ -7,11 +7,15 @@ on:
     paths:
       - "install.ps1"
       - "README.md"
+      - "README_ZH.md"
+      - "README_JA.md"
       - ".github/workflows/install-script.yml"
   pull_request:
     paths:
       - "install.ps1"
       - "README.md"
+      - "README_ZH.md"
+      - "README_JA.md"
       - ".github/workflows/install-script.yml"
   workflow_dispatch:
 
@@ -96,8 +100,10 @@ jobs:
           Assert (-not (Test-Path $target)) 'no prior installation'
 
           Write-Host '--- 1. fresh install via iex, the way the README runs it'
-          $eapBefore = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
           Invoke-Expression (Get-Content -Raw $script)
+          $eapAfter = $ErrorActionPreference
+          $ErrorActionPreference = 'Stop'
           Assert (Test-Path $target) "cc-switch.exe installed at $target"
           $raw = Get-RawUserPath
           Write-Host "user PATH (raw): $raw"
@@ -105,7 +111,7 @@ jobs:
           Assert ((Get-UserPathKind) -eq 'ExpandString') 'user PATH stays REG_EXPAND_SZ'
           Assert ((Count-Entry $raw $installDir) -eq 1) 'install dir is in user PATH exactly once'
           Assert ((Get-Command cc-switch).Path -eq $target) 'current session resolves cc-switch to the installed exe'
-          Assert ($ErrorActionPreference -eq $eapBefore) 'iex did not change the caller ErrorActionPreference'
+          Assert ($eapAfter -eq 'Continue') "iex left the caller ErrorActionPreference at Continue -> $eapAfter"
           $version = cc-switch --version
           Assert ($LASTEXITCODE -eq 0 -and $version -match '\d+\.\d+\.\d+') "cc-switch --version -> $version"
           $hash = (Get-FileHash $target).Hash
@@ -180,12 +186,13 @@ jobs:
           Assert (-not (Test-Path -LiteralPath $semiDir)) 'install dir not created'
           Assert ((Get-RawUserPath) -eq $pathBefore) 'user PATH unchanged'
 
-          Write-Host '--- 5. download failure gives a clear error and installs nothing'
-          $badDir = Join-Path $env:RUNNER_TEMP 'cc-switch-bad'
-          $r = Invoke-Installer @{ CC_SWITCH_INSTALL_DIR = $badDir; CC_SWITCH_VERSION = 'v0.0.0-does-not-exist' }
+          Write-Host '--- 5. download failure gives a clear error and keeps the existing install'
+          $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1'; CC_SWITCH_VERSION = 'v0.0.0-does-not-exist' }
           Assert ($r.Code -ne 0) 'missing release exits non-zero'
           Assert ($r.Output -match 'Download failed') 'error says the download failed'
-          Assert (-not (Test-Path (Join-Path $badDir 'cc-switch.exe'))) 'nothing installed'
+          Assert ((Get-FileHash $target).Hash -eq $hash) 'existing exe unchanged'
+          $left = Get-Leftovers
+          Assert ($left.Count -eq 0) "no .new/.old file or temp dir left behind: $left"
 
           Write-Host '--- 6. CC_SWITCH_INSTALL_DIR and CC_SWITCH_VERSION (without v prefix)'
           $customDir = Join-Path $env:RUNNER_TEMP 'cc switch custom'
@@ -247,8 +254,11 @@ jobs:
           Remove-Item -LiteralPath (Join-Path $root 'cc-switch.exe') -Force
 
           Write-Host '--- 10. the README one-liner, pointed at this commit instead of main'
-          $line = Get-Content README.md | Where-Object { $_ -like 'irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1*' }
-          Assert (@($line).Count -eq 1) "README.md has the one-liner: $line"
+          foreach ($readme in 'README.md', 'README_ZH.md', 'README_JA.md') {
+            $found = Get-Content -Encoding UTF8 $readme | Where-Object { $_ -like 'irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1*' }
+            Assert (@($found).Count -eq 1) "$readme has the one-liner: $found"
+            if ($readme -eq 'README.md') { $line = $found } else { Assert ($found -eq $line) "$readme matches README.md" }
+          }
           $command = $line.Replace('SaladDay/cc-switch-cli/main/', "$env:SCRIPT_REPO/$env:SCRIPT_SHA/")
           Write-Host "running: $command"
           $readmeDir = Join-Path $env:RUNNER_TEMP 'cc-switch-readme'
