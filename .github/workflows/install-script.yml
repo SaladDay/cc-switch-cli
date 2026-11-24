@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: install-script-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows-install-ps1:
     name: install.ps1 (${{ matrix.shell }})
@@ -24,6 +28,7 @@ jobs:
       matrix:
         shell: [powershell, pwsh]
     runs-on: windows-2022
+    timeout-minutes: 10
     defaults:
       run:
         shell: ${{ matrix.shell }}
@@ -32,6 +37,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Smoke test install.ps1 against the latest release
+        env:
+          SCRIPT_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          SCRIPT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           # Runs the checked-out script against real release assets. The runner
           # is ephemeral, so the user PATH and %LOCALAPPDATA% changes are discarded.
@@ -55,7 +63,7 @@ jobs:
             try { $key.GetValueKind('Path') } finally { $key.Close() }
           }
           function Count-Entry([string]$Raw, [string]$Dir) {
-            @($Raw -split ';' | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -eq $Dir }).Count
+            @($Raw -split ';' | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -eq $Dir.TrimEnd('\') }).Count
           }
           # Run the installer in a separate non-interactive process with extra env vars.
           function Invoke-Installer([hashtable]$Env) {
@@ -155,6 +163,63 @@ jobs:
           Assert ($out -match '5\.11\.3') "pinned version installed -> $out"
           Assert ((Count-Entry (Get-RawUserPath) $customDir) -eq 1) 'custom dir in user PATH exactly once'
 
-          Write-Host '--- 7. irm returns release assets as text, so `irm ... | iex` works'
-          $body = Invoke-RestMethod https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh
-          Assert ($body -is [string] -and $body.StartsWith('#!')) "irm on a release asset returns $($body.GetType().FullName)"
+          Write-Host '--- 7. an existing REG_SZ user PATH keeps its kind'
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+          $key.SetValue('Path', (Get-RawUserPath), 'String')
+          $key.Close()
+          $szDir = Join-Path $env:RUNNER_TEMP 'cc-switch-sz'
+          $r = Invoke-Installer @{ CC_SWITCH_INSTALL_DIR = $szDir }
+          Assert ($r.Code -eq 0) 'install with a REG_SZ user PATH succeeds'
+          Assert ((Get-UserPathKind) -eq 'String') 'user PATH stays REG_SZ'
+          Assert ((Count-Entry (Get-RawUserPath) $szDir) -eq 1) 'dir added to the REG_SZ PATH exactly once'
+
+          Write-Host '--- 7b. a failed PATH broadcast only warns'
+          # A same-named type without SendMessageTimeout makes the broadcast call throw.
+          $bcDir = Join-Path $env:RUNNER_TEMP 'cc-switch-broadcast'
+          $env:CC_SWITCH_INSTALL_DIR = $bcDir
+          $ErrorActionPreference = 'Continue'
+          $output = & $hostExe -NoProfile -NonInteractive -Command "Add-Type -TypeDefinition 'namespace CcSwitchInstaller { public static class Native {} }'; & '$script'" *>&1 | Out-String
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          $env:CC_SWITCH_INSTALL_DIR = $null
+          Write-Host $output
+          Assert ($code -eq 0) 'install still succeeds when the broadcast fails'
+          Assert ($output -match 'Could not notify') 'broadcast failure is reported as a warning'
+          Assert ($output -match 'cc-switch \d+\.\d+\.\d+') 'cc-switch --version still ran'
+          Assert ((Count-Entry (Get-RawUserPath) $bcDir) -eq 1) 'dir still added to user PATH'
+
+          Write-Host '--- 8. a missing user PATH value is created as REG_EXPAND_SZ'
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+          $savedPath = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          $key.DeleteValue('Path')
+          $key.Close()
+          $newDir = Join-Path $env:RUNNER_TEMP 'cc-switch-nopath'
+          $r = Invoke-Installer @{ CC_SWITCH_INSTALL_DIR = $newDir }
+          Assert ($r.Code -eq 0) 'install without a user PATH value succeeds'
+          Assert ((Get-UserPathKind) -eq 'ExpandString') 'new user PATH is REG_EXPAND_SZ'
+          Assert ((Get-RawUserPath) -eq $newDir) "user PATH is just the install dir -> $(Get-RawUserPath)"
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+          $key.SetValue('Path', "$savedPath;$newDir", 'ExpandString')
+          $key.Close()
+
+          Write-Host '--- 9. a drive root keeps its trailing backslash'
+          $root = "$env:SystemDrive\"
+          foreach ($i in 1, 2) {
+            $r = Invoke-Installer @{ CC_SWITCH_INSTALL_DIR = $root; CC_SWITCH_FORCE = '1' }
+            Assert ($r.Code -eq 0) "drive root install run $i succeeds"
+          }
+          $entries = @((Get-RawUserPath) -split ';')
+          Assert ($entries -contains $root) "user PATH has the entry $root"
+          Assert (-not ($entries -contains $env:SystemDrive)) "user PATH has no bare $env:SystemDrive entry"
+          Assert ((Count-Entry (Get-RawUserPath) $root) -eq 1) 'drive root in user PATH exactly once after two runs'
+          Remove-Item -LiteralPath (Join-Path $root 'cc-switch.exe') -Force
+
+          Write-Host '--- 10. the README one-liner, pointed at this commit instead of main'
+          $line = Get-Content README.md | Where-Object { $_ -like 'irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1*' }
+          Assert (@($line).Count -eq 1) "README.md has the one-liner: $line"
+          $command = $line.Replace('SaladDay/cc-switch-cli/main/', "$env:SCRIPT_REPO/$env:SCRIPT_SHA/")
+          Write-Host "running: $command"
+          $readmeDir = Join-Path $env:RUNNER_TEMP 'cc-switch-readme'
+          $env:CC_SWITCH_INSTALL_DIR = $readmeDir
+          try { Invoke-Expression $command } finally { $env:CC_SWITCH_INSTALL_DIR = $null }
+          Assert ((Get-FileHash (Join-Path $readmeDir 'cc-switch.exe')).Hash -eq $hash) 'README command installed the latest release'

@@ -193,10 +193,12 @@ curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/in
 Windows（PowerShell、管理者権限は不要）：
 
 ```powershell
-irm https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
 ```
 
 `cc-switch.exe` は `%LOCALAPPDATA%\cc-switch` にインストールされ、そのディレクトリがユーザー PATH に追加されます。`CC_SWITCH_INSTALL_DIR` と `CC_SWITCH_FORCE=1` は上記と同じように使えます。特定のリリースをインストールするには `CC_SWITCH_VERSION`（例：`v5.11.4`）を設定してください。
+
+以前に `cc-switch.exe` を `C:\Windows\System32` にコピーした場合は、そのコピーを削除してください（管理者ターミナルで実行）。削除しないと、新しくインストールしたものより優先されます。
 
 <details>
 <summary>手動インストール</summary>

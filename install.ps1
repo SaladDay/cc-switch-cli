@@ -1,5 +1,5 @@
 # Install cc-switch on Windows without administrator rights:
-#   irm https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
 #
 # Environment overrides (same names as install.sh where they overlap):
 #   CC_SWITCH_INSTALL_DIR  install directory (default: %LOCALAPPDATA%\cc-switch)
@@ -32,7 +32,8 @@ function Install-CcSwitch {
     if ([string]::IsNullOrWhiteSpace($installDir)) {
         $installDir = Join-Path $env:LOCALAPPDATA 'cc-switch'
     }
-    $installDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($installDir).TrimEnd('\')
+    $installDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($installDir)
+    if ($installDir -notmatch '^[A-Za-z]:\\$') { $installDir = $installDir.TrimEnd('\') }
     $target = Join-Path $installDir $binName
 
     $version = $env:CC_SWITCH_VERSION
@@ -93,12 +94,12 @@ function Install-CcSwitch {
         # --- install ---
         New-Item -ItemType Directory -Path $installDir -Force | Out-Null
         $staged = "$target.new"
-        Copy-Item -LiteralPath $extracted -Destination $staged -Force
         try {
+            Copy-Item -LiteralPath $extracted -Destination $staged -Force
             Move-Item -LiteralPath $staged -Destination $target -Force
         } catch {
             Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-            throw "Could not replace $target ($($_.Exception.Message)). It is probably in use: close every running cc-switch and try again. Nothing was overwritten."
+            throw "Could not replace $target ($($_.Exception.Message)). If it is in use, close every running cc-switch and try again. Nothing was overwritten."
         }
         Write-Info "Installed cc-switch to $target"
     } finally {
@@ -107,35 +108,40 @@ function Install-CcSwitch {
 
     # --- user PATH ---
     # Read the raw registry value so entries such as %USERPROFILE%\bin stay
-    # unexpanded, and write it back as REG_EXPAND_SZ.
+    # unexpanded, and write it back with its existing kind (REG_EXPAND_SZ if new).
     $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
     try {
         $userPath = [string]$envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         $entries = @($userPath -split ';' | Where-Object { $_ -ne '' })
         $present = $entries | Where-Object {
-            [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -eq $installDir
+            [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -eq $installDir.TrimEnd('\')
         }
         if ($present) {
             Write-Info "$installDir is already in your user PATH"
         } else {
-            $envKey.SetValue('Path', (($entries + $installDir) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            $kind = if ($null -ne $envKey.GetValue('Path')) { $envKey.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+            $envKey.SetValue('Path', (($entries + $installDir) -join ';'), $kind)
             Write-Info "Added $installDir to your user PATH"
             # Tell Explorer and new terminals that the environment changed.
-            if (-not ('CcSwitchInstaller.Native' -as [type])) {
-                Add-Type -Namespace CcSwitchInstaller -Name Native -MemberDefinition @'
+            try {
+                if (-not ('CcSwitchInstaller.Native' -as [type])) {
+                    Add-Type -Namespace CcSwitchInstaller -Name Native -MemberDefinition @'
 [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
 public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
 '@
+                }
+                $result = [UIntPtr]::Zero
+                [void][CcSwitchInstaller.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+            } catch {
+                Write-Warn "Could not notify other programs about the PATH change ($($_.Exception.Message)). Sign out and back in if new terminals cannot find cc-switch."
             }
-            $result = [UIntPtr]::Zero
-            [void][CcSwitchInstaller.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
         }
     } finally {
         $envKey.Close()
     }
 
     $sessionEntries = @($env:Path -split ';' | ForEach-Object { $_.TrimEnd('\') })
-    if ($sessionEntries -notcontains $installDir) {
+    if ($sessionEntries -notcontains $installDir.TrimEnd('\')) {
         $env:Path = "$($env:Path.TrimEnd(';'));$installDir"
     }
 

@@ -187,10 +187,12 @@ This installs `cc-switch` to `~/.local/bin`. Set `CC_SWITCH_INSTALL_DIR` to chan
 Windows (PowerShell, no administrator rights needed):
 
 ```powershell
-irm https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/SaladDay/cc-switch-cli/main/install.ps1 | iex
 ```
 
 This installs `cc-switch.exe` to `%LOCALAPPDATA%\cc-switch` and adds that directory to your user PATH. `CC_SWITCH_INSTALL_DIR` and `CC_SWITCH_FORCE=1` work the same way as above. Set `CC_SWITCH_VERSION` (for example `v5.11.4`) to install a specific release.
+
+If you previously copied `cc-switch.exe` into `C:\Windows\System32`, delete that copy (from an administrator terminal); otherwise it takes precedence over the new install.
 
 <details>
 <summary>Manual Installation</summary>
