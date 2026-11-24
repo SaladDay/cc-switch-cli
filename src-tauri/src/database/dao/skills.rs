@@ -153,6 +153,22 @@ impl Database {
         Ok(())
     }
 
+    /// 来自非 GitHub 仓库（上游 v27 `repo_host`）的 Skill ID；CLI 不能更新它们。
+    pub fn non_github_skill_ids(&self) -> Result<std::collections::HashSet<String>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM skills WHERE COALESCE(repo_host, 'github.com') <> 'github.com'",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(ids)
+    }
+
     /// 删除 Skill
     pub fn delete_skill(&self, id: &str) -> Result<bool, AppError> {
         let conn = lock_conn!(self.conn);
@@ -201,12 +217,15 @@ impl Database {
 
     // ========== SkillRepo CRUD（保持原有） ==========
 
-    /// 获取所有 Skill 仓库
+    /// 获取所有 GitHub Skill 仓库
+    ///
+    /// CLI 只会访问 GitHub；桌面端同步来的 GitLab 等仓库留在库里但不在 CLI 中使用。
     pub fn get_skill_repos(&self) -> Result<Vec<SkillRepo>, AppError> {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn
             .prepare(
-                "SELECT owner, name, branch, enabled FROM skill_repos ORDER BY owner ASC, name ASC",
+                "SELECT owner, name, branch, enabled FROM skill_repos
+                 WHERE host = 'github.com' ORDER BY owner ASC, name ASC",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
 

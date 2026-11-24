@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Database / Compatibility**: Support upstream database schema 27 for local startup and WebDAV/S3 restore, including snapshots from CC Switch desktop v4.0.36 through v4.0.40, fixing `Remote database schema is too new (27); this app supports up to 26`. Preserve the upstream skill repository host columns through migrations, CLI edits and sync round-trips. Addresses [#576](https://github.com/SaladDay/cc-switch-cli/issues/576).
+- **Database / Compatibility**: Support upstream database schema 27 for local startup and WebDAV/S3 restore, including snapshots from CC Switch desktop v4.0.34 through v4.0.40, fixing `Remote database schema is too new (27); this app supports up to 26`. Preserve the upstream skill repository host columns through migrations, CLI edits and sync round-trips. Addresses [#576](https://github.com/SaladDay/cc-switch-cli/issues/576).
 
 ### Upgrade notes
 

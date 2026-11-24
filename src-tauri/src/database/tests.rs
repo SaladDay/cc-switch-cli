@@ -2692,12 +2692,17 @@ fn skill_repo_save_preserves_upstream_host() {
         .expect("seed GitLab repo");
     }
 
-    // A CLI round trip (`load_index` -> edit -> `save_index`) re-saves every repo
-    // with the four CLI-managed fields only; the upstream host must survive.
-    let repos = db.get_skill_repos().expect("load repos");
-    assert_eq!(repos.len(), 1);
-    let mut repo = repos.into_iter().next().expect("one repo");
-    repo.enabled = true;
+    // The CLI only talks to GitHub, so non-GitHub repos are hidden from it.
+    assert!(db.get_skill_repos().expect("load repos").is_empty());
+
+    // Saving the same owner/name writes the four CLI-managed fields only;
+    // the upstream host must survive.
+    let repo = crate::services::skill::SkillRepo {
+        owner: "group/subgroup".to_string(),
+        name: "skills".to_string(),
+        branch: "develop".to_string(),
+        enabled: true,
+    };
     db.save_skill_repo(&repo).expect("save repo");
 
     let conn = db.conn.lock().expect("lock conn");
