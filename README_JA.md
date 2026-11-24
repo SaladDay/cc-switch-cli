@@ -177,9 +177,9 @@ macOS/Linux では、`start codex` に `--shared-sessions` を追加すると、
 
 ## 📥 インストール
 
-### 方法 1：クイックインストール（macOS / Linux）
+### 方法 1：クイックインストール
 
-> Windows ユーザーは、以下の「手動インストール」をご覧ください。
+macOS / Linux：
 
 ```bash
 curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
@@ -189,6 +189,14 @@ curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/in
 
 - インストール先にファイルが存在する場合、TTY では確認を求めます。非対話型シェルでは、`CC_SWITCH_FORCE=1` が設定されていない限り上書きしません。
 - Linux の自動モードは静的リンクされた musl ビルドを使用し、glibc にはフォールバックしません。互換性のある glibc ビルドが明示的に必要な場合のみ、`CC_SWITCH_LINUX_LIBC=glibc` を設定してください。
+
+Windows（PowerShell、管理者権限は不要）：
+
+```powershell
+irm https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.ps1 | iex
+```
+
+`cc-switch.exe` は `%LOCALAPPDATA%\cc-switch` にインストールされ、そのディレクトリがユーザー PATH に追加されます。`CC_SWITCH_INSTALL_DIR` と `CC_SWITCH_FORCE=1` は上記と同じように使えます。特定のリリースをインストールするには `CC_SWITCH_VERSION`（例：`v5.11.4`）を設定してください。
 
 <details>
 <summary>手動インストール</summary>
@@ -244,10 +252,7 @@ sudo mv cc-switch /usr/local/bin/
 # ZIP ファイルをダウンロード
 # https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
 
-# 展開後、cc-switch.exe を PATH に含まれるディレクトリへ移動（例）：
-move cc-switch.exe C:\Windows\System32\
-
-# または直接実行
+# 展開後、直接実行
 .\cc-switch.exe
 ```
 

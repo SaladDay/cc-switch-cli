@@ -1,0 +1,139 @@
+name: Install script
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "install.ps1"
+      - ".github/workflows/install-script.yml"
+  pull_request:
+    paths:
+      - "install.ps1"
+      - ".github/workflows/install-script.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-install-ps1:
+    name: install.ps1 (${{ matrix.shell }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Smoke test install.ps1 against the latest release
+        run: |
+          # Runs the checked-out script against real release assets. The runner
+          # is ephemeral, so the user PATH and %LOCALAPPDATA% changes are discarded.
+          $ErrorActionPreference = 'Stop'
+          $PSVersionTable.PSVersion.ToString()
+          $script = Join-Path $PWD 'install.ps1'
+          $hostExe = (Get-Process -Id $PID).Path
+          $target = Join-Path $env:LOCALAPPDATA 'cc-switch\cc-switch.exe'
+          $installDir = Split-Path $target
+
+          function Assert([bool]$Condition, [string]$Message) {
+            if (-not $Condition) { throw "ASSERTION FAILED: $Message" }
+            Write-Host "ok: $Message"
+          }
+          function Get-RawUserPath {
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+            try { [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames') } finally { $key.Close() }
+          }
+          function Get-UserPathKind {
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+            try { $key.GetValueKind('Path') } finally { $key.Close() }
+          }
+          function Count-Entry([string]$Raw, [string]$Dir) {
+            @($Raw -split ';' | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -eq $Dir }).Count
+          }
+          # Run the installer in a separate non-interactive process with extra env vars.
+          function Invoke-Installer([hashtable]$Env) {
+            $saved = @{}
+            foreach ($name in $Env.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $Env[$name]) }
+            $ErrorActionPreference = 'Continue'
+            try {
+              $output = & $hostExe -NoProfile -NonInteractive -File $script *>&1 | Out-String
+              $code = $LASTEXITCODE
+            } finally {
+              foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+            }
+            Write-Host $output
+            [pscustomobject]@{ Code = $code; Output = $output }
+          }
+
+          # Seed the user PATH with an unexpanded entry that must survive untouched.
+          $seed = '%USERPROFILE%\cc-switch-smoke-bin'
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+          $before = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          $key.SetValue('Path', (@($before -split ';' | Where-Object { $_ }) + $seed) -join ';', 'ExpandString')
+          $key.Close()
+          Assert (-not (Test-Path $target)) 'no prior installation'
+
+          Write-Host '--- 1. fresh install via iex, the way the README runs it'
+          $eapBefore = $ErrorActionPreference
+          Invoke-Expression (Get-Content -Raw $script)
+          Assert (Test-Path $target) "cc-switch.exe installed at $target"
+          $raw = Get-RawUserPath
+          Write-Host "user PATH (raw): $raw"
+          Assert ($raw -like "*$seed*") 'unexpanded %USERPROFILE% entry preserved'
+          Assert ((Get-UserPathKind) -eq 'ExpandString') 'user PATH stays REG_EXPAND_SZ'
+          Assert ((Count-Entry $raw $installDir) -eq 1) 'install dir is in user PATH exactly once'
+          Assert ((Get-Command cc-switch).Path -eq $target) 'current session resolves cc-switch to the installed exe'
+          Assert ($ErrorActionPreference -eq $eapBefore) 'iex did not change the caller ErrorActionPreference'
+          $version = cc-switch --version
+          Assert ($LASTEXITCODE -eq 0 -and $version -match '\d+\.\d+\.\d+') "cc-switch --version -> $version"
+          $hash = (Get-FileHash $target).Hash
+
+          Write-Host '--- 2. non-interactive rerun without CC_SWITCH_FORCE refuses to overwrite'
+          $stamp = (Get-Item $target).LastWriteTimeUtc
+          $r = Invoke-Installer @{}
+          Assert ($r.Code -ne 0) 'rerun exits non-zero'
+          Assert ($r.Output -match 'Nothing was overwritten') 'rerun explains that nothing was overwritten'
+          Assert ((Get-Item $target).LastWriteTimeUtc -eq $stamp -and (Get-FileHash $target).Hash -eq $hash) 'existing exe untouched'
+
+          Write-Host '--- 3. CC_SWITCH_FORCE=1 overwrites a stale exe and keeps PATH deduplicated'
+          Set-Content -Path $target -Value 'stale'
+          $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' }
+          Assert ($r.Code -eq 0) 'forced rerun succeeds'
+          Assert ((Get-FileHash $target).Hash -eq $hash) 'stale exe replaced with the release binary'
+          $raw = Get-RawUserPath
+          Assert ((Count-Entry $raw $installDir) -eq 1) 'install dir still in user PATH exactly once'
+          Assert ($raw -like "*$seed*") 'unexpanded entry still preserved'
+
+          Write-Host '--- 4. locked exe gives a clear error and leaves the old file'
+          $lock = [IO.File]::Open($target, 'Open', 'Read', 'None')
+          try { $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' } } finally { $lock.Close() }
+          Assert ($r.Code -ne 0) 'install over a locked exe exits non-zero'
+          Assert ($r.Output -match 'in use') 'error says the exe is in use'
+          Assert ((Get-FileHash $target).Hash -eq $hash) 'locked exe untouched'
+          Assert (-not (Test-Path "$target.new")) 'no staged .new file left behind'
+
+          Write-Host '--- 5. download failure gives a clear error and installs nothing'
+          $badDir = Join-Path $env:RUNNER_TEMP 'cc-switch-bad'
+          $r = Invoke-Installer @{ CC_SWITCH_INSTALL_DIR = $badDir; CC_SWITCH_VERSION = 'v0.0.0-does-not-exist' }
+          Assert ($r.Code -ne 0) 'missing release exits non-zero'
+          Assert ($r.Output -match 'Download failed') 'error says the download failed'
+          Assert (-not (Test-Path (Join-Path $badDir 'cc-switch.exe'))) 'nothing installed'
+
+          Write-Host '--- 6. CC_SWITCH_INSTALL_DIR and CC_SWITCH_VERSION (without v prefix)'
+          $customDir = Join-Path $env:RUNNER_TEMP 'cc switch custom'
+          $r = Invoke-Installer @{ CC_SWITCH_INSTALL_DIR = $customDir; CC_SWITCH_VERSION = '5.11.3' }
+          Assert ($r.Code -eq 0) 'custom dir install succeeds'
+          $out = & (Join-Path $customDir 'cc-switch.exe') --version
+          Assert ($out -match '5\.11\.3') "pinned version installed -> $out"
+          Assert ((Count-Entry (Get-RawUserPath) $customDir) -eq 1) 'custom dir in user PATH exactly once'
+
+          Write-Host '--- 7. irm returns release assets as text, so `irm ... | iex` works'
+          $body = Invoke-RestMethod https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh
+          Assert ($body -is [string] -and $body.StartsWith('#!')) "irm on a release asset returns $($body.GetType().FullName)"

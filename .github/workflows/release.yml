@@ -321,6 +321,7 @@ jobs:
 
           # Include install script
           cp install.sh release-assets/install.sh
+          cp install.ps1 release-assets/install.ps1
 
           echo "=== Release assets ==="
           ls -lh release-assets/
