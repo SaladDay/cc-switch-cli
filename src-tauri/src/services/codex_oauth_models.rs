@@ -143,7 +143,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn codex_oauth_model_discovery_uses_gpt6_compatible_identity() {
+    fn codex_oauth_model_discovery_uses_current_client_identity() {
         let request = build_models_request(&reqwest::Client::new(), "test-token", "test-account")
             .build()
             .unwrap();
@@ -161,13 +161,27 @@ mod tests {
             .split('.')
             .map(|part| part.parse().unwrap())
             .collect();
-        // Official rust-v0.153.4 catalog: gpt-6-astra requires 0.153.0.
-        assert!(parts.as_slice() >= [0, 153, 0].as_slice());
+        // The catalog gate can exceed a model's advertised minimal_client_version:
+        // GPT-6.2 is absent from the ChatGPT-account catalog below 0.169.0.
+        assert!(parts.as_slice() >= [0, 169, 0].as_slice());
         assert_eq!(request.headers()["version"], version);
         let models = parse_models(json!({"models": [{
             "slug": "gpt-6-astra", "minimal_client_version": "0.153.0"
         }]}));
         assert_eq!(models[0].id, "gpt-6-astra");
+    }
+
+    #[test]
+    fn parse_codex_oauth_models_preserves_gpt_6_2_models() {
+        let models = parse_models(json!({"models": [
+            { "slug": "gpt-6.2-sol", "display_name": "GPT-6.2 Sol" },
+            { "slug": "gpt-6.2-astra", "display_name": "GPT-6.2 Astra" }
+        ]}));
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gpt-6.2-astra");
+        assert_eq!(models[0].owned_by.as_deref(), Some("Codex"));
+        assert_eq!(models[1].id, "gpt-6.2-sol");
     }
 
     #[test]
