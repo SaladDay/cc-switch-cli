@@ -119,6 +119,24 @@ jobs:
           Assert ((Get-FileHash $target).Hash -eq $hash) 'locked exe untouched'
           Assert (-not (Test-Path "$target.new")) 'no staged .new file left behind'
 
+          Write-Host '--- 4b. a running cc-switch.exe gives the same clear error'
+          # Foreground proxy on an ephemeral port, with its config in a sandbox dir.
+          $sandbox = Join-Path $env:RUNNER_TEMP 'cc-switch-sandbox'
+          $savedEnv = @{ CC_SWITCH_CONFIG_DIR = $env:CC_SWITCH_CONFIG_DIR; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME }
+          $env:CC_SWITCH_CONFIG_DIR = "$sandbox\.cc-switch"; $env:USERPROFILE = $sandbox; $env:HOME = $sandbox
+          try {
+            $proc = Start-Process -FilePath $target -ArgumentList 'proxy', 'serve', '--listen-port', '0' -PassThru -WindowStyle Hidden
+          } finally {
+            foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name]) }
+          }
+          Start-Sleep -Seconds 5
+          Assert (-not $proc.HasExited) "cc-switch.exe is running (pid $($proc.Id))"
+          try { $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' } } finally { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; $proc.WaitForExit() }
+          Assert ($r.Code -ne 0) 'install over a running exe exits non-zero'
+          Assert ($r.Output -match 'in use') 'error says the exe is in use'
+          Assert ((Get-FileHash $target).Hash -eq $hash) 'running exe untouched'
+          Assert (-not (Test-Path "$target.new")) 'no staged .new file left behind'
+
           Write-Host '--- 5. download failure gives a clear error and installs nothing'
           $badDir = Join-Path $env:RUNNER_TEMP 'cc-switch-bad'
           $r = Invoke-Installer @{ CC_SWITCH_INSTALL_DIR = $badDir; CC_SWITCH_VERSION = 'v0.0.0-does-not-exist' }
