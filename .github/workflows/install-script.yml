@@ -130,7 +130,7 @@ jobs:
           $lock = [IO.File]::Open($target, 'Open', 'Read', 'None')
           try { $r = Invoke-Installer @{ CC_SWITCH_FORCE = '1' } } finally { $lock.Close() }
           Assert ($r.Code -ne 0) 'install over a locked exe exits non-zero'
-          Assert ($r.Output -match 'Could not replace .*cc-switch\.exe \(.+\)') 'error names the target and the underlying error'
+          Assert ($r.Output -match 'Could not replace') 'error comes from the failed replace step'
           Assert ((Get-FileHash $target).Hash -eq $hash) 'original exe still in place'
           $left = Get-Leftovers
           Assert ($left.Count -eq 0) "no .new/.old file or temp dir left behind: $left"

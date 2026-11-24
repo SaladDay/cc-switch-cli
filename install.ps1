@@ -112,17 +112,17 @@ function Install-CcSwitch {
             if ($hadTarget) { [IO.File]::Move($target, $backup) }
         } catch {
             Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-            throw "Could not replace $target ($($_.Exception.Message)). Close every program using it and try again. Nothing was overwritten."
+            throw "Could not replace $target ($($_.Exception.GetBaseException().Message)). Close every program using it and try again. Nothing was overwritten."
         }
         try {
             [IO.File]::Move($staged, $target)
         } catch {
-            $installError = $_.Exception.Message
+            $installError = $_.Exception.GetBaseException().Message
             if ($hadTarget) {
                 try {
                     [IO.File]::Move($backup, $target)
                 } catch {
-                    throw "Could not install $target ($installError), and restoring the previous version failed ($($_.Exception.Message)). The previous version is at $backup; rename it to $binName."
+                    throw "Could not install $target ($installError), and restoring the previous version failed ($($_.Exception.GetBaseException().Message)). The previous version is at $backup; rename it to $binName."
                 }
             }
             Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
