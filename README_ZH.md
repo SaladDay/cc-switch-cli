@@ -49,6 +49,16 @@
   </tr>
   <tr>
     <td width="180">
+      <a href="https://proxy-seller.com/">
+        <img src="assets/partners/logos/proxy-seller.png" alt="Proxy-Seller" width="150">
+      </a>
+    </td>
+    <td>
+      <a href="https://proxy-seller.com/"><b>Proxy-Seller</b></a> 提供住宅、ISP、数据中心（IPv4/IPv6）和移动代理，支持 API 访问，适用于数据采集、自动化和特定地区的工作流。结账时使用优惠码 <b><code>CCSCLI</code></b>，即可享受 <b>15% 折扣（八五折）</b>。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.openmodel.ai/?ref=JGDNqZl8">
         <img src="assets/partners/logos/openmodel.jpg" alt="OpenModel" width="150">
       </a>

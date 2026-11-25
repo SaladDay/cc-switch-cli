@@ -53,6 +53,16 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
   </tr>
   <tr>
     <td width="180">
+      <a href="https://proxy-seller.com/">
+        <img src="assets/partners/logos/proxy-seller.png" alt="Proxy-Seller" width="150">
+      </a>
+    </td>
+    <td>
+      <a href="https://proxy-seller.com/"><b>Proxy-Seller</b></a>: residential, ISP, datacenter (IPv4/IPv6) and mobile proxies with API access, for scraping, automation and geo-specific workflows. Use code <b><code>CCSCLI</code></b> at checkout for <b>15% off</b>.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.openmodel.ai/?ref=JGDNqZl8">
         <img src="assets/partners/logos/openmodel.jpg" alt="OpenModel" width="150">
       </a>

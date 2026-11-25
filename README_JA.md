@@ -58,6 +58,16 @@
   </tr>
   <tr>
     <td width="180">
+      <a href="https://proxy-seller.com/">
+        <img src="assets/partners/logos/proxy-seller.png" alt="Proxy-Seller" width="150">
+      </a>
+    </td>
+    <td>
+      <a href="https://proxy-seller.com/"><b>Proxy-Seller</b></a> は、API アクセスに対応した住宅用、ISP、データセンター（IPv4/IPv6）、モバイルプロキシを提供しています。スクレイピング、自動化、地域を指定したワークフローに利用できます。決済時にクーポンコード <b><code>CCSCLI</code></b> を入力すると、<b>15% オフ</b>になります。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.openmodel.ai/?ref=JGDNqZl8">
         <img src="assets/partners/logos/openmodel.jpg" alt="OpenModel" width="150">
       </a>
