@@ -997,7 +997,7 @@ mod tests {
     use super::*;
     use crate::config::get_app_config_dir;
     use crate::settings::{get_settings, update_settings, AppSettings};
-    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override, TestEnvGuard};
     use serde_json::json;
     use serial_test::serial;
     use std::collections::HashMap;
@@ -1093,8 +1093,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn missing_config_returns_default_models_object() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         let config = read_openclaw_config().expect("read default config");
@@ -1105,8 +1105,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn read_openclaw_config_accepts_json5_syntax() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         let source = r#"{
@@ -1138,8 +1138,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn read_openclaw_config_does_not_rewrite_string_contents() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         let source = r#"{
@@ -1170,8 +1170,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn set_and_remove_provider_only_touch_target_entry() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         fs::write(
@@ -1201,8 +1201,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn remove_missing_provider_is_noop_and_does_not_create_file() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         let path = get_openclaw_config_path();
@@ -1219,8 +1219,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn remove_last_provider_keeps_empty_providers_map() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         fs::write(
@@ -1247,8 +1247,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn remove_last_provider_rewrites_models_section_like_upstream() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         fs::write(
@@ -1396,8 +1396,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn default_model_round_trip_preserves_existing_providers() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         fs::write(
@@ -1447,8 +1447,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn typed_provider_round_trip_preserves_known_and_unknown_fields() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         let mut model_extra = std::collections::HashMap::new();
@@ -1500,8 +1500,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn get_providers_reads_multiple_json5_entries() {
-        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
+        let _home = TestEnvGuard::isolated(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
         let source = r#"{

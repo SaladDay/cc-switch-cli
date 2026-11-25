@@ -2089,7 +2089,7 @@ mod quick_config_toggle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+    use crate::test_support::TestEnvGuard;
     use std::env;
     use std::ffi::OsString;
     use tempfile::TempDir;
@@ -2397,8 +2397,7 @@ model = "gpt-5.4"
 
     #[test]
     fn get_codex_config_dir_respects_codex_home_env_var_when_directory_exists() {
-        let _guard = lock_test_home_and_settings();
-        set_test_home_override(Some(Path::new("/tmp/codex-home-env-home")));
+        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-home-env-home"));
         let _settings = SettingsGuard::with_codex_config_dir(None);
         let codex_home =
             std::env::temp_dir().join(format!("cc-switch-codex-home-env-{}", std::process::id()));
@@ -2406,14 +2405,11 @@ model = "gpt-5.4"
         let _env = CodexHomeEnvGuard::new(codex_home.to_str());
 
         assert_eq!(get_codex_config_dir(), codex_home);
-
-        set_test_home_override(None);
     }
 
     #[test]
     fn get_codex_config_dir_falls_back_to_home_dot_codex_when_codex_home_unset() {
-        let _guard = lock_test_home_and_settings();
-        set_test_home_override(Some(Path::new("/tmp/codex-default-home")));
+        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-default-home"));
         let _settings = SettingsGuard::with_codex_config_dir(None);
         let _env = CodexHomeEnvGuard::new(None);
 
@@ -2421,14 +2417,11 @@ model = "gpt-5.4"
             get_codex_config_dir(),
             PathBuf::from("/tmp/codex-default-home").join(".codex")
         );
-
-        set_test_home_override(None);
     }
 
     #[test]
     fn get_codex_config_dir_blank_codex_home_uses_settings_override() {
-        let _guard = lock_test_home_and_settings();
-        set_test_home_override(Some(Path::new("/tmp/codex-blank-env-home")));
+        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-blank-env-home"));
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
         let _env = CodexHomeEnvGuard::new(Some("   "));
 
@@ -2436,14 +2429,11 @@ model = "gpt-5.4"
             get_codex_config_dir(),
             PathBuf::from("/tmp/codex-settings-dir")
         );
-
-        set_test_home_override(None);
     }
 
     #[test]
     fn get_codex_config_dir_nonexistent_codex_home_uses_settings_override() {
-        let _guard = lock_test_home_and_settings();
-        set_test_home_override(Some(Path::new("/tmp/codex-nonexistent-env-home")));
+        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-nonexistent-env-home"));
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
         let missing = std::env::temp_dir().join(format!(
             "cc-switch-codex-missing-env-{}",
@@ -2455,14 +2445,11 @@ model = "gpt-5.4"
             get_codex_config_dir(),
             PathBuf::from("/tmp/codex-settings-dir")
         );
-
-        set_test_home_override(None);
     }
 
     #[test]
     fn get_codex_config_dir_file_codex_home_falls_back_to_home_dot_codex() {
-        let _guard = lock_test_home_and_settings();
-        set_test_home_override(Some(Path::new("/tmp/codex-file-env-home")));
+        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-file-env-home"));
         let _settings = SettingsGuard::with_codex_config_dir(None);
         let codex_home_file = std::env::temp_dir().join(format!(
             "cc-switch-codex-home-env-file-{}",
@@ -2477,13 +2464,11 @@ model = "gpt-5.4"
         );
 
         let _ = fs::remove_file(codex_home_file);
-        set_test_home_override(None);
     }
 
     #[test]
     fn get_codex_config_dir_settings_override_takes_precedence_over_codex_home() {
-        let _guard = lock_test_home_and_settings();
-        set_test_home_override(Some(Path::new("/tmp/codex-precedence-home")));
+        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-precedence-home"));
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
         let codex_home = std::env::temp_dir().join(format!(
             "cc-switch-codex-precedence-env-{}",
@@ -2498,7 +2483,6 @@ model = "gpt-5.4"
         );
 
         let _ = fs::remove_dir_all(codex_home);
-        set_test_home_override(None);
     }
 
     #[test]
@@ -3241,11 +3225,10 @@ model_catalog_json = "my-custom-catalog.json"
         seed_model_cache: bool,
         model_id: &str,
     ) {
-        let _guard = lock_test_home_and_settings();
         let temp_home = TempDir::new().expect("create temp home");
         let codex_dir = temp_home.path().join(".codex");
         fs::create_dir_all(&codex_dir).expect("create codex dir");
-        set_test_home_override(Some(temp_home.path()));
+        let _home = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_codex_config_dir(Some(codex_dir.to_str().unwrap()));
         let _env = CodexHomeEnvGuard::new(None);
 
@@ -3323,8 +3306,6 @@ wire_api = "responses"
                 .and_then(Value::as_str),
             Some(model_id)
         );
-
-        set_test_home_override(None);
     }
 
     #[test]

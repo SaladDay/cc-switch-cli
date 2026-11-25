@@ -5465,6 +5465,8 @@ experimental_bearer_token = "PROXY_MANAGED"
     #[tokio::test]
     #[serial]
     async fn disabling_global_proxy_clears_auto_failover_and_reports_count() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = TestHomeEnvGuard::set(temp_home.path());
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
         save_queue_provider(&db, "claude", "claude-p1");
@@ -6608,6 +6610,8 @@ base_url = "https://api.openai.com/v1"
     #[tokio::test]
     #[serial]
     async fn foreground_runtime_start_and_stop_syncs_global_proxy_switch() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = TestHomeEnvGuard::set(temp_home.path());
         let db = Arc::new(Database::memory().expect("create database"));
         seed_proxy_flags_raw(&db, "claude", false, true);
         let service = ProxyService::new(db.clone());
@@ -6657,6 +6661,8 @@ base_url = "https://api.openai.com/v1"
     #[tokio::test]
     #[serial]
     async fn managed_external_runtime_does_not_publish_session_before_ready_signal() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = TestHomeEnvGuard::set(temp_home.path());
         let _env = ManagedRuntimeEnvGuard::set("test-managed-session-token");
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
@@ -6951,6 +6957,8 @@ base_url = "https://api.openai.com/v1"
     #[tokio::test]
     #[serial]
     async fn managed_external_runtime_publishes_session_when_ready_signal_is_sent() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = TestHomeEnvGuard::set(temp_home.path());
         let _env = ManagedRuntimeEnvGuard::set("test-managed-session-token");
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
@@ -7065,6 +7073,8 @@ base_url = "https://api.openai.com/v1"
     #[tokio::test]
     #[serial]
     async fn proxy_config_update_waits_for_shared_restore_guard() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = TestHomeEnvGuard::set(temp_home.path());
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
 
@@ -7303,6 +7313,8 @@ base_url = "https://api.openai.com/v1"
     #[tokio::test]
     #[serial]
     async fn hot_updating_running_breaker_configs_refreshes_existing_breakers() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = TestHomeEnvGuard::set(temp_home.path());
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
 
@@ -7371,6 +7383,8 @@ base_url = "https://api.openai.com/v1"
     #[tokio::test]
     #[serial]
     async fn resetting_running_provider_breaker_clears_existing_breaker_state() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = TestHomeEnvGuard::set(temp_home.path());
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
 

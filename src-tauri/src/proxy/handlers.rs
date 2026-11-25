@@ -1345,6 +1345,7 @@ mod tests {
         handle_responses_compact, responses_sse_to_response_value,
         should_use_claude_transform_streaming,
     };
+    use crate::test_support::TestEnvGuard;
     use crate::{
         app_config::AppType,
         database::Database,
@@ -1369,57 +1370,23 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
     use serde_json::{json, Value};
-    use std::{collections::HashMap, env, sync::Arc, time::Duration};
+    use std::{collections::HashMap, sync::Arc, time::Duration};
     use tempfile::TempDir;
     use tokio::sync::RwLock;
 
     struct TempHome {
-        #[allow(dead_code)]
-        dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
-        original_config_dir: Option<String>,
+        _env: TestEnvGuard,
+        _dir: TempDir,
     }
 
     impl TempHome {
         fn new() -> Self {
             let dir = TempDir::new().expect("create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
-            let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
-
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
-            crate::settings::reload_test_settings();
-
+            let env = TestEnvGuard::isolated(dir.path());
             Self {
-                dir,
-                original_home,
-                original_userprofile,
-                original_config_dir,
+                _env: env,
+                _dir: dir,
             }
-        }
-    }
-
-    impl Drop for TempHome {
-        fn drop(&mut self) {
-            match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-
-            match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
-            }
-
-            match &self.original_config_dir {
-                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
-            }
-
-            crate::settings::reload_test_settings();
         }
     }
 
