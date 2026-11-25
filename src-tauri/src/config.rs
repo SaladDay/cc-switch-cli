@@ -749,7 +749,7 @@ fn normalized_absolute_path(path: &Path) -> Result<PathBuf, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override, TestEnvGuard};
     use std::ffi::OsString;
 
     struct ConfigDirEnvGuard {
@@ -888,59 +888,45 @@ mod tests {
 
     #[test]
     fn get_claude_config_dir_ignores_blank_env_var() {
-        let _guard = lock_test_home_and_settings();
+        let home = tempfile::tempdir().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_claude_config_dir(None);
         let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("   "));
-        set_test_home_override(Some(Path::new("/tmp/claude-home-blank")));
 
-        assert_eq!(
-            get_claude_config_dir(),
-            PathBuf::from("/tmp/claude-home-blank").join(".claude")
-        );
-
-        set_test_home_override(None);
+        assert_eq!(get_claude_config_dir(), home.path().join(".claude"));
     }
 
     #[test]
     fn get_claude_config_dir_falls_back_to_default_when_nothing_set() {
-        let _guard = lock_test_home_and_settings();
+        let home = tempfile::tempdir().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_claude_config_dir(None);
         let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", None);
-        set_test_home_override(Some(Path::new("/tmp/default-home")));
 
-        assert_eq!(
-            get_claude_config_dir(),
-            PathBuf::from("/tmp/default-home").join(".claude")
-        );
-
-        set_test_home_override(None);
+        assert_eq!(get_claude_config_dir(), home.path().join(".claude"));
     }
 
     #[test]
     fn get_claude_config_dir_env_overrides_settings() {
-        let _guard = lock_test_home_and_settings();
+        let home = tempfile::tempdir().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_claude_config_dir(Some("/tmp/settings-override"));
         let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("/tmp/env-override"));
-        set_test_home_override(Some(Path::new("/tmp/home")));
 
         assert_eq!(get_claude_config_dir(), PathBuf::from("/tmp/env-override"));
-
-        set_test_home_override(None);
     }
 
     #[test]
     fn get_claude_config_dir_blank_env_falls_back_to_settings() {
-        let _guard = lock_test_home_and_settings();
+        let home = tempfile::tempdir().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_claude_config_dir(Some("/tmp/settings-override"));
         let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("   "));
-        set_test_home_override(Some(Path::new("/tmp/home")));
 
         assert_eq!(
             get_claude_config_dir(),
             PathBuf::from("/tmp/settings-override")
         );
-
-        set_test_home_override(None);
     }
 
     #[test]

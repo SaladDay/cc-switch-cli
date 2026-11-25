@@ -390,69 +390,26 @@ impl ProxyServer {
 mod tests {
     use super::*;
 
+    use crate::test_support::TestEnvGuard;
     use serde_json::json;
     use serial_test::serial;
-    use std::env;
     use tempfile::TempDir;
 
     struct TempHome {
-        #[allow(dead_code)]
-        dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
-        original_config_dir: Option<String>,
-        original_codex_home: Option<String>,
+        _env: TestEnvGuard,
+        _dir: TempDir,
     }
 
     impl TempHome {
         fn new() -> Self {
             let dir = TempDir::new().expect("create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
-            let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
-            let original_codex_home = env::var("CODEX_HOME").ok();
-            let codex_home = dir.path().join(".codex");
-            std::fs::create_dir_all(&codex_home).expect("create temporary Codex home");
-
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
-            env::set_var("CODEX_HOME", codex_home);
-            crate::settings::reload_test_settings();
-
+            std::fs::create_dir_all(dir.path().join(".codex"))
+                .expect("create temporary Codex home");
+            let env = TestEnvGuard::isolated(dir.path());
             Self {
-                dir,
-                original_home,
-                original_userprofile,
-                original_config_dir,
-                original_codex_home,
+                _env: env,
+                _dir: dir,
             }
-        }
-    }
-
-    impl Drop for TempHome {
-        fn drop(&mut self) {
-            match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-
-            match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
-            }
-
-            match &self.original_config_dir {
-                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
-            }
-
-            match &self.original_codex_home {
-                Some(value) => env::set_var("CODEX_HOME", value),
-                None => env::remove_var("CODEX_HOME"),
-            }
-
-            crate::settings::reload_test_settings();
         }
     }
 
