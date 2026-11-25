@@ -2736,6 +2736,53 @@ fn skill_repo_save_preserves_upstream_host() {
 }
 
 #[test]
+fn adding_a_github_repo_takes_over_a_hidden_non_github_row() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "INSERT INTO skill_repos (owner, name, branch, enabled, host)
+             VALUES ('acme', 'skills', 'develop', 0, 'gitlab.com')",
+            [],
+        )
+        .expect("seed GitLab repo");
+    }
+    assert!(db.get_skill_repos().expect("load repos").is_empty());
+
+    let repo = crate::services::skill::SkillRepo {
+        owner: "acme".to_string(),
+        name: "skills".to_string(),
+        branch: "main".to_string(),
+        enabled: true,
+    };
+    db.add_github_skill_repo(&repo).expect("add repo");
+
+    let repos = db.get_skill_repos().expect("load repos after add");
+    assert_eq!(repos.len(), 1, "the added repo must be visible to the CLI");
+    assert_eq!((repos[0].branch.as_str(), repos[0].enabled), ("main", true));
+}
+
+#[test]
+fn default_skill_repos_are_not_seeded_over_non_github_repos() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "INSERT INTO skill_repos (owner, name, branch, enabled, host)
+             VALUES ('acme', 'skills', 'main', 1, 'gitlab.com')",
+            [],
+        )
+        .expect("seed GitLab repo");
+    }
+
+    assert_eq!(db.init_default_skill_repos().expect("initialize repos"), 0);
+    assert!(db.get_skill_repos().expect("get repos").is_empty());
+    assert!(db
+        .get_bool_flag("default_skill_repos_initialized")
+        .expect("get initialized flag"));
+}
+
+#[test]
 fn schema_create_tables_repairs_legacy_proxy_config_singleton_to_per_app() {
     let conn = Connection::open_in_memory().expect("open memory db");
 

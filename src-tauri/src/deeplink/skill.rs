@@ -43,7 +43,7 @@ pub fn import_skill_from_deeplink(
     };
 
     // Save using Database
-    state.db.save_skill_repo(&repo)?;
+    state.db.add_github_skill_repo(&repo)?;
 
     log::info!("Successfully added skill repo '{owner}/{name}'");
 

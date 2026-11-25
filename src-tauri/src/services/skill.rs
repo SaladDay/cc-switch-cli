@@ -2902,7 +2902,7 @@ impl SkillService {
 
     pub fn upsert_repo(repo: SkillRepo) -> Result<(), AppError> {
         let _state_guard = skill_state_write_guard();
-        Database::init()?.save_skill_repo(&repo)
+        Database::init()?.add_github_skill_repo(&repo)
     }
 
     pub fn remove_repo(owner: &str, name: &str) -> Result<(), AppError> {
@@ -2963,14 +2963,17 @@ impl SkillService {
         app: &AppType,
     ) -> Result<Option<InstalledSkill>, AppError> {
         let db = Database::init()?;
+        let non_github = db.non_github_skill_ids()?;
         for existing in db.get_all_installed_skills()?.values() {
             if !existing.directory.eq_ignore_ascii_case(install_name) {
                 continue;
             }
 
+            // CLI 只从 GitHub 安装；同 owner/name 但来自其他主机的不是同一个仓库。
             let same_repo = existing.repo_owner.as_deref()
                 == Some(discoverable.repo_owner.as_str())
-                && existing.repo_name.as_deref() == Some(discoverable.repo_name.as_str());
+                && existing.repo_name.as_deref() == Some(discoverable.repo_name.as_str())
+                && !non_github.contains(&existing.id);
             if !same_repo {
                 let existing_repo = format!(
                     "{}/{}",
@@ -4698,6 +4701,74 @@ mod tests {
             1,
             "conflicting install must not add another record"
         );
+    }
+
+    fn seed_gitlab_skill(db: &Database) -> InstalledSkill {
+        let mut skill = poisoned_skill("acme/skills:demo", "demo");
+        skill.name = "Demo".to_string();
+        skill.repo_owner = Some("acme".to_string());
+        skill.repo_name = Some("skills".to_string());
+        skill.repo_branch = Some("main".to_string());
+        db.save_skill(&skill).expect("save GitLab Skill");
+        db.conn
+            .lock()
+            .expect("lock conn")
+            .execute(
+                "UPDATE skills SET repo_host = 'gitlab.com' WHERE id = ?1",
+                [&skill.id],
+            )
+            .expect("mark Skill as GitLab");
+        skill
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_check_and_update_skip_non_github_skills() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init().expect("initialize isolated database");
+        let skill = seed_gitlab_skill(&db);
+        let service = SkillService::new().expect("create Skill service");
+
+        let check = service.check_updates().await.expect("check updates");
+        assert!(check.updates.is_empty() && check.failures.is_empty());
+
+        let result = service.update_skills(std::slice::from_ref(&skill.id)).await;
+        assert!(result.updated.is_empty());
+        assert_eq!(result.failures.len(), 1);
+        assert!(
+            result.failures[0].error.contains("non-GitHub"),
+            "unexpected error: {}",
+            result.failures[0].error
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn install_does_not_reuse_a_non_github_skill_with_the_same_repo() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init().expect("initialize isolated database");
+        for mut repo in SkillStore::default().repos {
+            repo.enabled = false;
+            db.save_skill_repo(&repo)
+                .expect("disable default repository");
+        }
+        let skill = seed_gitlab_skill(&db);
+
+        let error = SkillService::new()
+            .expect("create Skill service")
+            .install("acme/skills:demo", &AppType::Codex)
+            .await
+            .expect_err("a GitLab Skill must not be reused for a GitHub install");
+        assert!(
+            error.to_string().contains("SKILL_DIRECTORY_CONFLICT"),
+            "unexpected error: {error}"
+        );
+
+        let stored = db
+            .get_installed_skill(&skill.id)
+            .expect("load Skill")
+            .expect("find Skill");
+        assert!(!stored.apps.codex, "the GitLab Skill must stay untouched");
     }
 
     #[test]
