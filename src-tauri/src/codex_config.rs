@@ -2397,7 +2397,8 @@ model = "gpt-5.4"
 
     #[test]
     fn get_codex_config_dir_respects_codex_home_env_var_when_directory_exists() {
-        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-home-env-home"));
+        let home = TempDir::new().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_codex_config_dir(None);
         let codex_home =
             std::env::temp_dir().join(format!("cc-switch-codex-home-env-{}", std::process::id()));
@@ -2409,19 +2410,18 @@ model = "gpt-5.4"
 
     #[test]
     fn get_codex_config_dir_falls_back_to_home_dot_codex_when_codex_home_unset() {
-        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-default-home"));
+        let home = TempDir::new().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_codex_config_dir(None);
         let _env = CodexHomeEnvGuard::new(None);
 
-        assert_eq!(
-            get_codex_config_dir(),
-            PathBuf::from("/tmp/codex-default-home").join(".codex")
-        );
+        assert_eq!(get_codex_config_dir(), home.path().join(".codex"));
     }
 
     #[test]
     fn get_codex_config_dir_blank_codex_home_uses_settings_override() {
-        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-blank-env-home"));
+        let home = TempDir::new().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
         let _env = CodexHomeEnvGuard::new(Some("   "));
 
@@ -2433,7 +2433,8 @@ model = "gpt-5.4"
 
     #[test]
     fn get_codex_config_dir_nonexistent_codex_home_uses_settings_override() {
-        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-nonexistent-env-home"));
+        let home = TempDir::new().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
         let missing = std::env::temp_dir().join(format!(
             "cc-switch-codex-missing-env-{}",
@@ -2449,7 +2450,8 @@ model = "gpt-5.4"
 
     #[test]
     fn get_codex_config_dir_file_codex_home_falls_back_to_home_dot_codex() {
-        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-file-env-home"));
+        let home = TempDir::new().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_codex_config_dir(None);
         let codex_home_file = std::env::temp_dir().join(format!(
             "cc-switch-codex-home-env-file-{}",
@@ -2458,17 +2460,15 @@ model = "gpt-5.4"
         fs::write(&codex_home_file, "not a directory").unwrap();
         let _env = CodexHomeEnvGuard::new(codex_home_file.to_str());
 
-        assert_eq!(
-            get_codex_config_dir(),
-            PathBuf::from("/tmp/codex-file-env-home").join(".codex")
-        );
+        assert_eq!(get_codex_config_dir(), home.path().join(".codex"));
 
         let _ = fs::remove_file(codex_home_file);
     }
 
     #[test]
     fn get_codex_config_dir_settings_override_takes_precedence_over_codex_home() {
-        let _home = TestEnvGuard::isolated(Path::new("/tmp/codex-precedence-home"));
+        let home = TempDir::new().expect("create temp home");
+        let _home = TestEnvGuard::isolated(home.path());
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
         let codex_home = std::env::temp_dir().join(format!(
             "cc-switch-codex-precedence-env-{}",
