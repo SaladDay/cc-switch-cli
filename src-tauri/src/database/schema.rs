@@ -6,6 +6,29 @@ use super::{lock_conn, Database, SCHEMA_VERSION};
 use crate::error::AppError;
 use rusqlite::{params, Connection};
 
+/// Models whose seed price is read from the `llm-prices` table instead of a hand-typed
+/// literal. These are the rows that had drifted from the provider's list price.
+const LISTED_PRICE_MODELS: [(&str, &str); 2] = [
+    ("claude-sonnet-5", "Claude Sonnet 5"),
+    ("o3-mini", "OpenAI o3-mini"),
+];
+
+/// Input, output, cache-read and 5-minute cache-write prices (USD per 1M tokens) for
+/// `model_id`, as the exact decimal text `llm-prices` publishes. A missing cache price is "0",
+/// which is how this table stores "not billed".
+fn listed_price_row(
+    model_id: &str,
+) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    use llm_prices::Rate;
+    let price = llm_prices::lookup(model_id)?;
+    Some((
+        price.rate_str(Rate::Input)?,
+        price.rate_str(Rate::Output)?,
+        price.rate_str(Rate::CacheRead).unwrap_or("0"),
+        price.rate_str(Rate::CacheWrite("5m")).unwrap_or("0"),
+    ))
+}
+
 impl Database {
     /// 创建所有数据库表
     pub(crate) fn create_tables(&self) -> Result<(), AppError> {
@@ -1889,15 +1912,7 @@ impl Database {
                 "0.50",
                 "6.25",
             ),
-            // Claude Sonnet 5（list 价，与 Sonnet 4.6 一致；促销 $2/$10 至 2026-08-31 不入表）
-            (
-                "claude-sonnet-5",
-                "Claude Sonnet 5",
-                "3",
-                "15",
-                "0.30",
-                "3.75",
-            ),
+            // Claude Sonnet 5 is seeded from llm-prices below (LISTED_PRICE_MODELS).
             // Claude 4.7 系列
             (
                 "claude-opus-4-7",
@@ -2900,9 +2915,8 @@ impl Database {
             ("command-r", "Cohere Command R", "0.15", "0.60", "0", "0"),
             // OpenAI 补充
             ("o3-pro", "OpenAI o3-pro", "20", "80", "0", "0"),
-            ("o3-mini", "OpenAI o3-mini", "0.55", "2.20", "0.55", "0"),
             ("o1", "OpenAI o1", "15", "60", "7.50", "0"),
-            ("o1-mini", "OpenAI o1-mini", "0.55", "2.20", "0.55", "0"),
+            ("o1-mini", "OpenAI o1-mini", "1.10", "4.40", "0.55", "0"),
             ("codex-mini", "Codex Mini", "0.75", "3", "0.025", "0"),
             ("gpt-5-mini", "GPT-5 Mini", "0.25", "2", "0.025", "0"),
             ("gpt-5-nano", "GPT-5 Nano", "0.05", "0.40", "0.005", "0"),
@@ -2928,12 +2942,86 @@ impl Database {
             .map_err(|e| AppError::Database(format!("插入模型定价失败: {e}")))?;
         }
 
+        for (model_id, display_name) in LISTED_PRICE_MODELS {
+            let Some((input, output, cache_read, cache_creation)) = listed_price_row(model_id)
+            else {
+                continue;
+            };
+            stmt.execute(rusqlite::params![
+                model_id,
+                display_name,
+                input,
+                output,
+                cache_read,
+                cache_creation
+            ])
+            .map_err(|e| AppError::Database(format!("插入模型定价失败: {e}")))?;
+        }
+
         log::info!("已插入 {} 条默认模型定价数据", pricing_data.len());
         Ok(())
     }
 
     fn repair_current_model_pricing(conn: &Connection) -> Result<(), AppError> {
+        // Rows whose old built-in seed fell behind the provider's list price. Only a row
+        // still equal to the old seed is replaced, so user-edited prices are kept.
+        for (model_id, display_name, old_input, old_output, old_cache_read, old_cache_creation) in [
+            (
+                "claude-sonnet-5",
+                "Claude Sonnet 5",
+                "3",
+                "15",
+                "0.30",
+                "3.75",
+            ),
+            ("o3-mini", "OpenAI o3-mini", "0.55", "2.20", "0.55", "0"),
+        ] {
+            let Some((input, output, cache_read, cache_creation)) = listed_price_row(model_id)
+            else {
+                continue;
+            };
+            conn.execute(
+                "UPDATE model_pricing SET
+                    display_name = ?2,
+                    input_cost_per_million = ?3,
+                    output_cost_per_million = ?4,
+                    cache_read_cost_per_million = ?5,
+                    cache_creation_cost_per_million = ?6
+                 WHERE model_id = ?1
+                   AND input_cost_per_million = ?7
+                   AND output_cost_per_million = ?8
+                   AND cache_read_cost_per_million = ?9
+                   AND cache_creation_cost_per_million = ?10",
+                rusqlite::params![
+                    model_id,
+                    display_name,
+                    input,
+                    output,
+                    cache_read,
+                    cache_creation,
+                    old_input,
+                    old_output,
+                    old_cache_read,
+                    old_cache_creation
+                ],
+            )
+            .map_err(|e| AppError::Database(format!("修复模型 {model_id} 定价失败: {e}")))?;
+        }
+
         let pricing_fixes = [
+            // o1-mini was seeded at half its list price.
+            (
+                "o1-mini",
+                "OpenAI o1-mini",
+                "1.10",
+                "4.40",
+                "0.55",
+                "0",
+                "0.55",
+                "2.20",
+                "0.55",
+                "0",
+            ),
             // Correct the former Grok 4.5 cached-input seed without replacing
             // user-customized prices.
             (
