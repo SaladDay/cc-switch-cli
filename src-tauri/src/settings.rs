@@ -563,6 +563,9 @@ pub struct AppSettings {
     /// TUI appearance: "auto" | "dark" | "light" (absent = auto).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// Optional per-app TUI accent color overrides (`#RRGGBB`, `#RGB`, or named color).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_accent: Option<HashMap<String, String>>,
     /// TUI icon rendering: "auto" | "emoji" | "ascii" (absent = auto).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<String>,
@@ -655,6 +658,7 @@ impl Default for AppSettings {
             visible_apps_settings: VisibleAppsSettings::default(),
             language: None,
             theme: None,
+            app_accent: None,
             icons: None,
             launch_on_startup: false,
             preserve_codex_official_auth_on_switch: false,
@@ -745,6 +749,30 @@ impl AppSettings {
             .as_ref()
             .map(|s| s.trim().to_ascii_lowercase())
             .filter(|s| matches!(s.as_str(), "auto" | "dark" | "light"));
+
+        self.app_accent = self.app_accent.take().and_then(|map| {
+            let mut entries: Vec<(String, String)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let mut normalized = HashMap::new();
+            for (raw_key, raw_value) in entries {
+                let key = raw_key.trim().to_ascii_lowercase();
+                if key.is_empty() {
+                    continue;
+                }
+                let trimmed_value = raw_value.trim();
+                if parse_accent_rgb(trimmed_value).is_none() {
+                    continue;
+                }
+                normalized.insert(key, trimmed_value.to_ascii_lowercase());
+            }
+
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        });
 
         if let Some(webdav) = self.webdav_sync.as_mut() {
             webdav.normalize();
@@ -1174,6 +1202,101 @@ pub fn set_theme_mode(mode: &str) -> Result<(), AppError> {
     update_settings(settings)
 }
 
+/// Parse a hex (`#RGB` or `#RRGGBB`) or named color string into an RGB triple.
+pub fn parse_accent_rgb(raw: &str) -> Option<(u8, u8, u8)> {
+    let trimmed = raw.trim();
+    if let Some(hex) = trimmed.strip_prefix('#') {
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        return match hex.len() {
+            3 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+                Some((r, g, b))
+            }
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                Some((r, g, b))
+            }
+            _ => None,
+        };
+    }
+
+    if trimmed.is_empty()
+        || trimmed.starts_with(['-', '_'])
+        || trimmed.ends_with(['-', '_'])
+        || trimmed.chars().any(|c| c.is_whitespace())
+    {
+        return None;
+    }
+
+    let normalized: String = trimmed
+        .chars()
+        .filter(|c| *c != '-' && *c != '_')
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+
+    match normalized.as_str() {
+        "black" => Some((0, 0, 0)),
+        "white" => Some((255, 255, 255)),
+        "red" => Some((255, 0, 0)),
+        "green" => Some((0, 128, 0)),
+        "blue" => Some((0, 0, 255)),
+        "yellow" => Some((255, 255, 0)),
+        "cyan" | "aqua" => Some((0, 255, 255)),
+        "magenta" | "fuchsia" => Some((255, 0, 255)),
+        "orange" => Some((255, 165, 0)),
+        "pink" => Some((255, 192, 203)),
+        "purple" => Some((128, 0, 128)),
+        "violet" => Some((238, 130, 238)),
+        "indigo" => Some((75, 0, 130)),
+        "teal" => Some((0, 128, 128)),
+        "navy" => Some((0, 0, 128)),
+        "maroon" => Some((128, 0, 0)),
+        "olive" => Some((128, 128, 0)),
+        "lime" => Some((0, 255, 0)),
+        "coral" => Some((255, 127, 80)),
+        "salmon" => Some((250, 128, 114)),
+        "crimson" => Some((220, 20, 60)),
+        "gold" => Some((255, 215, 0)),
+        "silver" => Some((192, 192, 192)),
+        "gray" | "grey" => Some((128, 128, 128)),
+        "darkgray" | "darkgrey" => Some((169, 169, 169)),
+        "lightgray" | "lightgrey" => Some((211, 211, 211)),
+        "darkblue" => Some((0, 0, 139)),
+        "darkcyan" => Some((0, 139, 139)),
+        "darkgreen" => Some((0, 100, 0)),
+        "darkmagenta" => Some((139, 0, 139)),
+        "darkorange" => Some((255, 140, 0)),
+        "darkred" => Some((139, 0, 0)),
+        "lightblue" => Some((173, 216, 230)),
+        "lightcyan" => Some((224, 255, 255)),
+        "lightgreen" => Some((144, 238, 144)),
+        "lightyellow" => Some((255, 255, 224)),
+        "skyblue" => Some((135, 206, 235)),
+        "turquoise" => Some((64, 224, 208)),
+        "brown" => Some((165, 42, 42)),
+        _ => None,
+    }
+}
+
+pub fn get_app_accent(app: &AppType) -> Option<String> {
+    let key = app.as_str();
+    settings_store().read().ok().and_then(|settings| {
+        settings.app_accent.as_ref().and_then(|map| {
+            map.get(key).cloned().or_else(|| {
+                map.iter()
+                    .find(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+                    .map(|(_, v)| v.clone())
+            })
+        })
+    })
+}
+
 pub fn get_icon_mode() -> Option<String> {
     settings_store()
         .read()
@@ -1424,12 +1547,14 @@ pub fn set_skip_claude_onboarding(enabled: bool) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_pi_override_dir, get_preferred_editor, get_s3_sync_settings, get_settings,
-        get_webdav_sync_settings, set_preferred_editor, set_s3_sync_settings,
-        set_webdav_sync_settings, update_settings, AppSettings, LocalMigrations, S3SyncSettings,
-        WebDavSyncSettings,
+        get_app_accent, get_pi_override_dir, get_preferred_editor, get_s3_sync_settings,
+        get_settings, get_webdav_sync_settings, parse_accent_rgb, set_preferred_editor,
+        set_s3_sync_settings, set_webdav_sync_settings, update_settings, AppSettings,
+        LocalMigrations, S3SyncSettings, WebDavSyncSettings,
     };
+    use crate::app_config::AppType;
     use crate::test_support::TestEnvGuard;
+    use std::collections::HashMap;
 
     #[test]
     fn pi_override_dir_is_normalized_and_resolved() {
@@ -1645,5 +1770,117 @@ mod tests {
                 .base_url,
             "https://dav.example.com/dav/"
         );
+    }
+
+    #[test]
+    fn app_accent_defaults_none_and_uses_camel_case() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.app_accent, None);
+        let default_json = serde_json::to_value(&settings).expect("serialize default settings");
+        assert!(default_json.get("appAccent").is_none());
+
+        let legacy: AppSettings =
+            serde_json::from_value(json!({ "theme": "dark" })).expect("deserialize legacy");
+        assert_eq!(legacy.app_accent, None);
+
+        let mut accents = HashMap::new();
+        accents.insert("claude".to_string(), "#ffb86c".to_string());
+        let configured = AppSettings {
+            app_accent: Some(accents),
+            ..settings
+        };
+        let configured_json =
+            serde_json::to_value(configured).expect("serialize configured appAccent");
+        assert_eq!(configured_json["appAccent"]["claude"], "#ffb86c");
+    }
+
+    #[test]
+    fn parse_accent_rgb_handles_hex_named_and_invalid_inputs() {
+        assert_eq!(parse_accent_rgb("#ffb86c"), Some((255, 184, 108)));
+        assert_eq!(parse_accent_rgb("  #FFB86C  "), Some((255, 184, 108)));
+        assert_eq!(parse_accent_rgb("#f80"), Some((255, 136, 0)));
+        assert_eq!(parse_accent_rgb("#ABC"), Some((170, 187, 204)));
+        assert_eq!(parse_accent_rgb("red"), Some((255, 0, 0)));
+        assert_eq!(parse_accent_rgb("DarkCyan"), Some((0, 139, 139)));
+        assert_eq!(parse_accent_rgb("dark-cyan"), Some((0, 139, 139)));
+        assert_eq!(parse_accent_rgb("sky_blue"), Some((135, 206, 235)));
+        assert_eq!(parse_accent_rgb("grey"), Some((128, 128, 128)));
+
+        for invalid in [
+            "",
+            "   ",
+            "#12",
+            "#12345",
+            "#1234567",
+            "#gggggg",
+            "#+f00ff",
+            "#+f0",
+            "ffb86c",
+            "not-a-color",
+            "_red",
+            "red_",
+            "red blue",
+        ] {
+            assert_eq!(
+                parse_accent_rgb(invalid),
+                None,
+                "expected None for {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn app_accent_normalizes_and_ignores_invalid_entries() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        update_settings(AppSettings::default()).expect("reset isolated settings");
+
+        let settings_path = home.path().join(".cc-switch/settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).expect("create config dir");
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&json!({
+                "appAccent": {
+                    " Claude ": " #FFB86C ",
+                    "codex": "Dark-Cyan",
+                    "gemini": "#f80",
+                    "opencode": "not-a-color",
+                    " ": "#123456"
+                }
+            }))
+            .expect("serialize test settings"),
+        )
+        .expect("write test settings");
+        super::reload_test_settings();
+
+        assert_eq!(get_app_accent(&AppType::Claude).as_deref(), Some("#ffb86c"));
+        assert_eq!(
+            get_app_accent(&AppType::Codex).as_deref(),
+            Some("dark-cyan")
+        );
+        assert_eq!(get_app_accent(&AppType::Gemini).as_deref(), Some("#f80"));
+        assert_eq!(get_app_accent(&AppType::OpenCode), None);
+        assert_eq!(get_app_accent(&AppType::Hermes), None);
+
+        let loaded = get_settings();
+        let accents = loaded.app_accent.expect("valid accents preserved");
+        assert_eq!(accents.len(), 3);
+        assert!(!accents.contains_key("opencode"));
+
+        // When all configured entries are invalid, app_accent normalizes to None
+        // and is omitted when persisted.
+        let mut all_invalid = HashMap::new();
+        all_invalid.insert("claude".to_string(), "invalid".to_string());
+        update_settings(AppSettings {
+            app_accent: Some(all_invalid),
+            ..AppSettings::default()
+        })
+        .expect("save settings with invalid accent");
+        assert_eq!(get_settings().app_accent, None);
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&settings_path).expect("read persisted settings"),
+        )
+        .expect("parse persisted settings");
+        assert!(persisted.get("appAccent").is_none());
     }
 }
