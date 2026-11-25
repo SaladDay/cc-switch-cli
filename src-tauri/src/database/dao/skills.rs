@@ -249,9 +249,8 @@ impl Database {
 
     /// 保存 Skill 仓库
     ///
-    /// 只写 CLI 管理的四列；上游 v27 新增的 `host`（GitLab 等非 GitHub 主机）不在此处
-    /// 维护，冲突时必须保留库里的值，否则 `load_index → save_index` 一次往返就会把
-    /// 桌面端同步过来的 GitLab 仓库改回 github.com。
+    /// 只写 CLI 管理的四列，冲突时保留库里的 `host`（上游 v27）。用于回写已加载的
+    /// 状态，不会改动已有行的主机；用户显式添加仓库请用 [`Self::add_github_skill_repo`]。
     pub fn save_skill_repo(&self, repo: &SkillRepo) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         conn.execute(
@@ -260,6 +259,23 @@ impl Database {
              ON CONFLICT(owner, name) DO UPDATE SET
                 branch = excluded.branch,
                 enabled = excluded.enabled",
+            params![repo.owner, repo.name, repo.branch, repo.enabled],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 用户显式添加的 GitHub 仓库：与上游一致，同 owner/name 的已有行（包括桌面端
+    /// 同步来的非 GitHub 仓库）会被改为 github.com，而不是静默保留成 CLI 看不到的行。
+    pub fn add_github_skill_repo(&self, repo: &SkillRepo) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "INSERT INTO skill_repos (owner, name, branch, enabled, host)
+             VALUES (?1, ?2, ?3, ?4, 'github.com')
+             ON CONFLICT(owner, name) DO UPDATE SET
+                branch = excluded.branch,
+                enabled = excluded.enabled,
+                host = excluded.host",
             params![repo.owner, repo.name, repo.branch, repo.enabled],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -303,7 +319,15 @@ impl Database {
         }
 
         // 兼容升级前已经存在的用户选择，并记录初始化状态，避免以后删空后恢复默认值。
-        if !self.get_skill_repos()?.is_empty() {
+        // 与上游一致按全部行判断：只有桌面端同步来的非 GitHub 仓库时也不再补默认仓库。
+        let has_repos: bool = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM skill_repos)", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?
+        };
+        if has_repos {
             self.set_setting(INITIALIZED_KEY, "true")?;
             return Ok(0);
         }
