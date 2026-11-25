@@ -3,6 +3,7 @@
 //! Implements the `ccswitch://v1/import?...` protocol for importing resources.
 //! Supports importing providers, MCP servers, prompts, and skill repositories.
 
+mod codex_link;
 mod mcp;
 mod parser;
 mod prompt;
