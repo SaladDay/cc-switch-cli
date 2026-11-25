@@ -24,6 +24,36 @@ pub(crate) fn restore_stash(bytes: Option<&[u8]>) -> Result<(), crate::error::Ap
     }
 }
 
+/// A row whose config only ever uses built-in OpenAI (such as the imported `default` of a
+/// `codex login --with-api-key` setup, with or without config.toml) sends its key to
+/// OpenAI, so a live key that matches it is the user's own login, not residue.
+fn routes_third_party(config: Option<&str>) -> bool {
+    use toml_edit::{Item, TableLike};
+    fn set<'a>(table: &'a dyn TableLike, key: &str) -> Option<&'a str> {
+        table
+            .get(key)
+            .and_then(Item::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+    fn reroutes(table: &dyn TableLike) -> bool {
+        set(table, "model_provider").is_some_and(|id| id != "openai")
+            || set(table, "openai_base_url").is_some()
+            || set(table, "base_url").is_some()
+    }
+    let Ok(doc) = config.unwrap_or_default().parse::<toml_edit::DocumentMut>() else {
+        return true;
+    };
+    let table = |key: &str| doc.get(key).and_then(Item::as_table_like);
+    reroutes(doc.as_table())
+        || table("model_providers").is_some_and(|providers| providers.contains_key("openai"))
+        || table("profiles").is_some_and(|profiles| {
+            profiles
+                .iter()
+                .any(|(_, profile)| profile.as_table_like().is_none_or(reroutes))
+        })
+}
+
 pub(crate) fn prepare(
     official: bool,
     row_auth: &Value,
@@ -39,14 +69,17 @@ pub(crate) fn prepare(
     };
     let mut keys: Vec<String> = rows
         .iter()
-        .filter(|p| !is_official(p))
+        .filter(|p| {
+            !is_official(p)
+                && routes_third_party(p.settings_config.get("config").and_then(Value::as_str))
+        })
         .filter_map(|p| {
             p.settings_config
                 .get("auth")
                 .and_then(extract_codex_auth_api_key)
         })
         .collect();
-    if !official {
+    if !official && routes_third_party(Some(config)) {
         if let Some(key) = extract_codex_auth_api_key(row_auth) {
             keys.push(key);
         }

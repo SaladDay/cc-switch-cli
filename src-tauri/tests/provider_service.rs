@@ -487,6 +487,150 @@ requires_openai_auth = true
     );
 }
 
+/// A `codex login --with-api-key` setup imported as the `default` card, plus a relay and
+/// an official card.
+fn codex_api_key_login_state(user_config: &str) -> AppState {
+    let user_login = json!({ "OPENAI_API_KEY": "sk-user" });
+    write_codex_live_atomic(&user_login, Some(user_config)).expect("seed api-key login");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "default".to_string();
+        let mut imported = Provider::with_id(
+            "default".to_string(),
+            "default".to_string(),
+            json!({ "auth": user_login, "config": user_config }),
+            None,
+        );
+        imported.category = Some("custom".to_string());
+        manager.providers.insert("default".to_string(), imported);
+        manager.providers.insert(
+            "relay".to_string(),
+            codex_provider(
+                "relay",
+                "Relay",
+                "sk-relay",
+                "relay",
+                "https://relay.example/v1",
+            ),
+        );
+        let mut official = Provider::with_id(
+            "official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        manager.providers.insert("official".to_string(), official);
+    }
+    state_from_config(initial_config)
+}
+
+/// config.toml shapes of a `codex login --with-api-key` setup that still send the key to
+/// OpenAI.
+const API_KEY_LOGIN_CONFIGS: [&str; 5] = [
+    "",
+    "# comment\n",
+    "model = \"gpt-5\"\n[profiles.fast]\nmodel = \"gpt-5-mini\"\n",
+    "model_provider = \"openai\"\n",
+    "model = \"gpt-5\"\n[model_providers.ollama]\nname = \"Ollama\"\nbase_url = \"http://localhost:11434/v1\"\n",
+];
+
+#[test]
+fn provider_service_switch_codex_stashes_user_api_key_login_from_imported_default() {
+    let _guard = lock_test_mutex();
+    for user_config in API_KEY_LOGIN_CONFIGS {
+        reset_test_fs();
+        let _home = ensure_test_home();
+        let state = codex_api_key_login_state(user_config);
+
+        ProviderService::switch(&state, AppType::Codex, "relay").expect("switch to relay");
+        assert!(!cc_switch_lib::get_codex_auth_path().exists());
+        ProviderService::switch(&state, AppType::Codex, "official").expect("switch to official");
+
+        let auth: serde_json::Value =
+            read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
+        assert_eq!(
+            auth,
+            json!({ "OPENAI_API_KEY": "sk-user" }),
+            "{user_config:?}"
+        );
+    }
+}
+
+#[test]
+fn provider_service_switch_codex_preserve_keeps_user_api_key_login_from_imported_default() {
+    let _guard = lock_test_mutex();
+    for user_config in API_KEY_LOGIN_CONFIGS {
+        reset_test_fs();
+        let _home = ensure_test_home();
+        enable_codex_official_auth_preservation();
+        let state = codex_api_key_login_state(user_config);
+
+        ProviderService::switch(&state, AppType::Codex, "relay").expect("switch to relay");
+
+        let auth: serde_json::Value =
+            read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
+        assert_eq!(
+            auth,
+            json!({ "OPENAI_API_KEY": "sk-user" }),
+            "{user_config:?}"
+        );
+    }
+}
+
+#[test]
+fn provider_service_switch_codex_official_clears_legacy_relay_key() {
+    let _guard = lock_test_mutex();
+    for relay_config in [
+        "openai_base_url = \"https://relay.example/v1\"\n",
+        "base_url = \"https://relay.example/v1\"\n",
+        "model_provider = \"ollama\"\n",
+        "[profiles.p]\nmodel_provider = \"relay\"\n",
+        "not [[ toml",
+    ] {
+        reset_test_fs();
+        let _home = ensure_test_home();
+        write_codex_live_atomic(&json!({ "OPENAI_API_KEY": "sk-relay" }), Some(""))
+            .expect("seed legacy relay key");
+
+        let mut initial_config = MultiAppConfig::default();
+        {
+            let manager = initial_config
+                .get_manager_mut(&AppType::Codex)
+                .expect("codex manager");
+            manager.current = "relay".to_string();
+            let mut relay = Provider::with_id(
+                "relay".to_string(),
+                "Relay".to_string(),
+                json!({ "auth": { "OPENAI_API_KEY": "sk-relay" }, "config": relay_config }),
+                None,
+            );
+            relay.category = Some("custom".to_string());
+            manager.providers.insert("relay".to_string(), relay);
+            let mut official = Provider::with_id(
+                "official".to_string(),
+                "OpenAI Official".to_string(),
+                json!({ "auth": {}, "config": "" }),
+                None,
+            );
+            official.category = Some("official".to_string());
+            manager.providers.insert("official".to_string(), official);
+        }
+        let state = state_from_config(initial_config);
+
+        ProviderService::switch(&state, AppType::Codex, "official").expect("switch to official");
+
+        assert!(
+            !cc_switch_lib::get_codex_auth_path().exists(),
+            "{relay_config:?}"
+        );
+    }
+}
+
 #[test]
 fn provider_service_switch_codex_preserves_provider_model_provider_after_history_migration() {
     let _guard = lock_test_mutex();
