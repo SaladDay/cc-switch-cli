@@ -198,12 +198,16 @@ async fn insert_request_log(
         model,
         &pricing_config.pricing_model_source,
     );
-    let cost = calculate_cost(
-        &context.app_type,
-        &usage,
-        lookup_model_pricing(state.db.as_ref(), pricing_model).as_ref(),
-        pricing_config.cost_multiplier,
-    );
+    let cost = if crate::settings::cost_tracking_enabled() {
+        calculate_cost(
+            &context.app_type,
+            &usage,
+            lookup_model_pricing(state.db.as_ref(), pricing_model).as_ref(),
+            pricing_config.cost_multiplier,
+        )
+    } else {
+        None
+    };
     let request_id = usage.dedup_request_id();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
