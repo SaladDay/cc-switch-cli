@@ -13,6 +13,7 @@ use crate::{
     app_config::AppType,
     provider::{LocalProxyRequestOverrides, ProviderMeta},
     proxy::{
+        circuit_breaker::CircuitBreakerConfig,
         error::ProxyError,
         forwarder::{ForwardOptions, RequestForwarder},
         types::RectifierConfig,
@@ -1412,6 +1413,91 @@ async fn later_half_open_provider_permit_is_not_preclaimed_when_earlier_success_
 
     primary_server.abort();
     half_open_server.abort();
+}
+
+/// 验证 fallback 接管后，高优先级 provider 恢复时下一次请求会切回。
+#[tokio::test]
+async fn recovered_primary_provider_is_selected_after_fallback() {
+    let (primary_url, primary_hits, primary_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"provider": "primary"})).await;
+    let (fallback_url, fallback_hits, fallback_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"provider": "fallback"})).await;
+    let primary_provider = claude_provider("p1", &primary_url, None);
+    let fallback_provider = claude_provider("p2", &fallback_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router.clone()).expect("create forwarder");
+
+    db.save_provider("claude", &primary_provider)
+        .expect("save primary provider for health tracking");
+    db.save_provider("claude", &fallback_provider)
+        .expect("save fallback provider for health tracking");
+    let mut breaker_config = CircuitBreakerConfig {
+        failure_threshold: 1,
+        success_threshold: 1,
+        timeout_seconds: 3600,
+        ..Default::default()
+    };
+    db.update_circuit_breaker_config(&breaker_config)
+        .await
+        .expect("configure primary circuit breaker");
+    router.update_all_configs(breaker_config.clone()).await;
+    router
+        .record_result(
+            "p1",
+            "claude",
+            false,
+            false,
+            Some("primary outage".to_string()),
+        )
+        .await
+        .expect("open primary breaker");
+
+    let fallback_result = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            vec![primary_provider.clone(), fallback_provider.clone()],
+            ForwardOptions {
+                max_retries: 1,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("fallback provider should serve during primary outage");
+    assert_eq!(fallback_result.provider.id, "p2");
+
+    breaker_config.timeout_seconds = 0;
+    db.update_circuit_breaker_config(&breaker_config)
+        .await
+        .expect("shorten recovery timeout");
+    router.update_all_configs(breaker_config).await;
+
+    let recovered_result = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            vec![primary_provider, fallback_provider],
+            ForwardOptions {
+                max_retries: 1,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("recovered primary should serve the next request");
+    assert_eq!(recovered_result.provider.id, "p1");
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(fallback_hits.count.load(Ordering::SeqCst), 1);
+
+    primary_server.abort();
+    fallback_server.abort();
 }
 
 #[tokio::test]
