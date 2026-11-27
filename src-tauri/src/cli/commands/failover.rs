@@ -16,7 +16,11 @@ pub enum FailoverCommand {
     Show,
 
     /// Enable automatic failover for the selected app
-    Enable,
+    Enable {
+        /// Confirm proxy bootstrap without prompting
+        #[arg(long)]
+        yes: bool,
+    },
 
     /// Disable automatic failover for the selected app
     Disable,
@@ -58,8 +62,8 @@ pub fn execute(cmd: FailoverCommand, app: Option<AppType>) -> Result<(), AppErro
     let app_type = app.unwrap_or(AppType::Claude);
     match cmd {
         FailoverCommand::Show => show_failover(app_type),
-        FailoverCommand::Enable => set_auto_failover(app_type, true),
-        FailoverCommand::Disable => set_auto_failover(app_type, false),
+        FailoverCommand::Enable { yes } => set_auto_failover(app_type, true, yes),
+        FailoverCommand::Disable => set_auto_failover(app_type, false, false),
         FailoverCommand::List => list_queue(app_type),
         FailoverCommand::Available => list_available(app_type),
         FailoverCommand::Add { id } => add_provider(app_type, &id),
@@ -129,7 +133,8 @@ fn show_failover(app_type: AppType) -> Result<(), AppError> {
     Ok(())
 }
 
-fn set_auto_failover(app_type: AppType, enabled: bool) -> Result<(), AppError> {
+/// 按需确认代理启动，并切换所选应用的自动故障转移状态。
+fn set_auto_failover(app_type: AppType, enabled: bool, yes: bool) -> Result<(), AppError> {
     ensure_failover_supported(&app_type)?;
     let state = get_state()?;
     let runtime = create_runtime()?;
@@ -137,7 +142,7 @@ fn set_auto_failover(app_type: AppType, enabled: bool) -> Result<(), AppError> {
         let gate = runtime.block_on(inspect_auto_failover_gate(&state, &app_type))?;
         ensure_auto_failover_queue_ready(&gate)?;
         if gate.needs_proxy_bootstrap() {
-            if !confirm_enable_proxy_for_failover(app_type.as_str())? {
+            if !yes && !confirm_enable_proxy_for_failover(app_type.as_str())? {
                 println!("{}", info("Cancelled."));
                 return Ok(());
             }
