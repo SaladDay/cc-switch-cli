@@ -29,11 +29,8 @@ pub(super) fn launch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
 fn prepare_claude_launch(id: &str, temp_dir: &Path) -> Result<PreparedClaudeLaunch, AppError> {
     let state = load_state()?;
     let provider = ProviderService::get_provider(&state, AppType::Claude, id)?;
-    let settings = ProviderService::build_effective_live_snapshot_from_state(
-        &state,
-        AppType::Claude,
-        &provider,
-    )?;
+    let settings =
+        ProviderService::build_claude_temp_launch_settings_from_state(&state, &provider)?;
     prepare_launch_from_settings(&provider.id, &settings, temp_dir)
 }
 
@@ -402,12 +399,9 @@ mod tests {
         );
         ProviderService::add(&state, AppType::Claude, provider.clone()).expect("add provider");
 
-        let expected = ProviderService::build_effective_live_snapshot_from_state(
-            &state,
-            AppType::Claude,
-            &provider,
-        )
-        .expect("build effective snapshot");
+        let expected =
+            ProviderService::build_claude_temp_launch_settings_from_state(&state, &provider)
+                .expect("build effective snapshot");
 
         let temp_dir = TempDir::new().expect("create temp dir");
         let mut fixture = LaunchFixture::new(
@@ -430,10 +424,8 @@ mod tests {
             |id, temp_dir| {
                 let state = load_state()?;
                 let provider = ProviderService::get_provider(&state, AppType::Claude, id)?;
-                let settings = ProviderService::build_effective_live_snapshot_from_state(
-                    &state,
-                    AppType::Claude,
-                    &provider,
+                let settings = ProviderService::build_claude_temp_launch_settings_from_state(
+                    &state, &provider,
                 )?;
                 crate::cli::claude_temp_launch::prepare_launch_from_settings_with(
                     &provider.id,
