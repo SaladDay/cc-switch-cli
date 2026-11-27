@@ -530,6 +530,21 @@ cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Herme
 
 ### 🔧 实用工具
 
+手动从 [models.dev](https://models.dev) 同步文本模型的参考定价：
+
+```bash
+cc-switch pricing sync --provider openai --model gpt-6.1-sol --dry-run
+cc-switch pricing sync --provider openai --model gpt-6.1-sol --backfill
+cc-switch pricing sync --provider anthropic --overwrite --json
+```
+
+`--provider` 指 **models.dev 目录中的供应商 ID**，不是 CC Switch 中配置的供应商。
+省略 `--model` 会导入该供应商支持的全部文本模型，也可重复此参数选择精确的模型 ID。
+默认保留已有价格和已删除模型，只有 `--overwrite` 才会覆盖或恢复。
+`--dry-run` 预览源价格，不打开数据库；`--backfill` 补算所选模型缺失的费用，
+不会重算已经计价的历史记录。单价单位为美元/百万 Token，只使用基础单价，
+不包含长上下文分层、折扣或中转商实际账单。此功能不在后台联网，需再次执行命令刷新价格。
+
 Shell 补全、环境管理等实用功能。
 
 ```bash

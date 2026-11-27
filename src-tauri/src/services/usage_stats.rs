@@ -1803,6 +1803,12 @@ fn find_model_pricing_raw(
         return Ok(None);
     }
 
+    // Imported catalog IDs can include case-sensitive namespaces and suffixes.
+    // Prefer the original ID before the compatibility normalization below.
+    if let Some(row) = query_model_pricing_exact(conn, model_id.trim())? {
+        return Ok(Some(row));
+    }
+
     for candidate in &candidates {
         if let Some(row) = query_model_pricing_exact(conn, candidate)? {
             return Ok(Some(row));
