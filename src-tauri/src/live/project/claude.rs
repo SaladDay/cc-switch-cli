@@ -126,6 +126,41 @@ pub fn project_onto(
     Ok(doc)
 }
 
+/// 给临时启动（`claude --settings <临时文件>`）用的投影结果补上屏蔽值。
+///
+/// Claude Code 把 `--settings` 逐键叠在用户的 `settings.json` 之上，投影里删掉的键
+/// 会回退成 live 里上一家的值（凭据、模型名、`apiKeyHelper` 等）。这里把 live 里有、
+/// 投影后没了的键写成 `""`：
+/// - `env` 里的所有这类键（投影只会删关键字段、上一家的独有字段和残留值）；
+/// - 顶层关键字段中 live 值是字符串的。非字符串的（如 `modelOverrides` 对象）不动：
+///   空字符串不是它们的合法类型，对象又是逐键合并，屏蔽不掉。
+///
+/// 只用于临时文件；全局切换写的是完整文件，不需要也不能写这些空值。
+pub fn mask_removed_for_overlay(live: &Value, projected: &mut Value) {
+    let Some(projected) = projected.as_object_mut() else {
+        return;
+    };
+    if let Some(live_env) = live.get("env").and_then(Value::as_object) {
+        let env = projected
+            .entry("env")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(env) = env.as_object_mut() {
+            for key in live_env.keys() {
+                if !env.contains_key(key) {
+                    env.insert(key.clone(), Value::String(String::new()));
+                }
+            }
+        }
+    }
+    if let Some(live_top) = live.as_object() {
+        for (key, value) in live_top {
+            if floor::claude_floor_top(key) && value.is_string() && !projected.contains_key(key) {
+                projected.insert(key.clone(), Value::String(String::new()));
+            }
+        }
+    }
+}
+
 /// 把关键字段和独有字段存回供应商行：行里这两类键换成 `projection` 的，其余内容原样
 /// 保留（降级后旧版会整份使用这些行）。
 ///
@@ -426,6 +461,36 @@ fn is_truthy(value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mask_removed_for_overlay_blanks_only_keys_missing_from_projection() {
+        let live = json!({
+            "env": {"ANTHROPIC_AUTH_TOKEN": "a", "ANTHROPIC_BASE_URL": "a-url", "USER_ENV": "u"},
+            "apiKeyHelper": "a-helper",
+            "fallbackModel": "a-fallback",
+            "modelOverrides": {"x": "y"},
+            "theme": "dark"
+        });
+        let mut projected = json!({
+            "env": {"ANTHROPIC_API_KEY": "b", "ANTHROPIC_BASE_URL": "b-url", "USER_ENV": "u"},
+            "theme": "dark"
+        });
+        super::mask_removed_for_overlay(&live, &mut projected);
+        assert_eq!(
+            projected,
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "b",
+                    "ANTHROPIC_AUTH_TOKEN": "",
+                    "ANTHROPIC_BASE_URL": "b-url",
+                    "USER_ENV": "u"
+                },
+                "apiKeyHelper": "",
+                "fallbackModel": "",
+                "theme": "dark"
+            })
+        );
+    }
 
     fn project(live: &Value, prev: Option<&Value>, target: &Value) -> Value {
         let prev = prev.map(ClaudeProjection::of);

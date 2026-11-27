@@ -208,11 +208,7 @@ fn prepare_claude_launch_with<Resolve>(
 where
     Resolve: FnOnce() -> Result<std::path::PathBuf, AppError>,
 {
-    let settings = ProviderService::build_effective_live_snapshot_from_state(
-        state,
-        AppType::Claude,
-        provider,
-    )?;
+    let settings = ProviderService::build_claude_temp_launch_settings_from_state(state, provider)?;
     prepare_launch_from_settings_with(&provider.id, &settings, temp_dir, resolve_claude_binary)
 }
 
@@ -225,11 +221,7 @@ fn preview_claude_launch_with<Resolve>(
 where
     Resolve: FnOnce() -> Result<std::path::PathBuf, AppError>,
 {
-    let settings = ProviderService::build_effective_live_snapshot_from_state(
-        state,
-        AppType::Claude,
-        provider,
-    )?;
+    let settings = ProviderService::build_claude_temp_launch_settings_from_state(state, provider)?;
     preview_launch_from_settings_with(&provider.id, &settings, temp_dir, resolve_claude_binary)
 }
 
@@ -674,6 +666,93 @@ mod tests {
         assert_eq!(written["hooks"], live["hooks"]);
         assert_eq!(written["includeCoAuthoredBy"], false);
         assert_eq!(std::fs::read(&live_path).unwrap(), live_before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn prepare_claude_launch_masks_global_provider_keys_missing_from_target() {
+        let home = TempDir::new().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let live_path = crate::config::get_claude_settings_path();
+        let a_settings = json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-a",
+                "ANTHROPIC_BASE_URL": "https://a.example",
+                "ANTHROPIC_MODEL": "a-model"
+            },
+            "model": "a-top-model",
+            "apiKeyHelper": "/opt/a/helper.sh"
+        });
+        let live = json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-a",
+                "ANTHROPIC_BASE_URL": "https://a.example",
+                "ANTHROPIC_MODEL": "a-model",
+                "USER_ENV": "keep"
+            },
+            "model": "a-top-model",
+            "apiKeyHelper": "/opt/a/helper.sh",
+            "modelOverrides": {"a-top-model": "a-override"},
+            "permissions": {"allow": ["Read"]},
+            "hooks": {"UserPromptSubmit": []}
+        });
+        crate::config::write_json_file(&live_path, &live).unwrap();
+        let live_before = std::fs::read(&live_path).unwrap();
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let mut config = crate::app_config::MultiAppConfig::default();
+        config.ensure_app(&AppType::Claude);
+        {
+            let manager = config
+                .get_manager_mut(&AppType::Claude)
+                .expect("claude manager");
+            manager.current = "a".to_string();
+            manager.providers.insert(
+                "a".to_string(),
+                Provider::with_id("a".to_string(), "A".to_string(), a_settings, None),
+            );
+        }
+        let state = state_from_config(config);
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "B".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "sk-b",
+                    "ANTHROPIC_BASE_URL": "https://b.example"
+                }
+            }),
+            None,
+        );
+
+        let prepared = prepare_claude_launch_with(&state, &provider_b, temp_dir.path(), || {
+            Ok(std::path::PathBuf::from("/usr/bin/claude"))
+        })
+        .expect("prepare launch");
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
+        )
+        .expect("parse temp settings");
+
+        // Claude Code layers --settings over ~/.claude/settings.json key by key,
+        // so anything A owns must be explicitly blanked in the overlay.
+        assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "");
+        assert_eq!(written["env"]["ANTHROPIC_MODEL"], "");
+        assert_eq!(written["model"], "");
+        assert_eq!(written["apiKeyHelper"], "");
+        assert_eq!(written["env"]["ANTHROPIC_API_KEY"], "sk-b");
+        assert_eq!(written["env"]["ANTHROPIC_BASE_URL"], "https://b.example");
+        assert_eq!(written["env"]["USER_ENV"], "keep");
+        assert_eq!(written["permissions"], live["permissions"]);
+        assert_eq!(written["hooks"], live["hooks"]);
+        // Non-string floor values cannot be blanked with "" (type mismatch).
+        assert!(written.get("modelOverrides").is_none());
+        assert_eq!(std::fs::read(&live_path).unwrap(), live_before);
+
+        let preview = preview_claude_launch_with(&state, &provider_b, temp_dir.path(), || {
+            Ok(std::path::PathBuf::from("/usr/bin/claude"))
+        })
+        .expect("preview launch");
+        assert_eq!(preview.executable, prepared.executable);
     }
 
     #[test]

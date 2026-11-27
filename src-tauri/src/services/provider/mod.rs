@@ -3895,50 +3895,44 @@ impl ProviderService {
         )
     }
 
-    pub(crate) fn build_effective_live_snapshot_from_state(
+    /// 读 live `settings.json` 并投影到 `provider`，返回（live，投影结果），不写盘。
+    fn project_claude_live_from_state(
         state: &AppState,
-        app_type: AppType,
         provider: &Provider,
-    ) -> Result<Value, AppError> {
-        if matches!(app_type, AppType::Claude) {
-            use crate::live::project::claude::{project_onto, ClaudeProjection};
-            let _guard = crate::live::engine::lock_app("claude");
-            let path = get_claude_settings_path();
-            let live = if path.exists() {
-                read_json_file(&path)?
-            } else {
-                json!({})
-            };
-            let previous = crate::settings::get_effective_current_provider(&state.db, &app_type)?
+    ) -> Result<(Value, Value), AppError> {
+        use crate::live::project::claude::{project_onto, ClaudeProjection};
+        let _guard = crate::live::engine::lock_app("claude");
+        let path = get_claude_settings_path();
+        let live = if path.exists() {
+            read_json_file(&path)?
+        } else {
+            json!({})
+        };
+        let previous =
+            crate::settings::get_effective_current_provider(&state.db, &AppType::Claude)?
                 .map(|id| state.db.get_provider_by_id(&id, "claude"))
                 .transpose()?
                 .flatten()
                 .map(|provider| ClaudeProjection::of(&provider.settings_config));
-            return project_onto(
-                &path,
-                &live,
-                previous.as_ref(),
-                &ClaudeProjection::of(&provider.settings_config),
-            )
-            .map_err(AppError::from);
-        }
-        let common_config_snippet = {
-            let config = state.config.read().map_err(AppError::from)?;
-            config.common_config_snippets.get(&app_type).cloned()
-        };
-
-        let apply_common_config = Self::resolve_live_apply_common_config(
-            &app_type,
-            provider,
-            common_config_snippet.as_deref(),
-            true,
-        );
-        Self::build_effective_live_snapshot(
-            &app_type,
-            provider,
-            common_config_snippet.as_deref(),
-            apply_common_config,
+        let projected = project_onto(
+            &path,
+            &live,
+            previous.as_ref(),
+            &ClaudeProjection::of(&provider.settings_config),
         )
+        .map_err(AppError::from)?;
+        Ok((live, projected))
+    }
+
+    /// `claude --settings <临时文件>` 的内容：在投影结果上屏蔽掉 live 里上一家留下、
+    /// 而 `provider` 没有的键，免得 Claude Code 叠加用户设置时回退到上一家的值。
+    pub(crate) fn build_claude_temp_launch_settings_from_state(
+        state: &AppState,
+        provider: &Provider,
+    ) -> Result<Value, AppError> {
+        let (live, mut projected) = Self::project_claude_live_from_state(state, provider)?;
+        crate::live::project::claude::mask_removed_for_overlay(&live, &mut projected);
+        Ok(projected)
     }
 
     pub(crate) fn get_provider(
